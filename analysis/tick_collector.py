@@ -156,7 +156,7 @@ def main(argv=None):
     log.info("No-data warning after: %d min", timeout_minutes)
 
     # ── open store (retry if another process briefly holds the WAL lock) ───
-    from db.tick_store import TickStore
+    from feeds.tick_store import TickStore
     for _attempt in range(10):
         try:
             store = TickStore(args.db)

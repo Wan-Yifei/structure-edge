@@ -967,7 +967,7 @@ class OrderFlowApp(tk.Tk):
         db_path = _pl.Path(__file__).parent.parent / "db" / "ticks.db"
         if not db_path.exists():
             return None
-        from db.tick_store import TickStore
+        from feeds.tick_store import TickStore
         try:
             day            = datetime.strptime(date_str, "%Y-%m-%d").date()
             _, candle_mins = TIMEFRAME_MAP[tf]
@@ -1203,7 +1203,7 @@ def _load_tick_buckets(code: str, date_str: str, tf: str) -> dict | None:
         db_path = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
         if not db_path.exists():
             return None
-        from db.tick_store import TickStore
+        from feeds.tick_store import TickStore
         day            = datetime.strptime(date_str, "%Y-%m-%d").date()
         _, candle_mins = TIMEFRAME_MAP[tf]
         with TickStore(db_path) as store:

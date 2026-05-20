@@ -40,7 +40,7 @@ import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
-from backtest.fetcher  import fetch_klines
+from feeds.fetcher import fetch_klines
 from backtest.engine import BacktestParams, BacktestResult, run_backtest
 from backtest.viz      import plot_backtest_results, plot_from_csv
 

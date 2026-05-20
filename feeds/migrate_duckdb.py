@@ -1,9 +1,10 @@
-"""One-time migration: ticks.duckdb → ticks.db (SQLite)."""
+"""One-time migration: ticks.duckdb -> ticks.db (SQLite)."""
 import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
-src = pathlib.Path(__file__).parent / "ticks.duckdb"
-dst = pathlib.Path(__file__).parent / "ticks.db"
+_DB_DIR = pathlib.Path(__file__).parent.parent / "db"
+src = _DB_DIR / "ticks.duckdb"
+dst = _DB_DIR / "ticks.db"
 
 if not src.exists():
     print("ticks.duckdb not found — nothing to migrate.")
@@ -23,7 +24,7 @@ con.close()
 print(f"  {len(rows)} ticks read.")
 
 print(f"Writing {dst} ...")
-from db.tick_store import TickStore
+from feeds.tick_store import TickStore
 store = TickStore(dst)
 store._con.executemany(
     "INSERT OR IGNORE INTO ticks VALUES (?, ?, ?, ?, ?)", rows

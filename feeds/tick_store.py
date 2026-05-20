@@ -14,7 +14,7 @@ import pathlib
 from datetime import datetime, date
 from typing import Iterable
 
-_DEFAULT_DB = pathlib.Path(__file__).parent / "ticks.db"
+_DEFAULT_DB = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
 
 _SETUP_SQL = """
 PRAGMA journal_mode=WAL;

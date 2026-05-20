@@ -6,15 +6,12 @@ On subsequent calls, returns cached data without reconnecting to moomoo.
 
 from __future__ import annotations
 
-import sys
 import time
 import pathlib
 
 import pandas as pd
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
-
-from backtest.kline_store import KlineStore
+from feeds.kline_store import KlineStore
 
 _HOST = "127.0.0.1"
 _PORT = 11111
