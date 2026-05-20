@@ -18,7 +18,7 @@ import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 
-from backtest.strategy import BacktestResult
+from backtest.engine import BacktestResult
 
 # ── Colour palette (matches core/chart.py dark theme) ─────────────────────────
 _BG     = "#0b1120"
