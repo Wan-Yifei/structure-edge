@@ -110,8 +110,9 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2) -> list[dict]:
     closes = klines["close"].values
     n      = len(klines)
     signals: list[dict] = []
-    processed_highs: set[int] = set()
-    processed_lows:  set[int] = set()
+    processed_highs:      set[int] = set()
+    processed_lows:       set[int] = set()
+    processed_break_bars: set[int] = set()  # one signal per break bar
 
     for i in range(2, len(swings)):
         sw = swings[i]
@@ -125,17 +126,19 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2) -> list[dict]:
                 continue
             for j in range(sw["idx"] + 1, n):
                 if closes[j] > prev_high["price"]:
-                    sig_type = "BOS" if trend == "up" else "CHoCH"
-                    signals.append({
-                        "type":      sig_type,
-                        "direction": "bull",
-                        "idx":       j,
-                        "price":     prev_high["price"],
-                        "from_idx":  prev_high["idx"],
-                    })
+                    if j not in processed_break_bars:
+                        sig_type = "BOS" if trend == "up" else "CHoCH"
+                        signals.append({
+                            "type":      sig_type,
+                            "direction": "bull",
+                            "idx":       j,
+                            "price":     prev_high["price"],
+                            "from_idx":  prev_high["idx"],
+                        })
+                        processed_break_bars.add(j)
+                        if sig_type == "CHoCH":
+                            trend = "up"
                     processed_highs.add(prev_high["idx"])
-                    if sig_type == "CHoCH":
-                        trend = "up"
                     break
 
         else:  # kind == "low"
@@ -147,17 +150,19 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2) -> list[dict]:
                 continue
             for j in range(sw["idx"] + 1, n):
                 if closes[j] < prev_low["price"]:
-                    sig_type = "BOS" if trend == "down" else "CHoCH"
-                    signals.append({
-                        "type":      sig_type,
-                        "direction": "bear",
-                        "idx":       j,
-                        "price":     prev_low["price"],
-                        "from_idx":  prev_low["idx"],
-                    })
+                    if j not in processed_break_bars:
+                        sig_type = "BOS" if trend == "down" else "CHoCH"
+                        signals.append({
+                            "type":      sig_type,
+                            "direction": "bear",
+                            "idx":       j,
+                            "price":     prev_low["price"],
+                            "from_idx":  prev_low["idx"],
+                        })
+                        processed_break_bars.add(j)
+                        if sig_type == "CHoCH":
+                            trend = "down"
                     processed_lows.add(prev_low["idx"])
-                    if sig_type == "CHoCH":
-                        trend = "down"
                     break
 
     return signals
