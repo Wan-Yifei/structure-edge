@@ -19,7 +19,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from backtest.smc import (
+from strategy.smc import (
     find_swings,
     detect_bos_choch,
     detect_fvg,

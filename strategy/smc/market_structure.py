@@ -9,6 +9,38 @@ import numpy as np
 import pandas as pd
 
 
+def determine_trend(bos_signals: list[dict], min_consecutive: int = 1) -> str | None:
+    """Return current trend direction from a BOS/CHoCH signal list.
+
+    Iterates signals chronologically. Each CHoCH resets the trend and starts
+    a new consecutive count. Returns None when fewer than min_consecutive BOS
+    confirmations have occurred since the last CHoCH (or overall if none).
+    """
+    if not bos_signals:
+        return None
+
+    current_trend: str | None = None
+    consecutive: int = 0
+
+    for sig in bos_signals:
+        if sig["type"] == "CHoCH":
+            current_trend = sig["direction"]
+            consecutive = 1
+        elif sig["type"] == "BOS" and sig["direction"] == current_trend:
+            consecutive += 1
+
+    # Fallback: no CHoCH seen — infer from a unanimous BOS cluster
+    if current_trend is None and bos_signals:
+        dirs = {s["direction"] for s in bos_signals}
+        if len(dirs) == 1:
+            current_trend = bos_signals[0]["direction"]
+            consecutive = len(bos_signals)
+
+    if current_trend is None:
+        return None
+    return current_trend if consecutive >= min_consecutive else None
+
+
 def find_swings(klines: pd.DataFrame, lookback: int = 2) -> list[dict]:
     """Return alternating swing highs and lows.
 
