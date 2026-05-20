@@ -1,0 +1,602 @@
+2026-05-18 02:10:27  Config saved.
+2026-05-18 02:10:27  Scheduler started.  Watching session boundaries...
+2026-05-18 02:10:28  [OVERNIGHT]  Session ACTIVE
+2026-05-18 06:25:02  [OVERNIGHT]  Session ended — stopping collector
+2026-05-18 06:25:13  [PREMARKET]  Session ACTIVE
+2026-05-18 07:25:23  Scheduler stopped.
+2026-05-18 07:27:19  Config saved.
+2026-05-18 07:27:19  Scheduler started.  Watching session boundaries...
+2026-05-18 07:27:19  [PREMARKET]  Session ACTIVE
+2026-05-18 07:27:19  [PREMARKET]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 07:27:19  Collector PID 4072 started  (no-data warn: 5 min)
+2026-05-18 07:27:19    [collector] Traceback (most recent call last):
+2026-05-18 07:27:19    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 207, in <module>
+2026-05-18 07:27:19    [collector]     main()
+2026-05-18 07:27:19    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 143, in main
+2026-05-18 07:27:19    [collector]     cfg = json.load(f)
+2026-05-18 07:27:19    [collector]           ^^^^^^^^^^^^
+2026-05-18 07:27:19    [collector]   File "C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\Lib\json\__init__.py", line 293, in load
+2026-05-18 07:27:19    [collector]     return loads(fp.read(),
+2026-05-18 07:27:19    [collector]                  ^^^^^^^^^
+2026-05-18 07:27:19    [collector] UnicodeDecodeError: 'gbk' codec can't decode byte 0x93 in position 342: illegal multibyte sequence
+2026-05-18 07:27:19    [collector] process exited
+2026-05-18 07:27:46  Scheduler stopped.
+2026-05-18 07:27:54  Config saved.
+2026-05-18 07:27:54  Scheduler started.  Watching session boundaries...
+2026-05-18 07:27:54  [PREMARKET]  Session ACTIVE
+2026-05-18 07:27:54  [PREMARKET]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 07:27:54  Collector PID 24308 started  (no-data warn: 5 min)
+2026-05-18 07:27:55    [collector] Traceback (most recent call last):
+2026-05-18 07:27:55    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 207, in <module>
+2026-05-18 07:27:55    [collector]     main()
+2026-05-18 07:27:55    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 143, in main
+2026-05-18 07:27:55    [collector]     cfg = json.load(f)
+2026-05-18 07:27:55    [collector]           ^^^^^^^^^^^^
+2026-05-18 07:27:55    [collector]   File "C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\Lib\json\__init__.py", line 293, in load
+2026-05-18 07:27:55    [collector]     return loads(fp.read(),
+2026-05-18 07:27:55    [collector]                  ^^^^^^^^^
+2026-05-18 07:27:55    [collector] UnicodeDecodeError: 'gbk' codec can't decode byte 0x93 in position 342: illegal multibyte sequence
+2026-05-18 07:27:55    [collector] process exited
+2026-05-18 07:34:27  Config saved.
+2026-05-18 07:34:27  Scheduler started.  Watching session boundaries...
+2026-05-18 07:34:27  [PREMARKET]  Session ACTIVE
+2026-05-18 07:34:27  [PREMARKET]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 07:34:27  Collector PID 35056 started  (no-data warn: 5 min)
+2026-05-18 07:34:27    [collector] 07:34:27  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 07:34:27    [collector] 07:34:27  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 07:34:27    [collector] 07:34:27  INFO     No-data warning after: 5 min
+2026-05-18 07:34:29    [collector] 2026-05-18 07:34:29,710 | 12112 | 36992 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462103315998879120(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x000001A4DD8340E0>
+2026-05-18 07:34:29    [collector] 07:34:29  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 07:34:29    [collector] 07:34:29  INFO     DATA RECEIVED  first tick: US.SNDK  price=1407.6100  vol=1  dir=NEUTRAL
+2026-05-18 07:40:29    [collector] 07:40:29  WARNING  NO DATA  6 min since last tick — check OpenD connection and market hours
+2026-05-18 08:02:19  Collector PID 35056 stopped
+2026-05-18 08:02:19  Scheduler stopped.
+2026-05-18 08:02:19    [collector] process exited
+2026-05-18 08:02:21  Config saved.
+2026-05-18 08:02:21  Scheduler started.  Watching session boundaries...
+2026-05-18 08:02:21  [PREMARKET]  Session ACTIVE
+2026-05-18 08:02:21  [PREMARKET]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 08:02:21  Collector PID 45520 started  (no-data warn: 5 min)
+2026-05-18 08:02:21    [collector] 08:02:21  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 08:02:21    [collector] 08:02:21  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 08:02:21    [collector] 08:02:21  INFO     No-data warning after: 5 min
+2026-05-18 08:02:22    [collector] 2026-05-18 08:02:22,467 | 48756 | 8512 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462110332056395936(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x0000018C5A2B9700>
+2026-05-18 08:02:22    [collector] 08:02:22  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 08:02:22    [collector] 08:02:22  INFO     DATA RECEIVED  first tick: US.SNDK  price=1407.6100  vol=1  dir=NEUTRAL
+2026-05-18 08:07:45  Collector PID 45520 stopped
+2026-05-18 08:07:45  Scheduler stopped.
+2026-05-18 08:07:45    [collector] process exited
+2026-05-18 08:09:34  Config saved.
+2026-05-18 08:09:34  Scheduler started.  Watching session boundaries...
+2026-05-18 08:09:34  [PREMARKET]  Session ACTIVE
+2026-05-18 08:09:34  [PREMARKET]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 08:09:34  Collector PID 5436 started  (no-data warn: 5 min)
+2026-05-18 08:09:34    [collector] 08:09:34  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 08:09:34    [collector] 08:09:34  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 08:09:34    [collector] 08:09:34  INFO     No-data warning after: 5 min
+2026-05-18 08:09:35    [collector] 2026-05-18 08:09:35,517 | 38448 | 17960 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462112148394150057(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x0000022279F8ACC0>
+2026-05-18 08:09:35    [collector] 08:09:35  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 08:09:35    [collector] 08:09:35  INFO     DATA RECEIVED  first tick: US.SNDK  ts=2026-05-15 16:00:00.894  price=1407.6100  vol=1  dir=NEUTRAL
+2026-05-18 08:10:35    [collector] 08:10:35  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:11:35    [collector] 08:11:35  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:12:35    [collector] 08:12:35  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:13:35    [collector] 08:13:35  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:14:35    [collector] 08:14:35  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:14:42  Collector PID 5436 stopped
+2026-05-18 08:14:42  Scheduler stopped.
+2026-05-18 08:14:42    [collector] process exited
+2026-05-18 08:14:44  Config saved.
+2026-05-18 08:14:44  Scheduler started.  Watching session boundaries...
+2026-05-18 08:14:44  [PREMARKET]  Session ACTIVE
+2026-05-18 08:14:44  [PREMARKET]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 08:14:44  Collector PID 26588 started  (no-data warn: 5 min)
+2026-05-18 08:14:44    [collector] 08:14:44  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 08:14:44    [collector] 08:14:44  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 08:14:44    [collector] 08:14:44  INFO     No-data warning after: 5 min
+2026-05-18 08:14:45    [collector] 2026-05-18 08:14:45,024 | 64812 | 38916 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462113446561675596(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x0000021157182900>
+2026-05-18 08:14:45    [collector] 08:14:45  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 08:14:45    [collector] 08:14:45  INFO     DATA RECEIVED  first tick: US.SNDK  ts=2026-05-15 16:00:00.894  price=1407.6100  vol=1  dir=NEUTRAL
+2026-05-18 08:17:58  Collector PID 26588 stopped
+2026-05-18 08:17:58  Scheduler stopped.
+2026-05-18 08:17:58    [collector] process exited
+2026-05-18 08:19:07  Config saved.
+2026-05-18 08:19:07  Scheduler started.  Watching session boundaries...
+2026-05-18 08:19:07  [PREMARKET]  Session ACTIVE
+2026-05-18 08:19:07  [PREMARKET]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 08:19:07  Collector PID 43460 started  (no-data warn: 5 min)
+2026-05-18 08:19:07    [collector] 08:19:07  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 08:19:07    [collector] 08:19:07  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 08:19:07    [collector] 08:19:07  INFO     No-data warning after: 5 min
+2026-05-18 08:19:08    [collector] 2026-05-18 08:19:08,434 | 62880 | 31696 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462114551383711337(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x0000015DD1445AC0>
+2026-05-18 08:19:08    [collector] 08:19:08  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 08:19:08    [collector] 08:19:08  INFO     DB total at start: 19 ticks
+2026-05-18 08:19:08    [collector] 08:19:08  INFO     DATA RECEIVED  first tick: US.SNDK  ts=2026-05-15 16:00:00.894  price=1407.6100  vol=1  dir=NEUTRAL
+2026-05-18 08:24:08    [collector] 08:24:08  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:29:08    [collector] 08:29:08  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:29:08    [collector] 08:29:08  WARNING  NO DATA  10 min since last tick — check OpenD connection and market hours
+2026-05-18 08:34:08    [collector] 08:34:08  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:39:08    [collector] 08:39:08  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:44:08    [collector] 08:44:08  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:49:08    [collector] 08:49:08  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:54:08    [collector] 08:54:08  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 08:59:08    [collector] 08:59:08  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 09:04:08    [collector] 09:04:08  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 09:09:08    [collector] 09:09:08  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 09:12:50  Collector PID 43460 stopped
+2026-05-18 09:12:50  Scheduler stopped.
+2026-05-18 09:12:50    [collector] process exited
+2026-05-18 09:12:52  Config saved.
+2026-05-18 09:12:52  Scheduler started.  Watching session boundaries...
+2026-05-18 09:12:52  [PREMARKET]  Session ACTIVE
+2026-05-18 09:12:52  [PREMARKET]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 09:12:52  Collector PID 60356 started  (no-data warn: 10 min)
+2026-05-18 09:12:52    [collector] 09:12:52  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 09:12:52    [collector] 09:12:52  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 09:12:52    [collector] 09:12:52  INFO     No-data warning after: 10 min
+2026-05-18 09:12:53    [collector] 2026-05-18 09:12:53,459 | 48744 | 45700 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462128078115664177(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x0000022373AEBEC0>
+2026-05-18 09:12:53    [collector] 09:12:53  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 09:12:53    [collector] 09:12:53  INFO     DB total at start: 19 ticks
+2026-05-18 09:12:53    [collector] 09:12:53  INFO     DATA RECEIVED  first tick: US.CRWV  ts=2026-05-15 16:00:01.484  price=107.3000  vol=115  dir=NEUTRAL
+2026-05-18 09:22:53    [collector] 09:22:53  INFO     DB total: 19 ticks  (this session: 19)
+2026-05-18 09:25:00  [REGULAR]  Pre-start: launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 09:25:00  [REGULAR]  Pre-start: launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 09:25:00  Collector PID 46348 started  (no-data warn: 5 min)
+2026-05-18 09:25:01    [collector] 09:25:01  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 09:25:01    [collector] 09:25:01  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 09:25:01    [collector] 09:25:01  INFO     No-data warning after: 10 min
+2026-05-18 09:25:01    [collector] Traceback (most recent call last):
+2026-05-18 09:25:01    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 212, in <module>
+2026-05-18 09:25:01    [collector]     main()
+2026-05-18 09:25:01    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 161, in main
+2026-05-18 09:25:01    [collector]     store = TickStore(args.db)
+2026-05-18 09:25:01    [collector]             ^^^^^^^^^^^^^^^^^^
+2026-05-18 09:25:01    [collector]   File "E:\project\moomoo\store\tick_store.py", line 36, in __init__
+2026-05-18 09:25:01    [collector]     self._con = duckdb.connect(str(self._path))
+2026-05-18 09:25:01    [collector]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-05-18 09:25:01    [collector] _duckdb.IOException: IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb": The process cannot access the file because it is being used by another process.
+2026-05-18 09:25:01    [collector] File is already open in
+2026-05-18 09:25:01    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 48744)
+2026-05-18 09:25:01    [collector] process exited
+2026-05-18 09:30:00  [PREMARKET]  Session ended — stopping collector
+2026-05-18 09:30:00  [PREMARKET]  Session ended — stopping collector
+2026-05-18 09:30:00  [REGULAR]  Session ACTIVE
+2026-05-18 09:30:00  Collector PID 60356 stopped
+2026-05-18 09:30:00  [REGULAR]  Session ACTIVE
+2026-05-18 09:30:00    [collector] process exited
+2026-05-18 09:44:35  Config saved.
+2026-05-18 09:44:35  Scheduler started.  Watching session boundaries...
+2026-05-18 09:44:35  [REGULAR]  Session ACTIVE
+2026-05-18 09:44:35  [REGULAR]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 09:44:35  Collector PID 50372 started  (no-data warn: 10 min)
+2026-05-18 09:44:35    [collector] 09:44:35  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 09:44:35    [collector] 09:44:35  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 09:44:35    [collector] 09:44:35  INFO     No-data warning after: 10 min
+2026-05-18 09:44:36    [collector] 2026-05-18 09:44:36,213 | 56488 | 3476 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462136058847310883(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x0000017DA7705520>
+2026-05-18 09:44:36    [collector] 09:44:36  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 09:44:36    [collector] Traceback (most recent call last):
+2026-05-18 09:44:36    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 212, in <module>
+2026-05-18 09:44:36    [collector]     main()
+2026-05-18 09:44:36    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 181, in main
+2026-05-18 09:44:36    [collector]     log.info("DB total at start: %d ticks", store.row_count())
+2026-05-18 09:44:36    [collector]                                             ^^^^^^^^^^^^^^^^^
+2026-05-18 09:44:36    [collector]   File "E:\project\moomoo\store\tick_store.py", line 102, in row_count
+2026-05-18 09:44:36    [collector]     return self._con.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+2026-05-18 09:44:36    [collector]            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+2026-05-18 09:44:36    [collector] TypeError: 'NoneType' object is not subscriptable
+2026-05-18 09:44:36    [collector] 09:44:36  INFO     DATA RECEIVED  first tick: US.SNDK  ts=2026-05-18 09:44:37.379  price=1371.6700  vol=10  dir=NEUTRAL
+2026-05-18 10:18:32  Config saved.
+2026-05-18 10:18:32  Scheduler started.  Watching session boundaries...
+2026-05-18 10:18:32  [REGULAR]  Session ACTIVE
+2026-05-18 10:18:32  [REGULAR]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:18:32  Collector PID 10892 started  (no-data warn: 10 min)
+2026-05-18 10:18:32    [collector] 10:18:32  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:18:32    [collector] 10:18:32  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 10:18:32    [collector] 10:18:32  INFO     No-data warning after: 10 min
+2026-05-18 10:18:33    [collector] 2026-05-18 10:18:33,144 | 48908 | 26296 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462144602352087258(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x000002087D896360>
+2026-05-18 10:18:33    [collector] 10:18:33  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 10:18:33    [collector] 10:18:33  INFO     DATA RECEIVED  first tick: US.AMD  ts=2026-05-18 10:18:34.322  price=419.5600  vol=1  dir=NEUTRAL
+2026-05-18 10:18:33    [collector] 10:18:33  INFO     DB total at start: 1 ticks
+2026-05-18 10:21:18  Scheduler stopped.
+2026-05-18 10:21:31  Collector PID 10892 stopped
+2026-05-18 10:21:31  Scheduler stopped.
+2026-05-18 10:21:31    [collector] process exited
+2026-05-18 10:21:32  Config saved.
+2026-05-18 10:21:32  Scheduler started.  Watching session boundaries...
+2026-05-18 10:21:32  [REGULAR]  Session ACTIVE
+2026-05-18 10:21:32  [REGULAR]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:21:32  Collector PID 55280 started  (no-data warn: 10 min)
+2026-05-18 10:21:32    [collector] 10:21:32  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:21:32    [collector] 10:21:32  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 10:21:32    [collector] 10:21:32  INFO     No-data warning after: 10 min
+2026-05-18 10:21:34    [collector] 2026-05-18 10:21:34,315 | 58988 | 46548 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462145362241278345(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x00000211FC00E9C0>
+2026-05-18 10:21:34    [collector] 10:21:34  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 10:21:34    [collector] 10:21:34  INFO     DATA RECEIVED  first tick: US.AMD  ts=2026-05-18 10:21:35.551  price=421.2400  vol=1  dir=NEUTRAL
+2026-05-18 10:21:34    [collector] Traceback (most recent call last):
+2026-05-18 10:21:34    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 212, in <module>
+2026-05-18 10:21:34    [collector]     main()
+2026-05-18 10:21:34    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 181, in main
+2026-05-18 10:21:34    [collector]     log.info("DB total at start: %d ticks", store.row_count())
+2026-05-18 10:21:34    [collector]                                             ^^^^^^^^^^^^^^^^^
+2026-05-18 10:21:34    [collector]   File "E:\project\moomoo\store\tick_store.py", line 103, in row_count
+2026-05-18 10:21:34    [collector]     return self._con.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+2026-05-18 10:21:34    [collector]            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+2026-05-18 10:21:34    [collector] TypeError: 'NoneType' object is not subscriptable
+2026-05-18 10:21:46  Collector PID 55280 stopped
+2026-05-18 10:34:46  Config saved.
+2026-05-18 10:34:46  Scheduler started.  Watching session boundaries...
+2026-05-18 10:34:46  [REGULAR]  Session ACTIVE
+2026-05-18 10:34:46  [REGULAR]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:34:46  Collector PID 42696 started  (no-data warn: 10 min)
+2026-05-18 10:34:46    [collector] 10:34:46  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:34:46    [collector] 10:34:46  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 10:34:46    [collector] 10:34:46  INFO     No-data warning after: 10 min
+2026-05-18 10:34:47    [collector] Traceback (most recent call last):
+2026-05-18 10:34:47    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 212, in <module>
+2026-05-18 10:34:47    [collector]     main()
+2026-05-18 10:34:47    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 161, in main
+2026-05-18 10:34:47    [collector]     store = TickStore(args.db)
+2026-05-18 10:34:47    [collector]             ^^^^^^^^^^^^^^^^^^
+2026-05-18 10:34:47    [collector]   File "E:\project\moomoo\store\tick_store.py", line 36, in __init__
+2026-05-18 10:34:47    [collector]     self._con = duckdb.connect(str(self._path))
+2026-05-18 10:34:47    [collector]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-05-18 10:34:47    [collector] _duckdb.IOException: IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:34:47    [collector] File is already open in
+2026-05-18 10:34:47    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488)
+2026-05-18 10:34:47    [collector] process exited
+2026-05-18 10:37:24  Config saved.
+2026-05-18 10:37:24  Scheduler started.  Watching session boundaries...
+2026-05-18 10:37:24  [REGULAR]  Session ACTIVE
+2026-05-18 10:37:24  [REGULAR]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:37:24  Collector PID 24092 started  (no-data warn: 10 min)
+2026-05-18 10:37:24    [collector] 10:37:24  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:37:24    [collector] 10:37:24  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 10:37:24    [collector] 10:37:24  INFO     No-data warning after: 10 min
+2026-05-18 10:37:24    [collector] Traceback (most recent call last):
+2026-05-18 10:37:24    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 212, in <module>
+2026-05-18 10:37:24    [collector]     main()
+2026-05-18 10:37:24    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 161, in main
+2026-05-18 10:37:24    [collector]     store = TickStore(args.db)
+2026-05-18 10:37:24    [collector]             ^^^^^^^^^^^^^^^^^^
+2026-05-18 10:37:24    [collector]   File "E:\project\moomoo\store\tick_store.py", line 36, in __init__
+2026-05-18 10:37:24    [collector]     self._con = duckdb.connect(str(self._path), read_only=read_only)
+2026-05-18 10:37:24    [collector]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-05-18 10:37:24    [collector] _duckdb.IOException: IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:37:24    [collector] File is already open in
+2026-05-18 10:37:24    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488)
+2026-05-18 10:37:24    [collector] process exited
+2026-05-18 10:47:15  Config saved.
+2026-05-18 10:47:15  Scheduler started.  Watching session boundaries...
+2026-05-18 10:47:15  [REGULAR]  Session ACTIVE
+2026-05-18 10:47:15  [REGULAR]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:47:15  Collector PID 32812 started  (no-data warn: 10 min)
+2026-05-18 10:47:15    [collector] 10:47:15  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:47:15    [collector] 10:47:15  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 10:47:15    [collector] 10:47:15  INFO     No-data warning after: 10 min
+2026-05-18 10:47:15    [collector] 10:47:15  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:47:16    [collector] File is already open in
+2026-05-18 10:47:16    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:47:19    [collector] 10:47:19  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:47:19    [collector] File is already open in
+2026-05-18 10:47:19    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:47:22    [collector] 10:47:22  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:47:22    [collector] File is already open in
+2026-05-18 10:47:22    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:47:25    [collector] 10:47:25  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:47:25    [collector] File is already open in
+2026-05-18 10:47:25    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:47:28    [collector] 10:47:28  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:47:28    [collector] File is already open in
+2026-05-18 10:47:28    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:47:31    [collector] 10:47:31  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:47:31    [collector] File is already open in
+2026-05-18 10:47:31    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:47:34    [collector] 10:47:34  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:47:34    [collector] File is already open in
+2026-05-18 10:47:34    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:47:37    [collector] 10:47:37  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:47:37    [collector] File is already open in
+2026-05-18 10:47:37    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:47:40    [collector] 10:47:40  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:47:41    [collector] File is already open in
+2026-05-18 10:47:41    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:47:44    [collector] 10:47:44  ERROR    Cannot open DB after 10 attempts: IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:47:44    [collector] File is already open in
+2026-05-18 10:47:44    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488)
+2026-05-18 10:47:44    [collector] process exited
+2026-05-18 10:47:54  Scheduler stopped.
+2026-05-18 10:54:57  Config saved.
+2026-05-18 10:54:57  Scheduler started.  Watching session boundaries...
+2026-05-18 10:54:57  [REGULAR]  Session ACTIVE
+2026-05-18 10:54:57  [REGULAR]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:54:57  Collector PID 23996 started  (no-data warn: 10 min)
+2026-05-18 10:54:57    [collector] 10:54:57  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:54:57    [collector] 10:54:57  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 10:54:57    [collector] 10:54:57  INFO     No-data warning after: 10 min
+2026-05-18 10:54:57    [collector] 10:54:57  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:54:57    [collector] File is already open in
+2026-05-18 10:54:57    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:55:00    [collector] 10:55:00  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:55:00    [collector] File is already open in
+2026-05-18 10:55:00    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:55:03    [collector] 10:55:03  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:55:03    [collector] File is already open in
+2026-05-18 10:55:03    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:55:07    [collector] 10:55:07  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:55:07    [collector] File is already open in
+2026-05-18 10:55:07    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:55:10    [collector] 10:55:10  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:55:10    [collector] File is already open in
+2026-05-18 10:55:10    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:55:13    [collector] 10:55:13  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:55:13    [collector] File is already open in
+2026-05-18 10:55:13    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:55:16    [collector] 10:55:16  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:55:16    [collector] File is already open in
+2026-05-18 10:55:16    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:55:19    [collector] 10:55:19  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:55:19    [collector] File is already open in
+2026-05-18 10:55:19    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:55:22    [collector] 10:55:22  WARNING  DB locked, retrying in 3 s… (IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:55:22    [collector] File is already open in
+2026-05-18 10:55:22    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488))
+2026-05-18 10:55:25    [collector] 10:55:25  ERROR    Cannot open DB after 10 attempts: IO Error: Cannot open file "E:\project\moomoo\store\ticks.duckdb.wal": The process cannot access the file because it is being used by another process.
+2026-05-18 10:55:25    [collector] File is already open in
+2026-05-18 10:55:25    [collector] C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\python.exe (PID 56488)
+2026-05-18 10:55:26    [collector] process exited
+2026-05-18 10:56:59  Scheduler stopped.
+2026-05-18 10:58:39  Config saved.
+2026-05-18 10:58:39  Scheduler started.  Watching session boundaries...
+2026-05-18 10:58:39  [REGULAR]  Session ACTIVE
+2026-05-18 10:58:39  [REGULAR]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:58:39  Collector PID 51724 started  (no-data warn: 10 min)
+2026-05-18 10:58:39    [collector] 10:58:39  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 10:58:39    [collector] 10:58:39  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 10:58:39    [collector] 10:58:39  INFO     No-data warning after: 10 min
+2026-05-18 10:58:39    [collector] 2026-05-18 10:58:39,826 | 56044 | 56848 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462154696712893009(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x000001D3C0B92C60>
+2026-05-18 10:58:39    [collector] 10:58:39  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 10:58:39    [collector] 10:58:39  INFO     DB total at start: 2996 ticks
+2026-05-18 10:58:39    [collector] 10:58:39  INFO     DATA RECEIVED  first tick: US.NVTS  ts=2026-05-18 10:58:40.701  price=19.2450  vol=276  dir=NEUTRAL
+2026-05-18 11:08:39    [collector] Exception in thread Thread-3 (_watchdog):
+2026-05-18 11:08:39    [collector] Traceback (most recent call last):
+2026-05-18 11:08:39    [collector]   File "C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\Lib\threading.py", line 1075, in _bootstrap_inner
+2026-05-18 11:08:39    [collector]     self.run()
+2026-05-18 11:08:40    [collector]   File "C:\Users\wanyi\AppData\Roaming\uv\python\cpython-3.12.11-windows-x86_64-none\Lib\threading.py", line 1012, in run
+2026-05-18 11:08:40    [collector]     self._target(*self._args, **self._kwargs)
+2026-05-18 11:08:40    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 90, in _watchdog
+2026-05-18 11:08:40    [collector]     total = store.row_count()
+2026-05-18 11:08:40    [collector]             ^^^^^^^^^^^^^^^^^
+2026-05-18 11:08:40    [collector]   File "E:\project\moomoo\store\tick_store.py", line 104, in row_count
+2026-05-18 11:08:40    [collector]     return self._con.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+2026-05-18 11:08:40    [collector]            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+2026-05-18 11:08:40    [collector] TypeError: 'NoneType' object is not subscriptable
+2026-05-18 11:33:30  Collector PID 51724 stopped
+2026-05-18 11:33:34  Config saved.
+2026-05-18 11:33:34  Scheduler started.  Watching session boundaries...
+2026-05-18 11:33:34  [REGULAR]  Session ACTIVE
+2026-05-18 11:33:34  [REGULAR]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 11:33:34  Collector PID 15004 started  (no-data warn: 10 min)
+2026-05-18 11:33:35    [collector] 11:33:35  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 11:33:35    [collector] 11:33:35  INFO     DB: E:\project\moomoo\store\ticks.duckdb
+2026-05-18 11:33:35    [collector] 11:33:35  INFO     No-data warning after: 10 min
+2026-05-18 11:34:01    [collector] 2026-05-18 11:34:01,750 | 8704 | 60004 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462163596704424821(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x000001889E307320>
+2026-05-18 11:34:01    [collector] 11:34:01  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 11:34:01    [collector] 11:34:01  INFO     DB total at start: 77154 ticks
+2026-05-18 11:34:01    [collector] 11:34:01  INFO     DATA RECEIVED  first tick: US.QCOM  ts=2026-05-18 11:34:03.066  price=195.9500  vol=4  dir=BUY
+2026-05-18 11:44:01    [collector] 11:44:01  INFO     This session: 26127 ticks
+2026-05-18 11:54:01    [collector] 11:54:01  INFO     This session: 51760 ticks
+2026-05-18 11:56:51  Collector PID 15004 stopped
+2026-05-18 12:02:01  Config saved.
+2026-05-18 12:02:01  Scheduler started.  Watching session boundaries...
+2026-05-18 12:02:01  [REGULAR]  Session ACTIVE
+2026-05-18 12:02:01  [REGULAR]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 12:02:01  Collector PID 5948 started  (no-data warn: 10 min)
+2026-05-18 12:02:01    [collector] 12:02:01  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 12:02:01    [collector] 12:02:01  INFO     DB: E:\project\moomoo\store\ticks.db
+2026-05-18 12:02:01    [collector] 12:02:01  INFO     No-data warning after: 10 min
+2026-05-18 12:02:02    [collector] 2026-05-18 12:02:02,372 | 17548 | 13436 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462170645745048451(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x00000202FDBBA0F0>
+2026-05-18 12:02:02    [collector] 12:02:02  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 12:02:02    [collector] 12:02:02  INFO     DB total at start: 124552 ticks
+2026-05-18 12:02:02    [collector] 12:02:02  INFO     DATA RECEIVED  first tick: US.CRWV  ts=2026-05-18 12:02:03.611  price=100.0745  vol=22  dir=BUY
+2026-05-18 12:12:02    [collector] 12:12:02  INFO     This session: 128709 ticks
+2026-05-18 12:22:02    [collector] 12:22:02  INFO     This session: 259434 ticks
+2026-05-18 12:32:02    [collector] 12:32:02  INFO     This session: 485015 ticks
+2026-05-18 12:42:02    [collector] 12:42:02  INFO     This session: 585464 ticks
+2026-05-18 12:52:02    [collector] 12:52:02  INFO     This session: 672771 ticks
+2026-05-18 13:02:02    [collector] 13:02:02  INFO     This session: 765788 ticks
+2026-05-18 13:12:02    [collector] 13:12:02  INFO     This session: 839996 ticks
+2026-05-18 13:22:02    [collector] 13:22:02  INFO     This session: 915046 ticks
+2026-05-18 13:32:02    [collector] 13:32:02  INFO     This session: 993490 ticks
+2026-05-18 13:42:02    [collector] 13:42:02  INFO     This session: 1068228 ticks
+2026-05-18 13:52:02    [collector] 13:52:02  INFO     This session: 1144615 ticks
+2026-05-18 14:02:02    [collector] 14:02:02  INFO     This session: 1212293 ticks
+2026-05-18 14:12:02    [collector] 14:12:02  INFO     This session: 1304186 ticks
+2026-05-18 14:22:02    [collector] 14:22:02  INFO     This session: 1413256 ticks
+2026-05-18 14:32:02    [collector] 14:32:02  INFO     This session: 1521996 ticks
+2026-05-18 14:42:02    [collector] 14:42:02  INFO     This session: 1612203 ticks
+2026-05-18 14:52:02    [collector] 14:52:02  INFO     This session: 1710580 ticks
+2026-05-18 15:02:02    [collector] 15:02:02  INFO     This session: 1826148 ticks
+2026-05-18 15:12:02    [collector] 15:12:02  INFO     This session: 1949438 ticks
+2026-05-18 15:22:02    [collector] 15:22:02  INFO     This session: 2045313 ticks
+2026-05-18 15:32:02    [collector] 15:32:02  INFO     This session: 2151184 ticks
+2026-05-18 15:42:02    [collector] 15:42:02  INFO     This session: 2302278 ticks
+2026-05-18 15:52:02    [collector] 15:52:02  INFO     This session: 2485892 ticks
+2026-05-18 15:55:00  [AFTERHOURS]  Pre-start: launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 16:00:00  [REGULAR]  Session ended — stopping collector
+2026-05-18 16:00:01  Collector PID 5948 stopped
+2026-05-18 16:00:01  [AFTERHOURS]  Session ACTIVE
+2026-05-18 16:00:01    [collector] process exited
+2026-05-18 16:20:03  Scheduler stopped.
+2026-05-18 16:20:04  Config saved.
+2026-05-18 16:20:04  Scheduler started.  Watching session boundaries...
+2026-05-18 16:20:04  [AFTERHOURS]  Session ACTIVE
+2026-05-18 16:20:04  [AFTERHOURS]  Mid-session start — launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 16:20:04  Collector PID 2640 started  (no-data warn: 10 min)
+2026-05-18 16:20:04    [collector] 16:20:04  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 16:20:04    [collector] 16:20:04  INFO     DB: E:\project\moomoo\store\ticks.db
+2026-05-18 16:20:04    [collector] 16:20:04  INFO     No-data warning after: 10 min
+2026-05-18 16:20:06    [collector] 2026-05-18 16:20:06,802 | 37732 | 32656 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462235592147881202(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x00000236E070A0F0>
+2026-05-18 16:20:06    [collector] 16:20:06  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 16:21:22    [collector] 16:21:22  INFO     DB total at start: 2585490 ticks
+2026-05-18 16:21:22    [collector] 16:21:22  INFO     DATA RECEIVED  first tick: US.MU  ts=2026-05-18 16:00:01.313  price=681.5400  vol=1  dir=NEUTRAL
+2026-05-18 16:27:33  Collector PID 2640 stopped
+2026-05-18 16:27:34  Scheduler stopped.
+2026-05-18 16:27:34    [collector] process exited
+2026-05-18 16:27:49  Config saved.
+2026-05-18 16:27:49  Scheduler started.  Watching session boundaries...
+2026-05-18 16:27:49  [AFTERHOURS]  Session ACTIVE
+2026-05-18 16:27:49  Collector PID 21800 started  (no-data warn: 10 min)
+2026-05-18 16:27:49    [collector] 16:27:49  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-18 16:27:49    [collector] 16:27:49  INFO     DB: E:\project\moomoo\store\ticks.db
+2026-05-18 16:27:49    [collector] 16:27:49  INFO     No-data warning after: 10 min
+2026-05-18 16:27:50    [collector] 2026-05-18 16:27:50,000 | 5552 | 62304 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462237534942176973(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x000002D0ACFDA0F0>
+2026-05-18 16:27:50    [collector] 16:27:50  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-18 16:27:50    [collector] 16:27:50  INFO     DB total at start: 2585509 ticks
+2026-05-18 16:27:50    [collector] 16:27:50  INFO     DATA RECEIVED  first tick: US.AMD  ts=2026-05-18 16:00:01.167  price=420.9900  vol=11  dir=NEUTRAL
+2026-05-18 16:37:50    [collector] 16:37:50  INFO     This session: 19 ticks
+2026-05-18 16:47:50    [collector] 16:47:50  INFO     This session: 19 ticks
+2026-05-18 16:47:50    [collector] 16:47:50  WARNING  NO DATA  20 min since last tick — check OpenD connection and market hours
+2026-05-18 16:57:50    [collector] 16:57:50  INFO     This session: 19 ticks
+2026-05-18 17:07:50    [collector] 17:07:50  INFO     This session: 19 ticks
+2026-05-18 17:17:50    [collector] 17:17:50  INFO     This session: 19 ticks
+2026-05-18 17:27:50    [collector] 17:27:50  INFO     This session: 19 ticks
+2026-05-18 17:37:50    [collector] 17:37:50  INFO     This session: 19 ticks
+2026-05-18 17:47:50    [collector] 17:47:50  INFO     This session: 19 ticks
+2026-05-18 17:57:50    [collector] 17:57:50  INFO     This session: 19 ticks
+2026-05-18 18:07:50    [collector] 18:07:50  INFO     This session: 19 ticks
+2026-05-18 18:17:50    [collector] 18:17:50  INFO     This session: 19 ticks
+2026-05-18 18:27:50    [collector] 18:27:50  INFO     This session: 19 ticks
+2026-05-18 19:38:52    [collector] 2026-05-18 19:38:50,753 | 5552 | 42108 | [open_context_base.py:521] on_disconnect: Disconnected: conn=7462237534942176973(1) reason=RemoteClose msg=
+2026-05-18 19:38:56    [collector] 2026-05-18 19:38:56,777 | 5552 | 15580 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462285630081150871(2) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x000002D0ACFDA0F0>
+2026-05-18 19:41:14    [collector] 19:41:14  INFO     This session: 38 ticks
+2026-05-18 19:51:14    [collector] 19:51:14  INFO     This session: 38 ticks
+2026-05-18 19:51:14    [collector] 19:51:14  WARNING  NO DATA  12 min since last tick — check OpenD connection and market hours
+2026-05-18 20:00:00  [OVERNIGHT]  Session ACTIVE
+2026-05-18 20:00:00  [AFTERHOURS]  Session ended — stopping collector
+2026-05-18 20:00:00  Collector PID 21800 stopped
+2026-05-18 20:00:00    [collector] process exited
+2026-05-19 09:44:26  Config saved.
+2026-05-19 09:44:26  Scheduler started.  Watching session boundaries...
+2026-05-19 09:44:26  [REGULAR]  Session ACTIVE
+2026-05-19 09:44:26  Collector PID 37792 started  (no-data warn: 10 min)
+2026-05-19 09:44:26    [collector] 09:44:26  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-19 09:44:26    [collector] 09:44:26  INFO     DB: E:\project\moomoo\db\ticks.db
+2026-05-19 09:44:26    [collector] 09:44:26  INFO     No-data warning after: 10 min
+2026-05-19 09:44:26    [collector] Traceback (most recent call last):
+2026-05-19 09:44:26    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 221, in <module>
+2026-05-19 09:44:26    [collector]     main()
+2026-05-19 09:44:26    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 159, in main
+2026-05-19 09:44:26    [collector]     from store.tick_store import TickStore
+2026-05-19 09:44:26    [collector] ModuleNotFoundError: No module named 'store.tick_store'
+2026-05-19 09:44:26    [collector] process exited
+2026-05-19 09:44:33  Scheduler stopped.
+2026-05-19 09:48:13  Config saved.
+2026-05-19 09:48:13  Scheduler started.  Watching session boundaries...
+2026-05-19 09:48:13  [REGULAR]  Session ACTIVE
+2026-05-19 09:48:13  Collector PID 48352 started  (no-data warn: 10 min)
+2026-05-19 09:48:13    [collector] 09:48:13  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-19 09:48:13    [collector] 09:48:13  INFO     DB: E:\project\moomoo\db\ticks.db
+2026-05-19 09:48:13    [collector] 09:48:13  INFO     No-data warning after: 10 min
+2026-05-19 09:48:20    [collector] 2026-05-19 09:48:20,488 | 55216 | 11636 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462499387282217076(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x00000186A1AFA180>
+2026-05-19 09:48:20    [collector] 09:48:20  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-19 09:49:21    [collector] 09:49:21  INFO     DATA RECEIVED  first tick: US.NVTS  ts=2026-05-19 09:48:21.297  price=18.7693  vol=55  dir=NEUTRAL
+2026-05-19 09:49:21    [collector] 09:49:21  INFO     DB total at start: 2585509 ticks
+2026-05-19 09:59:21    [collector] 09:59:21  INFO     This session: 200975 ticks
+2026-05-19 10:09:21    [collector] 10:09:21  INFO     This session: 440017 ticks
+2026-05-19 10:19:21    [collector] 10:19:21  INFO     This session: 764756 ticks
+2026-05-19 10:29:21    [collector] 10:29:21  INFO     This session: 1026921 ticks
+2026-05-19 10:39:21    [collector] 10:39:21  INFO     This session: 1247201 ticks
+2026-05-19 10:49:21    [collector] 10:49:21  INFO     This session: 1441889 ticks
+2026-05-19 10:59:21    [collector] 10:59:21  INFO     This session: 1626693 ticks
+2026-05-19 11:09:21    [collector] 11:09:21  INFO     This session: 1810368 ticks
+2026-05-19 11:19:21    [collector] 11:19:21  INFO     This session: 1978961 ticks
+2026-05-19 11:29:21    [collector] 11:29:21  INFO     This session: 2137811 ticks
+2026-05-19 11:39:21    [collector] 11:39:21  INFO     This session: 2292684 ticks
+2026-05-19 11:49:21    [collector] 11:49:21  INFO     This session: 2449330 ticks
+2026-05-19 11:59:21    [collector] 11:59:21  INFO     This session: 2584263 ticks
+2026-05-19 12:09:21    [collector] 12:09:21  INFO     This session: 2732137 ticks
+2026-05-19 12:19:21    [collector] 12:19:21  INFO     This session: 2859931 ticks
+2026-05-19 12:29:21    [collector] 12:29:21  INFO     This session: 2960068 ticks
+2026-05-19 12:39:21    [collector] 12:39:21  INFO     This session: 3088694 ticks
+2026-05-19 12:49:21    [collector] 12:49:21  INFO     This session: 3199633 ticks
+2026-05-19 12:59:21    [collector] 12:59:21  INFO     This session: 3292446 ticks
+2026-05-19 13:09:22    [collector] 13:09:22  INFO     This session: 3387909 ticks
+2026-05-19 13:19:22    [collector] 13:19:22  INFO     This session: 3486985 ticks
+2026-05-19 13:29:22    [collector] 13:29:22  INFO     This session: 3598545 ticks
+2026-05-19 13:39:22    [collector] 13:39:22  INFO     This session: 3677475 ticks
+2026-05-19 13:49:22    [collector] 13:49:22  INFO     This session: 3761101 ticks
+2026-05-19 13:59:22    [collector] 13:59:22  INFO     This session: 3851258 ticks
+2026-05-19 14:09:22    [collector] 14:09:22  INFO     This session: 3922496 ticks
+2026-05-19 14:19:22    [collector] 14:19:22  INFO     This session: 3990524 ticks
+2026-05-19 14:29:22    [collector] 14:29:22  INFO     This session: 4069388 ticks
+2026-05-19 14:39:22    [collector] 14:39:22  INFO     This session: 4132372 ticks
+2026-05-19 14:49:22    [collector] 14:49:22  INFO     This session: 4198398 ticks
+2026-05-19 14:59:22    [collector] 14:59:22  INFO     This session: 4277288 ticks
+2026-05-19 15:09:22    [collector] 15:09:22  INFO     This session: 4354135 ticks
+2026-05-19 15:19:22    [collector] 15:19:22  INFO     This session: 4429363 ticks
+2026-05-19 15:29:22    [collector] 15:29:22  INFO     This session: 4515655 ticks
+2026-05-19 15:39:22    [collector] 15:39:22  INFO     This session: 4624895 ticks
+2026-05-19 15:49:22    [collector] 15:49:22  INFO     This session: 4750341 ticks
+2026-05-19 15:55:00  [AFTERHOURS]  Pre-start: launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-19 15:59:22    [collector] 15:59:22  INFO     This session: 5060117 ticks
+2026-05-19 16:00:00  [REGULAR]  Session ended — stopping collector
+2026-05-19 16:00:00  Collector PID 48352 stopped
+2026-05-19 16:00:00  [AFTERHOURS]  Session ACTIVE
+2026-05-19 16:00:00  Collector PID 57656 started  (no-data warn: 10 min)
+2026-05-19 16:00:00    [collector] process exited
+2026-05-19 16:00:01    [collector] 16:00:01  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-19 16:00:01    [collector] 16:00:01  INFO     DB: E:\project\moomoo\db\ticks.db
+2026-05-19 16:00:01    [collector] 16:00:01  INFO     No-data warning after: 10 min
+2026-05-19 16:00:01    [collector] 2026-05-19 16:00:01,808 | 4496 | 5696 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462592925905103623(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x0000026B1DFD2450>
+2026-05-19 16:00:01    [collector] 16:00:01  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-19 16:02:52    [collector] 16:02:52  INFO     DB total at start: 7059147 ticks
+2026-05-19 16:02:52    [collector] 16:02:52  INFO     DATA RECEIVED  first tick: US.AMD  ts=2026-05-19 16:00:00.822  price=414.0500  vol=120  dir=NEUTRAL
+2026-05-19 16:12:52    [collector] 16:12:52  INFO     This session: 19 ticks
+2026-05-19 16:22:52    [collector] 16:22:52  INFO     This session: 19 ticks
+2026-05-19 16:22:52    [collector] 16:22:52  WARNING  NO DATA  20 min since last tick — check OpenD connection and market hours
+2026-05-19 16:32:52    [collector] 16:32:52  INFO     This session: 19 ticks
+2026-05-19 16:41:15    [collector] process exited
+2026-05-19 16:42:28  Config saved.
+2026-05-19 16:42:28  Scheduler started.  Watching session boundaries...
+2026-05-19 16:42:28  [AFTERHOURS]  Session ACTIVE
+2026-05-19 16:42:28  Collector PID 34184 started  (no-data warn: 10 min)
+2026-05-19 16:42:28    [collector] 16:42:28  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-19 16:42:28    [collector] 16:42:28  INFO     DB: E:\project\moomoo\db\ticks.db
+2026-05-19 16:42:28    [collector] 16:42:28  INFO     No-data warning after: 10 min
+2026-05-19 16:42:30    [collector] 2026-05-19 16:42:30,211 | 28100 | 45564 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462603614682227746(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x000001CA5A7C2450>
+2026-05-19 16:42:30    [collector] 16:42:30  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-19 16:45:57    [collector] 16:45:57  INFO     DATA RECEIVED  first tick: US.AMD  ts=2026-05-19 16:00:01.504  price=414.0500  vol=10  dir=NEUTRAL
+2026-05-19 16:45:57    [collector] 16:45:57  INFO     DB total at start: 7059166 ticks
+2026-05-19 16:53:57  Config saved.
+2026-05-19 16:53:57  Scheduler started.  Watching session boundaries...
+2026-05-19 16:53:57  [AFTERHOURS]  Session ACTIVE
+2026-05-19 16:53:57  Collector PID 11136 started  (no-data warn: 10 min)
+2026-05-19 16:53:57    [collector] 16:53:57  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-19 16:53:57    [collector] 16:53:57  INFO     DB: E:\project\moomoo\db\ticks.db
+2026-05-19 16:53:57    [collector] 16:53:57  INFO     No-data warning after: 10 min
+2026-05-19 16:53:58    [collector] 2026-05-19 16:53:58,149 | 8872 | 59940 | [open_context_base.py:410] _init_connect_sync: New connect ready: conn=7462606500104012213(1) context=<moomoo.quote.open_quote_context.OpenQuoteContext object at 0x00000259F2462450>
+2026-05-19 16:53:58    [collector] 16:53:58  INFO     Subscribed — collecting ticks. Press Ctrl-C to stop.
+2026-05-19 16:53:58    [collector] 16:53:58  INFO     DB total at start: 7059167 ticks
+2026-05-19 16:53:58    [collector] 16:53:58  INFO     DATA RECEIVED  first tick: US.CRWV  ts=2026-05-19 16:00:00.960  price=99.8100  vol=1  dir=NEUTRAL
+2026-05-19 17:03:58    [collector] 17:03:58  INFO     This session: 19 ticks
+2026-05-19 17:13:58    [collector] 17:13:58  INFO     This session: 19 ticks
+2026-05-19 17:13:58    [collector] 17:13:58  WARNING  NO DATA  20 min since last tick — check OpenD connection and market hours
+2026-05-19 17:23:58    [collector] 17:23:58  INFO     This session: 19 ticks
+2026-05-19 17:33:58    [collector] 17:33:58  INFO     This session: 19 ticks
+2026-05-19 17:43:58    [collector] 17:43:58  INFO     This session: 19 ticks
+2026-05-19 17:53:58    [collector] 17:53:58  INFO     This session: 19 ticks
+2026-05-19 18:03:58    [collector] 18:03:58  INFO     This session: 19 ticks
+2026-05-19 18:13:58    [collector] 18:13:58  INFO     This session: 19 ticks
+2026-05-19 18:23:58    [collector] 18:23:58  INFO     This session: 19 ticks
+2026-05-19 18:33:58    [collector] 18:33:58  INFO     This session: 19 ticks
+2026-05-19 18:43:58    [collector] 18:43:58  INFO     This session: 19 ticks
+2026-05-19 18:53:58    [collector] 18:53:58  INFO     This session: 19 ticks
+2026-05-19 19:03:58    [collector] 19:03:58  INFO     This session: 19 ticks
+2026-05-19 19:13:58    [collector] 19:13:58  INFO     This session: 19 ticks
+2026-05-19 19:23:58    [collector] 19:23:58  INFO     This session: 19 ticks
+2026-05-19 19:33:58    [collector] 19:33:58  INFO     This session: 19 ticks
+2026-05-19 19:43:58    [collector] 19:43:58  INFO     This session: 19 ticks
+2026-05-19 19:53:58    [collector] 19:53:58  INFO     This session: 19 ticks
+2026-05-19 20:00:00  [OVERNIGHT]  Session ACTIVE
+2026-05-19 20:00:00  [AFTERHOURS]  Session ended — stopping collector
+2026-05-19 20:00:00  Collector PID 11136 stopped
+2026-05-19 20:00:00    [collector] process exited

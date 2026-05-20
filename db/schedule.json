@@ -1,0 +1,53 @@
+{
+  "_comment": "All times are US Eastern Time (ET). Collector starts prestart_minutes before each session.",
+  "prestart_minutes": 5,
+  "data_timeout_minutes": 10,
+  "live_refresh_seconds": 15,
+  "sessions": {
+    "overnight": {
+      "enabled": true,
+      "start": "20:00",
+      "end": "04:00",
+      "label": "Overnight  20:00–04:00 ET"
+    },
+    "premarket": {
+      "enabled": true,
+      "start": "04:00",
+      "end": "09:30",
+      "label": "Pre-market  04:00–09:30 ET"
+    },
+    "regular": {
+      "enabled": true,
+      "start": "09:30",
+      "end": "16:00",
+      "label": "Regular  09:30–16:00 ET"
+    },
+    "afterhours": {
+      "enabled": true,
+      "start": "16:00",
+      "end": "20:00",
+      "label": "After-hours  16:00–20:00 ET"
+    }
+  },
+  "targets": [
+    "US.AMD",
+    "US.BE",
+    "US.CRWV",
+    "US.CSCO",
+    "US.LITE",
+    "US.MRVL",
+    "US.MU",
+    "US.NVDA",
+    "US.NVTS",
+    "US.Q",
+    "US.QCOM",
+    "US.SIMO",
+    "US.SMCI",
+    "US.SNDK",
+    "US.SOXL",
+    "US.STX",
+    "US.TSEM",
+    "US.TSM",
+    "US.WDC"
+  ]
+}
