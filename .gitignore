@@ -11,3 +11,15 @@ wheels/
 
 # Claude Code internal files
 .claude/
+
+# Runtime database files
+*.db
+*.db-shm
+*.db-wal
+*.duckdb
+*.duckdb.wal
+*.duckdb.migrated
+
+# Logs (keep directory structure, ignore log files)
+logs/**
+!logs/**/.gitkeep

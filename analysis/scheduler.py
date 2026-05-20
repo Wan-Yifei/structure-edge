@@ -2,7 +2,7 @@
 Market Session Scheduler — Tkinter GUI
 
 Manages which US trading sessions the tick collector should run in.
-Config is persisted to db/schedule.json.
+Config is persisted to config/schedule.json.
 
 Run:  uv run analysis/scheduler.py
       uv run main.py scheduler
@@ -23,8 +23,8 @@ import pystray
 from PIL import Image, ImageDraw
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-CONFIG_PATH = pathlib.Path(__file__).parent.parent / "db" / "schedule.json"
-LOG_PATH    = pathlib.Path(__file__).parent.parent / "db" / "scheduler.log"
+CONFIG_PATH = pathlib.Path(__file__).parent.parent / "config" / "schedule.json"
+LOG_PATH    = pathlib.Path(__file__).parent.parent / "logs" / "analysis" / "scheduler.log"
 
 # ── Colours (match orderflow palette) ────────────────────────────────────────
 BG_DARK  = "#1a1a2e"

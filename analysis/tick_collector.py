@@ -1,7 +1,7 @@
 """Real-time tick collector — subscribes to TICKER feed and writes to DuckDB.
 
 Usage:
-    uv run analysis/tick_collector.py [--config db/schedule.json] [--host HOST] [--port PORT]
+    uv run analysis/tick_collector.py [--config config/schedule.json] [--host HOST] [--port PORT]
 
 The script reads target codes from the schedule config and subscribes to each.
 Press Ctrl-C to stop.
@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-_DEFAULT_CONFIG = pathlib.Path(__file__).parent.parent / "db" / "schedule.json"
+_DEFAULT_CONFIG = pathlib.Path(__file__).parent.parent / "config" / "schedule.json"
 _DEFAULT_DB     = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
 
 
@@ -113,12 +113,12 @@ def _parse_args(argv=None):
         epilog="""
 Examples:
   uv run analysis/tick_collector.py
-  uv run analysis/tick_collector.py --config store/schedule.json --host 127.0.0.1 --port 11111
+  uv run analysis/tick_collector.py --config config/schedule.json --host 127.0.0.1 --port 11111
   uv run analysis/tick_collector.py --codes US.AAPL US.TSLA
         """,
     )
     p.add_argument("--config", default=str(_DEFAULT_CONFIG),
-                   help="Path to schedule.json (default: store/schedule.json)")
+                   help="Path to schedule.json (default: config/schedule.json)")
     p.add_argument("--db", default=str(_DEFAULT_DB),
                    help="Path to DuckDB file (default: store/ticks.duckdb)")
     p.add_argument("--codes", nargs="*",

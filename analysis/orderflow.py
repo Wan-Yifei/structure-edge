@@ -169,7 +169,7 @@ class OrderFlowApp(tk.Tk):
 
         # indicator toggles — loaded from chart_config.json
         self._ind: dict[str, tk.BooleanVar] = {}
-        self._cfg_path = pathlib.Path(__file__).parent.parent / "db" / "chart_config.json"
+        self._cfg_path = pathlib.Path(__file__).parent.parent / "config" / "chart.json"
         self._load_indicator_cfg()
 
         self._build_toolbar()
@@ -188,7 +188,7 @@ class OrderFlowApp(tk.Tk):
             if args.date:
                 self.date_var.set(args.date)
             # override refresh from schedule.json if present
-            cfg_path = pathlib.Path(__file__).parent.parent / "db" / "schedule.json"
+            cfg_path = pathlib.Path(__file__).parent.parent / "config" / "schedule.json"
             if cfg_path.exists():
                 try:
                     import json as _json
