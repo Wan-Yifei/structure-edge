@@ -16,7 +16,7 @@ from core.time_utils import candle_start
 from core.chart import build_ohlcv_profile
 from analysis.orderflow import TIMEFRAME_MAP
 
-OUTPUT_DIR = pathlib.Path(__file__).parent / "outputs"
+OUTPUT_DIR = pathlib.Path(__file__).parent.parent / "outputs"
 
 
 # ── candle_start ─────────────────────────────────────────────────────────────
