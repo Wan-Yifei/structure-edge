@@ -1,0 +1,30 @@
+2026-05-19 06:15:56  [OVERNIGHT]  Session ended — stopping collector
+2026-05-19 06:16:01  [PREMARKET]  Session ACTIVE
+2026-05-19 06:16:35  Collector PID 41180 started  (no-data warn: 10 min)
+2026-05-19 06:16:43    [collector] 06:16:37  ERROR    Config not found: E:\project\moomoo\store\schedule.json
+2026-05-19 06:16:43    [collector] process exited
+2026-05-19 09:25:00  [REGULAR]  Pre-start: launching collector for US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-19 09:25:00  Collector PID 45372 started  (no-data warn: 10 min)
+2026-05-19 09:25:03    [collector] 09:25:03  ERROR    Config not found: E:\project\moomoo\store\schedule.json
+2026-05-19 09:25:03    [collector] process exited
+2026-05-19 09:30:00  [PREMARKET]  Session ended — stopping collector
+2026-05-19 09:30:00  [REGULAR]  Session ACTIVE
+2026-05-19 09:30:00  Collector PID 37260 started  (no-data warn: 10 min)
+2026-05-19 09:30:00    [collector] 09:30:00  ERROR    Config not found: E:\project\moomoo\store\schedule.json
+2026-05-19 09:30:00    [collector] process exited
+2026-05-19 09:43:34  Scheduler stopped.
+2026-05-19 09:43:35  Config saved.
+2026-05-19 09:43:35  Scheduler started.  Watching session boundaries...
+2026-05-19 09:43:35  [REGULAR]  Session ACTIVE
+2026-05-19 09:43:35  Collector PID 45656 started  (no-data warn: 10 min)
+2026-05-19 09:43:35    [collector] 09:43:35  INFO     Targets: US.AMD, US.BE, US.CRWV, US.CSCO, US.LITE, US.MRVL, US.MU, US.NVDA, US.NVTS, US.Q, US.QCOM, US.SIMO, US.SMCI, US.SNDK, US.SOXL, US.STX, US.TSEM, US.TSM, US.WDC
+2026-05-19 09:43:35    [collector] 09:43:35  INFO     DB: E:\project\moomoo\db\ticks.db
+2026-05-19 09:43:35    [collector] 09:43:35  INFO     No-data warning after: 10 min
+2026-05-19 09:43:35    [collector] Traceback (most recent call last):
+2026-05-19 09:43:35    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 221, in <module>
+2026-05-19 09:43:35    [collector]     main()
+2026-05-19 09:43:35    [collector]   File "E:\project\moomoo\analysis\tick_collector.py", line 159, in main
+2026-05-19 09:43:35    [collector]     from store.tick_store import TickStore
+2026-05-19 09:43:35    [collector] ModuleNotFoundError: No module named 'store.tick_store'
+2026-05-19 09:43:35    [collector] process exited
+2026-05-19 09:44:05  Scheduler stopped.

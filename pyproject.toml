@@ -1,0 +1,28 @@
+[project]
+name = "moomoo-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "backtrader>=1.9.78.123",
+    "duckdb>=1.5.2",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.9",
+    "moomoo-api>=10.5.6508",
+    "numpy>=2.4.5",
+    "pandas>=3.0.3",
+    "pillow>=12.2.0",
+    "pystray>=0.19.5",
+    "tqdm>=4.67.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
