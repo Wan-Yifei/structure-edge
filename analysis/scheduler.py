@@ -604,8 +604,15 @@ class SchedulerApp(tk.Tk):
                     # preceding session's INACTIVE transition just killed the collector.
                     self._launch_collector()
                 elif st == "INACTIVE" and prev in ("ACTIVE", "STARTING SOON"):
-                    self._log(f"[{name.upper()}]  Session ended — stopping collector")
-                    self._kill_collector()
+                    other_active = any(
+                        session_status(self.cfg, s, et) in ("ACTIVE", "STARTING SOON")
+                        for s in SESSION_ORDER if s != name
+                    )
+                    if other_active:
+                        self._log(f"[{name.upper()}]  Session ended — keeping collector (another session active)")
+                    else:
+                        self._log(f"[{name.upper()}]  Session ended — stopping collector")
+                        self._kill_collector()
             setattr(self, f"_prev_{name}", st)
 
     # ── Collector subprocess ──────────────────────────────────────────────────
