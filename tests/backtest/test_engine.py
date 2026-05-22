@@ -96,8 +96,23 @@ class TestBacktestResultMetrics:
         r = _result_from_trades([_make_trade("win", 2.0)])
         d = r.summary_dict()
         for key in ("n_trades", "win_rate", "total_r", "avg_r",
-                    "profit_factor", "max_drawdown_r", "max_loss_r"):
+                    "profit_factor", "max_drawdown_r", "max_loss_r",
+                    "sharpe", "sortino"):
             assert key in d
+
+    def test_summary_dict_sharpe_sortino_types(self):
+        trades = [_make_trade("win", 2.0), _make_trade("loss", -1.0),
+                  _make_trade("win", 2.0)]
+        d = _result_from_trades(trades).summary_dict()
+        assert isinstance(d["sharpe"],  float)
+        assert isinstance(d["sortino"], float)
+        assert d["sharpe"]  > 0
+        assert d["sortino"] > 0
+
+    def test_summary_dict_empty_sharpe_zero(self):
+        d = _result_from_trades([]).summary_dict()
+        assert d["sharpe"]  == 0.0
+        assert d["sortino"] == 0.0
 
 
 # ── run_backtest ──────────────────────────────────────────────────────────────
