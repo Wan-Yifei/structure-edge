@@ -48,7 +48,7 @@ import pickle
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from tqdm import tqdm
@@ -204,6 +204,66 @@ def _ckpt_path(key: str) -> pathlib.Path:
     return _CHECKPOINT_DIR / f"{key}.pkl"
 
 
+# ── Date-range reuse helpers ──────────────────────────────────────────────────
+
+_REUSE_WARMUP_DAYS = 14  # calendar days prepended to each gap for HTF warmup
+
+def _merge_segments(segs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Merge overlapping / adjacent date-range segments, return sorted list."""
+    if not segs:
+        return []
+    segs = sorted(segs)
+    merged = [segs[0]]
+    for s, e in segs[1:]:
+        if s <= merged[-1][1]:          # overlap or adjacent
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _coverage_gaps(
+    req_start: str, req_end: str,
+    covered: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Return sub-ranges of [req_start, req_end] not covered by any segment.
+
+    Args:
+        req_start / req_end: the full requested date range (YYYY-MM-DD strings)
+        covered: list of (start, end) already computed in the DB
+
+    Returns:
+        List of (gap_start, gap_end) that need to be run.
+    """
+    relevant = [
+        (max(s, req_start), min(e, req_end))
+        for s, e in covered
+        if s <= req_end and e >= req_start
+    ]
+    merged = _merge_segments(relevant)
+
+    gaps: list[tuple[str, str]] = []
+    cursor = req_start
+    for seg_start, seg_end in merged:
+        if cursor < seg_start:
+            gaps.append((cursor, _prev_day(seg_start)))
+        cursor = _next_day(seg_end)
+    if cursor <= req_end:
+        gaps.append((cursor, req_end))
+    return gaps
+
+
+def _next_day(d: str) -> str:
+    return (date.fromisoformat(d) + timedelta(days=1)).isoformat()
+
+def _prev_day(d: str) -> str:
+    return (date.fromisoformat(d) - timedelta(days=1)).isoformat()
+
+def _warmup_start(gap_start: str) -> str:
+    """Extend gap_start backward by _REUSE_WARMUP_DAYS for HTF context."""
+    return (date.fromisoformat(gap_start) - timedelta(days=_REUSE_WARMUP_DAYS)).isoformat()
+
+
 def _load_checkpoint(key: str) -> dict[int, BacktestResult]:
     p = _ckpt_path(key)
     if not p.exists():
@@ -293,6 +353,7 @@ def run_grid(
     db: Optional[BacktestDB] = None,
     start_date: str = "",
     end_date: str = "",
+    no_reuse: bool = False,
 ) -> list[BacktestResult]:
     n = len(params_list)
     log = get_logger("main")
@@ -305,8 +366,11 @@ def run_grid(
             log.info("Resuming from checkpoint: %d/%d combos already done", len(done), n)
             print(f"  Resuming from checkpoint: {len(done)}/{n} combos already done")
 
-    # Build remaining tasks, skipping completed and missing data
+    # Build remaining tasks, skipping completed and missing data.
+    # For combos not in the checkpoint, check DB for partial date coverage (--no-reuse bypasses).
     tasks: list[tuple] = []
+    db_preloaded: dict[int, BacktestResult] = {}  # combos fully satisfied from DB
+
     for idx, params in enumerate(params_list, 1):
         if idx in done:
             continue
@@ -315,10 +379,81 @@ def run_grid(
         if htf is None or ltf is None:
             log.warning("SKIP combo %d — missing data for %s/%s", idx, params.trend_tf, params.entry_tf)
             print(f"  [{idx}/{n}] SKIP — missing data for {params.trend_tf}/{params.entry_tf}")
-        else:
-            tasks.append((idx, params, htf, ltf))
+            continue
 
-    bt_results: dict[int, BacktestResult] = dict(done)
+        # ── DB date-range reuse ────────────────────────────────────────────
+        if db is not None and not no_reuse and start_date and end_date:
+            phash   = _params_hash(params)
+            covered = db.covered_segments(phash, code, params.trend_tf, params.entry_tf)
+            gaps    = _coverage_gaps(start_date, end_date, covered)
+
+            if not gaps:
+                # Fully covered — load trades from DB, skip engine entirely
+                cached = db.load_trades_in_range(
+                    phash, code, params.trend_tf, params.entry_tf,
+                    start_date, end_date,
+                )
+                bt = BacktestResult(params=params)
+                bt.trades = cached
+                db_preloaded[idx] = bt
+                log.info("DB reuse combo %d — %d trades loaded (fully covered)", idx, len(cached))
+                continue
+
+            elif covered:  # partially covered — run only the gaps
+                # Partially covered — run only the gap segments with warmup extension,
+                # then merge with cached trades from covered portions.
+                gap_trades: list = []
+                for gap_start, gap_end in gaps:
+                    ws  = _warmup_start(gap_start)
+                    # Slice klines to warmup_start → gap_end
+                    htf_g = htf[htf["time_key"].astype(str) >= ws].reset_index(drop=True)
+                    ltf_g = ltf[ltf["time_key"].astype(str) >= ws].reset_index(drop=True)
+                    htf_g = htf_g[htf_g["time_key"].astype(str) <= gap_end].reset_index(drop=True)
+                    ltf_g = ltf_g[ltf_g["time_key"].astype(str) <= gap_end].reset_index(drop=True)
+                    if htf_g.empty or ltf_g.empty:
+                        continue
+                    r = run_backtest(htf_g, ltf_g, params)
+                    # Keep only trades that entered in the actual gap (not the warmup zone)
+                    gap_trades.extend(
+                        t for t in r.trades
+                        if str(t.entry_time)[:10] >= gap_start
+                    )
+
+                # Load cached trades from covered portions
+                cached = db.load_trades_in_range(
+                    phash, code, params.trend_tf, params.entry_tf,
+                    start_date, end_date,
+                )
+                all_trades = sorted(
+                    cached + gap_trades, key=lambda t: str(t.entry_time)
+                )
+                bt = BacktestResult(params=params)
+                bt.trades = all_trades
+                # Write new gap trades to DB under a new run_id per gap
+                for gap_start, gap_end in gaps:
+                    new_trades = [
+                        t for t in gap_trades
+                        if gap_start <= str(t.entry_time)[:10] <= gap_end
+                    ]
+                    if new_trades:
+                        run_id = db.get_or_create_run(
+                            phash, params.to_dict(), code,
+                            params.trend_tf, params.entry_tf, gap_start, gap_end,
+                        )[0]
+                        db.mark_running(run_id)
+                        db.write_trades(run_id, code, new_trades)
+                        db.write_stats(run_id, bt)
+                        db.mark_done(run_id)
+                db_preloaded[idx] = bt
+                log.info(
+                    "DB reuse combo %d — %d cached + %d new trades (%d gaps filled)",
+                    idx, len(cached), len(gap_trades), len(gaps),
+                )
+                continue
+
+        tasks.append((idx, params, htf, ltf))
+
+    bt_results: dict[int, BacktestResult] = {**done, **db_preloaded}
     save_counter = 0
 
     # One shared queue — listener in main process, workers send via QueueHandler
@@ -344,7 +479,7 @@ def run_grid(
         futures = {ex.submit(_worker, t): t[0] for t in tasks}
         bar = tqdm(
             total=n,
-            initial=len(done),
+            initial=len(done) + len(db_preloaded),
             ncols=90,
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
         )
@@ -410,6 +545,8 @@ def main() -> None:
                     help="Parallel workers; 0 or negative = auto (overrides config)")
     ap.add_argument("--no-resume",  action="store_true",
                     help="Ignore existing checkpoint; rerun all combos from scratch")
+    ap.add_argument("--no-reuse",   action="store_true",
+                    help="Ignore DB date-range cache; always run engine for full date range")
     ap.add_argument("--save-every", type=int, default=500, metavar="N",
                     help="Save checkpoint every N completions (default: 500)")
     ap.add_argument("--random",     type=int, default=0, metavar="N",
@@ -518,6 +655,7 @@ def main() -> None:
             db=db,
             start_date=cfg.start,
             end_date=cfg.end,
+            no_reuse=args.no_reuse,
         )
 
         if not bt_results:
