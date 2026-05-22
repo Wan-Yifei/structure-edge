@@ -1,5 +1,5 @@
 """
-Unit tests for analysis.orderflow
+Unit tests for analysis.trade_viewer (formerly analysis.orderflow)
 
 Run: uv run pytest tests/ -v
 """
@@ -14,7 +14,7 @@ import pandas as pd
 
 from core.time_utils import candle_start
 from core.chart import build_ohlcv_profile
-from analysis.orderflow import TIMEFRAME_MAP
+from analysis.trade_viewer import TIMEFRAME_MAP
 
 OUTPUT_DIR = pathlib.Path(__file__).parent.parent / "outputs"
 

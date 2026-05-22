@@ -10,6 +10,7 @@ Subtypes:
 """
 
 from __future__ import annotations
+import numpy as np
 import pandas as pd
 
 
@@ -26,20 +27,24 @@ def detect_order_blocks(
          idx:    int,   # candle index of the OB
          bos_idx: int}  # candle index of the triggering BOS/CHoCH
     """
-    opens  = klines["open"].values
-    closes = klines["close"].values
-    highs  = klines["high"].values
-    lows   = klines["low"].values
-    n      = len(klines)
-    blocks = []
+    opens   = klines["open"].values
+    closes  = klines["close"].values
+    highs   = klines["high"].values
+    lows    = klines["low"].values
+    volumes = klines["volume"].values
+    n       = len(klines)
+    blocks  = []
 
     for sig in bos_signals:
         bos_idx = sig["idx"]
         bull    = sig["direction"] == "bull"
 
-        # scan backwards from BOS to find last opposing candle
+        # OB is anchored at the reference swing (from_idx), not the break bar.
+        # Scan backwards from the swing point to find the last opposing candle
+        # in the structure that created that swing.
+        anchor = min(sig.get("from_idx", bos_idx - 1), n - 1)
         ob_idx = None
-        for k in range(bos_idx - 1, -1, -1):
+        for k in range(anchor, max(-1, anchor - 8), -1):
             is_bear_candle = closes[k] < opens[k]
             is_bull_candle = closes[k] > opens[k]
             if bull and is_bear_candle:
@@ -48,8 +53,26 @@ def detect_order_blocks(
             if not bull and is_bull_candle:
                 ob_idx = k
                 break
+        # fallback: scan forward from swing toward break bar
+        if ob_idx is None:
+            for k in range(anchor + 1, bos_idx):
+                is_bear_candle = closes[k] < opens[k]
+                is_bull_candle = closes[k] > opens[k]
+                if bull and is_bear_candle:
+                    ob_idx = k
+                    break
+                if not bull and is_bull_candle:
+                    ob_idx = k
+                    break
 
         if ob_idx is None:
+            continue
+
+        # Volume filter: OB candle must exceed the median of the 5 preceding bars.
+        # Low-volume OBs are more likely to be noise rather than institutional flow.
+        vol_start  = max(0, ob_idx - 5)
+        prior_vols = volumes[vol_start:ob_idx]
+        if len(prior_vols) > 0 and float(volumes[ob_idx]) < float(np.median(prior_vols)):
             continue
 
         top    = float(highs[ob_idx])
@@ -82,4 +105,4 @@ def detect_order_blocks(
         })
 
     # keep only the most recent OBs to avoid cluttering the chart
-    return blocks[-8:]
+    return blocks[-4:]

@@ -2,7 +2,7 @@
 moomoo project — unified entry point
 
 Usage:
-  uv run main.py orderflow [orderflow-args...]
+  uv run main.py trade_viewer [args...]
   uv run main.py scheduler
 """
 
@@ -10,8 +10,8 @@ import argparse
 import importlib
 
 COMMANDS = {
-    "orderflow": ("analysis.orderflow", "main"),
-    "scheduler": ("analysis.scheduler", "main"),
+    "trade_viewer": ("analysis.trade_viewer", "main"),
+    "scheduler":    ("analysis.scheduler",    "main"),
 }
 
 

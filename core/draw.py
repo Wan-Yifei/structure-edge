@@ -65,13 +65,29 @@ def _bin_profile(
     sell_v: np.ndarray,
     neu_v: np.ndarray,
     max_bins: int = _MAX_PROFILE_BINS,
+    lo: float | None = None,
+    hi: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Collapse many tick prices into at most max_bins price buckets."""
+    """Collapse tick prices into at most max_bins price buckets.
+
+    When lo/hi are supplied the bins span the full [lo, hi] range regardless
+    of how many unique tick prices exist — this keeps bar heights visible even
+    when only a few price levels have traded.
+    """
     prices_arr = np.array(prices, dtype=float)
-    if len(prices_arr) <= max_bins:
+    if len(prices_arr) == 0:
         return prices_arr, buy_v, sell_v, neu_v
-    lo, hi = prices_arr[0], prices_arr[-1]
-    edges   = np.linspace(lo, hi, max_bins + 1)
+
+    forced = lo is not None and hi is not None and hi > lo
+    if not forced and len(prices_arr) <= max_bins:
+        return prices_arr, buy_v, sell_v, neu_v
+
+    bin_lo = lo if forced else float(prices_arr[0])
+    bin_hi = hi if forced else float(prices_arr[-1])
+    if bin_lo >= bin_hi:
+        return prices_arr, buy_v, sell_v, neu_v
+
+    edges   = np.linspace(bin_lo, bin_hi, max_bins + 1)
     centers = (edges[:-1] + edges[1:]) / 2.0
     idx     = np.clip(np.searchsorted(edges[1:], prices_arr, side="left"), 0, max_bins - 1)
     new_buy  = np.zeros(max_bins, dtype=float)
@@ -90,16 +106,19 @@ def draw_tick_profile_bars(
     sell_v: np.ndarray,
     neu_v: np.ndarray,
     title: str,
-    ax_c=None,
-    klines: pd.DataFrame | None = None,
     max_bins: int = _MAX_PROFILE_BINS,
+    lo: float | None = None,
+    hi: float | None = None,
 ) -> tuple[list, object, object]:
     """Draw stacked buy/sell/neutral horizontal bars on ax_p.
 
     Returns (patch_list, axvline, legend) for later surgical removal.
     Prices are binned to at most max_bins levels to keep artist count low.
+    lo/hi: force binning across the full price range (prevents invisible bars
+    when only a few tick price levels exist in a wide price range).
     """
-    y, buy_v, sell_v, neu_v = _bin_profile(prices, buy_v, sell_v, neu_v, max_bins=max_bins)
+    y, buy_v, sell_v, neu_v = _bin_profile(prices, buy_v, sell_v, neu_v,
+                                             max_bins=max_bins, lo=lo, hi=hi)
     h = float((y[1] - y[0]) * 0.8) if len(y) > 1 else 0.05
 
     bars1 = ax_p.barh(y, buy_v,             height=h, color=UP,   alpha=0.85)
@@ -108,6 +127,18 @@ def draw_tick_profile_bars(
                       height=h, color=DOWN, alpha=0.85)
     vl  = ax_p.axvline(0, color=FG, linewidth=0.5, alpha=0.4)
 
+    # POC line — max total-volume bin
+    total_v   = buy_v + sell_v + neu_v
+    poc_extra: list = []
+    if total_v.any():
+        poc_price = y[int(np.argmax(total_v))]
+        poc_line  = ax_p.axhline(poc_price, color=GOLD, lw=0.9,
+                                 linestyle="--", alpha=0.8, zorder=5)
+        poc_txt   = ax_p.text(0, poc_price, f" {poc_price:.2f}",
+                              color=GOLD, fontsize=6, va="bottom",
+                              ha="left", zorder=6)
+        poc_extra = [poc_line, poc_txt]
+
     leg = ax_p.legend(
         handles=[Patch(color=UP, alpha=0.85, label="Buy"),
                  Patch(color=GREY, alpha=0.70, label="Neutral"),
@@ -115,18 +146,12 @@ def draw_tick_profile_bars(
         loc="lower right", fontsize=7,
         facecolor=BG_BAR, labelcolor=FG, edgecolor="#444466")
 
-    patches = [p for c in [bars1, bars2, bars3] for p in c.patches]
+    patches = [p for c in [bars1, bars2, bars3] for p in c.patches] + poc_extra
 
     ax_p.set_title(title, color=FG, fontsize=9)
     ax_p.set_xlabel("Volume", color=FG, fontsize=8)
     ax_p.tick_params(axis="x", colors=FG, labelsize=7)
     ax_p.grid(axis="x", color=GRID, linewidth=0.5)
-
-    if ax_c is not None and klines is not None:
-        # y-axis is determined solely by candle OHLC — tick prices must not extend it
-        ymin = float(klines["low"].min())  * 0.999
-        ymax = float(klines["high"].max()) * 1.001
-        ax_c.set_ylim(ymin, ymax)
 
     return patches, vl, leg
 
@@ -178,6 +203,128 @@ def prices_arrays(
     return prices, buy_v, sell_v, neu_v
 
 
+# ── Hybrid profile (tick + OHLCV normal-distribution estimate) ───────────────
+
+def build_hybrid_profile(
+    klines: pd.DataFrame,
+    buckets: dict,
+    candle_mins: int,
+    n_bins: int = 40,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int] | None:
+    """Build a session-level volume-at-price profile mixing tick data and OHLCV estimates.
+
+    For each candle:
+    - If a tick bucket exists: accumulate actual tick volumes into price bins.
+    - Otherwise: distribute the candle's reported volume using a normal distribution
+      centred on the typical price (H+L+C)/3 with σ = (H−L)/4, so that ≈95 % of
+      estimated volume falls within the candle's range.
+
+    Returns (centers, tick_vol, ohlcv_vol, coverage_pct) or None on degenerate range.
+    """
+    lo_min = float(klines["low"].min())
+    hi_max = float(klines["high"].max())
+    if hi_max - lo_min < 1e-9:
+        return None
+
+    edges   = np.linspace(lo_min, hi_max, n_bins + 1)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    tick_v  = np.zeros(n_bins, dtype=float)
+    ohlcv_v = np.zeros(n_bins, dtype=float)
+
+    tick_candles = 0
+
+    for _, row in klines.iterrows():
+        tk_str = str(row["time_key"])
+        try:
+            bar_end    = datetime.strptime(tk_str[:16], "%Y-%m-%d %H:%M")
+            bucket_key = candle_start(bar_end - timedelta(minutes=candle_mins), candle_mins)
+        except ValueError:
+            continue
+
+        pd_ = buckets.get(bucket_key)
+        if pd_:
+            tick_candles += 1
+            for price, counts in pd_.items():
+                p = float(price)
+                if lo_min <= p <= hi_max:
+                    idx = int(np.clip(
+                        np.searchsorted(edges[1:], p, side="left"),
+                        0, n_bins - 1,
+                    ))
+                    tick_v[idx] += counts["buy"] + counts["sell"] + counts["neutral"]
+        else:
+            lo  = float(row["low"])
+            hi  = float(row["high"])
+            vol = float(row["volume"])
+            if hi <= lo or vol <= 0:
+                continue
+            typical = (lo + hi + float(row["close"])) / 3.0
+            sigma   = max((hi - lo) / 4.0, 1e-6)
+            weights = np.exp(-0.5 * ((centers - typical) / sigma) ** 2)
+            w_sum   = weights.sum()
+            if w_sum > 0:
+                ohlcv_v += vol * weights / w_sum
+
+    n_candles    = len(klines)
+    coverage_pct = int(100 * tick_candles / n_candles) if n_candles > 0 else 0
+    return centers, tick_v, ohlcv_v, coverage_pct
+
+
+def draw_hybrid_profile(
+    ax_p,
+    centers: np.ndarray,
+    tick_v: np.ndarray,
+    ohlcv_v: np.ndarray,
+    coverage_pct: int,
+    date_label: str = "",
+) -> tuple[list, object, object, float | None]:
+    """Draw hybrid profile: OHLCV estimate (gray) + tick volume (coloured) per price bin.
+
+    Returns (patch_list, axvline, legend, poc_price).
+    poc_price is the POC price in data coordinates, or None when there is no volume.
+    The caller is responsible for drawing the POC on the main candle axis AFTER its
+    ylim has been enforced — this function only marks the POC on ax_p to avoid
+    inadvertently expanding the candle chart's y range.
+    """
+    h = float(centers[1] - centers[0]) * 0.8 if len(centers) > 1 else 0.05
+
+    bars_est  = ax_p.barh(centers, ohlcv_v, height=h, color=GREY, alpha=0.35)
+    bars_tick = ax_p.barh(centers, tick_v,  height=h, color=UP,   alpha=0.75)
+
+    total     = tick_v + ohlcv_v
+    poc_price: float | None = None
+    poc_artists: list = []
+    if total.any():
+        poc_price = float(centers[int(np.argmax(total))])
+        poc_line  = ax_p.axhline(poc_price, color=GOLD, lw=0.9,
+                                 linestyle="--", alpha=0.8, zorder=5)
+        poc_txt   = ax_p.text(
+            0, poc_price, f" {poc_price:.2f}",
+            color=GOLD, fontsize=6, va="bottom", ha="left", zorder=6,
+        )
+        poc_artists = [poc_line, poc_txt]
+
+    vl = ax_p.axvline(0, color=FG, linewidth=0.5, alpha=0.4)
+
+    suffix = f"\n{date_label}" if date_label else ""
+    ax_p.set_title(f"Vol Profile ({coverage_pct}% tick){suffix}", color=FG, fontsize=9)
+    ax_p.set_xlabel("Volume", color=FG, fontsize=8)
+    ax_p.tick_params(axis="x", colors=FG, labelsize=7)
+    ax_p.grid(axis="x", color=GRID, linewidth=0.5)
+
+    leg = ax_p.legend(
+        handles=[
+            Patch(color=UP,   alpha=0.75, label="Tick"),
+            Patch(color=GREY, alpha=0.35, label="Est"),
+        ],
+        loc="lower right", fontsize=7,
+        facecolor=BG_BAR, labelcolor=FG, edgecolor="#444466",
+    )
+
+    patches = [p for c in [bars_est, bars_tick] for p in c.patches] + poc_artists
+    return patches, vl, leg, poc_price
+
+
 # ── OHLCV profile ─────────────────────────────────────────────────────────────
 
 def draw_ohlcv_profile(
@@ -216,15 +363,18 @@ def draw_ohlcv_profile(
     ax_p.set_xlabel("Volume", color=FG, fontsize=8)
     ax_p.tick_params(axis="x", colors=FG, labelsize=7)
     ax_p.grid(axis="x", color=GRID, linewidth=0.5)
-    ax_c.set_ylim(klines["low"].min() * 0.999, klines["high"].max() * 1.001)
 
     return centers, volumes
 
 
 # ── Heatmap + Delta ───────────────────────────────────────────────────────────
 
-_UP_RGB = np.array([0xef / 255, 0x53 / 255, 0x50 / 255], dtype=np.float32)
-_DN_RGB = np.array([0x26 / 255, 0xa6 / 255, 0x9a / 255], dtype=np.float32)
+# Buy-dominant bins → amber (distinct from red UP candles)
+# Sell-dominant bins → purple (distinct from teal DOWN candles)
+_UP_RGB = np.array([1.00, 0.627, 0.02 ], dtype=np.float32)   # #FFA005
+_DN_RGB = np.array([0.671, 0.278, 0.737], dtype=np.float32)  # #AB47BC
+_UP_HEX = "#FFA005"
+_DN_HEX = "#AB47BC"
 
 
 def draw_candle_heatmap(
@@ -286,8 +436,9 @@ def draw_candle_heatmap(
         ratio = np.divide(buy_b - sell_b, bs,
                           out=np.zeros(n_price_bins, dtype=np.float32),
                           where=bs > 0)
-        alpha = ((0.12 + 0.55 * total / mx) * (0.25 + 0.75 * np.abs(ratio))) * in_candle
-        np.clip(alpha, 0, 0.85, out=alpha)
+        # Raise alpha floor so low-volume bins are still visible
+        alpha = ((0.30 + 0.70 * total / mx) * (0.45 + 0.55 * np.abs(ratio))) * in_candle
+        np.clip(alpha, 0, 0.88, out=alpha)
 
         img[:, i, :3] = np.where(ratio[:, None] >= 0, _UP_RGB, _DN_RGB)
         img[:, i, 3]  = alpha
@@ -296,6 +447,19 @@ def draw_candle_heatmap(
         img, aspect="auto", origin="lower",
         extent=(-0.5, n - 0.5, ylo, yhi),
         interpolation="nearest", zorder=1,
+    )
+
+    # Small color legend in upper-left corner
+    legend_handles = [
+        Patch(facecolor=_UP_HEX, alpha=0.85, label="Buy"),
+        Patch(facecolor=_DN_HEX, alpha=0.85, label="Sell"),
+    ]
+    ax_c.legend(
+        handles=legend_handles,
+        loc="upper left", fontsize=6, framealpha=0.45,
+        facecolor="#111122", edgecolor="#444466",
+        handlelength=1.2, handleheight=0.8, labelcolor=FG,
+        borderpad=0.5, labelspacing=0.3,
     )
 
 
@@ -345,34 +509,87 @@ def draw_candle_deltas(
 # ── SMC: BOS / CHoCH ─────────────────────────────────────────────────────────
 
 def draw_bos_choch(ax_c, klines: pd.DataFrame, signals: list[dict]) -> list:
-    """Draw BOS / CHoCH horizontal lines + labels.
+    """Draw BOS / CHoCH signals.
+
+    Visual design:
+      • Horizontal line floating above (bull) or below (bear) all candles in the
+        range [from_idx, break_idx], clear of wicks.
+      • Two vertical dotted ticks drop/rise from the line ends toward the candle
+        tips at from_idx and break_idx (with a small gap so they don't cover wicks).
+      • Label centred on the horizontal line at its midpoint.
+      • Solid line = BOS, dashed = CHoCH.
 
     Each signal dict: {type: 'BOS'|'CHoCH', direction: 'bull'|'bear',
                        idx: int, price: float, from_idx: int}
-    Returns list of drawn artists for cleanup.
     """
     artists = []
+    if not signals:
+        return artists
+
+    highs = klines["high"].values
+    lows  = klines["low"].values
+    n     = len(klines)
+
+    price_range = float(highs.max() - lows.min())
+    float_gap   = price_range * 0.010   # headroom above/below the wick cluster
+    wick_gap    = price_range * 0.003   # min gap so tick line doesn't touch the wick tip
+
     for sig in signals:
-        color   = UP   if sig["direction"] == "bull" else DOWN
-        ls      = "-"  if sig["type"] == "BOS" else "--"
-        x_start = sig.get("from_idx", max(0, sig["idx"] - 3))
-        x_end   = sig["idx"]          # stop at the confirmation candle
-        line,   = ax_c.plot([x_start, x_end], [sig["price"], sig["price"]],
-                            color=color, linewidth=1.5, linestyle=ls,
-                            alpha=0.90, zorder=4)
-        label = ax_c.text(
-            x_end, sig["price"], f" {sig['type']}",
-            color=color, fontsize=7, va="center", ha="left",
+        bull      = sig["direction"] == "bull"
+        color     = UP if bull else DOWN
+        ls        = "-" if sig["type"] == "BOS" else "--"
+        from_idx  = max(0, min(int(sig.get("from_idx", max(0, sig["idx"] - 5))), n - 1))
+        break_idx = max(0, min(int(sig["idx"]), n - 1))
+        if from_idx >= break_idx:
+            continue
+
+        if bull:
+            y_line    = max(float(highs[from_idx]), float(highs[break_idx])) + float_gap
+            left_tip  = float(highs[from_idx])  + wick_gap
+            right_tip = float(highs[break_idx]) + wick_gap
+            va        = "bottom"
+        else:
+            y_line    = min(float(lows[from_idx]), float(lows[break_idx])) - float_gap
+            left_tip  = float(lows[from_idx])  - wick_gap
+            right_tip = float(lows[break_idx]) - wick_gap
+            va        = "top"
+
+        # horizontal line spanning from_idx → break_idx
+        h_line, = ax_c.plot(
+            [from_idx, break_idx], [y_line, y_line],
+            color=color, linewidth=1.4, linestyle=ls, alpha=0.90, zorder=4,
+        )
+        artists.append(h_line)
+
+        # vertical tick at from_idx (reference swing)
+        lv, = ax_c.plot(
+            [from_idx, from_idx], [y_line, left_tip],
+            color=color, linewidth=1.0, linestyle=":", alpha=0.65, zorder=3,
+        )
+        artists.append(lv)
+
+        # vertical tick at break_idx (break bar)
+        rv, = ax_c.plot(
+            [break_idx, break_idx], [y_line, right_tip],
+            color=color, linewidth=1.0, linestyle=":", alpha=0.65, zorder=3,
+        )
+        artists.append(rv)
+
+        # label centred on the horizontal line
+        lbl = ax_c.text(
+            (from_idx + break_idx) / 2.0, y_line, sig["type"],
+            color=color, fontsize=7, va=va, ha="center",
             fontweight="bold", zorder=5,
             bbox=dict(fc=BG_TIP, ec="none", alpha=0.70, pad=1.5),
         )
-        artists.extend([line, label])
+        artists.append(lbl)
+
     return artists
 
 
 # ── SMC: FVG ──────────────────────────────────────────────────────────────────
 
-def draw_fvg(ax_c, klines: pd.DataFrame, gaps: list[dict]) -> list:
+def draw_fvg(ax_c, klines: pd.DataFrame, gaps: list[dict], max_bars: int = 20) -> list:
     """Draw Fair Value Gap rectangles.
 
     Each gap dict: {direction: 'bull'|'bear', top: float, bottom: float,
@@ -387,7 +604,7 @@ def draw_fvg(ax_c, klines: pd.DataFrame, gaps: list[dict]) -> list:
         x_start = gap["idx"]
         rect = MplRect(
             (x_start - 0.5, gap["bottom"]),
-            n - x_start,
+            min(n - x_start, max_bars),
             gap["top"] - gap["bottom"],
             facecolor=color, edgecolor=color,
             alpha=alpha, zorder=2, linewidth=0.6,
@@ -411,7 +628,7 @@ _OB_COLORS = {
     "mitigation": ("#ffca28", "#ffca28"),   # amber for both
 }
 
-def draw_order_blocks(ax_c, klines: pd.DataFrame, blocks: list[dict]) -> list:
+def draw_order_blocks(ax_c, klines: pd.DataFrame, blocks: list[dict], max_bars: int = 30) -> list:
     """Draw Order Block rectangles with subtype labels.
 
     Each block dict: {direction: 'bull'|'bear',
@@ -428,13 +645,14 @@ def draw_order_blocks(ax_c, klines: pd.DataFrame, blocks: list[dict]) -> list:
         x_start = blk["idx"]
         rect = MplRect(
             (x_start - 0.5, blk["bottom"]),
-            n - x_start,
+            min(n - x_start, max_bars),
             blk["top"] - blk["bottom"],
             edgecolor=color, facecolor=color,
             alpha=0.22, zorder=2, linewidth=1.2,
         )
         ax_c.add_patch(rect)
-        subtype = blk.get("subtype", "OB").replace("regular", "OB").capitalize()
+        raw     = blk.get("subtype", "regular")
+        subtype = "OB" if raw == "regular" else raw.capitalize()
         lbl = ax_c.text(
             x_start, blk["top"], f" {subtype}",
             color=color, fontsize=6, va="bottom", ha="left",

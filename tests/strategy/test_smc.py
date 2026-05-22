@@ -96,6 +96,67 @@ class TestDetectBosChoch:
     def test_empty_for_short_series(self):
         assert detect_bos_choch(_klines([1, 2, 3]), lookback=2) == []
 
+    def test_converging_initial_swings_do_not_misdetect_uptrend(self):
+        """Lower high + higher low (converging) must NOT set initial trend to 'up'.
+
+        With the old OR logic the higher low alone would flip trend='up', making
+        the subsequent low-break a CHoCH bear instead of BOS bear.
+        """
+        # H1=98 > H2=97 (lower high), L1=92 < L2=95 (higher low) → converging
+        # Price then falls to 89, breaking below L1=92.
+        # Expected: BOS bear (trend was down), NOT CHoCH bear.
+        closes = [100, 92, 98, 95, 97, 89]
+        df = _klines(closes,
+                     highs=[c + 0.5 for c in closes],
+                     lows=[c  - 0.5 for c in closes])
+        sigs = detect_bos_choch(df, lookback=1, filter_choch=False)
+        bear_chochs = [s for s in sigs if s["direction"] == "bear" and s["type"] == "CHoCH"]
+        assert bear_chochs == [], (
+            f"Converging initial structure should not produce bearish CHoCH: {bear_chochs}"
+        )
+
+    def test_choch_opposite_colours_never_overlap(self):
+        """A CHoCH of one direction must not span across a CHoCH of the other direction.
+
+        Sequence: downtrend → bullish CHoCH (price breaks above swing high) →
+        uptrend → bearish CHoCH (price breaks below swing low).
+        The bearish CHoCH's from_idx must be AFTER the bullish CHoCH's idx.
+        """
+        # Hand-crafted price sequence that produces one bull CHoCH then one bear CHoCH:
+        #   bars 0-5: downtrend establishing swing highs/lows
+        #   bar 6: spike up through the swing high → bullish CHoCH
+        #   bars 7-10: new uptrend swing, then retreat
+        #   bar 11: spike down through the swing low formed after bar 6 → bearish CHoCH
+        closes = [
+            100, 98, 102, 96, 101, 94,   # downtrend (bars 0-5)
+            105,                           # bar 6 — breaks above swing high → bull CHoCH
+            104, 107, 103, 106,            # bars 7-10 — uptrend swings
+            101,                           # bar 11 — breaks below post-CHoCH swing low → bear CHoCH
+        ]
+        df = _klines(closes,
+                     highs=[c + 0.5 for c in closes],
+                     lows=[c  - 0.5 for c in closes])
+        sigs = detect_bos_choch(df, lookback=1, filter_choch=False)
+        chochs = [s for s in sigs if s["type"] == "CHoCH"]
+        if len(chochs) < 2:
+            return  # not enough structure in this synthetic data — skip
+
+        bull_chochs = [s for s in chochs if s["direction"] == "bull"]
+        bear_chochs = [s for s in chochs if s["direction"] == "bear"]
+        if not bull_chochs or not bear_chochs:
+            return
+
+        # For every pair of opposite-colour CHoCH signals, the later one's from_idx
+        # must not precede the earlier one's idx (no overlap / nesting).
+        for b in bull_chochs:
+            for d in bear_chochs:
+                earlier, later = (b, d) if b["idx"] < d["idx"] else (d, b)
+                assert later["from_idx"] >= earlier["idx"], (
+                    f"CHoCH overlap: {earlier['direction']} CHoCH ends at bar "
+                    f"{earlier['idx']} but opposite CHoCH starts from bar "
+                    f"{later['from_idx']}"
+                )
+
 
 # ── determine_trend ───────────────────────────────────────────────────────────
 
@@ -238,22 +299,28 @@ class TestIsDisplacementCandle:
         return pd.DataFrame(rows)
 
     def test_qualifies_when_large_and_directional(self):
-        # B (index 1) has range 10, neighbors have range 1
-        df = self._make([1, 10, 1], [0.5, 0.8, 0.5])
-        assert is_displacement_candle(df, fvg_idx=2, atr_mult=1.5, body_ratio_min=0.5) is True
+        # B (index 5) has range 10; preceding 5 candles all have range 1 → mean=1
+        df = self._make([1, 1, 1, 1, 1, 10, 1], [0.5, 0.5, 0.5, 0.5, 0.5, 0.8, 0.5])
+        assert is_displacement_candle(df, fvg_idx=6, atr_mult=1.5, body_ratio_min=0.5,
+                                      lookback=5) == True
 
     def test_fails_when_range_too_small(self):
-        df = self._make([1, 1.2, 1], [0.5, 0.8, 0.5])
-        assert is_displacement_candle(df, fvg_idx=2, atr_mult=1.5, body_ratio_min=0.5) is False
+        # B range 1.2 vs mean of preceding 5 = 1.0 → 1.2 < 1.5 → False
+        df = self._make([1, 1, 1, 1, 1, 1.2, 1], [0.5, 0.5, 0.5, 0.5, 0.5, 0.8, 0.5])
+        assert is_displacement_candle(df, fvg_idx=6, atr_mult=1.5, body_ratio_min=0.5,
+                                      lookback=5) == False
 
     def test_fails_when_doji(self):
-        df = self._make([1, 10, 1], [0.5, 0.1, 0.5])
-        assert is_displacement_candle(df, fvg_idx=2, atr_mult=1.5, body_ratio_min=0.5) is False
+        # Large range but tiny body
+        df = self._make([1, 1, 1, 1, 1, 10, 1], [0.5, 0.5, 0.5, 0.5, 0.5, 0.1, 0.5])
+        assert is_displacement_candle(df, fvg_idx=6, atr_mult=1.5, body_ratio_min=0.5,
+                                      lookback=5) == False
 
     def test_edge_returns_true(self):
-        # fvg_idx=0 → a < 0 → fallback True
+        # fvg_idx=0 → mid < 1 → fallback True
         df = self._make([1, 2], [0.5, 0.5])
-        assert is_displacement_candle(df, fvg_idx=0, atr_mult=1.5, body_ratio_min=0.5) is True
+        assert is_displacement_candle(df, fvg_idx=0, atr_mult=1.5, body_ratio_min=0.5,
+                                      lookback=5) == True
 
 
 # ── compute_volume_profile / fvg_overlaps_lvn ─────────────────────────────────

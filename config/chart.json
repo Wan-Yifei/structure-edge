@@ -1,10 +1,11 @@
 {
   "_comment": "Toggle each indicator overlay in the chart window.",
   "indicators": {
-    "heatmap": true,
+    "heatmap": false,
     "delta": true,
     "bos_choch": true,
     "fvg": false,
-    "ob": true
+    "ob": true,
+    "trade_review": false
   }
 }

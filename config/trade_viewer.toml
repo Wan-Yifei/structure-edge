@@ -1,0 +1,24 @@
+# trade_viewer indicator visibility config
+#
+# Each section controls which indicators APPEAR in the GUI.
+# Remove a line → that indicator is hidden from the UI entirely.
+# Add it back → it reappears.
+#
+# This file controls AVAILABILITY only.
+# The ON/OFF state of each checkbox is saved in config/chart.json.
+
+# Checkboxes shown in the Indicators toolbar row.
+# Valid keys: heatmap  delta  bos_choch  fvg  ob
+[orderflow]
+enabled = ["heatmap", "delta", "bos_choch", "fvg", "ob"]
+
+# Overlay indicators shown in the right-panel Indicators list.
+# Valid entries: "EMA 9"  "EMA 21"  "EMA 50"  "EMA 200"  "Bollinger Bands"
+[ta_overlay]
+enabled = ["EMA 9", "EMA 21", "EMA 50", "EMA 200", "Bollinger Bands"]
+
+# Subplot indicators shown in the right-panel Indicators list.
+# Valid entries: "MACD"  "RSI"  "ATR"  "Vol"  "MAVOL"
+# Note: MAVOL shares the Vol panel when both are active (no extra row).
+[ta_subplot]
+enabled = ["MACD", "RSI", "ATR", "Vol", "MAVOL"]

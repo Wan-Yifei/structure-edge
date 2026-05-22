@@ -97,33 +97,48 @@ def fvg_entry_depth(fvg: dict, price: float) -> float:
 
 
 def is_displacement_candle(
-    klines: pd.DataFrame, fvg_idx: int, atr_mult: float = 1.5, body_ratio_min: float = 0.5
+    klines: pd.DataFrame,
+    fvg_idx: int,
+    atr_mult: float = 1.5,
+    body_ratio_min: float = 0.5,
+    lookback: int = 5,
 ) -> bool:
     """Check whether the FVG's middle candle (fvg_idx - 1) is a displacement candle.
 
     Two conditions must both hold:
-      1. Range: range_B >= atr_mult * max(range_A, range_C)
+      1. Range: range_B >= atr_mult * mean(range of previous `lookback` candles)
       2. Body:  body_B / range_B >= body_ratio_min
-    Falls back to True when A or C is unavailable (near dataset edges).
+
+    Using the mean of `lookback` preceding candles (instead of just the two
+    immediate neighbours) gives a more stable baseline, closer to ATR.
+    Falls back to True when there are fewer than 2 preceding candles.
     """
     mid = fvg_idx - 1
-    a   = mid - 1
-    c   = fvg_idx
-
-    if a < 0 or c >= len(klines):
+    if mid < 1 or fvg_idx >= len(klines):
         return True
 
-    range_b = float(klines.iloc[mid]["high"] - klines.iloc[mid]["low"])
-    range_a = float(klines.iloc[a]["high"]   - klines.iloc[a]["low"])
-    range_c = float(klines.iloc[c]["high"]   - klines.iloc[c]["low"])
+    highs  = klines["high"].values.astype(float)
+    lows   = klines["low"].values.astype(float)
+    opens  = klines["open"].values.astype(float)
+    closes = klines["close"].values.astype(float)
+
+    range_b = highs[mid] - lows[mid]
     if range_b <= 0:
         return False
-    neighbour_max = max(range_a, range_c)
-    if neighbour_max <= 0:
+
+    # baseline: mean range of the `lookback` candles preceding the middle candle
+    start      = max(0, mid - lookback)
+    prev_ranges = highs[start:mid] - lows[start:mid]
+    if len(prev_ranges) == 0:
+        return True
+    baseline = float(prev_ranges.mean())
+    if baseline <= 0:
         return False
-    if range_b < atr_mult * neighbour_max:
+
+    if range_b < atr_mult * baseline:
         return False
-    body_b = abs(float(klines.iloc[mid]["close"] - klines.iloc[mid]["open"]))
+
+    body_b = abs(closes[mid] - opens[mid])
     return (body_b / range_b) >= body_ratio_min
 
 

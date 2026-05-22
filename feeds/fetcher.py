@@ -107,7 +107,7 @@ def fetch_klines(
     print(f"[fetcher] Fetching {code} {ktype} from {start} to {end} ...")
     frames: list[pd.DataFrame] = []
 
-    from moomoo import OpenQuoteContext, RET_OK
+    from moomoo import OpenQuoteContext, RET_OK, AuType
     ctx = OpenQuoteContext(host=_HOST, port=_PORT)
     try:
         page_req_key = None

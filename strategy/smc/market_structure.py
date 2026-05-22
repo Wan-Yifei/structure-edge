@@ -83,7 +83,67 @@ def find_swings(klines: pd.DataFrame, lookback: int = 2) -> list[dict]:
     return cleaned
 
 
-def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2) -> list[dict]:
+def _local_trend_array(closes: np.ndarray, window: int = 20) -> np.ndarray:
+    """Return per-bar local trend ('up'/'down') using a backward-looking window.
+
+    At each bar i the window covers closes[max(0, i-window+1) : i+1].
+    The first-third mean is compared to the last-third mean; no lookahead.
+    """
+    n = len(closes)
+    result = np.empty(n, dtype=object)
+    for i in range(n):
+        start = max(0, i - window + 1)
+        w = closes[start : i]   # exclude bar i — its own price must not bias the trend label
+        m = len(w)
+        if m < 4:
+            result[i] = "up"
+        else:
+            third = m // 3
+            early = float(w[:third].mean())
+            late  = float(w[m - third :].mean())
+            result[i] = "up" if late > early else "down"
+    return result
+
+
+def _is_displacement(
+    opens: np.ndarray, closes: np.ndarray,
+    highs: np.ndarray, lows: np.ndarray,
+    j: int, lookback: int = 5,
+    body_mult: float = 1.5, body_ratio_min: float = 0.5,
+) -> bool:
+    """True if bar j is a displacement candle (large body, small wick ratio)."""
+    if j < 1:
+        return False
+    start = max(0, j - lookback)
+    prior_bodies = np.abs(closes[start:j] - opens[start:j])
+    mean_body = float(prior_bodies.mean()) if len(prior_bodies) else 0.0
+    body = abs(closes[j] - opens[j])
+    total = highs[j] - lows[j]
+    if body < body_mult * mean_body:
+        return False
+    if total > 0 and body / total < body_ratio_min:
+        return False
+    return True
+
+
+def _price_accepted(
+    closes: np.ndarray, j: int, level: float,
+    direction: str, n: int, check_bars: int = 2,
+) -> bool:
+    """True if the next check_bars bars all close on the breakout side of level."""
+    end = min(j + check_bars + 1, n)
+    for k in range(j + 1, end):
+        if direction == "bull" and closes[k] <= level:
+            return False
+        if direction == "bear" and closes[k] >= level:
+            return False
+    return True
+
+
+def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
+                     filter_choch: bool = True,
+                     trend_window: int = 20,
+                     max_span_bars: int | None = None) -> list[dict]:
     """Detect Break of Structure (BOS) and Change of Character (CHoCH).
 
     BOS: price breaks a swing level in the direction of the current trend.
@@ -102,67 +162,123 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2) -> list[dict]:
     if len(highs) < 2 or len(lows) < 2:
         return []
 
-    # initial trend: higher highs + higher lows → uptrend
-    trend = ("up"
-             if highs[1]["price"] > highs[0]["price"] or lows[1]["price"] > lows[0]["price"]
-             else "down")
+    closes   = klines["close"].values
+    opens    = klines["open"].values
+    highs_ar = klines["high"].values
+    lows_ar  = klines["low"].values
+    n        = len(klines)
 
-    closes = klines["close"].values
-    n      = len(klines)
+    # Per-bar local trend: backward-looking window so each signal is classified
+    # against the trend *at that moment*, not a global state from bar 0.
+    local_t  = _local_trend_array(closes, trend_window)
     signals: list[dict] = []
     processed_highs:      set[int] = set()
     processed_lows:       set[int] = set()
     processed_break_bars: set[int] = set()  # one signal per break bar
 
+    # Bar index where the current trend was last confirmed (by CHoCH or initialisation).
+    # Swing levels formed before this bar belong to the previous trend context and must
+    # NOT be reused as reference levels — otherwise a CHoCH from one colour can span
+    # across a CHoCH from the opposite colour, creating impossible overlaps.
+    trend_started_at: int = 0
+
     for i in range(2, len(swings)):
         sw = swings[i]
 
         if sw["kind"] == "high":
-            prev_highs = [s for s in swings[:i] if s["kind"] == "high"]
+            # Only reference levels that belong to the current trend window
+            prev_highs = [s for s in swings[:i]
+                          if s["kind"] == "high" and s["idx"] >= trend_started_at]
             if not prev_highs:
                 continue
             prev_high = prev_highs[-1]
             if prev_high["idx"] in processed_highs:
                 continue
+            # Use wick high as break threshold — close-based swing price can sit below
+            # the actual wick, causing a premature BOS before the true structural break.
+            ref_high = float(highs_ar[prev_high["idx"]])
             for j in range(sw["idx"] + 1, n):
-                if closes[j] > prev_high["price"]:
+                if max_span_bars is not None and j - prev_high["idx"] > max_span_bars:
+                    break
+                if closes[j] > ref_high:
                     if j not in processed_break_bars:
-                        sig_type = "BOS" if trend == "up" else "CHoCH"
-                        signals.append({
-                            "type":      sig_type,
-                            "direction": "bull",
-                            "idx":       j,
-                            "price":     prev_high["price"],
-                            "from_idx":  prev_high["idx"],
-                        })
-                        processed_break_bars.add(j)
-                        if sig_type == "CHoCH":
-                            trend = "up"
+                        sig_type = "BOS" if local_t[j] == "up" else "CHoCH"
+                        emit = True
+                        if filter_choch and sig_type == "CHoCH":
+                            emit = (
+                                _is_displacement(opens, closes, highs_ar, lows_ar, j)
+                                and _price_accepted(closes, j, ref_high, "bull", n)
+                            )
+                        if emit:
+                            signals.append({
+                                "type":      sig_type,
+                                "direction": "bull",
+                                "idx":       j,
+                                "price":     ref_high,
+                                "from_idx":  prev_high["idx"],
+                            })
+                            processed_break_bars.add(j)
+                        if sig_type == "CHoCH":   # always reset context, even if filtered
+                            trend_started_at = j
                     processed_highs.add(prev_high["idx"])
                     break
 
         else:  # kind == "low"
-            prev_lows = [s for s in swings[:i] if s["kind"] == "low"]
+            prev_lows = [s for s in swings[:i]
+                         if s["kind"] == "low" and s["idx"] >= trend_started_at]
             if not prev_lows:
                 continue
             prev_low = prev_lows[-1]
             if prev_low["idx"] in processed_lows:
                 continue
+            # Use wick low as break threshold — symmetric with bull case.
+            ref_low = float(lows_ar[prev_low["idx"]])
             for j in range(sw["idx"] + 1, n):
-                if closes[j] < prev_low["price"]:
+                if max_span_bars is not None and j - prev_low["idx"] > max_span_bars:
+                    break
+                if closes[j] < ref_low:
                     if j not in processed_break_bars:
-                        sig_type = "BOS" if trend == "down" else "CHoCH"
-                        signals.append({
-                            "type":      sig_type,
-                            "direction": "bear",
-                            "idx":       j,
-                            "price":     prev_low["price"],
-                            "from_idx":  prev_low["idx"],
-                        })
-                        processed_break_bars.add(j)
-                        if sig_type == "CHoCH":
-                            trend = "down"
+                        sig_type = "BOS" if local_t[j] == "down" else "CHoCH"
+                        emit = True
+                        if filter_choch and sig_type == "CHoCH":
+                            emit = (
+                                _is_displacement(opens, closes, highs_ar, lows_ar, j)
+                                and _price_accepted(closes, j, ref_low, "bear", n)
+                            )
+                        if emit:
+                            signals.append({
+                                "type":      sig_type,
+                                "direction": "bear",
+                                "idx":       j,
+                                "price":     ref_low,
+                                "from_idx":  prev_low["idx"],
+                            })
+                            processed_break_bars.add(j)
+                        if sig_type == "CHoCH":   # always reset context, even if filtered
+                            trend_started_at = j
                     processed_lows.add(prev_low["idx"])
                     break
 
-    return signals
+    return _remove_bos_crossing_choch(signals)
+
+
+def _remove_bos_crossing_choch(signals: list[dict]) -> list[dict]:
+    """Discard BOS signals whose [from_idx, idx] span contains any CHoCH.
+
+    A BOS that references a swing formed before a CHoCH is referencing stale
+    structure — the CHoCH already invalidated that market context.
+    """
+    choch_idxs = [s["idx"] for s in signals if s["type"] == "CHoCH"]
+    if not choch_idxs:
+        return signals
+    result = []
+    for sig in signals:
+        if sig["type"] != "BOS":
+            result.append(sig)
+            continue
+        from_i  = sig.get("from_idx", sig["idx"] - 1)
+        break_i = sig["idx"]
+        if any(from_i < ci < break_i for ci in choch_idxs):
+            continue   # this BOS crosses a CHoCH — invalid
+        result.append(sig)
+    return result
