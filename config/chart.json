@@ -1,7 +1,7 @@
 {
   "_comment": "Toggle each indicator overlay in the chart window.",
   "indicators": {
-    "heatmap": false,
+    "heatmap": true,
     "delta": true,
     "bos_choch": true,
     "fvg": false,

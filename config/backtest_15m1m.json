@@ -1,0 +1,13 @@
+{
+    "codes": ["US.SNDK"],
+    "start": "2025-02-13",
+    "end": "2025-12-31",
+    "workers": 11,
+    "top_n": 20,
+    "tf_pairs": [
+        ["15m", "1m"]
+    ],
+    "tf_pairs_fast": [
+        ["15m", "1m"]
+    ]
+}
