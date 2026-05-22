@@ -16,6 +16,7 @@ Entry logic:
 from __future__ import annotations
 
 import bisect
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -129,6 +130,8 @@ class Trade:
     exit_price:  float = 0.0
     result:      str   = ""   # "win" | "loss" | "timeout"
     r_multiple:  float = 0.0  # realised R (positive = profit)
+    trade_id:    str   = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    entry_ltf_bar: int = 0    # absolute LTF bar index at entry (for chart centering)
 
 
 # ── Result ────────────────────────────────────────────────────────────────────
@@ -426,12 +429,13 @@ def run_backtest(
 
         # ── 9. Open trade ─────────────────────────────────────────────────
         active_trade = Trade(
-            direction   = trend,
-            entry_price = bar_cls,
-            sl          = sl_price,
-            tp          = tp_price,
-            planned_rr  = rr,
-            entry_time  = t,
+            direction     = trend,
+            entry_price   = bar_cls,
+            sl            = sl_price,
+            tp            = tp_price,
+            planned_rr    = rr,
+            entry_time    = t,
+            entry_ltf_bar = i,
         )
         active_trade_bar = i
         in_fvg_since     = -1

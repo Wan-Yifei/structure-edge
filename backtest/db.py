@@ -44,19 +44,20 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 
 CREATE TABLE IF NOT EXISTS trades (
-    trade_id     VARCHAR PRIMARY KEY,
-    run_id       VARCHAR NOT NULL REFERENCES runs(run_id),
-    symbol       VARCHAR NOT NULL,
-    direction    VARCHAR NOT NULL,
-    entry_time   VARCHAR NOT NULL,
-    entry_price  DOUBLE  NOT NULL,
-    sl_price     DOUBLE  NOT NULL,
-    tp_price     DOUBLE  NOT NULL,
-    exit_time    VARCHAR,
-    exit_price   DOUBLE,
-    result       VARCHAR,
-    r_multiple   DOUBLE,
-    planned_rr   DOUBLE
+    trade_id      VARCHAR PRIMARY KEY,
+    run_id        VARCHAR NOT NULL REFERENCES runs(run_id),
+    symbol        VARCHAR NOT NULL,
+    direction     VARCHAR NOT NULL,
+    entry_time    VARCHAR NOT NULL,
+    entry_price   DOUBLE  NOT NULL,
+    sl_price      DOUBLE  NOT NULL,
+    tp_price      DOUBLE  NOT NULL,
+    exit_time     VARCHAR,
+    exit_price    DOUBLE,
+    result        VARCHAR,
+    r_multiple    DOUBLE,
+    planned_rr    DOUBLE,
+    entry_ltf_bar INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS run_stats (
@@ -209,7 +210,7 @@ class BacktestDB:
             return
         rows = [
             (
-                str(uuid.uuid4()),
+                t.trade_id,
                 run_id,
                 symbol,
                 t.direction,
@@ -222,6 +223,7 @@ class BacktestDB:
                 t.result,
                 t.r_multiple,
                 t.planned_rr,
+                t.entry_ltf_bar,
             )
             for t in trades
         ]
@@ -229,7 +231,7 @@ class BacktestDB:
         try:
             self._conn.execute("DELETE FROM trades WHERE run_id = ?", [run_id])
             self._conn.executemany(
-                "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows
+                "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows
             )
             self._conn.execute("COMMIT")
         except Exception:
@@ -256,6 +258,61 @@ class BacktestDB:
                 s.get("sortino", 0.0),
             ],
         )
+
+    # ── date-range reuse ──────────────────────────────────────────────────────
+
+    def covered_segments(
+        self, config_hash: str, symbol: str, trend_tf: str, entry_tf: str,
+    ) -> list[tuple[str, str]]:
+        """Return (start_date, end_date) for all completed runs of this combo."""
+        rows = self._conn.execute(
+            "SELECT start_date, end_date FROM runs "
+            "WHERE config_hash=? AND symbol=? AND trend_tf=? AND entry_tf=? "
+            "AND status='done' ORDER BY start_date",
+            [config_hash, symbol, trend_tf, entry_tf],
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    def load_trades_in_range(
+        self, config_hash: str, symbol: str,
+        trend_tf: str, entry_tf: str,
+        start: str, end: str,
+    ) -> list["Trade"]:
+        """Load Trade objects from DB for this combo within [start, end]."""
+        from backtest.engine import Trade  # local import to avoid circular
+        rows = self._conn.execute(
+            """
+            SELECT t.trade_id, t.direction, t.entry_price, t.sl_price, t.tp_price,
+                   t.planned_rr, t.entry_time, t.exit_time, t.exit_price,
+                   t.result, t.r_multiple, t.entry_ltf_bar
+            FROM trades t
+            JOIN runs r ON t.run_id = r.run_id
+            WHERE r.config_hash=? AND t.symbol=?
+              AND r.trend_tf=? AND r.entry_tf=?
+              AND r.status='done'
+              AND LEFT(t.entry_time, 10) >= ? AND LEFT(t.entry_time, 10) <= ?
+            ORDER BY t.entry_time
+            """,
+            [config_hash, symbol, trend_tf, entry_tf, start, end],
+        ).fetchall()
+        trades = []
+        for r in rows:
+            t = Trade(
+                trade_id      = r[0],
+                direction     = r[1],
+                entry_price   = r[2],
+                sl            = r[3],
+                tp            = r[4],
+                planned_rr    = r[5],
+                entry_time    = r[6],
+                exit_time     = r[7] or "",
+                exit_price    = r[8] or 0.0,
+                result        = r[9] or "",
+                r_multiple    = r[10] or 0.0,
+                entry_ltf_bar = r[11] or 0,
+            )
+            trades.append(t)
+        return trades
 
     # ── queries ───────────────────────────────────────────────────────────────
 
