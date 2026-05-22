@@ -118,6 +118,19 @@ class PerfStats:
         self._data.clear()
 
 
+class _SafeNavToolbar(NavigationToolbar2Tk):
+    """NavigationToolbar2Tk that guards against _pan_info=None during chart redraws."""
+    def drag_pan(self, event):
+        if self._pan_info is None:
+            return
+        super().drag_pan(event)
+
+    def release_pan(self, event):
+        if self._pan_info is None:
+            return
+        super().release_pan(event)
+
+
 # ── Viewer config (which indicators are available in the GUI) ─────────────────
 
 _VIEWER_CFG_PATH = pathlib.Path(__file__).parent.parent / "config" / "trade_viewer.toml"
@@ -549,7 +562,7 @@ class OrderFlowApp(tk.Tk):
 
         tb_frame = tk.Frame(canvas_frame, bg=BG_DARK)
         tb_frame.pack(fill=tk.X)
-        NavigationToolbar2Tk(self.canvas, tb_frame)
+        _SafeNavToolbar(self.canvas, tb_frame)
 
         self.canvas.mpl_connect("motion_notify_event", self._on_hover)
         self.canvas.mpl_connect("axes_leave_event",    self._on_axes_leave)
@@ -1213,19 +1226,43 @@ class OrderFlowApp(tk.Tk):
             date_str = self.date_var.get().strip()
             dt   = datetime.strptime(date_str, "%Y-%m-%d")
             prev = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
-            start, end = f"{prev} 20:00:00", f"{date_str} 23:59:59"
+            # Extend end by 3 calendar days so the user can pan forward into
+            # subsequent sessions after the anchor date.
+            end_dt = dt + timedelta(days=3)
+            start, end = f"{prev} 20:00:00", f"{end_dt.strftime('%Y-%m-%d')} 23:59:59"
+
+            # Trade Review: expand window to cover pre-entry context + exit date
+            tr_active = self._ind.get("trade_review") and self._ind["trade_review"].get()
+            if tr_active and self._trade_record:
+                cfg = self._trade_record.get("_config", {})
+                trend_tf = cfg.get("trend_tf", "60m")
+                # Derive HTF candle size so the lookback covers the full 80-bar
+                # HTF context window used in _overlay_trade_review.
+                _htf_mins = {"1m":1,"5m":5,"15m":15,"30m":30,"60m":60,"1h":60,"4h":240,"1d":1440}
+                htf_candle_mins = _htf_mins.get(trend_tf, 60)
+                # 80 HTF bars + 30% buffer, converted to calendar days (7 trading hr/day)
+                htf_lookback_days = max(14, int(80 * htf_candle_mins / (60 * 7) * 1.5) + 7)
+                _, candle_mins = TIMEFRAME_MAP[self.tf_var.get()]
+                ltf_lookback_days = max(3, (num * candle_mins) // (60 * 7))
+                lookback_days = max(htf_lookback_days, ltf_lookback_days)
+                start = (dt - timedelta(days=lookback_days)).strftime("%Y-%m-%d 20:00:00")
+                exit_time = str(self._trade_record.get("exit_time") or "")
+                if exit_time and len(exit_time) >= 10:
+                    exit_date = exit_time[:10]
+                    if exit_date > end_dt.strftime("%Y-%m-%d"):
+                        end = f"{exit_date} 23:59:59"
         else:
             end   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             start = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
         ret, df, _ = self.ctx.request_history_kline(
             code, start=start, end=end, ktype=ktype, autype=AuType.NONE,
-            max_count=1000, extended_time=True)
+            max_count=2000, extended_time=True)
         if ret != RET_OK:
             return None
-        # Store the full dataset so TA indicators can use it for warmup,
-        # then return only the display slice.
+        # Return all fetched bars; _render_chart controls the initial viewport
+        # via xlim anchored to date_str, so the user can pan into adjacent sessions.
         self._klines_warmup = df.reset_index(drop=True)
-        return df.tail(num).reset_index(drop=True)
+        return df.reset_index(drop=True)
 
     # ── Chart refresh ─────────────────────────────────────────────────────────
 
@@ -1269,7 +1306,7 @@ class OrderFlowApp(tk.Tk):
             _, candle_mins = TIMEFRAME_MAP[tf]
 
             if historical:
-                ticks = self._load_local_ticks(code, date_str, tf)
+                ticks = self._load_local_ticks(code, date_str, tf) or {}
             else:
                 ticks = self._load_local_ticks(code, datetime.now().strftime("%Y-%m-%d"), tf) or {}
                 for bk, pd_ in live_mem.items():
@@ -1352,6 +1389,16 @@ class OrderFlowApp(tk.Tk):
         else:
             self._live_buckets = ticks
 
+        # Save current zoom state before clearing (Live mode only: preserve user pan/zoom)
+        _saved_xlim: tuple | None = None
+        _saved_n: int | None = None
+        if not historical and hasattr(self, "ax_c"):
+            try:
+                _saved_xlim = self.ax_c.get_xlim()
+                _saved_n = len(self._klines_data) if hasattr(self, "_klines_data") else None
+            except Exception:
+                pass
+
         # rebuild figure — layout depends on active subplot indicators
         self.fig.clear()
         self._profile_hover_band    = None   # axes recreated; old refs are invalid
@@ -1399,14 +1446,27 @@ class OrderFlowApp(tk.Tk):
         # ── candles ───────────────────────────────────────────────────────────
         labels = draw_candles(self.ax_c, klines)
         n = len(klines)
-        step = max(1, n // 20)        # show at most ~20 x-tick labels
+
+        # Anchor index: last bar on or before date_str (supports cross-day pan).
+        num_view = self.num_var.get()
+        if historical and date_str:
+            anchor_idx = next(
+                (i for i in range(n - 1, -1, -1)
+                 if str(klines.iloc[i]["time_key"])[:10] <= date_str),
+                n - 1,
+            )
+        else:
+            anchor_idx = n - 1
+
+        # Density based on viewport width so ~20 labels show in the initial view.
+        step = max(1, num_view // 20)
         shown = list(range(0, n, step))
         self.ax_c.set_xticks(shown)
         self.ax_c.set_xticklabels([labels[i] for i in shown],
                                    rotation=45, fontsize=7, color=FG)
         self.ax_c.set_ylabel("Price", color=FG)
         self.ax_c.grid(axis="y", color=GRID, linewidth=0.5)
-        self.ax_c.set_xlim(-0.5, n - 0.5)
+        self.ax_c.set_xlim(-0.5, n - 0.5)  # overridden below after TA subplots
         self._hovered_candle_idx  = None
         self._tick_shown_idx      = None
         self._tick_data_cache     = {}   # new chart data invalidates all cached profiles
@@ -1471,21 +1531,23 @@ class OrderFlowApp(tk.Tk):
                 and self._trade_record is not None:
             self._overlay_trade_review(klines)
 
-        # Enforce ax_c ylim based on candle data only — prevents any axhline drawn
-        # by SMC overlays, POC, or BOS signals from expanding the visible range.
-        kl_lo = float(klines["low"].min())
-        kl_hi = float(klines["high"].max())
+        # Enforce ax_c ylim from the VISIBLE bars (anchor viewport), so that bars
+        # loaded for cross-day panning don't artificially expand the price range.
+        vis_start = max(0, anchor_idx - num_view + 1)
+        vis_klines = klines.iloc[vis_start : anchor_idx + 1]
+        kl_lo = float(vis_klines["low"].min())  if not vis_klines.empty else float(klines["low"].min())
+        kl_hi = float(vis_klines["high"].max()) if not vis_klines.empty else float(klines["high"].max())
         pr    = max(kl_hi - kl_lo, 0.01)
         margin_bot = pr * 0.10 if ind.get("delta") else pr * 0.05
         self.ax_c.set_ylim(kl_lo - margin_bot, kl_hi + pr * 0.05)
 
         # Draw POC on main chart only when it falls within the candle price range,
-        # and add a price label at the right edge.
+        # and add a price label at the right edge of the initial viewport.
         if poc_price is not None and kl_lo <= poc_price <= kl_hi:
             self.ax_c.axhline(poc_price, color=GOLD, lw=0.9,
                               linestyle="--", alpha=0.8, zorder=5)
             self.ax_c.text(
-                len(klines) - 0.5, poc_price, f" POC {poc_price:.2f}",
+                anchor_idx + 0.5, poc_price, f" POC {poc_price:.2f}",
                 color=GOLD, fontsize=7, va="center", ha="left", zorder=6,
                 bbox=dict(fc=BG_TIP, ec="none", alpha=0.7, pad=1.5),
             )
@@ -1493,10 +1555,43 @@ class OrderFlowApp(tk.Tk):
         # Re-sync profile ylim after main-chart ylim is finalised.
         self._sync_profile_ylim()
 
+        # Apply anchor viewport last — overrides any set_xlim from _draw_ta_subplots.
+        # Initial view: num_view bars ending at anchor_idx (the target date's close).
+        # User can pan right to see subsequent sessions loaded by _fetch_klines.
+        xlim_lo = max(-0.5, anchor_idx - num_view + 0.5)
+        self.ax_c.set_xlim(xlim_lo, anchor_idx + 0.5)
+
+        # Live mode: restore user's zoom/pan position after refresh.
+        # - If user was at the right edge (following live bars) → advance window to show latest bar.
+        # - If user had panned left → shift xlim by the number of new bars added.
+        if not historical and _saved_xlim is not None and _saved_n is not None:
+            delta_n = n - _saved_n
+            prev_lo, prev_hi = _saved_xlim
+            prev_width = max(prev_hi - prev_lo, 1.0)
+            at_edge = prev_hi >= _saved_n - 1.5  # user was within 1.5 bars of the right edge
+            if at_edge:
+                new_hi = anchor_idx + 0.5
+                new_lo = max(-0.5, new_hi - prev_width)
+            else:
+                new_lo = max(-0.5, prev_lo + delta_n)
+                new_hi = min(n - 0.5, prev_hi + delta_n)
+            self.ax_c.set_xlim(new_lo, new_hi)
+            # Recompute ylim for the new visible window so price stays in frame.
+            vis_s  = max(0, int(new_lo + 0.5))
+            vis_e  = min(n - 1, int(new_hi + 0.5))
+            vis_kl = klines.iloc[vis_s : vis_e + 1]
+            if not vis_kl.empty:
+                vlo = float(vis_kl["low"].min())
+                vhi = float(vis_kl["high"].max())
+                vpr = max(vhi - vlo, 0.01)
+                mb  = vpr * 0.10 if ind.get("delta") else vpr * 0.05
+                self.ax_c.set_ylim(vlo - mb, vhi + vpr * 0.05)
+                self._sync_profile_ylim()
+
         self._perf.start("full_render")
         self.canvas.draw_idle()
 
-        total_ticks = sum(p[k] for v in ticks.values() for p in v.values() for k in p)
+        total_ticks = sum(p[k] for v in ticks.values() if v for p in v.values() if p for k in p)
         if historical:
             self._log(f"Chart ready  |  {n} candles  |  {src_label}")
         else:
@@ -1570,7 +1665,7 @@ class OrderFlowApp(tk.Tk):
         for i, name in enumerate(panels):
             ax = self._ta_axes[i]
             ax.grid(axis="y", color=GRID, linewidth=0.3)
-            ax.set_xlim(-0.5, n_display - 0.5)
+            # xlim is set by _render_chart after all subplots are drawn (via sharex)
 
             primary_series = None   # will be stored for crosshair readout
 
@@ -2045,7 +2140,7 @@ class OrderFlowApp(tk.Tk):
             )
             artists.append(lbl)
 
-        # ── HTF FVG band + last 1-2 BOS from cached data ─────────────────
+        # ── HTF FVG + BOS/CHoCH + OB context ────────────────────────────
         symbol   = str(trade.get("symbol", ""))
         trend_tf = config.get("trend_tf", "")
         if symbol and trend_tf:
@@ -2053,75 +2148,151 @@ class OrderFlowApp(tk.Tk):
                 from feeds.fetcher import fetch_klines as _fetch
                 from strategy.smc.fvg import detect_fvg
                 from strategy.smc.market_structure import detect_bos_choch
+                from strategy.smc.order_blocks import detect_order_blocks
+                from matplotlib.patches import Rectangle as _MplRect
+                import numpy as _np
 
-                htf_df = _fetch(code=symbol, ktype=trend_tf)
+                from datetime import datetime as _dt, timedelta as _td
+                _entry_dt  = _dt.fromisoformat(entry_time[:19])
+                _htf_start = (_entry_dt - _td(days=180)).strftime("%Y-%m-%d")
+                _htf_end   = (_entry_dt + _td(days=1)).strftime("%Y-%m-%d")
+                htf_df = _fetch(code=symbol, ktype=trend_tf,
+                                start=_htf_start, end=_htf_end)
                 if not htf_df.empty:
-                    htf_times = htf_df["time_key"].astype(str).values
-                    import numpy as _np
-                    htf_pos   = int(_np.searchsorted(htf_times, entry_time[:16], side="right")) - 1
-                    htf_slice = htf_df.iloc[max(0, htf_pos - 80): htf_pos + 1].reset_index(drop=True)
+                    htf_times      = htf_df["time_key"].astype(str).values
+                    htf_pos        = int(_np.searchsorted(htf_times, entry_time[:16], side="right")) - 1
+                    htf_slice      = htf_df.iloc[max(0, htf_pos - 80): htf_pos + 1].reset_index(drop=True)
+                    htf_slice_times = htf_slice["time_key"].astype(str).values
+                    n_ltf          = max(len(klines) - 1, 1)
 
-                    # ── FVG: find the one that contains entry_price ────────
+                    def _htf_to_ltf(htf_rel: int) -> int:
+                        """htf_slice relative index → nearest LTF klines bar index."""
+                        if 0 <= htf_rel < len(htf_slice_times):
+                            return _bar_idx(htf_slice_times[htf_rel]) or 0
+                        return 0
+
+                    show_fvg = self._ind.get("fvg") and self._ind["fvg"].get()
+                    show_bos = self._ind.get("bos_choch") and self._ind["bos_choch"].get()
+                    show_ob  = self._ind.get("ob") and self._ind["ob"].get()
+
+                    # ── BOS / CHoCH: detect first (OB needs it) ────────────
+                    # No max_span_bars here — _BOS_MAX_SPAN is for the LTF
+                    # display chart; on an 80-bar HTF slice it kills all signals.
+                    all_bos = detect_bos_choch(htf_slice)
+                    bos_dir   = "bull" if is_bull else "bear"
+                    rel_bos   = [b for b in all_bos if b.get("direction") == bos_dir][-2:]
+                    self._log(f"TR overlay: HTF slice {len(htf_slice)} bars, "
+                              f"all_bos={len(all_bos)}, rel_bos={len(rel_bos)}")
+
+                    # ── FVG: the zone that contains entry_price ────────────
                     fvg_dir   = "bull" if is_bull else "bear"
                     fvg_width = config.get("fvg_min_width_pct", 0.002)
                     fvgs      = detect_fvg(htf_slice, fvg_width)
                     entry_fvg = next(
                         (f for f in reversed(fvgs)
-                         if not f["filled"]
-                         and f["direction"] == fvg_dir
+                         if f["direction"] == fvg_dir
                          and f["bottom"] <= entry_price <= f["top"]),
                         None,
                     )
-                    if entry_fvg:
-                        span = self.ax_c.axhspan(
-                            entry_fvg["bottom"], entry_fvg["top"],
-                            alpha=0.18,
-                            color=GREEN if is_bull else RED,
-                            zorder=2, label="Entry FVG",
-                        )
-                        artists.append(span)
-                        # label at left edge of visible window
+                    self._log(f"TR overlay: fvgs={len(fvgs)}, entry_fvg={'found' if entry_fvg else 'none'}, show_fvg={show_fvg}")
+                    if show_fvg and entry_fvg:
+                        # Cap formation bar at entry so the band never starts
+                        # after the entry point.
+                        _e = entry_idx if entry_idx is not None else n_ltf
+                        fvg_ltf = min(_htf_to_ltf(entry_fvg["idx"]), _e)
+                        fvg_color = GREEN if is_bull else RED
+                        fvg_w = len(klines) - fvg_ltf
+                        if fvg_w > 0:
+                            # Rectangle in data coords: left edge at fvg_ltf
+                            # (same x as the text label, no -0.5 shift).
+                            rect = _MplRect(
+                                (fvg_ltf, entry_fvg["bottom"]),
+                                fvg_w,
+                                entry_fvg["top"] - entry_fvg["bottom"],
+                                facecolor=fvg_color, edgecolor="none",
+                                alpha=0.18, zorder=2,
+                            )
+                            self.ax_c.add_patch(rect)
+                            artists.append(rect)
                         lbl = self.ax_c.text(
-                            0, (entry_fvg["bottom"] + entry_fvg["top"]) / 2,
-                            "FVG", color=GREEN if is_bull else RED,
+                            fvg_ltf, (entry_fvg["bottom"] + entry_fvg["top"]) / 2,
+                            " FVG", color=fvg_color,
                             fontsize=7, va="center", alpha=0.85, zorder=5,
                         )
                         artists.append(lbl)
 
-                    # ── BOS: last 1-2 signals before entry in trend dir ───
-                    bos_dir   = "bull" if is_bull else "bear"
-                    htf_alias = {"60m": "1h"}
-                    htf_key   = htf_alias.get(trend_tf, trend_tf)
-                    all_bos   = detect_bos_choch(htf_slice, max_span_bars=_BOS_MAX_SPAN.get(htf_key))
-                    rel_bos   = [b for b in all_bos if b.get("direction") == bos_dir][-2:]
-                    for bos in rel_bos:
-                        bos_price = float(bos.get("price", 0))
-                        bos_type  = str(bos.get("type", "BOS"))
-                        bos_time  = str(bos.get("time", ""))
-                        if not bos_price:
-                            continue
-                        # Find nearest LTF bar for x-coordinate
-                        bos_idx = _bar_idx(bos_time) if bos_time else 0
-                        line    = self.ax_c.axhline(
-                            bos_price, xmin=0,
-                            xmax=(bos_idx / max(len(klines) - 1, 1)) if bos_idx else 0.5,
-                            color=GOLD, linewidth=0.9, linestyle=":",
-                            alpha=0.70, zorder=3,
-                        )
-                        artists.append(line)
-                        lbl = self.ax_c.text(
-                            bos_idx or 1, bos_price,
-                            f" {bos_type}", color=GOLD, fontsize=6,
-                            va="bottom", alpha=0.80, zorder=4,
-                        )
-                        artists.append(lbl)
+                    # ── OB: detect now (always log, draw only when show_ob) ──
+                    htf_obs = detect_order_blocks(htf_slice, all_bos)
+                    rel_obs = [ob for ob in htf_obs
+                               if ob.get("direction") == bos_dir][-3:]
+                    self._log(f"TR overlay: htf_obs={len(htf_obs)}, "
+                              f"rel_obs={len(rel_obs)} "
+                              f"subtypes={[o.get('subtype') for o in rel_obs]}")
+
+                    if show_bos:
+                        # Re-index signals from HTF slice coords → LTF klines coords,
+                        # then delegate to draw_bos_choch for the canonical visual style
+                        # (floating line + vertical dotted ticks, same as live/historic).
+                        ltf_signals = []
+                        for bos in rel_bos:
+                            from_ltf  = _htf_to_ltf(bos.get("from_idx", 0))
+                            break_ltf = _htf_to_ltf(bos.get("idx", 0))
+                            self._log(f"TR overlay: {bos.get('type')} price={bos.get('price',0):.2f} "
+                                      f"from_ltf={from_ltf} break_ltf={break_ltf}")
+                            if from_ltf == break_ltf:
+                                continue  # zero-length — skip
+                            # Skip signals whose price level is outside the
+                            # current y-axis range — they would be invisible
+                            # and confuse the auto-scaling.
+                            ylo, yhi = self.ax_c.get_ylim()
+                            bos_p = float(bos.get("price", 0))
+                            if bos_p and not (ylo <= bos_p <= yhi):
+                                self._log(f"TR overlay: {bos.get('type')} @ {bos_p:.2f} "
+                                          f"outside ylim [{ylo:.2f}, {yhi:.2f}] — skipped")
+                                continue
+                            ltf_signals.append({
+                                "type":      bos.get("type", "BOS"),
+                                "direction": bos.get("direction", bos_dir),
+                                "idx":       break_ltf,
+                                "from_idx":  from_ltf,
+                                "price":     float(bos.get("price", 0)),
+                            })
+                        artists.extend(draw_bos_choch(self.ax_c, klines, ltf_signals))
+
+                    if show_ob:
+                        for ob in rel_obs:
+                            ob_ltf = _htf_to_ltf(ob.get("idx", 0))
+                            ob_w   = len(klines) - ob_ltf
+                            if ob_w <= 0:
+                                continue
+                            sub      = ob.get("subtype", "regular")
+                            ob_alpha = 0.06 if sub == "breaker" else 0.16
+                            rect = _MplRect(
+                                (ob_ltf, ob["bottom"]),
+                                ob_w,
+                                ob["top"] - ob["bottom"],
+                                facecolor=GOLD, edgecolor="none",
+                                alpha=ob_alpha, zorder=2,
+                            )
+                            self.ax_c.add_patch(rect)
+                            artists.append(rect)
+                            lbl = self.ax_c.text(
+                                ob_ltf,
+                                (ob["bottom"] + ob["top"]) / 2,
+                                f" OB{'!' if sub == 'breaker' else ''}",
+                                color=GOLD, fontsize=7,
+                                va="center", ha="left", alpha=0.90, zorder=5,
+                                bbox=dict(fc=BG_TIP, ec=GOLD, alpha=0.70,
+                                          pad=2, linewidth=0.6),
+                            )
+                            artists.append(lbl)
 
             except Exception as exc:
                 self._log(f"Trade Review overlay warning: {exc}")
 
-        # Redraw with new artists
+        # Invalidate background cache so the next draw_idle() (called by
+        # _render_chart) picks up the new artists.
         self._bg = self._bg_t = self._bg_p = None
-        self.canvas.draw_idle()
 
     def _log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
