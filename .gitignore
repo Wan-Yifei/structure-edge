@@ -23,3 +23,16 @@ wheels/
 # Logs (keep directory structure, ignore log files)
 logs/**
 !logs/**/.gitkeep
+
+# Backtest results (generated output — CSVs, HTML reports, run logs, checkpoints)
+backtest/results/
+backtest/output.png
+
+# Test output images
+tests/outputs/
+
+# Loose screenshots in root
+ScreenShot_*.png
+
+# Runtime / scheduler logs in db/
+db/scheduler.log
