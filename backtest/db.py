@@ -148,22 +148,35 @@ CREATE TABLE IF NOT EXISTS live_trades (
 
 
 class BacktestDB:
-    """Thin wrapper around backtest.duckdb for writing runs, trades, and stats."""
+    """Thin wrapper around backtest.duckdb for writing runs, trades, and stats.
 
-    def __init__(self, db_path: str | pathlib.Path = _DEFAULT_DB) -> None:
-        self.db_path = pathlib.Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = duckdb.connect(str(self.db_path))
-        self._conn.execute(_DDL)
-        # Migrations for existing databases
-        for col_ddl in [
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS algo_version VARCHAR",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS commit_hash  VARCHAR",
-        ]:
-            try:
-                self._conn.execute(col_ddl)
-            except Exception:
-                pass
+    Pass read_only=True to open an existing database without acquiring a write
+    lock — safe to use alongside a running backtest (run.py) or from multiple
+    Jupyter notebooks at the same time.  DDL and migrations are skipped in
+    read-only mode; the database must already exist.
+    """
+
+    def __init__(
+        self,
+        db_path: str | pathlib.Path = _DEFAULT_DB,
+        read_only: bool = False,
+    ) -> None:
+        self.db_path  = pathlib.Path(db_path)
+        self.read_only = read_only
+        if not read_only:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = duckdb.connect(str(self.db_path), read_only=read_only)
+        if not read_only:
+            self._conn.execute(_DDL)
+            # Migrations for existing databases
+            for col_ddl in [
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS algo_version VARCHAR",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS commit_hash  VARCHAR",
+            ]:
+                try:
+                    self._conn.execute(col_ddl)
+                except Exception:
+                    pass
 
     def close(self) -> None:
         self._conn.close()
@@ -193,6 +206,7 @@ class BacktestDB:
         needs_write=False: run already completed (status='done'), skip writing.
         needs_write=True:  new run created, or crashed run reset to pending.
         """
+        self._require_write()
         row = self._conn.execute(
             "SELECT run_id, status FROM runs WHERE config_hash = ? "
             "AND symbol = ? AND trend_tf = ? AND entry_tf = ? "
@@ -222,18 +236,25 @@ class BacktestDB:
         )
         return run_id, True
 
+    def _require_write(self) -> None:
+        if self.read_only:
+            raise RuntimeError("BacktestDB opened in read-only mode — write operations not allowed")
+
     def mark_running(self, run_id: str) -> None:
+        self._require_write()
         self._conn.execute(
             "UPDATE runs SET status='running' WHERE run_id=?", [run_id]
         )
 
     def mark_done(self, run_id: str) -> None:
+        self._require_write()
         self._conn.execute(
             "UPDATE runs SET status='done', finished_at=? WHERE run_id=?",
             [datetime.now(), run_id],
         )
 
     def mark_failed(self, run_id: str, error: str) -> None:
+        self._require_write()
         self._conn.execute(
             "UPDATE runs SET status='failed' WHERE run_id=?", [run_id]
         )
@@ -242,6 +263,7 @@ class BacktestDB:
 
     def write_trades(self, run_id: str, symbol: str, trades: list[Trade]) -> None:
         """Batch-insert all trades for one run in a single transaction."""
+        self._require_write()
         if not trades:
             return
         rows = [
@@ -278,6 +300,7 @@ class BacktestDB:
 
     def write_stats(self, run_id: str, bt: BacktestResult) -> None:
         """Compute and insert aggregate stats for a completed run."""
+        self._require_write()
         s = bt.summary_dict()
         self._conn.execute(
             "INSERT OR REPLACE INTO run_stats VALUES (?,?,?,?,?,?,?,?,?,?,now())",
@@ -387,6 +410,7 @@ class BacktestDB:
 
     def insert_review_trades(self, symbol: str, params_dict: dict, trades: list[Trade]) -> None:
         """Write review-generated trades so trade_viewer can look them up by ID."""
+        self._require_write()
         config_json = json.dumps(params_dict)
         self._conn.executemany(
             """
@@ -426,6 +450,7 @@ class BacktestDB:
                        entry_time, entry_price, qty.
         All other keys are optional and default to NULL.
         """
+        self._require_write()
         if trade.get("account_type") not in ("LIVE", "PAPER"):
             raise ValueError("account_type must be 'LIVE' or 'PAPER'")
         tid = trade.get("trade_id") or str(uuid.uuid4())
@@ -474,6 +499,7 @@ class BacktestDB:
 
     def update_live_trade(self, trade_id: str, updates: dict) -> None:
         """Patch specific fields on an existing live trade (e.g. fill in exit data)."""
+        self._require_write()
         allowed = {
             "exit_order_id", "exit_time", "exit_price",
             "result", "pnl_gross", "commission", "pnl_net", "r_multiple",

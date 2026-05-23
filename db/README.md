@@ -219,11 +219,13 @@ live_trades（独立）
 ```python
 from backtest.db import BacktestDB
 
-db = BacktestDB()
+# ── 只读模式（推荐用于 Jupyter / review.py / 并发查询）────────────────
+# 不持有写锁，可与正在运行的 run.py 同时使用
+db = BacktestDB(read_only=True)
 
-# 查看最近 10 次最优回测结果
+# 查看最近 10 次最优回测结果（含算法版本和 commit）
 df = db.get_run_stats(top_n=10)
-print(df[["symbol", "trend_tf", "entry_tf", "profit_factor", "sharpe"]])
+print(df[["symbol", "trend_tf", "entry_tf", "algo_version", "commit_hash", "profit_factor", "sharpe"]])
 
 # 查看某次回测的所有交易
 trades = db.get_trades(run_id="<uuid>")
@@ -233,4 +235,8 @@ open_live = db.get_open_live_trades(account_type="LIVE")
 
 # 查看某笔交易的完整信息（含策略参数快照）
 record = db.fetch_trade("<trade_id>")
+
+# ── 写入模式（run.py / review.py 内部使用）──────────────────────────────
+# 同一时间只能有一个写连接；若已有写连接存在会抛出 DuckDB 锁错误
+db_rw = BacktestDB()
 ```

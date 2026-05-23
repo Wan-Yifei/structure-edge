@@ -60,6 +60,26 @@ class TestSchemaCreation:
             count = db2._conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
         assert count == 0
 
+    def test_read_only_allows_queries(self, tmp_path):
+        # Write some data with a normal connection, then re-open read-only.
+        with BacktestDB(tmp_path / "ro.duckdb") as rw:
+            run_id, _ = rw.get_or_create_run(
+                "h", {}, "US.TEST", "4h", "15m", "2025-01-01", "2025-12-31"
+            )
+            rw.mark_done(run_id)
+        with BacktestDB(tmp_path / "ro.duckdb", read_only=True) as ro:
+            count = ro._conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            assert count == 1
+
+    def test_read_only_blocks_writes(self, tmp_path):
+        with BacktestDB(tmp_path / "ro2.duckdb") as rw:
+            pass  # create schema
+        with BacktestDB(tmp_path / "ro2.duckdb", read_only=True) as ro:
+            with pytest.raises(RuntimeError, match="read-only"):
+                ro.get_or_create_run(
+                    "h", {}, "US.TEST", "4h", "15m", "2025-01-01", "2025-12-31"
+                )
+
 
 # ── runs ──────────────────────────────────────────────────────────────────────
 
