@@ -148,6 +148,7 @@ PARAM_GRID: dict[str, list] = {
     # Focused grid: derived from random-search results (2026-05-22, 50 samples, 15m/1m SNDK).
     # bos_count=2 and min_rr=1.5 dominated top performers; displacement_required added
     # (was absent from random sample due to grid default); rr=3.0 dropped (too few trades).
+    "htf_window_bars":            [20, 30, 50],   # ~5 h / ~8 h / ~13 h at 15 m (min ~20 for reliable swing detection)
     "swing_lookback":             [2, 3],
     "bos_count":                  [2],
     "fvg_min_width_pct":          [0.001, 0.003, 0.005],
@@ -160,6 +161,7 @@ PARAM_GRID: dict[str, list] = {
 }
 
 PARAM_GRID_FAST: dict[str, list] = {
+    "htf_window_bars":            [20],
     "swing_lookback":             [2],
     "bos_count":                  [1],
     "fvg_min_width_pct":          [0.002],

@@ -36,7 +36,7 @@ from strategy.smc import (
 )
 from backtest.stats import sharpe_ratio, sortino_ratio
 
-_HTF_WINDOW  = 200  # HTF bars used for each analysis snapshot (O(n²) cap)
+_HTF_WINDOW_DEFAULT = 20  # default HTF bars (~5 h at 15 m ≈ one trading day; override via BacktestParams.htf_window_bars)
 _LTF_WINDOW  = 120  # LTF bars used for swing/BOS detection
 _LTF_PRE_FVG = _LTF_WINDOW  # look back a full LTF window before FVG entry
 _WARMUP      = 40   # skip the first N LTF bars while indicators warm up
@@ -100,6 +100,7 @@ class BacktestParams:
     sl_buffer_pct:            float = 0.001  # extra % added beyond the swing level
     max_sl_pct:           float = 0.005  # skip trade if SL > this % of entry
     min_rr:               float = 2.0
+    htf_window_bars:      int   = 20     # HTF bars for trend/structure (20 × 15 m ≈ 5 h ≈ one trading day)
     allow_short:          bool  = True   # False = long-only (skip bear setups)
     intraday_only:        bool  = False  # True = force-close positions at end of trading day
 
@@ -113,7 +114,8 @@ class BacktestParams:
             flags += " ID"
         return (
             f"{self.trend_tf}/{self.entry_tf} lb{self.swing_lookback}"
-            f" bos{self.bos_count} w{self.fvg_min_width_pct:.3f}"
+            f" bos{self.bos_count} w{self.htf_window_bars}"
+            f" fvg{self.fvg_min_width_pct:.3f}"
             f" dp{self.fvg_entry_depth_pct:.1f} {d}"
             f" {conf} sl{self.sl_buffer_pct:.3f} msl{self.max_sl_pct:.3f}"
             f" rr{self.min_rr:.1f}{flags}"
@@ -366,7 +368,7 @@ def run_backtest(
             continue
 
         if htf_pos != prev_htf_pos:
-            htf_start  = max(0, htf_pos + 1 - _HTF_WINDOW)
+            htf_start  = max(0, htf_pos + 1 - params.htf_window_bars)
             htf_view   = htf.iloc[htf_start : htf_pos + 1].reset_index(drop=True)
             htf_swings          = find_swings(htf_view, params.swing_lookback)
             htf_bos             = detect_bos_choch(htf_view, params.swing_lookback)

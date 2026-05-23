@@ -45,7 +45,6 @@ from strategy.smc   import (
 
 _HTF_CHART_BARS   = 80   # total HTF bars shown, centered on entry bar
 _HTF_HALF         = _HTF_CHART_BARS // 2
-_HTF_ENGINE_WINDOW = 200  # must match engine._HTF_WINDOW
 _LTF_PRE_BARS     = 40   # LTF bars shown before entry
 _LTF_POST_BARS    = 20   # LTF bars shown after exit
 _TOP_N_LOSSES     = 5
@@ -186,7 +185,7 @@ def _trade_chart_b64(
     # trend-setting CHoCH might be 50-150 bars back — outside the visible window.
     # Solution: run BOS detection on the engine's full backward window, then
     # remap signal indices into the chart coordinate system.
-    eng_start   = max(0, htf_pos + 1 - _HTF_ENGINE_WINDOW)
+    eng_start   = max(0, htf_pos + 1 - params.htf_window_bars)
     htf_eng     = htf.iloc[eng_start : htf_pos + 1].reset_index(drop=True)
     htf_bos_eng = detect_bos_choch(htf_eng, params.swing_lookback)
 
@@ -276,7 +275,7 @@ def _trade_chart_b64(
               bbox=dict(fc=BG_BAR, ec=trend_color, alpha=0.85, pad=3, boxstyle="round"))
 
     ax_h.set_title(
-        f"HTF {params.trend_tf}  — {dir_label} setup  [engine window: last {min(htf_pos+1, _HTF_ENGINE_WINDOW)} bars]",
+        f"HTF {params.trend_tf}  — {dir_label} setup  [engine window: last {min(htf_pos+1, params.htf_window_bars)} bars]",
         color=FG, fontsize=8)
     ax_h.legend(fontsize=6, facecolor=BG_BAR, labelcolor=FG)
 
@@ -599,6 +598,7 @@ def _build_params_from_args(args) -> BacktestParams:
     return BacktestParams(
         trend_tf                 = args.trend_tf,
         entry_tf                 = args.entry_tf,
+        htf_window_bars          = args.htf_window_bars,
         swing_lookback           = args.swing_lookback,
         bos_count                = args.bos_count,
         fvg_min_width_pct        = args.fvg_min_width_pct,
@@ -619,18 +619,20 @@ if __name__ == "__main__":
     # Strategy params — best-cluster defaults from SNDK grid search
     ap.add_argument("--trend-tf",                 default="15m")
     ap.add_argument("--entry-tf",                 default="1m")
-    ap.add_argument("--swing-lookback",           type=int,   default=3)
-    ap.add_argument("--bos-count",                type=int,   default=2)
+    ap.add_argument("--htf-window-bars",          type=int,   default=20,
+                    help="HTF bars for trend window (20 × 15 m ≈ 5 h, min ~20 for swing detection)")
+    ap.add_argument("--swing-lookback",           type=int,   default=2)
+    ap.add_argument("--bos-count",                type=int,   default=1)
     ap.add_argument("--fvg-min-width-pct",        type=float, default=0.001)
-    ap.add_argument("--fvg-entry-depth-pct",      type=float, default=0.50)
+    ap.add_argument("--fvg-entry-depth-pct",      type=float, default=0.20)
     ap.add_argument("--displacement-required",    action="store_true")
     ap.add_argument("--no-displacement",          dest="displacement_required",
                                                   action="store_false")
-    ap.set_defaults(displacement_required=True)
+    ap.set_defaults(displacement_required=False)
     ap.add_argument("--require-ltf-confirmation", action="store_true")
     ap.add_argument("--no-ltf-confirmation",      dest="require_ltf_confirmation",
                                                   action="store_false")
-    ap.set_defaults(require_ltf_confirmation=True)
+    ap.set_defaults(require_ltf_confirmation=False)
     ap.add_argument("--sl-buffer-pct",            type=float, default=0.003)
     ap.add_argument("--max-sl-pct",               type=float, default=0.010)
     ap.add_argument("--min-rr",                   type=float, default=2.0)
