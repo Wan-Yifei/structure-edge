@@ -402,7 +402,72 @@ def _importance_fig(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-# ── 9. Parallel coordinates ───────────────────────────────────────────────────
+# ── 9. Long / short breakdown ─────────────────────────────────────────────────
+
+def _direction_fig(df: pd.DataFrame, top_n: int = 20) -> go.Figure:
+    """Bull vs bear win-rate and total-R for the top N combos by profit factor."""
+    need = {"bull_trades", "bear_trades", "bull_win_rate", "bear_win_rate",
+            "bull_total_r", "bear_total_r"}
+    if not need.issubset(df.columns):
+        return go.Figure()
+
+    active = df[df["n_trades"] > 0].copy()
+    if active.empty:
+        return go.Figure()
+
+    top = active.nlargest(top_n, "profit_factor").reset_index(drop=True)
+    labels = [
+        f"{r['trend_tf']}/{r['entry_tf']} PF={r['profit_factor']:.2f}"
+        for _, r in top.iterrows()
+    ]
+
+    fig = go.Figure()
+
+    # Win-rate bars
+    fig.add_trace(go.Bar(
+        name="Bull win rate", x=labels, y=top["bull_win_rate"],
+        marker_color=_GREEN, opacity=0.85,
+        yaxis="y", offsetgroup="bull",
+        text=[f"{v:.0%}" for v in top["bull_win_rate"]], textposition="outside",
+    ))
+    fig.add_trace(go.Bar(
+        name="Bear win rate", x=labels, y=top["bear_win_rate"],
+        marker_color=_RED, opacity=0.85,
+        yaxis="y", offsetgroup="bear",
+        text=[f"{v:.0%}" for v in top["bear_win_rate"]], textposition="outside",
+    ))
+
+    # Total-R dots on secondary axis
+    fig.add_trace(go.Scatter(
+        name="Bull total R", x=labels, y=top["bull_total_r"],
+        mode="markers", marker=dict(symbol="circle", size=9, color=_GREEN,
+                                    line=dict(width=1, color=_BG)),
+        yaxis="y2",
+    ))
+    fig.add_trace(go.Scatter(
+        name="Bear total R", x=labels, y=top["bear_total_r"],
+        mode="markers", marker=dict(symbol="diamond", size=9, color=_RED,
+                                    line=dict(width=1, color=_BG)),
+        yaxis="y2",
+    ))
+
+    layout = dict(_PLOTLY_LAYOUT)
+    layout.update(dict(
+        title=dict(text=f"Long vs Short — Top {top_n} by PF",
+                   font=dict(size=13, color=_FG)),
+        barmode="group",
+        height=420,
+        yaxis=dict(title="Win Rate", tickformat=".0%",
+                   gridcolor=_GRID, linecolor=_GRID, range=[0, 0.9]),
+        yaxis2=dict(title="Total R", overlaying="y", side="right",
+                    gridcolor=_GRID, zeroline=True, zerolinecolor=_GRID),
+        legend=dict(orientation="h", y=1.08, font=dict(size=10)),
+    ))
+    fig.update_layout(**layout)
+    return fig
+
+
+# ── 10. Parallel coordinates ──────────────────────────────────────────────────
 
 def _parcoords_fig(df: pd.DataFrame, metric: str = "total_r") -> go.Figure:
     """Multi-factor view: all numeric params × metric, coloured by metric."""
@@ -525,7 +590,8 @@ def generate_report(
     scatter_html = _to_html(_scatter_fig(df))
     heatmap_html = _to_html(_heatmap_fig(df))
     surface_html = _to_html(_surface_fig(df, metric))
-    import_html  = _to_html(_importance_fig(df))
+    import_html    = _to_html(_importance_fig(df))
+    direction_html = _to_html(_direction_fig(df, top_n))
     parcoords_html = _to_html(_parcoords_fig(df, metric))
 
     # ── Assemble ──────────────────────────────────────────────────────────────
@@ -539,6 +605,8 @@ def generate_report(
         + kpi_html
         + _html_section(f"Top {top_n} Combinations", table_html)
         + _html_section("Performance Overview", _chart_grid(equity_html, rdist_html))
+        + _html_section("Long vs Short Breakdown",
+                        f'<div class="chart-full">{direction_html}</div>')
         + _html_section("All Combos: Win Rate × Profit Factor",
                         f'<div class="chart-full">{scatter_html}</div>')
         + _html_section("Parameter Sensitivity",

@@ -635,7 +635,13 @@ def main() -> None:
     print(f"Resume:      {'disabled (--no-resume)' if args.no_resume else 'enabled'}")
     print(f"Total runs:  {len(params) * len(cfg.codes)}")
 
-    run_tag     = datetime.now().strftime("%Y%m%d_%H%M")
+    if cfg.fast:
+        mode_tag = "smoke"
+    elif args.random > 0:
+        mode_tag = f"random_{args.random}"
+    else:
+        mode_tag = "grid"
+    run_tag     = f"{datetime.now().strftime('%Y%m%d_%H%M')}_{ALGO_VERSION}_{mode_tag}"
     results_dir = _RESULTS_DIR / run_tag
     csv_path    = results_dir / "backtest_results.csv"
 

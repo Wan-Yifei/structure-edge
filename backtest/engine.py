@@ -207,6 +207,10 @@ class BacktestResult:
 
     def summary_dict(self) -> dict:
         rs = [t.r_multiple for t in self.trades]
+        bull = [t for t in self.trades if t.direction == "bull"]
+        bear = [t for t in self.trades if t.direction == "bear"]
+        bull_wins = sum(1 for t in bull if t.result == "win")
+        bear_wins = sum(1 for t in bear if t.result == "win")
         return {
             "n_trades":        self.n_trades,
             "win_rate":        round(self.win_rate, 3),
@@ -217,6 +221,12 @@ class BacktestResult:
             "max_loss_r":      round(self.max_loss_r, 2),
             "sharpe":          round(sharpe_ratio(rs), 3),
             "sortino":         round(sortino_ratio(rs), 3),
+            "bull_trades":     len(bull),
+            "bear_trades":     len(bear),
+            "bull_win_rate":   round(bull_wins / len(bull), 3) if bull else 0.0,
+            "bear_win_rate":   round(bear_wins / len(bear), 3) if bear else 0.0,
+            "bull_total_r":    round(sum(t.r_multiple for t in bull), 2),
+            "bear_total_r":    round(sum(t.r_multiple for t in bear), 2),
             **self.params.to_dict(),
         }
 
