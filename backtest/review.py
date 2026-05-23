@@ -43,7 +43,8 @@ from strategy.smc   import (
     find_swings, detect_bos_choch, detect_fvg, determine_trend,
 )
 
-_HTF_CHART_BARS   = 60   # HTF bars shown before the entry bar
+_HTF_CHART_BARS   = 60   # total HTF bars shown, centered on entry bar
+_HTF_HALF         = _HTF_CHART_BARS // 2
 _LTF_PRE_BARS     = 40   # LTF bars shown before entry
 _LTF_POST_BARS    = 20   # LTF bars shown after exit
 _TOP_N_LOSSES     = 5
@@ -78,6 +79,33 @@ def _find_streaks(trades: list[Trade]) -> dict:
 
 
 # ── Chart helpers ─────────────────────────────────────────────────────────────
+
+def _entry_fvg(
+    fvgs: list[dict],
+    entry_price: float,
+    direction: str,
+    entry_bar: int,
+) -> list[dict]:
+    """Return the single FVG most directly responsible for this trade entry.
+
+    Selects the most recent FVG that (a) matches trade direction, (b) formed at
+    or before entry_bar, and (c) contains the entry price. Falls back to the
+    most recent same-direction FVG if none contain the price.
+    """
+    candidates = [
+        f for f in fvgs
+        if f["direction"] == direction and f["idx"] <= entry_bar
+    ]
+    if not candidates:
+        return []
+    containing = [
+        f for f in candidates
+        if f["bottom"] <= entry_price <= f["top"]
+    ]
+    if containing:
+        return [max(containing, key=lambda f: f["idx"])]
+    return [max(candidates, key=lambda f: f["idx"])]
+
 
 def _style_ax(ax):
     ax.set_facecolor(BG_BAR)
@@ -131,11 +159,13 @@ def _trade_chart_b64(
     entry_str = str(trade.entry_time)
     exit_str  = str(trade.exit_time)
 
-    # HTF: last bar before or at entry
-    htf_pos = int(np.searchsorted(htf_times, entry_str, side="right")) - 1
-    htf_pos = max(0, min(htf_pos, len(htf) - 1))
-    htf_start = max(0, htf_pos - _HTF_CHART_BARS + 1)
-    htf_slice = htf.iloc[htf_start : htf_pos + 1].reset_index(drop=True)
+    # HTF: center on entry bar so you can see context before and after
+    htf_pos   = int(np.searchsorted(htf_times, entry_str, side="right")) - 1
+    htf_pos   = max(0, min(htf_pos, len(htf) - 1))
+    htf_start = max(0, htf_pos - _HTF_HALF)
+    htf_end   = min(len(htf), htf_pos + _HTF_HALF + 1)
+    htf_slice = htf.iloc[htf_start:htf_end].reset_index(drop=True)
+    rel_entry_htf = htf_pos - htf_start  # entry bar position within the slice
 
     # LTF: use stored bar index
     entry_bar = trade.entry_ltf_bar
@@ -151,7 +181,9 @@ def _trade_chart_b64(
     # ── reconstruct SMC signals on the HTF slice ──────────────────────────
     htf_swings = find_swings(htf_slice, params.swing_lookback)
     htf_bos    = detect_bos_choch(htf_slice, params.swing_lookback)
-    htf_fvgs   = detect_fvg(htf_slice, params.fvg_min_width_pct)
+    all_htf_fvgs = detect_fvg(htf_slice, params.fvg_min_width_pct)
+    # Show only the FVG directly responsible for this trade entry (not all FVGs)
+    htf_fvgs   = _entry_fvg(all_htf_fvgs, trade.entry_price, trade.direction, rel_entry_htf)
 
     # ── reconstruct LTF BOS/CHoCH (only if ltf_confirmation was used) ────
     ltf_bos: list[dict] = []
@@ -176,10 +208,11 @@ def _trade_chart_b64(
     ax_h.set_xticks(range(0, n_h, step_h))
     ax_h.set_xticklabels([labels_h[i] for i in range(0, n_h, step_h)],
                          rotation=30, fontsize=6, color=FG)
-    # vertical line at entry time
-    ax_h.axvline(n_h - 1, color=GOLD, lw=1, linestyle="--", alpha=0.7,
+    # vertical line at entry bar (centered in window)
+    ax_h.axvline(rel_entry_htf, color=GOLD, lw=1, linestyle="--", alpha=0.7,
                  label="Entry bar")
-    ax_h.set_title(f"HTF {params.trend_tf}  — {trade.direction.upper()} setup",
+    dir_label = "LONG" if trade.direction == "bull" else "SHORT"
+    ax_h.set_title(f"HTF {params.trend_tf}  — {dir_label} setup",
                    color=FG, fontsize=8)
     ax_h.legend(fontsize=6, facecolor=BG_BAR, labelcolor=FG)
 
@@ -223,7 +256,7 @@ def _trade_chart_b64(
     ax_l.legend(fontsize=6, facecolor=BG_BAR, labelcolor=FG)
 
     fig.suptitle(
-        f"Trade {trade.trade_id}  |  {trade.result.upper()}  {trade.r_multiple:+.2f}R",
+        f"Trade {trade.trade_id}  |  {dir_label}  |  {trade.result.upper()}  {trade.r_multiple:+.2f}R",
         color=FG, fontsize=9, fontweight="bold",
     )
     fig.tight_layout()
