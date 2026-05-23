@@ -100,16 +100,23 @@ class BacktestParams:
     sl_buffer_pct:            float = 0.001  # extra % added beyond the swing level
     max_sl_pct:           float = 0.005  # skip trade if SL > this % of entry
     min_rr:               float = 2.0
+    allow_short:          bool  = True   # False = long-only (skip bear setups)
+    intraday_only:        bool  = False  # True = force-close positions at end of trading day
 
     def label(self) -> str:
         d    = f"D{self.displacement_atr_mult:.1f}b{self.displacement_body_ratio:.1f}" if self.displacement_required else "d"
         conf = "ltf" if self.require_ltf_confirmation else "raw"
+        flags = ""
+        if not self.allow_short:
+            flags += " Lo"
+        if self.intraday_only:
+            flags += " ID"
         return (
             f"{self.trend_tf}/{self.entry_tf} lb{self.swing_lookback}"
             f" bos{self.bos_count} w{self.fvg_min_width_pct:.3f}"
             f" dp{self.fvg_entry_depth_pct:.1f} {d}"
             f" {conf} sl{self.sl_buffer_pct:.3f} msl{self.max_sl_pct:.3f}"
-            f" rr{self.min_rr:.1f}"
+            f" rr{self.min_rr:.1f}{flags}"
         )
 
     def to_dict(self) -> dict:
@@ -250,6 +257,19 @@ def run_backtest(
     vp_edges:      object          = None   # volume profile edges (np.ndarray | None)
     vp_vols:       object          = None   # volume profile bins  (np.ndarray | None)
 
+    # Precompute last-bar-of-day index for each LTF bar (intraday_only mode).
+    # Groups bars by calendar date (first 10 chars of time_key) and records the
+    # absolute index of the last bar on the same date.
+    day_end_bars: Optional[np.ndarray] = None
+    if params.intraday_only:
+        dates = np.array([str(t)[:10] for t in ltf_times])
+        day_end_bars = np.empty(n_ltf, dtype=np.int64)
+        _, first_occ = np.unique(dates, return_index=True)
+        for k in range(len(first_occ)):
+            s = first_occ[k]
+            e = (first_occ[k + 1] - 1) if k + 1 < len(first_occ) else n_ltf - 1
+            day_end_bars[s : e + 1] = e
+
     # Pre-compute LTF BOS/CHoCH once — avoids calling detect_bos_choch() on every
     # 1m bar while waiting in an FVG zone (otherwise O(n_bars × window) Python loops).
     # Signals are stored with ABSOLUTE LTF bar indices; bisect gives O(log n) window slicing.
@@ -273,13 +293,35 @@ def run_backtest(
         # ── 1. Manage open trade (vectorised exit — no bar-by-bar loop) ───
         if active_trade is not None:
             sl_dist = abs(active_trade.entry_price - active_trade.sl)
+
+            # intraday_only: cap exit search to end of the entry day
+            if day_end_bars is not None:
+                eod_bar = int(day_end_bars[active_trade.entry_ltf_bar])
+                if i > eod_bar:
+                    # Entry was on the last bar of the day — close immediately at
+                    # that bar's close (avoids crossing into next session).
+                    ep  = float(ltf_cls[active_trade.entry_ltf_bar])
+                    pnl = (ep - active_trade.entry_price if active_trade.direction == "bull"
+                           else active_trade.entry_price - ep)
+                    active_trade.exit_price  = ep
+                    active_trade.exit_time   = str(ltf_times[active_trade.entry_ltf_bar])
+                    active_trade.result      = "timeout"
+                    active_trade.r_multiple  = pnl / sl_dist
+                    result.trades.append(active_trade)
+                    active_trade = None; active_trade_bar = -1
+                    in_fvg_since = -1;   current_fvg_key  = None
+                    continue  # process bar i normally (may open a new trade)
+                effective_max_bars = min(max_bars_in_trade, eod_bar - i + 1)
+            else:
+                effective_max_bars = max_bars_in_trade
+
             exit_bar, exit_price, outcome = _find_exit(
                 ltf_lows, ltf_highs, ltf_cls,
                 from_bar=i,
                 sl=active_trade.sl,
                 tp=active_trade.tp,
                 direction=active_trade.direction,
-                max_bars=max_bars_in_trade,
+                max_bars=effective_max_bars,
             )
             active_trade.exit_price = exit_price
             active_trade.result     = outcome
@@ -327,6 +369,14 @@ def run_backtest(
         if trend is None:
             in_fvg_since    = -1
             current_fvg_key = None
+            i += 1
+            continue
+
+        # Skip bear setups when long-only mode is active
+        if trend == "bear" and not params.allow_short:
+            if current_fvg_key is not None:
+                in_fvg_since    = -1
+                current_fvg_key = None
             i += 1
             continue
 
