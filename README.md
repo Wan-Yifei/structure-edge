@@ -31,6 +31,7 @@ moomoo/
 │   ├── db.py                    #   DuckDB 读写（runs / trades / run_stats / live_trades）
 │   ├── stats.py                 #   统计函数：Sharpe / Sortino / heatmap
 │   ├── report.py                #   HTML 报告生成（Plotly）
+│   ├── review.py                #   单组合交易回顾报告（K 线图 + 统计，自包含 HTML）
 │   ├── viz.py                   #   matplotlib 可视化（结果图表）
 │   └── logger.py                #   多进程安全日志（QueueHandler）
 │
@@ -130,6 +131,9 @@ uv run backtest/run.py --codes US.SNDK --random 300 --no-viz
 
 # 强制重跑（忽略断点续跑缓存）
 uv run backtest/run.py --fast --no-resume
+
+# 强制重跑（忽略 DB 已有的日期段，不从数据库复用交易数据）
+uv run backtest/run.py --codes US.SNDK --no-reuse
 ```
 
 ### 输出
@@ -140,9 +144,19 @@ uv run backtest/run.py --fast --no-resume
 | `backtest/results/<时间戳>/report_<代码>.html` | 交互式 Plotly 报告（KPI 卡片 / 热力图 / 参数重要性）|
 | `db/backtest.duckdb` | 每笔模拟交易持久化，支持按 trade_id 回溯 |
 
-### 断点续跑
+### 断点续跑 & 日期段复用
 
-相同参数组合的结果自动缓存在 `backtest/results/checkpoints/`。下次运行时已完成的组合直接跳过。
+- **断点续跑**：相同参数组合的结果自动缓存在 `backtest/results/checkpoints/`。下次运行时已完成的组合直接跳过。
+- **DB 日期段复用**：若某个 `(股票, 参数组合)` 的部分日期已在 `backtest.duckdb` 中，只运行缺口日期段，并把新旧交易合并。使用 `--no-reuse` 可禁用此行为。
+
+### 单组合交易回顾报告
+
+```bash
+# 生成指定参数组合的 HTML 回顾报告
+uv run backtest/review.py --code US.SNDK --start 2025-05-22 --end 2026-05-22
+```
+
+报告内容：10 项 KPI 卡片（WR / PF / Sharpe / Sortino / DD 等）、净值曲线、全部交易列表（含 trade_id）、最长连胜/连亏 K 线图、Top-5 亏损与 Top-3 盈利交易图。生成路径：`backtest/results/review_<时间戳>/review_<代码>_<tf>.html`。
 
 ### 统计指标说明
 
