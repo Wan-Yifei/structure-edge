@@ -43,8 +43,9 @@ from strategy.smc   import (
     find_swings, detect_bos_choch, detect_fvg, determine_trend,
 )
 
-_HTF_CHART_BARS   = 60   # total HTF bars shown, centered on entry bar
+_HTF_CHART_BARS   = 80   # total HTF bars shown, centered on entry bar
 _HTF_HALF         = _HTF_CHART_BARS // 2
+_HTF_ENGINE_WINDOW = 200  # must match engine._HTF_WINDOW
 _LTF_PRE_BARS     = 40   # LTF bars shown before entry
 _LTF_POST_BARS    = 20   # LTF bars shown after exit
 _TOP_N_LOSSES     = 5
@@ -178,9 +179,31 @@ def _trade_chart_b64(
     rel_entry = entry_bar - ltf_start
     rel_exit  = exit_bar  - ltf_start
 
-    # ── reconstruct SMC signals on the HTF slice ──────────────────────────
-    htf_swings = find_swings(htf_slice, params.swing_lookback)
-    htf_bos    = detect_bos_choch(htf_slice, params.swing_lookback)
+    # ── reconstruct SMC signals matching the engine's backward window ─────
+    # The engine sees 200 HTF bars ending at the current bar; the chart only
+    # shows 80 bars centred on entry.  Re-running detect_bos_choch on the
+    # narrow chart slice gives different (and often wrong) signals because the
+    # trend-setting CHoCH might be 50-150 bars back — outside the visible window.
+    # Solution: run BOS detection on the engine's full backward window, then
+    # remap signal indices into the chart coordinate system.
+    eng_start   = max(0, htf_pos + 1 - _HTF_ENGINE_WINDOW)
+    htf_eng     = htf.iloc[eng_start : htf_pos + 1].reset_index(drop=True)
+    htf_bos_eng = detect_bos_choch(htf_eng, params.swing_lookback)
+
+    # Remap: engine bar k → absolute htf index = eng_start + k
+    #        chart  bar m → absolute htf index = htf_start + m
+    #        so chart_m = k + (eng_start - htf_start)
+    idx_offset = eng_start - htf_start
+    n_chart = len(htf_slice)
+    htf_bos: list[dict] = []
+    for sig in htf_bos_eng:
+        s = dict(sig)
+        s["idx"]      = sig["idx"] + idx_offset
+        s["from_idx"] = sig.get("from_idx", max(0, sig["idx"] - 1)) + idx_offset
+        # Only include signals with at least one endpoint visible in chart
+        if s["from_idx"] < n_chart and s["idx"] >= 0:
+            htf_bos.append(s)
+
     all_htf_fvgs = detect_fvg(htf_slice, params.fvg_min_width_pct)
     # Show only the FVG directly responsible for this trade entry (not all FVGs)
     htf_fvgs   = _entry_fvg(all_htf_fvgs, trade.entry_price, trade.direction, rel_entry_htf)
@@ -210,7 +233,7 @@ def _trade_chart_b64(
                          rotation=30, fontsize=6, color=FG)
 
     # vertical line at entry bar (centered in window)
-    dir_label  = "LONG"  if trade.direction == "bull" else "SHORT"
+    dir_label   = "LONG"  if trade.direction == "bull" else "SHORT"
     trend_color = UP if trade.direction == "bull" else DOWN
     ax_h.axvline(rel_entry_htf, color=GOLD, lw=1, linestyle="--", alpha=0.7)
 
@@ -222,14 +245,39 @@ def _trade_chart_b64(
     ax_h.axhline(trade.tp,          color=GREEN, lw=0.9, linestyle="--", alpha=0.6,
                  label=f"TP {trade.tp:.2f}")
 
+    # Engine's trend from the full 200-bar window (same calculation the engine did)
+    eng_trend = determine_trend(htf_bos_eng, params.bos_count)
+
+    # Find the last CHoCH that established the current trend direction
+    trend_choch_info = ""
+    if htf_bos_eng:
+        last_choch = None
+        for sig in htf_bos_eng:
+            if sig["type"] == "CHoCH":
+                last_choch = sig
+        if last_choch is not None:
+            bars_ago = len(htf_eng) - 1 - last_choch["idx"]
+            abs_choch = eng_start + last_choch["idx"]
+            choch_dir = "bull" if last_choch["direction"] == "bull" else "bear"
+            choch_chart = abs_choch - htf_start  # chart coordinate
+            if 0 <= choch_chart < n_chart:
+                # CHoCH is visible — draw a vertical dashed line
+                ax_h.axvline(choch_chart, color=trend_color, lw=0.8, linestyle=":", alpha=0.5)
+            trend_choch_info = (
+                f"  CHoCH {choch_dir} {bars_ago}bars ago"
+                if bars_ago > 0 else ""
+            )
+
     # trend direction badge (top-left)
     trend_arrow = "▲" if trade.direction == "bull" else "▼"
-    ax_h.text(0.02, 0.97, f"{trend_arrow} {dir_label}",
-              transform=ax_h.transAxes, color=trend_color, fontsize=8,
+    ax_h.text(0.02, 0.97, f"{trend_arrow} {dir_label}{trend_choch_info}",
+              transform=ax_h.transAxes, color=trend_color, fontsize=7,
               fontweight="bold", va="top", ha="left", zorder=10,
               bbox=dict(fc=BG_BAR, ec=trend_color, alpha=0.85, pad=3, boxstyle="round"))
 
-    ax_h.set_title(f"HTF {params.trend_tf}  — {dir_label} setup", color=FG, fontsize=8)
+    ax_h.set_title(
+        f"HTF {params.trend_tf}  — {dir_label} setup  [engine window: last {min(htf_pos+1, _HTF_ENGINE_WINDOW)} bars]",
+        color=FG, fontsize=8)
     ax_h.legend(fontsize=6, facecolor=BG_BAR, labelcolor=FG)
 
     # LTF panel
