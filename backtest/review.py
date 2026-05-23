@@ -454,6 +454,14 @@ def generate_report(
         raise RuntimeError("No trades produced — try different parameters or date range")
     print(f"[review] {len(trades)} trades found. Generating charts …")
 
+    # Persist trades so trade_viewer can look them up by ID without manual date entry.
+    try:
+        from backtest.db import BacktestDB
+        with BacktestDB() as _db:
+            _db.insert_review_trades(code, params.to_dict(), trades)
+    except Exception:
+        pass  # DB unavailable (locked, missing) — not fatal for HTML report
+
     # ── Statistics ─────────────────────────────────────────────────────────
     rs        = [t.r_multiple for t in trades]
     n_trades  = len(trades)

@@ -1986,8 +1986,11 @@ class OrderFlowApp(tk.Tk):
                 row = db.fetch_live_trade(trade_id)     # live / paper first
                 source = "live_trades"
                 if row is None:
-                    row = db.fetch_trade(trade_id)      # backtest trades fallback
+                    row = db.fetch_trade(trade_id)      # backtest grid trades
                     source = "backtest"
+                if row is None:
+                    row = db.fetch_review_trade(trade_id)   # review.py trades
+                    source = "review"
         except Exception as exc:
             messagebox.showerror("DB Error", str(exc))
             return
