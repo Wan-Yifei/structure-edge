@@ -170,8 +170,9 @@ class BacktestDB:
             self._conn.execute(_DDL)
             # Migrations for existing databases
             for col_ddl in [
-                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS algo_version VARCHAR",
-                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS commit_hash  VARCHAR",
+                "ALTER TABLE runs   ADD COLUMN IF NOT EXISTS algo_version  VARCHAR",
+                "ALTER TABLE runs   ADD COLUMN IF NOT EXISTS commit_hash   VARCHAR",
+                "ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_ltf_bar INTEGER",
             ]:
                 try:
                     self._conn.execute(col_ddl)
