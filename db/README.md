@@ -4,6 +4,21 @@
 
 ---
 
+## 为什么用两种数据库？
+
+项目中同时使用了 **SQLite** 和 **DuckDB**，原因是两种场景的访问模式截然不同：
+
+| | SQLite（`ticks.db`）| DuckDB（`backtest.duckdb` / `backtest_klines.duckdb`）|
+|--|--|--|
+| 访问模式 | 行式，高频写入 | 列式，批量分析查询 |
+| 典型操作 | 每秒插入数百条 tick | `SELECT avg(r_multiple) GROUP BY strategy` |
+| 强项 | 并发写入稳定，WAL 模式开销低 | 聚合/过滤百万行速度快，Pandas 互转方便 |
+| 弱项 | 列式聚合慢 | 高频单行写入开销高 |
+
+简单说：**SQLite 处理实时流入的行情数据，DuckDB 处理离线批量分析**。两者分工明确，不是历史遗留，不建议合并。
+
+---
+
 ## 文件一览
 
 | 文件 | 大小（约） | 用途 |
@@ -94,6 +109,8 @@ live_trades（独立）
 | `entry_tf` | VARCHAR | 入场时间框架，如 `15m` |
 | `start_date` | VARCHAR | 回测开始日期 |
 | `end_date` | VARCHAR | 回测结束日期 |
+| `algo_version` | VARCHAR | 算法语义版本标签（如 `smc_v2`）；正式打 tag 前为空。用于隔离不同算法逻辑的结果，断点续跑时只复用相同版本的结果 |
+| `commit_hash` | VARCHAR | 运行时自动记录的 git commit 短哈希，精确溯源到产生结果的代码版本 |
 | `status` | VARCHAR | `pending` / `running` / `done` / `failed` |
 | `created_at` | TIMESTAMP | 创建时间 |
 | `finished_at` | TIMESTAMP | 完成时间 |
@@ -135,6 +152,29 @@ live_trades（独立）
 | `sharpe` | DOUBLE | 夏普比率（基于 R 序列） |
 | `sortino` | DOUBLE | 索提诺比率（只考虑下行波动） |
 | `computed_at` | TIMESTAMP | 写入时间 |
+
+---
+
+### 表：`review_trades` — Review 生成的回测交易
+
+由 `backtest/review.py` 运行后写入，供 `analysis/trade_viewer.py` 按 trade_id 查询，免去手动填写 symbol / 日期。与 `trades` 表的区别是没有 `run_id`（不属于参数扫描任务）。
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `trade_id` | VARCHAR | 主键 |
+| `symbol` | VARCHAR | 股票代码 |
+| `direction` | VARCHAR | `bull` / `bear` |
+| `entry_time` | VARCHAR | 入场时间 |
+| `exit_time` | VARCHAR | 出场时间 |
+| `entry_price` | DOUBLE | 入场价 |
+| `exit_price` | DOUBLE | 出场价 |
+| `sl_price` | DOUBLE | 止损价 |
+| `tp_price` | DOUBLE | 止盈价 |
+| `result` | VARCHAR | `win` / `loss` / `timeout` |
+| `r_multiple` | DOUBLE | 实现 R 倍数 |
+| `planned_rr` | DOUBLE | 计划风险回报比 |
+| `config_json` | JSON | 生成该交易时的 `BacktestParams` 快照（供 viewer 读取 `entry_tf`）|
+| `created_at` | TIMESTAMP | 写入时间 |
 
 ---
 
