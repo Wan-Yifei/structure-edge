@@ -506,6 +506,22 @@ def draw_candle_deltas(
         )
 
 
+# ── KD channel overlay ───────────────────────────────────────────────────────
+
+def draw_kd(ax, klines: pd.DataFrame, kd_df: pd.DataFrame) -> list:
+    """Draw KD fast/slow channel midlines on a candle axis.
+
+    kd_df is the DataFrame returned by compute_kd() — must be aligned to klines
+    (same length, same row order).  Returns a list of drawn artists.
+    """
+    x = np.arange(len(klines))
+    fast, = ax.plot(x, kd_df["mid1"].values, color=GREEN, lw=1.0,
+                    linestyle="--", alpha=0.75, label="KD fast", zorder=4)
+    slow, = ax.plot(x, kd_df["mid2"].values, color="#5c9cf5", lw=1.0,
+                    linestyle="--", alpha=0.75, label="KD slow", zorder=4)
+    return [fast, slow]
+
+
 # ── SMC: BOS / CHoCH ─────────────────────────────────────────────────────────
 
 def draw_bos_choch(ax_c, klines: pd.DataFrame, signals: list[dict]) -> list:

@@ -37,10 +37,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from backtest.engine import BacktestParams, BacktestResult, Trade, run_backtest
 from backtest.stats  import sharpe_ratio, sortino_ratio
 from core.chart      import BG_BAR, FG, GREEN, RED, GOLD, GRID, UP, DOWN
-from core.draw       import draw_candles, draw_fvg, draw_bos_choch
+from core.draw       import draw_candles, draw_fvg, draw_bos_choch, draw_kd
 from feeds.fetcher   import fetch_klines
 from strategy.smc   import (
     find_swings, detect_bos_choch, detect_fvg, determine_trend,
+    compute_kd, kd_trend,
 )
 
 _HTF_CHART_BARS   = 80   # total HTF bars shown, centered on entry bar
@@ -225,6 +226,9 @@ def _trade_chart_b64(
     labels_h = draw_candles(ax_h, htf_slice)
     draw_fvg(ax_h, htf_slice, htf_fvgs, max_bars=_HTF_CHART_BARS)
     draw_bos_choch(ax_h, htf_slice, htf_bos)
+    if params.htf_trend_method == "kd":
+        kd_df = compute_kd(htf_slice, params.kd_fast, params.kd_slow)
+        draw_kd(ax_h, htf_slice, kd_df)
     n_h = len(htf_slice)
     step_h = max(1, n_h // 8)
     ax_h.set_xticks(range(0, n_h, step_h))

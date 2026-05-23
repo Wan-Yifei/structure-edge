@@ -14,6 +14,7 @@ from strategy.smc.fvg import (
 )
 from strategy.smc.confirmation import check_ltf_confirmation
 from strategy.smc.order_blocks import detect_order_blocks
+from strategy.smc.kd_trend import compute_kd, kd_trend
 
 __all__ = [
     "find_swings",
@@ -26,4 +27,6 @@ __all__ = [
     "fvg_overlaps_lvn",
     "check_ltf_confirmation",
     "detect_order_blocks",
+    "compute_kd",
+    "kd_trend",
 ]

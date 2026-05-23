@@ -33,6 +33,7 @@ from strategy.smc import (
     check_ltf_confirmation,
     compute_volume_profile,
     fvg_overlaps_lvn,
+    kd_trend,
 )
 from backtest.stats import sharpe_ratio, sortino_ratio
 
@@ -113,6 +114,10 @@ class BacktestParams:
     htf_window_bars:      int   = 20     # HTF bars for trend/structure (20 × 15 m ≈ 5 h ≈ one trading day)
     allow_short:          bool  = True   # False = long-only (skip bear setups)
     intraday_only:        bool  = False  # True = force-close positions at end of trading day
+    htf_trend_method:     str   = "bos_choch"  # "bos_choch" | "kd"
+    kd_fast:              int   = 25    # KD fast EMA span (only used when htf_trend_method="kd")
+    kd_slow:              int   = 90    # KD slow EMA span
+    kd_flat_threshold:    float = 0.0   # |spread| below this → no trend (price units)
 
     def label(self) -> str:
         d    = f"D{self.displacement_atr_mult:.1f}b{self.displacement_body_ratio:.1f}" if self.displacement_required else "d"
@@ -394,12 +399,20 @@ def run_backtest(
         if htf_pos != prev_htf_pos:
             htf_start  = max(0, htf_pos + 1 - params.htf_window_bars)
             htf_view   = htf.iloc[htf_start : htf_pos + 1].reset_index(drop=True)
-            htf_swings          = find_swings(htf_view, params.swing_lookback)
-            htf_bos             = detect_bos_choch(htf_view, params.swing_lookback, trend_window=params.htf_window_bars)
-            htf_fvgs            = detect_fvg(htf_view, params.fvg_min_width_pct)
-            trend               = determine_trend(htf_bos, params.bos_count)
-            vp_edges, vp_vols   = compute_volume_profile(htf_view)
-            prev_htf_pos        = htf_pos
+            htf_swings = find_swings(htf_view, params.swing_lookback)
+            htf_fvgs   = detect_fvg(htf_view, params.fvg_min_width_pct)
+            vp_edges, vp_vols = compute_volume_profile(htf_view)
+
+            if params.htf_trend_method == "kd":
+                htf_bos = []
+                trend   = kd_trend(htf_view, params.kd_fast, params.kd_slow,
+                                   params.kd_flat_threshold)
+            else:
+                htf_bos = detect_bos_choch(htf_view, params.swing_lookback,
+                                           trend_window=params.htf_window_bars)
+                trend   = determine_trend(htf_bos, params.bos_count)
+
+            prev_htf_pos = htf_pos
 
         if trend is None:
             in_fvg_since    = -1
