@@ -36,7 +36,7 @@ from strategy.smc import (
 )
 from backtest.stats import sharpe_ratio, sortino_ratio
 
-ALGO_VERSION = ""  # set to a semantic tag when formally versioned (e.g. "smc_v2"); empty until first tag
+ALGO_VERSION = "smc_v1"  # bump when algorithm logic changes significantly; must match a git tag
 
 _HTF_WINDOW_DEFAULT = 20  # default HTF bars (~5 h at 15 m ≈ one trading day; override via BacktestParams.htf_window_bars)
 _WARMUP      = 40   # skip the first N LTF bars while indicators warm up
