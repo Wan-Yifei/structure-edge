@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS runs (
     entry_tf     VARCHAR NOT NULL,
     start_date   VARCHAR NOT NULL,
     end_date     VARCHAR NOT NULL,
+    algo_version VARCHAR,
+    commit_hash  VARCHAR,
     status       VARCHAR NOT NULL DEFAULT 'pending',
     created_at   TIMESTAMP DEFAULT now(),
     finished_at  TIMESTAMP
@@ -153,6 +155,15 @@ class BacktestDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = duckdb.connect(str(self.db_path))
         self._conn.execute(_DDL)
+        # Migrations for existing databases
+        for col_ddl in [
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS algo_version VARCHAR",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS commit_hash  VARCHAR",
+        ]:
+            try:
+                self._conn.execute(col_ddl)
+            except Exception:
+                pass
 
     def close(self) -> None:
         self._conn.close()
@@ -174,6 +185,8 @@ class BacktestDB:
         entry_tf: str,
         start_date: str,
         end_date: str,
+        algo_version: str = "",
+        commit_hash: str = "",
     ) -> tuple[str, bool]:
         """Return (run_id, needs_write).
 
@@ -182,8 +195,9 @@ class BacktestDB:
         """
         row = self._conn.execute(
             "SELECT run_id, status FROM runs WHERE config_hash = ? "
-            "AND symbol = ? AND trend_tf = ? AND entry_tf = ?",
-            [config_hash, symbol, trend_tf, entry_tf],
+            "AND symbol = ? AND trend_tf = ? AND entry_tf = ? "
+            "AND COALESCE(algo_version, '') = ?",
+            [config_hash, symbol, trend_tf, entry_tf, algo_version],
         ).fetchone()
 
         if row:
@@ -200,9 +214,11 @@ class BacktestDB:
         run_id = str(uuid.uuid4())
         self._conn.execute(
             "INSERT INTO runs (run_id, config_hash, config_json, symbol, "
-            "trend_tf, entry_tf, start_date, end_date) VALUES (?,?,?,?,?,?,?,?)",
+            "trend_tf, entry_tf, start_date, end_date, algo_version, commit_hash) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             [run_id, config_hash, json.dumps(config_json), symbol,
-             trend_tf, entry_tf, start_date, end_date],
+             trend_tf, entry_tf, start_date, end_date,
+             algo_version or None, commit_hash or None],
         )
         return run_id, True
 
@@ -283,13 +299,14 @@ class BacktestDB:
 
     def covered_segments(
         self, config_hash: str, symbol: str, trend_tf: str, entry_tf: str,
+        algo_version: str = "",
     ) -> list[tuple[str, str]]:
         """Return (start_date, end_date) for all completed runs of this combo."""
         rows = self._conn.execute(
             "SELECT start_date, end_date FROM runs "
             "WHERE config_hash=? AND symbol=? AND trend_tf=? AND entry_tf=? "
-            "AND status='done' ORDER BY start_date",
-            [config_hash, symbol, trend_tf, entry_tf],
+            "AND COALESCE(algo_version, '') = ? AND status='done' ORDER BY start_date",
+            [config_hash, symbol, trend_tf, entry_tf, algo_version],
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
@@ -297,6 +314,7 @@ class BacktestDB:
         self, config_hash: str, symbol: str,
         trend_tf: str, entry_tf: str,
         start: str, end: str,
+        algo_version: str = "",
     ) -> list["Trade"]:
         """Load Trade objects from DB for this combo within [start, end]."""
         from backtest.engine import Trade  # local import to avoid circular
@@ -309,11 +327,12 @@ class BacktestDB:
             JOIN runs r ON t.run_id = r.run_id
             WHERE r.config_hash=? AND t.symbol=?
               AND r.trend_tf=? AND r.entry_tf=?
+              AND COALESCE(r.algo_version, '') = ?
               AND r.status='done'
               AND LEFT(t.entry_time, 10) >= ? AND LEFT(t.entry_time, 10) <= ?
             ORDER BY t.entry_time
             """,
-            [config_hash, symbol, trend_tf, entry_tf, start, end],
+            [config_hash, symbol, trend_tf, entry_tf, algo_version, start, end],
         ).fetchall()
         trades = []
         for r in rows:
@@ -343,7 +362,7 @@ class BacktestDB:
 
     def get_run_stats(self, top_n: int = 20) -> pd.DataFrame:
         return self._conn.execute(
-            "SELECT r.symbol, r.trend_tf, r.entry_tf, r.config_hash, "
+            "SELECT r.symbol, r.trend_tf, r.entry_tf, r.algo_version, r.commit_hash, r.config_hash, "
             "s.n_trades, s.win_rate, s.total_r, s.avg_r, "
             "s.profit_factor, s.max_drawdown_r, s.sharpe, s.sortino "
             "FROM run_stats s JOIN runs r ON s.run_id = r.run_id "

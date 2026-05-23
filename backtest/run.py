@@ -58,7 +58,23 @@ import pandas as pd
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from feeds.fetcher import fetch_klines
-from backtest.engine  import BacktestParams, BacktestResult, run_backtest
+from backtest.engine  import ALGO_VERSION, BacktestParams, BacktestResult, run_backtest
+
+
+def _git_commit_hash() -> str:
+    import subprocess
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=pathlib.Path(__file__).parent,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ""
+
+
+_COMMIT_HASH = _git_commit_hash()
 from backtest.viz     import plot_backtest_results, plot_from_csv
 from backtest.report  import generate_report
 from backtest.logger  import make_listener, worker_init, get_logger
@@ -386,14 +402,14 @@ def run_grid(
         # ── DB date-range reuse ────────────────────────────────────────────
         if db is not None and not no_reuse and start_date and end_date:
             phash   = _params_hash(params)
-            covered = db.covered_segments(phash, code, params.trend_tf, params.entry_tf)
+            covered = db.covered_segments(phash, code, params.trend_tf, params.entry_tf, ALGO_VERSION)
             gaps    = _coverage_gaps(start_date, end_date, covered)
 
             if not gaps:
                 # Fully covered — load trades from DB, skip engine entirely
                 cached = db.load_trades_in_range(
                     phash, code, params.trend_tf, params.entry_tf,
-                    start_date, end_date,
+                    start_date, end_date, ALGO_VERSION,
                 )
                 bt = BacktestResult(params=params)
                 bt.trades = cached
@@ -424,7 +440,7 @@ def run_grid(
                 # Load cached trades from covered portions
                 cached = db.load_trades_in_range(
                     phash, code, params.trend_tf, params.entry_tf,
-                    start_date, end_date,
+                    start_date, end_date, ALGO_VERSION,
                 )
                 all_trades = sorted(
                     cached + gap_trades, key=lambda t: str(t.entry_time)
@@ -441,6 +457,7 @@ def run_grid(
                         run_id = db.get_or_create_run(
                             phash, params.to_dict(), code,
                             params.trend_tf, params.entry_tf, gap_start, gap_end,
+                            ALGO_VERSION, _COMMIT_HASH,
                         )[0]
                         db.mark_running(run_id)
                         db.write_trades(run_id, code, new_trades)
@@ -496,6 +513,7 @@ def run_grid(
                     run_id, needs_write = db.get_or_create_run(
                         _params_hash(p), p.to_dict(), code,
                         p.trend_tf, p.entry_tf, start_date, end_date,
+                        ALGO_VERSION, _COMMIT_HASH,
                     )
                     if needs_write:
                         db.mark_running(run_id)

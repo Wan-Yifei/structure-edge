@@ -36,10 +36,20 @@ from strategy.smc import (
 )
 from backtest.stats import sharpe_ratio, sortino_ratio
 
+ALGO_VERSION = ""  # set to a semantic tag when formally versioned (e.g. "smc_v2"); empty until first tag
+
 _HTF_WINDOW_DEFAULT = 20  # default HTF bars (~5 h at 15 m ≈ one trading day; override via BacktestParams.htf_window_bars)
-_LTF_WINDOW  = 120  # LTF bars used for swing/BOS detection
-_LTF_PRE_FVG = _LTF_WINDOW  # look back a full LTF window before FVG entry
 _WARMUP      = 40   # skip the first N LTF bars while indicators warm up
+
+
+def _tf_minutes(tf: str) -> int:
+    """Parse timeframe string to minutes. '1m'→1, '15m'→15, '1h'→60, '4h'→240."""
+    tf = tf.lower().strip()
+    if tf.endswith("h"):
+        return int(tf[:-1]) * 60
+    if tf.endswith("m"):
+        return int(tf[:-1])
+    raise ValueError(f"Unrecognised TF string: {tf!r}")
 
 
 def _find_exit(
@@ -274,12 +284,16 @@ def run_backtest(
             e = (first_occ[k + 1] - 1) if k + 1 < len(first_occ) else n_ltf - 1
             day_end_bars[s : e + 1] = e
 
+    # Number of LTF bars that fit in one HTF bar — used to size the confirmation
+    # window so LTF structure is evaluated only within the current HTF candle.
+    ltf_per_htf = max(1, _tf_minutes(params.trend_tf) // _tf_minutes(params.entry_tf))
+
     # Pre-compute LTF BOS/CHoCH once — avoids calling detect_bos_choch() on every
     # 1m bar while waiting in an FVG zone (otherwise O(n_bars × window) Python loops).
     # Signals are stored with ABSOLUTE LTF bar indices; bisect gives O(log n) window slicing.
     if params.require_ltf_confirmation:
         _ltf_precomp: list[dict] = sorted(
-            detect_bos_choch(ltf, lookback=1),
+            detect_bos_choch(ltf, lookback=1, trend_window=ltf_per_htf),
             key=lambda s: s["idx"],
         )
         _ltf_precomp_idxs: list[int] = [s["idx"] for s in _ltf_precomp]
@@ -371,7 +385,7 @@ def run_backtest(
             htf_start  = max(0, htf_pos + 1 - params.htf_window_bars)
             htf_view   = htf.iloc[htf_start : htf_pos + 1].reset_index(drop=True)
             htf_swings          = find_swings(htf_view, params.swing_lookback)
-            htf_bos             = detect_bos_choch(htf_view, params.swing_lookback)
+            htf_bos             = detect_bos_choch(htf_view, params.swing_lookback, trend_window=params.htf_window_bars)
             htf_fvgs            = detect_fvg(htf_view, params.fvg_min_width_pct)
             trend               = determine_trend(htf_bos, params.bos_count)
             vp_edges, vp_vols   = compute_volume_profile(htf_view)
@@ -440,12 +454,12 @@ def run_backtest(
 
         # ── 6. Confirmation ───────────────────────────────────────────────
         if params.require_ltf_confirmation:
-            cur_win     = max(0, i - _LTF_WINDOW)
+            cur_win     = max(0, i - ltf_per_htf)
             lo          = bisect.bisect_left(_ltf_precomp_idxs, cur_win)
             hi          = bisect.bisect_right(_ltf_precomp_idxs, i)
             ltf_bos_sig = [dict(s, idx=s["idx"] - cur_win)
                            for s in _ltf_precomp[lo:hi]]
-            anchor      = max(0, in_fvg_since - _LTF_PRE_FVG)
+            anchor      = max(0, in_fvg_since - ltf_per_htf)
             rel_anchor  = max(0, anchor - cur_win)
             if not check_ltf_confirmation(ltf_bos_sig, trend, after_idx=rel_anchor):
                 i += 1
