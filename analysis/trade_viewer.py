@@ -69,12 +69,13 @@ from core.draw import (
     draw_candles, draw_tick_profile_bars, draw_ohlcv_profile,
     draw_hybrid_profile, build_hybrid_profile,
     draw_candle_heatmap, draw_candle_deltas,
-    draw_bos_choch, draw_fvg, draw_order_blocks,
+    draw_bos_choch, draw_fvg, draw_order_blocks, draw_kd,
     aggregate_buckets, bucket_coverage, prices_arrays,
 )
 from strategy.smc.market_structure import detect_bos_choch
 from strategy.smc.fvg import detect_fvg
 from strategy.smc.order_blocks import detect_order_blocks
+from strategy.smc.kd_trend import compute_kd
 
 # ── Performance monitor ───────────────────────────────────────────────────────
 
@@ -185,6 +186,8 @@ _TA_OVERLAY: dict[str, dict] = {
     "EMA 50":          {"color": "#f9a825", "lw": 1.5},
     "EMA 200":         {"color": "#ef5350", "lw": 1.5},
     "Bollinger Bands": {"color": "#80cbc4", "lw": 0.9},
+    "KD":              {"fast": 25, "slow": 90,
+                        "color_fast": "#26a69a", "color_slow": "#5c9cf5", "lw": 1.0},
 }
 
 # Indicators drawn in a separate subplot below the price chart.
@@ -1626,6 +1629,9 @@ class OrderFlowApp(tk.Tk):
                 self.ax_c.fill_between(x, bb.bollinger_lband(),
                                        bb.bollinger_hband(),
                                        color=col, alpha=0.05, zorder=2)
+            elif name == "KD":
+                kd_df = compute_kd(klines, fast=cfg["fast"], slow=cfg["slow"])
+                draw_kd(self.ax_c, klines, kd_df)
         if any(n.startswith("EMA") for n in self._ta_overlay):
             self.ax_c.legend(
                 loc="upper left", fontsize=7,
