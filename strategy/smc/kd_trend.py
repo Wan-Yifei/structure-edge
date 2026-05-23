@@ -60,31 +60,37 @@ def kd_trend(
     klines: pd.DataFrame,
     fast: int = 25,
     slow: int = 90,
+    window: int = 10,
     flat_threshold: float = 0.0,
 ) -> str | None:
     """Return HTF trend direction using the KD channel indicator.
+
+    Trend is determined by the average WIDTH (Δspread) over the last `window`
+    bars — i.e. which direction the spread has been moving recently, not its
+    absolute level.  Only recent bars are relevant to the current trend.
 
     Args:
         klines:          OHLCV DataFrame.
         fast:            EMA span for the fast channel (default 25).
         slow:            EMA span for the slow channel (default 90).
-        flat_threshold:  Minimum |spread| to consider a directional trend.
-                         Spread in absolute price units.  0 = no flat filter.
+        window:          Number of recent bars to average WIDTH over.
+        flat_threshold:  |avg_width| below this → no trend (price units/bar).
+                         0 = no flat filter.
 
     Returns:
-        "bull"  if MID1 is sufficiently above MID2
-        "bear"  if MID1 is sufficiently below MID2
-        None    if spread is near zero (flat) or insufficient data
+        "bull"  if avg WIDTH over window is sufficiently positive
+        "bear"  if avg WIDTH over window is sufficiently negative
+        None    if near flat or insufficient data
     """
-    if len(klines) < slow:
+    if len(klines) < slow + window:
         return None
 
     kd = compute_kd(klines, fast, slow)
-    last_spread = float(kd["spread"].iloc[-1])
+    avg_width = float(kd["width"].iloc[-window:].mean())
 
-    if np.isnan(last_spread):
+    if np.isnan(avg_width):
         return None
-    if abs(last_spread) <= flat_threshold:
+    if abs(avg_width) <= flat_threshold:
         return None
 
-    return "bull" if last_spread > 0 else "bear"
+    return "bull" if avg_width > 0 else "bear"

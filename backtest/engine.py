@@ -117,7 +117,8 @@ class BacktestParams:
     htf_trend_method:     str   = "bos_choch"  # "bos_choch" | "kd"
     kd_fast:              int   = 25    # KD fast EMA span (only used when htf_trend_method="kd")
     kd_slow:              int   = 90    # KD slow EMA span
-    kd_flat_threshold:    float = 0.0   # |spread| below this → no trend (price units)
+    kd_window:            int   = 10    # bars to average WIDTH over for trend direction
+    kd_flat_threshold:    float = 0.0   # |avg_width| below this → no trend (price units/bar)
 
     def label(self) -> str:
         d    = f"D{self.displacement_atr_mult:.1f}b{self.displacement_body_ratio:.1f}" if self.displacement_required else "d"
@@ -409,7 +410,7 @@ def run_backtest(
                 htf_full = htf.iloc[: htf_pos + 1].reset_index(drop=True)
                 htf_bos  = []
                 trend    = kd_trend(htf_full, params.kd_fast, params.kd_slow,
-                                    params.kd_flat_threshold)
+                                    params.kd_window, params.kd_flat_threshold)
             else:
                 htf_bos = detect_bos_choch(htf_view, params.swing_lookback,
                                            trend_window=params.htf_window_bars)
