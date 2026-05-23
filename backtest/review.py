@@ -208,12 +208,28 @@ def _trade_chart_b64(
     ax_h.set_xticks(range(0, n_h, step_h))
     ax_h.set_xticklabels([labels_h[i] for i in range(0, n_h, step_h)],
                          rotation=30, fontsize=6, color=FG)
+
     # vertical line at entry bar (centered in window)
-    ax_h.axvline(rel_entry_htf, color=GOLD, lw=1, linestyle="--", alpha=0.7,
-                 label="Entry bar")
-    dir_label = "LONG" if trade.direction == "bull" else "SHORT"
-    ax_h.set_title(f"HTF {params.trend_tf}  — {dir_label} setup",
-                   color=FG, fontsize=8)
+    dir_label  = "LONG"  if trade.direction == "bull" else "SHORT"
+    trend_color = UP if trade.direction == "bull" else DOWN
+    ax_h.axvline(rel_entry_htf, color=GOLD, lw=1, linestyle="--", alpha=0.7)
+
+    # entry price + SL/TP horizontal reference lines on HTF
+    ax_h.axhline(trade.entry_price, color=GOLD,  lw=0.9, linestyle=":",  alpha=0.7,
+                 label=f"Entry {trade.entry_price:.2f}")
+    ax_h.axhline(trade.sl,          color=RED,   lw=0.9, linestyle="--", alpha=0.6,
+                 label=f"SL {trade.sl:.2f}")
+    ax_h.axhline(trade.tp,          color=GREEN, lw=0.9, linestyle="--", alpha=0.6,
+                 label=f"TP {trade.tp:.2f}")
+
+    # trend direction badge (top-left)
+    trend_arrow = "▲" if trade.direction == "bull" else "▼"
+    ax_h.text(0.02, 0.97, f"{trend_arrow} {dir_label}",
+              transform=ax_h.transAxes, color=trend_color, fontsize=8,
+              fontweight="bold", va="top", ha="left", zorder=10,
+              bbox=dict(fc=BG_BAR, ec=trend_color, alpha=0.85, pad=3, boxstyle="round"))
+
+    ax_h.set_title(f"HTF {params.trend_tf}  — {dir_label} setup", color=FG, fontsize=8)
     ax_h.legend(fontsize=6, facecolor=BG_BAR, labelcolor=FG)
 
     # LTF panel
@@ -232,7 +248,7 @@ def _trade_chart_b64(
     entry_y = trade.entry_price
     arrow_dy = (trade.tp - trade.entry_price) * 0.15
     ax_l.annotate(
-        f"  {trade.direction[0].upper()} {trade.entry_price:.2f}",
+        f"  {dir_label} {trade.entry_price:.2f}",
         xy=(rel_entry, entry_y),
         xytext=(rel_entry, entry_y - arrow_dy),
         arrowprops=dict(arrowstyle="->", color=GOLD, lw=1.5),
@@ -329,7 +345,7 @@ def _trades_table(trades: list[Trade], highlight_ids: set[str]) -> str:
             f"<td>{i}</td>"
             f"<td><code>{t.trade_id}</code></td>"
             f"<td>{t.entry_time[:16]}</td>"
-            f"<td>{t.direction[0].upper()}</td>"
+            f"<td>{'L' if t.direction == 'bull' else 'S'}</td>"
             f"<td>{t.entry_price:.2f}</td>"
             f"<td>{t.sl:.2f}</td>"
             f"<td>{t.tp:.2f}</td>"

@@ -246,6 +246,8 @@ def run_backtest(
     active_trade_bar:    int             = -1
     in_fvg_since:        int             = -1   # LTF bar when we first entered FVG
     current_fvg_key:     Optional[tuple] = None  # (bottom, top) — stable across window shifts
+    used_fvg_keys:       set             = set() # FVG zones used today; reset each trading day
+    _prev_date:          str             = ""    # tracks calendar-day boundary
 
     # HTF cache — recomputed only when a new HTF bar closes
     prev_htf_pos:  int             = -1
@@ -289,6 +291,13 @@ def run_backtest(
         bar_lo  = ltf_lows[i]
         bar_hi  = ltf_highs[i]
         bar_cls = ltf_cls[i]
+
+        # Reset per-day FVG usage at each new trading day so that fresh sessions
+        # can form new setups in the same price zones (prevents cross-day stale blocks).
+        _cur_date = t[:10]
+        if _cur_date != _prev_date:
+            used_fvg_keys.clear()
+            _prev_date = _cur_date
 
         # ── 1. Manage open trade (vectorised exit — no bar-by-bar loop) ───
         if active_trade is not None:
@@ -391,6 +400,7 @@ def run_backtest(
             and g["direction"] == trend
             and (htf_view_last - g["idx"]) <= params.fvg_max_age_bars
             and (wick <= g["top"] if trend == "bull" else wick >= g["bottom"])
+            and (round(g["bottom"], 4), round(g["top"], 4)) not in used_fvg_keys
         ]
         if not in_zone:
             if current_fvg_key is not None:
@@ -478,6 +488,7 @@ def run_backtest(
             continue
 
         # ── 9. Open trade ─────────────────────────────────────────────────
+        used_fvg_keys.add(fvg_key)   # prevent re-entry into the same FVG zone
         active_trade = Trade(
             direction     = trend,
             entry_price   = bar_cls,
