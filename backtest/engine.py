@@ -404,9 +404,12 @@ def run_backtest(
             vp_edges, vp_vols = compute_volume_profile(htf_view)
 
             if params.htf_trend_method == "kd":
-                htf_bos = []
-                trend   = kd_trend(htf_view, params.kd_fast, params.kd_slow,
-                                   params.kd_flat_threshold)
+                # KD needs slow-span bars to warm up — use full history up to
+                # current bar so the window limit doesn't starve the EMA.
+                htf_full = htf.iloc[: htf_pos + 1].reset_index(drop=True)
+                htf_bos  = []
+                trend    = kd_trend(htf_full, params.kd_fast, params.kd_slow,
+                                    params.kd_flat_threshold)
             else:
                 htf_bos = detect_bos_choch(htf_view, params.swing_lookback,
                                            trend_window=params.htf_window_bars)
