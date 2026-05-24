@@ -131,8 +131,13 @@ class BacktestParams:
         if self.intraday_only:
             flags += " ID"
         methods = "+".join(self.htf_trend_methods)
+        tp = self.htf_trend_params
+        kd_tag = ""
+        if "kd" in self.htf_trend_methods:
+            kd_tag = (f" kd{tp.get('kd_fast',25)}/{tp.get('kd_slow',90)}"
+                      f"w{tp.get('kd_window',10)}")
         return (
-            f"{self.trend_tf}/{self.entry_tf} [{methods}]"
+            f"{self.trend_tf}/{self.entry_tf} [{methods}]{kd_tag}"
             f" lb{self.swing_lookback} bos{self.bos_count} w{self.htf_window_bars}"
             f" fvg{self.fvg_min_width_pct:.3f}"
             f" dp{self.fvg_entry_depth_pct:.1f} {d}"
