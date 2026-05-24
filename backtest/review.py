@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import base64
 import io
+import math
 import pathlib
 import sys
 from dataclasses import asdict
@@ -42,6 +43,7 @@ from feeds.fetcher   import fetch_klines
 from strategy.smc   import (
     find_swings, detect_bos_choch, detect_fvg, determine_trend,
 )
+from strategy.smc.kd_trend import compute_kd, kd_trend as _kd_trend
 
 _HTF_CHART_BARS   = 80   # total HTF bars shown, centered on entry bar
 _HTF_HALF         = _HTF_CHART_BARS // 2
@@ -411,16 +413,47 @@ def _trades_table(trades: list[Trade], highlight_ids: set[str]) -> str:
     return f"<table>{header}{''.join(rows)}</table>"
 
 
+def _kd_at_entry(trade: Trade, htf: pd.DataFrame, params: BacktestParams) -> tuple[float, str | None]:
+    """Return (avg_width, trend) from KD indicator at trade entry time."""
+    tp     = params.htf_trend_params
+    fast   = tp.get("kd_fast", 25)
+    slow   = tp.get("kd_slow", 90)
+    window = tp.get("kd_window", 10)
+    flat_t = tp.get("kd_flat_threshold", 0.0)
+    htf_times = htf["time_key"].values.astype(str)
+    htf_pos   = int(np.searchsorted(htf_times, str(trade.entry_time), side="right")) - 1
+    htf_pos   = max(0, min(htf_pos, len(htf) - 1))
+    htf_full  = htf.iloc[: htf_pos + 1].reset_index(drop=True)
+    kd        = compute_kd(htf_full, fast=fast, slow=slow)
+    avg_w     = float(kd["width"].iloc[-window:].mean()) if len(kd) >= window else float("nan")
+    trend     = _kd_trend(htf_full, fast=fast, slow=slow, window=window, flat_threshold=flat_t)
+    return avg_w, trend
+
+
 def _trade_card(trade: Trade, htf: pd.DataFrame, ltf: pd.DataFrame,
-                params: BacktestParams, idx: int | None = None) -> str:
+                params: BacktestParams, idx: int | None = None,
+                kd_cache: dict | None = None) -> str:
     b64 = _trade_chart_b64(trade, htf, ltf, params)
     label = f"#{idx}  " if idx is not None else ""
     r_color = "color:#4caf50" if trade.r_multiple >= 0 else "color:#ef5350"
+    kd_html = ""
+    if kd_cache is not None:
+        meta = kd_cache.get(trade.trade_id)
+        if meta:
+            avg_w, trend = meta
+            if not math.isnan(avg_w):
+                trend_label = trend if trend else "flat"
+                trend_color = "#4caf50" if trend == "bull" else ("#ef5350" if trend == "bear" else "#888888")
+                kd_html = (
+                    f'  ·  <span style="color:#aaaadd">KDW&nbsp;{avg_w:+.4f}</span>'
+                    f'  <span style="color:{trend_color}">▸&nbsp;{trend_label}</span>'
+                )
     return (
         f'<div class="trade-card">'
         f"<h4>{label}<code>{trade.trade_id}</code>  ·  "
         f"{trade.entry_time[:16]}  ·  {trade.direction.upper()}  ·  "
-        f'<span style="{r_color}">{trade.r_multiple:+.2f}R  ({trade.result})</span></h4>'
+        f'<span style="{r_color}">{trade.r_multiple:+.2f}R  ({trade.result})</span>'
+        f"{kd_html}</h4>"
         f'<img src="data:image/png;base64,{b64}" />'
         f"</div>"
     )
@@ -523,7 +556,7 @@ def generate_report(
             return f"<p style='color:#666688'>No {label.lower()} streak found.</p>"
         ids = ", ".join(f"<code>{t.trade_id}</code>" for t in streak_trades)
         cards = "".join(
-            _trade_card(t, htf, ltf, params, i + 1)
+            _trade_card(t, htf, ltf, params, i + 1, kd_cache or None)
             for i, t in enumerate(streak_trades)
         )
         return (
@@ -532,10 +565,18 @@ def generate_report(
             f"{cards}"
         )
 
+    # ── KD cache for featured trades ───────────────────────────────────────
+    kd_cache: dict[str, tuple] = {}
+    if "kd" in params.htf_trend_methods:
+        featured = streaks["win"] + streaks["loss"] + loss_sorted + win_sorted
+        for t in featured:
+            if t.trade_id not in kd_cache:
+                kd_cache[t.trade_id] = _kd_at_entry(t, htf, params)
+
     # ── Section: top loss / win cards ──────────────────────────────────────
     def ranked_cards(trade_list: list[Trade], offset: int = 0) -> str:
         return "".join(
-            _trade_card(t, htf, ltf, params, i + 1 + offset)
+            _trade_card(t, htf, ltf, params, i + 1 + offset, kd_cache or None)
             for i, t in enumerate(trade_list)
         )
 
