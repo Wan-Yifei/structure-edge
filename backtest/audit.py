@@ -633,12 +633,12 @@ def generate_audit(
     # ── Write file ─────────────────────────────────────────────────────────
     if out_dir is None:
         ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = _RESULTS_DIR / f"review_{ts}"
+        out_dir = _RESULTS_DIR / f"audit_{ts}"
     out_dir.mkdir(parents=True, exist_ok=True)
     slug = f"{code.replace('.','_')}_{params.trend_tf}_{params.entry_tf}"
     out_path = out_dir / f"audit_{slug}.html"
     out_path.write_text(body, encoding="utf-8")
-    print(f"[review] Report written → {out_path}")
+    print(f"[audit] Report written → {out_path}")
     return out_path
 
 
@@ -698,7 +698,6 @@ if __name__ == "__main__":
                     help="Output directory (default: backtest/results/review_<timestamp>/)")
 
     args = ap.parse_args()
-    out_dir = pathlib.Path(args.out_dir) if args.out_dir else None
 
     if args.from_csv:
         csv_path = pathlib.Path(args.from_csv)
@@ -723,11 +722,13 @@ if __name__ == "__main__":
         if not start or not end:
             print("ERROR: --start and --end required with --from-csv"); sys.exit(1)
         print(f"[audit] Rank #{args.rank}: {params.label()}")
+        out_dir = pathlib.Path(args.out_dir) if args.out_dir else csv_path.parent
     else:
         if not args.code or not args.start or not args.end:
             ap.error("--code, --start, and --end are required without --from-csv")
         params = _build_params_from_args(args)
         code, start, end = args.code, args.start, args.end
+        out_dir = pathlib.Path(args.out_dir) if args.out_dir else None
 
     out_path = generate_audit(
         code       = code,
