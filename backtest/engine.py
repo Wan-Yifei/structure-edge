@@ -209,10 +209,9 @@ class Trade:
 
     def __post_init__(self) -> None:
         if not self.trade_id:
-            # Deterministic ID from immutable trade attributes so that re-running
-            # the same backtest always produces the same IDs — essential for
-            # trade_viewer lookups from saved audit HTML reports.
-            key = f"{self.entry_time}:{self.direction}:{self.entry_price:.6f}:{self.sl:.6f}"
+            # Deterministic ID scoped to algo version — same entry under a different
+            # version produces a different ID, preventing cross-version DB collisions.
+            key = f"{ALGO_VERSION}:{self.entry_time}:{self.direction}:{self.entry_price:.6f}:{self.sl:.6f}"
             self.trade_id = hashlib.sha256(key.encode()).hexdigest()[:8]
 
 
