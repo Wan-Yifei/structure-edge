@@ -640,7 +640,7 @@ def main() -> None:
     ap.add_argument("--fast",       action="store_true", help="Smoke test — 2 TF pairs, minimal params")
     ap.add_argument("--kd",         action="store_true", help="Use KD trend grid (PARAM_GRID_KD)")
     ap.add_argument("--combined",   action="store_true", help="Use bos_choch+kd consensus grid (PARAM_GRID_COMBINED)")
-    ap.add_argument("--focused",    action="store_true", help="Use focused exhaustive grid derived from random search (PARAM_GRID_FOCUSED)")
+    ap.add_argument("--grid",       action="store_true", help="Use focused exhaustive grid derived from random search (PARAM_GRID_FOCUSED)")
     ap.add_argument("--force",      action="store_true", help="Re-fetch klines from API")
     ap.add_argument("--no-viz",     action="store_true", help="Skip the matplotlib visualisation")
     ap.add_argument("--show-chart", action="store_true", help="Open chart interactively (blocks)")
@@ -702,7 +702,7 @@ def main() -> None:
     pairs  = pairs_fast if cfg.fast else pairs_normal
     if cfg.fast:
         grid = PARAM_GRID_FAST
-    elif args.focused:
+    elif args.grid:
         grid = PARAM_GRID_FOCUSED
     elif args.combined:
         grid = PARAM_GRID_COMBINED
@@ -729,7 +729,7 @@ def main() -> None:
     print(f"Resume:      {'disabled (--no-resume)' if args.no_resume else 'enabled'}")
     print(f"Total runs:  {len(params) * len(cfg.codes)}")
 
-    if args.focused:
+    if args.grid:
         grid_tag = "focused_"
     elif args.combined:
         grid_tag = "combined_"
