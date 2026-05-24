@@ -16,6 +16,7 @@ Entry logic:
 from __future__ import annotations
 
 import bisect
+import json
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -114,11 +115,12 @@ class BacktestParams:
     htf_window_bars:      int   = 20     # HTF bars for trend/structure (20 × 15 m ≈ 5 h ≈ one trading day)
     allow_short:          bool  = True   # False = long-only (skip bear setups)
     intraday_only:        bool  = False  # True = force-close positions at end of trading day
-    htf_trend_method:     str   = "bos_choch"  # "bos_choch" | "kd"
-    kd_fast:              int   = 25    # KD fast EMA span (only used when htf_trend_method="kd")
-    kd_slow:              int   = 90    # KD slow EMA span
-    kd_window:            int   = 10    # bars to average WIDTH over for trend direction
-    kd_flat_threshold:    float = 0.0   # |avg_width| below this → no trend (price units/bar)
+    # Trend method(s) — applied in order; all must agree for a valid trend signal.
+    # Supported: "bos_choch", "kd"
+    htf_trend_methods:    tuple  = ("bos_choch",)
+    # Per-method config dict, keyed by "<method>_<param>".
+    # e.g. {"kd_fast": 25, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.0}
+    htf_trend_params:     dict   = field(default_factory=dict)
 
     def label(self) -> str:
         d    = f"D{self.displacement_atr_mult:.1f}b{self.displacement_body_ratio:.1f}" if self.displacement_required else "d"
@@ -128,9 +130,10 @@ class BacktestParams:
             flags += " Lo"
         if self.intraday_only:
             flags += " ID"
+        methods = "+".join(self.htf_trend_methods)
         return (
-            f"{self.trend_tf}/{self.entry_tf} lb{self.swing_lookback}"
-            f" bos{self.bos_count} w{self.htf_window_bars}"
+            f"{self.trend_tf}/{self.entry_tf} [{methods}]"
+            f" lb{self.swing_lookback} bos{self.bos_count} w{self.htf_window_bars}"
             f" fvg{self.fvg_min_width_pct:.3f}"
             f" dp{self.fvg_entry_depth_pct:.1f} {d}"
             f" {conf} sl{self.sl_buffer_pct:.3f} msl{self.max_sl_pct:.3f}"
@@ -138,7 +141,20 @@ class BacktestParams:
         )
 
     def to_dict(self) -> dict:
-        return {k: getattr(self, k) for k in self.__dataclass_fields__}   # type: ignore[attr-defined]
+        d = {k: getattr(self, k) for k in self.__dataclass_fields__}   # type: ignore[attr-defined]
+        d["htf_trend_methods"] = json.dumps(list(self.htf_trend_methods))
+        d["htf_trend_params"]  = json.dumps(self.htf_trend_params, sort_keys=True)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "BacktestParams":
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        if "htf_trend_methods" in d and isinstance(d["htf_trend_methods"], str):
+            d["htf_trend_methods"] = tuple(json.loads(d["htf_trend_methods"]))
+        if "htf_trend_params" in d:
+            v = d["htf_trend_params"]
+            d["htf_trend_params"] = json.loads(v) if isinstance(v, str) and v else (v or {})
+        return cls(**d)
 
 
 # ── Trade ─────────────────────────────────────────────────────────────────────
@@ -404,17 +420,31 @@ def run_backtest(
             htf_fvgs   = detect_fvg(htf_view, params.fvg_min_width_pct)
             vp_edges, vp_vols = compute_volume_profile(htf_view)
 
-            if params.htf_trend_method == "kd":
-                # KD needs slow-span bars to warm up — use full history up to
-                # current bar so the window limit doesn't starve the EMA.
-                htf_full = htf.iloc[: htf_pos + 1].reset_index(drop=True)
-                htf_bos  = []
-                trend    = kd_trend(htf_full, params.kd_fast, params.kd_slow,
-                                    params.kd_window, params.kd_flat_threshold)
-            else:
-                htf_bos = detect_bos_choch(htf_view, params.swing_lookback,
+            htf_bos    = []
+            tp         = params.htf_trend_params
+            per_method = []
+            for method in params.htf_trend_methods:
+                if method == "bos_choch":
+                    bos = detect_bos_choch(htf_view, params.swing_lookback,
                                            trend_window=params.htf_window_bars)
-                trend   = determine_trend(htf_bos, params.bos_count)
+                    htf_bos = bos
+                    per_method.append(determine_trend(bos, params.bos_count))
+                elif method == "kd":
+                    # Use full history so EMA has enough bars to warm up.
+                    htf_full = htf.iloc[: htf_pos + 1].reset_index(drop=True)
+                    per_method.append(kd_trend(
+                        htf_full,
+                        fast=tp.get("kd_fast", 25),
+                        slow=tp.get("kd_slow", 90),
+                        window=tp.get("kd_window", 10),
+                        flat_threshold=tp.get("kd_flat_threshold", 0.0),
+                    ))
+
+            # All methods must agree on the same direction.
+            if per_method and all(t == per_method[0] for t in per_method) and per_method[0] is not None:
+                trend = per_method[0]
+            else:
+                trend = None
 
             prev_htf_pos = htf_pos
 

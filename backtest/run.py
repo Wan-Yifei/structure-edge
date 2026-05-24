@@ -176,6 +176,30 @@ PARAM_GRID: dict[str, list] = {
     "min_rr":                     [1.5, 2.0],
 }
 
+PARAM_GRID_KD: dict[str, list] = {
+    "htf_trend_methods": [("kd",)],
+    "htf_trend_params": [
+        {"kd_fast": 15, "kd_slow": 60, "kd_window":  5, "kd_flat_threshold": 0.0},
+        {"kd_fast": 15, "kd_slow": 60, "kd_window": 10, "kd_flat_threshold": 0.0},
+        {"kd_fast": 15, "kd_slow": 90, "kd_window":  5, "kd_flat_threshold": 0.0},
+        {"kd_fast": 15, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.0},
+        {"kd_fast": 25, "kd_slow": 60, "kd_window":  5, "kd_flat_threshold": 0.0},
+        {"kd_fast": 25, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.0},
+        {"kd_fast": 25, "kd_slow": 90, "kd_window": 20, "kd_flat_threshold": 0.0},
+        {"kd_fast": 25, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.05},
+    ],
+    "htf_window_bars":           [50],
+    "swing_lookback":            [2],
+    "bos_count":                 [2],
+    "fvg_min_width_pct":         [0.001, 0.003, 0.005],
+    "fvg_entry_depth_pct":       [0.05, 0.10, 0.20, 0.50],
+    "require_ltf_confirmation":  [False],
+    "displacement_required":     [False],
+    "sl_buffer_pct":             [0.003, 0.005],
+    "max_sl_pct":                [0.010, 0.020],
+    "min_rr":                    [1.5, 2.0],
+}
+
 PARAM_GRID_FAST: dict[str, list] = {
     "htf_window_bars":            [20],
     "swing_lookback":             [2],
@@ -556,6 +580,7 @@ def main() -> None:
     ap.add_argument("--start", default=None, help="YYYY-MM-DD (overrides config)")
     ap.add_argument("--end",   default=None, help="YYYY-MM-DD (overrides config)")
     ap.add_argument("--fast",       action="store_true", help="Smoke test — 2 TF pairs, minimal params")
+    ap.add_argument("--kd",         action="store_true", help="Use KD trend grid (PARAM_GRID_KD)")
     ap.add_argument("--force",      action="store_true", help="Re-fetch klines from API")
     ap.add_argument("--no-viz",     action="store_true", help="Skip the matplotlib visualisation")
     ap.add_argument("--show-chart", action="store_true", help="Open chart interactively (blocks)")
@@ -615,7 +640,7 @@ def main() -> None:
         cfg.workers = _resolve_workers(args.workers)
 
     pairs  = pairs_fast if cfg.fast else pairs_normal
-    grid   = PARAM_GRID_FAST if cfg.fast else PARAM_GRID
+    grid   = PARAM_GRID_FAST if cfg.fast else (PARAM_GRID_KD if args.kd else PARAM_GRID)
     if args.random > 0:
         params = build_param_list_random(pairs, grid, n_samples=args.random, seed=args.seed)
     else:
@@ -635,12 +660,13 @@ def main() -> None:
     print(f"Resume:      {'disabled (--no-resume)' if args.no_resume else 'enabled'}")
     print(f"Total runs:  {len(params) * len(cfg.codes)}")
 
+    grid_tag = "kd_" if args.kd else ""
     if cfg.fast:
         mode_tag = "smoke"
     elif args.random > 0:
-        mode_tag = f"random_{args.random}"
+        mode_tag = f"{grid_tag}random_{args.random}"
     else:
-        mode_tag = "grid"
+        mode_tag = f"{grid_tag}grid"
     run_tag     = f"{datetime.now().strftime('%Y%m%d_%H%M')}_{ALGO_VERSION}_{mode_tag}"
     results_dir = _RESULTS_DIR / run_tag
     csv_path    = results_dir / "backtest_results.csv"
@@ -709,7 +735,7 @@ def main() -> None:
         n_filtered = len(df_code) - len(df_code[df_code["n_trades"] >= min_trades])
         print(f"\n── Top {cfg.top_n} [{code}] by profit factor  (min_trades≥{min_trades}, {n_filtered} excluded) ──\n")
         for _, row in df_ranked_code.iterrows():
-            p = BacktestParams(**{k: row[k] for k in BacktestParams.__dataclass_fields__})  # type: ignore
+            p = BacktestParams.from_dict(row.to_dict())
             print(f"  {p.label()}")
             print(_fmt_row(row.to_dict()))
             print()
@@ -753,7 +779,7 @@ def main() -> None:
         )
         print(f"\n── Top {cfg.top_n} across all codes  (min_trades≥{min_trades}) ───────────────\n")
         for _, row in df_ranked.iterrows():
-            p = BacktestParams(**{k: row[k] for k in BacktestParams.__dataclass_fields__})  # type: ignore
+            p = BacktestParams.from_dict(row.to_dict())
             print(f"[{row['code']}]  {p.label()}")
             print(_fmt_row(row.to_dict()))
             print()
