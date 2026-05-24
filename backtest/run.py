@@ -660,8 +660,8 @@ def main() -> None:
                     help="Random seed for --random (default: 42)")
     ap.add_argument("--min-trades", type=int, default=10, metavar="N",
                     help="Exclude combos with fewer than N trades from top-N ranking (default: 10)")
-    ap.add_argument("--no-report",  action="store_true",
-                    help="Skip HTML report generation")
+    ap.add_argument("--no-audit",   action="store_true",
+                    help="Skip HTML audit report generation")
     ap.add_argument("--from-csv",   metavar="PATH",
                     help="Regenerate chart/report from an existing CSV (skips backtest)")
     args = ap.parse_args()
@@ -672,7 +672,7 @@ def main() -> None:
             print(f"ERROR: CSV not found: {csv_in}")
             sys.exit(1)
         cfg_top = args.top or BacktestConfig().top_n
-        if not args.no_report:
+        if not args.no_audit:
             generate_audit(csv_in, top_n=cfg_top, open_browser=args.show_chart)
         else:
             plot_from_csv(csv_path=csv_in, show=args.show_chart, top_n=cfg_top)
@@ -817,7 +817,7 @@ def main() -> None:
             print()
 
         # ── Per-code HTML report (default) ───────────────────────────────
-        if not cfg.no_viz and not args.no_report:
+        if not cfg.no_viz and not args.no_audit:
             generate_audit(
                 code_csv,
                 output_path=code_csv.parent / f"report_{code_slug}.html",
