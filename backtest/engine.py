@@ -134,8 +134,10 @@ class BacktestParams:
         tp = self.htf_trend_params
         kd_tag = ""
         if "kd" in self.htf_trend_methods:
+            ft = tp.get("kd_flat_threshold", 0.0)
+            ft_tag = f"f{ft}" if ft else ""
             kd_tag = (f" kd{tp.get('kd_fast',25)}/{tp.get('kd_slow',90)}"
-                      f"w{tp.get('kd_window',10)}")
+                      f"w{tp.get('kd_window',10)}{ft_tag}")
         return (
             f"{self.trend_tf}/{self.entry_tf} [{methods}]{kd_tag}"
             f" lb{self.swing_lookback} bos{self.bos_count} w{self.htf_window_bars}"

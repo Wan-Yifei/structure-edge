@@ -226,14 +226,25 @@ PARAM_GRID_COMBINED: dict[str, list] = {
 
 PARAM_GRID_FOCUSED: dict[str, list] = {
     # Derived from combined bos_choch+kd random search (2026-05-23, 150 samples, SNDK).
-    # kd_fast=15 dominated; slow=60/90 and window=5/10 both competitive.
-    # Strategy grid tightened around top-performing fvg/sl/rr values.
+    # kd_fast=15 dominated; slow=60/90, window=5/10/20, flat_threshold=0.0/0.10 added.
+    # flat_threshold=0.10 ≈ abs_median/2 for SNDK 15m width distribution.
+    # 12 KD configs × strategy grid = 2304 combos across 15m/1m + 15m/3m.
     "htf_trend_methods": [("bos_choch", "kd")],
     "htf_trend_params": [
+        # flat_threshold=0.0: no dead-zone filter
         {"kd_fast": 15, "kd_slow": 60, "kd_window":  5, "kd_flat_threshold": 0.0},
         {"kd_fast": 15, "kd_slow": 60, "kd_window": 10, "kd_flat_threshold": 0.0},
+        {"kd_fast": 15, "kd_slow": 60, "kd_window": 20, "kd_flat_threshold": 0.0},
         {"kd_fast": 15, "kd_slow": 90, "kd_window":  5, "kd_flat_threshold": 0.0},
         {"kd_fast": 15, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.0},
+        {"kd_fast": 15, "kd_slow": 90, "kd_window": 20, "kd_flat_threshold": 0.0},
+        # flat_threshold=0.10: filters ~35% weakest momentum bars (≈ abs_median/2 for SNDK 15m)
+        {"kd_fast": 15, "kd_slow": 60, "kd_window":  5, "kd_flat_threshold": 0.10},
+        {"kd_fast": 15, "kd_slow": 60, "kd_window": 10, "kd_flat_threshold": 0.10},
+        {"kd_fast": 15, "kd_slow": 60, "kd_window": 20, "kd_flat_threshold": 0.10},
+        {"kd_fast": 15, "kd_slow": 90, "kd_window":  5, "kd_flat_threshold": 0.10},
+        {"kd_fast": 15, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.10},
+        {"kd_fast": 15, "kd_slow": 90, "kd_window": 20, "kd_flat_threshold": 0.10},
     ],
     "htf_window_bars":           [50],
     "swing_lookback":            [2],
