@@ -662,10 +662,16 @@ def _build_params_from_args(args) -> BacktestParams:
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Generate a trade review HTML report")
-    ap.add_argument("--code",  required=True, help="e.g. US.SNDK")
-    ap.add_argument("--start", required=True, help="YYYY-MM-DD")
-    ap.add_argument("--end",   required=True, help="YYYY-MM-DD")
+    ap = argparse.ArgumentParser(description="Generate a trade audit HTML report")
+    ap.add_argument("--from-csv", metavar="PATH",
+                    help="Pick params from a results CSV (sorted by profit_factor desc)")
+    ap.add_argument("--rank",  type=int, default=1,
+                    help="Which result to audit when using --from-csv (1 = best, default: 1)")
+    ap.add_argument("--min-trades", type=int, default=10,
+                    help="Minimum trades filter when ranking (default: 10)")
+    ap.add_argument("--code",  default=None, help="e.g. US.SNDK (required without --from-csv)")
+    ap.add_argument("--start", default=None, help="YYYY-MM-DD (required without --from-csv)")
+    ap.add_argument("--end",   default=None, help="YYYY-MM-DD (required without --from-csv)")
     # Strategy params — best-cluster defaults from SNDK grid search
     ap.add_argument("--trend-tf",                 default="15m")
     ap.add_argument("--entry-tf",                 default="1m")
@@ -692,13 +698,42 @@ if __name__ == "__main__":
                     help="Output directory (default: backtest/results/review_<timestamp>/)")
 
     args = ap.parse_args()
-    params   = _build_params_from_args(args)
-    out_dir  = pathlib.Path(args.out_dir) if args.out_dir else None
+    out_dir = pathlib.Path(args.out_dir) if args.out_dir else None
+
+    if args.from_csv:
+        csv_path = pathlib.Path(args.from_csv)
+        if not csv_path.exists():
+            print(f"ERROR: CSV not found: {csv_path}"); sys.exit(1)
+        df = pd.read_csv(csv_path)
+        df_ranked = (
+            df[df["n_trades"] >= args.min_trades]
+            .sort_values(["profit_factor", "total_r"], ascending=[False, False])
+            .reset_index(drop=True)
+        )
+        if args.rank > len(df_ranked):
+            print(f"ERROR: only {len(df_ranked)} combos with ≥{args.min_trades} trades"); sys.exit(1)
+        row    = df_ranked.iloc[args.rank - 1]
+        params = BacktestParams.from_dict(row.to_dict())
+        code   = args.code or str(row.get("code", ""))
+        start  = args.start or str(csv_path.stem).split("_")[0]  # fallback
+        end    = args.end   or ""
+        if not code:
+            print("ERROR: --code required when CSV has no 'code' column"); sys.exit(1)
+        # derive date range from kline cache if not provided
+        if not start or not end:
+            print("ERROR: --start and --end required with --from-csv"); sys.exit(1)
+        print(f"[audit] Rank #{args.rank}: {params.label()}")
+    else:
+        if not args.code or not args.start or not args.end:
+            ap.error("--code, --start, and --end are required without --from-csv")
+        params = _build_params_from_args(args)
+        code, start, end = args.code, args.start, args.end
+
     out_path = generate_audit(
-        code       = args.code,
+        code       = code,
         params     = params,
-        start      = args.start,
-        end        = args.end,
+        start      = start,
+        end        = end,
         out_dir    = out_dir,
         top_losses = args.top_losses,
         top_wins   = args.top_wins,
