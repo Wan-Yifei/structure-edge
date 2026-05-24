@@ -422,6 +422,18 @@ def build_param_list_random(
     return result
 
 
+def _write_review_trades(code: str, params: BacktestParams, trades: list) -> None:
+    """Write trades to review_trades.duckdb so trade_viewer can look them up by ID."""
+    if not trades:
+        return
+    try:
+        from backtest.db import ReviewTradesDB
+        with ReviewTradesDB() as rdb:
+            rdb.insert_trades(code, params.to_dict(), trades)
+    except Exception as exc:
+        get_logger("main").warning("review DB write failed: %s", exc)
+
+
 def _worker(args: tuple) -> tuple[int, BacktestResult]:
     """Top-level so ProcessPoolExecutor can pickle it on Windows (spawn mode)."""
     idx, params, htf, ltf = args
@@ -543,6 +555,7 @@ def run_grid(
                         )[0]
                         db.mark_running(run_id)
                         db.write_trades(run_id, code, new_trades)
+                        _write_review_trades(code, params, new_trades)
                         db.write_stats(run_id, bt)
                         db.mark_done(run_id)
                 db_preloaded[idx] = bt
@@ -600,6 +613,7 @@ def run_grid(
                     if needs_write:
                         db.mark_running(run_id)
                         db.write_trades(run_id, code, bt.trades)
+                        _write_review_trades(code, p, bt.trades)
                         db.write_stats(run_id, bt)
                         db.mark_done(run_id)
                 except Exception as exc:

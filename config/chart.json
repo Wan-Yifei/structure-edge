@@ -4,8 +4,8 @@
     "heatmap": true,
     "delta": true,
     "bos_choch": true,
-    "fvg": false,
-    "ob": true,
-    "trade_review": false
+    "fvg": true,
+    "ob": false,
+    "trade_review": true
   }
 }

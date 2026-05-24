@@ -27,11 +27,12 @@ moomoo/
 │
 ├── backtest/                    # 回测框架
 │   ├── engine.py                #   回测引擎：run_backtest(), BacktestParams, Trade
-│   ├── run.py                   #   批量网格/随机搜索 CLI
-│   ├── db.py                    #   DuckDB 读写（runs / trades / run_stats / live_trades）
+│   ├── run.py                   #   批量网格/随机搜索 CLI（自动写入 review_trades.duckdb）
+│   ├── audit.py                 #   单组合交易审计报告（K 线图 + 统计，自包含 HTML）
+│   ├── fvg_inspect.py           #   FVG 过滤诊断工具：显示指定时段内每个 FVG 触碰被过滤的原因
+│   ├── db.py                    #   DuckDB 读写（runs / trades / run_stats / live_trades / review_trades）
 │   ├── stats.py                 #   统计函数：Sharpe / Sortino / heatmap
 │   ├── report.py                #   HTML 报告生成（Plotly）
-│   ├── review.py                #   单组合交易回顾报告（K 线图 + 统计，自包含 HTML）
 │   ├── viz.py                   #   matplotlib 可视化（结果图表）
 │   └── logger.py                #   多进程安全日志（QueueHandler）
 │
@@ -54,7 +55,8 @@ moomoo/
 ├── db/                          # 本地数据库文件（见 db/README.md）
 │   ├── ticks.db                 #   实时 tick（~770 万行，SQLite）
 │   ├── backtest_klines.duckdb   #   K 线缓存（DuckDB）
-│   └── backtest.duckdb          #   回测结果 + 交易记录（DuckDB）
+│   ├── backtest.duckdb          #   回测结果 + 交易记录（DuckDB）
+│   └── review_trades.duckdb     #   交易索引（DuckDB，trade_viewer 查询用，独立文件避免锁冲突）
 │
 ├── tests/                       # 单元测试（163 tests）
 ├── main.py                      # 统一入口
@@ -149,14 +151,46 @@ uv run backtest/run.py --codes US.SNDK --no-reuse
 - **断点续跑**：相同参数组合的结果自动缓存在 `backtest/results/checkpoints/`。下次运行时已完成的组合直接跳过。
 - **DB 日期段复用**：若某个 `(股票, 参数组合)` 的部分日期已在 `backtest.duckdb` 中，只运行缺口日期段，并把新旧交易合并。使用 `--no-reuse` 可禁用此行为。
 
-### 单组合交易回顾报告
+### 单组合交易审计报告（`audit.py`）
 
 ```bash
-# 生成指定参数组合的 HTML 回顾报告
-uv run backtest/review.py --code US.SNDK --start 2025-05-22 --end 2026-05-22
+# 从网格结果 CSV 中选最优参数组合生成审计报告
+uv run backtest/audit.py --from-csv backtest/results/.../results_US_SNDK.csv \
+    --code US.SNDK --start 2025-05-22 --end 2026-05-22
+
+# 手动指定参数
+uv run backtest/audit.py --code US.SNDK --start 2025-05-22 --end 2026-05-22 \
+    --trend-tf 15m --entry-tf 3m
 ```
 
-报告内容：10 项 KPI 卡片（WR / PF / Sharpe / Sortino / DD 等）、净值曲线、全部交易列表（含 trade_id）、最长连胜/连亏 K 线图、Top-5 亏损与 Top-3 盈利交易图。生成路径：`backtest/results/review_<时间戳>/review_<代码>_<tf>.html`。
+报告内容：10 项 KPI 卡片（WR / PF / Sharpe / Sortino / DD 等）、净值曲线、全部交易列表（含 trade_id）、最长连胜/连亏 K 线图、Top-5 亏损与 Top-3 盈利交易图。同时将交易记录写入 `db/review_trades.duckdb`，供 Trade Viewer 按 trade_id 查询。
+
+### FVG 过滤诊断（`fvg_inspect.py`）
+
+用于手工对照：在指定时间窗口内，引擎检测到的每个 FVG 触碰在哪一步被过滤（或成功入场）。
+
+```bash
+# 从结果 CSV 选最优参数，检查某一周的所有 FVG 事件
+uv run backtest/fvg_inspect.py \
+    --from-csv backtest/results/.../results_US_SNDK.csv \
+    --code US.SNDK --start 2025-05-22 --end 2026-05-22 \
+    --inspect-start 2025-11-03 --inspect-end 2025-11-07
+```
+
+输出一份自包含 HTML，每行一个 FVG 触碰事件，列出：触碰时间、FVG 区间、方向、深度、过滤步骤及原因。颜色区分：绿色 = 入场，灰色 = 深度未达到，橙/红 = 各过滤器拦截。
+
+**过滤步骤说明：**
+
+| 结果 | 含义 |
+|------|------|
+| `depth_never_reached` | 影线进入 FVG 但从未达到 `fvg_entry_depth_pct` 阈值，区间失效 |
+| `ltf_confirmation` | 深度已达到，但区间失效前始终未完成 LTF CHoCH+BOS 确认 |
+| `lvn_filter` | FVG 区间不在低成交量节点（LVN）内 |
+| `displacement_filter` | FVG 中间蜡烛不满足位移蜡烛条件 |
+| `no_sl_tp` | 无法找到有效的止损/止盈摆动位 |
+| `max_sl_pct` | 止损距离超过 `max_sl_pct` 上限 |
+| `min_rr` | 盈亏比不足 `min_rr` |
+| `entered` | 所有条件通过，入场交易（显示 trade_id）|
 
 ### 统计指标说明
 
@@ -190,6 +224,7 @@ uv run backtest/review.py --code US.SNDK --start 2025-05-22 --end 2026-05-22
 | `ticks.db` | SQLite | 实时逐笔成交（~770 万行）|
 | `backtest_klines.duckdb` | DuckDB | K 线缓存，供回测离线使用 |
 | `backtest.duckdb` | DuckDB | 回测结果 + 实盘 / 模拟盘交易记录 |
+| `review_trades.duckdb` | DuckDB | 交易索引（run.py + audit.py 写入，trade_viewer 读取）|
 
 ---
 

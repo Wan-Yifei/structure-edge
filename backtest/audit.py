@@ -489,12 +489,14 @@ def generate_audit(
     print(f"[review] {len(trades)} trades found. Generating charts …")
 
     # Persist trades so trade_viewer can look them up by ID without manual date entry.
+    # Uses a separate review_trades.duckdb so it never conflicts with a running grid
+    # that holds an exclusive lock on backtest.duckdb.
     try:
-        from backtest.db import BacktestDB
-        with BacktestDB() as _db:
-            _db.insert_review_trades(code, params.to_dict(), trades)
-    except Exception:
-        pass  # DB unavailable (locked, missing) — not fatal for HTML report
+        from backtest.db import ReviewTradesDB
+        with ReviewTradesDB() as _rdb:
+            _rdb.insert_trades(code, params.to_dict(), trades)
+    except Exception as _e:
+        print(f"[audit] Warning: could not write trades to review DB: {_e}")
 
     # ── Statistics ─────────────────────────────────────────────────────────
     rs        = [t.r_multiple for t in trades]

@@ -1192,7 +1192,9 @@ class OrderFlowApp(tk.Tk):
 
     def _on_close(self):
         self._stop()
+        self._perf_visible = False   # prevent _schedule_perf_refresh from re-arming
         self.destroy()
+        self.quit()
 
     # ── Tick handler (live) ───────────────────────────────────────────────────
 
@@ -1981,28 +1983,45 @@ class OrderFlowApp(tk.Tk):
     # ── Trade Review ──────────────────────────────────────────────────────────
 
     def _load_trade_by_id(self) -> None:
-        """Look up a trade_id in backtest.duckdb and auto-populate the toolbar."""
+        """Look up a trade_id in the backtest/review DBs and auto-populate the toolbar."""
         trade_id = self._trade_id_var.get().strip()
         if not trade_id:
             return
 
+        row = None
+        source = None
+
+        # Check live_trades and backtest trades (read_only avoids blocking the grid).
         try:
             from backtest.db import BacktestDB
-            with BacktestDB() as db:
-                row = db.fetch_live_trade(trade_id)     # live / paper first
+            with BacktestDB(read_only=True) as db:
+                row = db.fetch_live_trade(trade_id)
                 source = "live_trades"
                 if row is None:
-                    row = db.fetch_trade(trade_id)      # backtest grid trades
+                    row = db.fetch_trade(trade_id)
                     source = "backtest"
-                if row is None:
-                    row = db.fetch_review_trade(trade_id)   # review.py trades
+        except Exception:
+            pass  # DB locked or missing — continue to review DB
+
+        # Check review_trades (separate file, never blocked by grid).
+        if row is None:
+            try:
+                from backtest.db import ReviewTradesDB
+                with ReviewTradesDB(read_only=True) as rdb:
+                    row = rdb.fetch_trade(trade_id)
                     source = "review"
-        except Exception as exc:
-            messagebox.showerror("DB Error", str(exc))
-            return
+            except FileNotFoundError:
+                pass  # review DB doesn't exist yet
+            except Exception as exc:
+                messagebox.showerror("DB Error", str(exc))
+                return
 
         if row is None:
-            messagebox.showerror("Not found", f"trade_id not found in backtest.duckdb:\n{trade_id}")
+            messagebox.showerror(
+                "Not found",
+                f"Trade ID not found in any DB:\n{trade_id}\n\n"
+                "If this is an audit trade, re-run audit.py to register it.",
+            )
             return
 
         # Extract config to get entry_tf
@@ -2011,16 +2030,26 @@ class OrderFlowApp(tk.Tk):
         if raw_cfg:
             config = json.loads(raw_cfg) if isinstance(raw_cfg, str) else raw_cfg
 
-        entry_tf   = config.get("entry_tf", "15m")
-        # Map backtest TF names → viewer TF names
-        tf_alias   = {"60m": "1h"}
-        tf         = tf_alias.get(entry_tf, entry_tf)
+        # Use HTF (trend_tf) as the display timeframe in review mode —
+        # the FVG/BOS context is defined on HTF, matching the audit report view.
+        tf_alias = {"60m": "1h"}
+        trend_tf  = config.get("trend_tf", "")
+        tf        = tf_alias.get(trend_tf, trend_tf)
+        if tf not in TIMEFRAME_MAP:
+            entry_tf = config.get("entry_tf", "15m")
+            tf       = tf_alias.get(entry_tf, entry_tf)
         if tf not in TIMEFRAME_MAP:
             tf = "15m"
 
-        # Date from entry_time
+        # Date from entry_time — must come from DB, not today's date
         entry_str = str(row.get("entry_time") or "")
-        date_str  = entry_str[:10] if entry_str else (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        candidate = entry_str[:10] if len(entry_str) >= 10 else ""
+        try:
+            datetime.strptime(candidate, "%Y-%m-%d")
+            date_str = candidate
+        except ValueError:
+            self._log(f"Warning: entry_time '{entry_str}' could not be parsed; falling back")
+            date_str = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
 
         # Populate toolbar fields
         self.code_var.set(row.get("symbol", ""))
@@ -2193,17 +2222,48 @@ class OrderFlowApp(tk.Tk):
                     self._log(f"TR overlay: HTF slice {len(htf_slice)} bars, "
                               f"all_bos={len(all_bos)}, rel_bos={len(rel_bos)}")
 
-                    # ── FVG: the zone that contains entry_price ────────────
-                    fvg_dir   = "bull" if is_bull else "bear"
-                    fvg_width = config.get("fvg_min_width_pct", 0.002)
-                    fvgs      = detect_fvg(htf_slice, fvg_width)
-                    entry_fvg = next(
-                        (f for f in reversed(fvgs)
-                         if f["direction"] == fvg_dir
-                         and f["bottom"] <= entry_price <= f["top"]),
-                        None,
-                    )
-                    self._log(f"TR overlay: fvgs={len(fvgs)}, entry_fvg={'found' if entry_fvg else 'none'}, show_fvg={show_fvg}")
+                    # ── FVG: zone that triggered the entry ────────────────
+                    # Prefer exact FVG stored in DB at trade creation time.
+                    # Fall back to proximity search for trades logged before
+                    # fvg_top/fvg_bottom columns were added.
+                    fvg_dir    = "bull" if is_bull else "bear"
+                    fvg_width  = config.get("fvg_min_width_pct", 0.002)
+                    fvgs       = detect_fvg(htf_slice, fvg_width)
+                    stored_top = trade.get("fvg_top")
+                    stored_bot = trade.get("fvg_bottom")
+                    if stored_top and stored_bot:
+                        stored_top = float(stored_top)
+                        stored_bot = float(stored_bot)
+                        # Match back to a detected FVG to get the correct idx
+                        # (formation bar), falling back to the entry bar.
+                        matched = next(
+                            (f for f in fvgs
+                             if f["direction"] == fvg_dir
+                             and abs(f["top"]    - stored_top) < 1e-6
+                             and abs(f["bottom"] - stored_bot) < 1e-6),
+                            None,
+                        )
+                        entry_fvg = matched or {
+                            "direction": fvg_dir,
+                            "top":       stored_top,
+                            "bottom":    stored_bot,
+                            "idx":       len(htf_slice) - 1,
+                        }
+                        self._log(f"TR overlay: stored FVG {stored_bot:.4f}-{stored_top:.4f}, "
+                                  f"idx={'matched' if matched else 'fallback'}")
+                    else:
+                        _candidates = [
+                            f for f in fvgs
+                            if f["direction"] == fvg_dir
+                            and abs((f["top"] + f["bottom"]) / 2 - entry_price)
+                                / max(entry_price, 1e-9) < 0.10
+                        ]
+                        entry_fvg = (
+                            min(_candidates,
+                                key=lambda f: abs((f["top"] + f["bottom"]) / 2 - entry_price))
+                            if _candidates else None
+                        )
+                        self._log(f"TR overlay: fvgs={len(fvgs)}, entry_fvg={'found' if entry_fvg else 'none'}, show_fvg={show_fvg}")
                     if show_fvg and entry_fvg:
                         # Cap formation bar at entry so the band never starts
                         # after the entry point.

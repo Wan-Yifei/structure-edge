@@ -16,6 +16,7 @@ Entry logic:
 from __future__ import annotations
 
 import bisect
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -178,8 +179,18 @@ class Trade:
     exit_price:  float = 0.0
     result:      str   = ""   # "win" | "loss" | "timeout"
     r_multiple:  float = 0.0  # realised R (positive = profit)
-    trade_id:    str   = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    trade_id:    str   = ""   # set in __post_init__ if not provided
     entry_ltf_bar: int = 0    # absolute LTF bar index at entry (for chart centering)
+    fvg_top:     float = 0.0  # HTF FVG price levels that triggered entry
+    fvg_bottom:  float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.trade_id:
+            # Deterministic ID from immutable trade attributes so that re-running
+            # the same backtest always produces the same IDs — essential for
+            # trade_viewer lookups from saved audit HTML reports.
+            key = f"{self.entry_time}:{self.direction}:{self.entry_price:.6f}:{self.sl:.6f}"
+            self.trade_id = hashlib.sha256(key.encode()).hexdigest()[:8]
 
 
 # ── Result ────────────────────────────────────────────────────────────────────
@@ -267,6 +278,8 @@ def run_backtest(
     ltf: pd.DataFrame,
     params: BacktestParams,
     max_bars_in_trade: int = 200,
+    rejection_log: list | None = None,
+    inspect_window: tuple[str, str] | None = None,
 ) -> BacktestResult:
     """Run a single SMC multi-TF backtest.
 
@@ -275,6 +288,10 @@ def run_backtest(
         ltf:               Low-timeframe OHLCV (entry TF)
         params:            Strategy parameters
         max_bars_in_trade: Force-close after this many LTF bars (timeout)
+        rejection_log:     If a list is passed, FVG touch/rejection events are
+                           appended to it (opt-in; zero overhead when None).
+        inspect_window:    Optional (start_date, end_date) strings "YYYY-MM-DD"
+                           to restrict rejection logging to a date range.
 
     Returns:
         BacktestResult with a list of Trade objects and computed metrics.
@@ -299,6 +316,22 @@ def run_backtest(
     current_fvg_key:     Optional[tuple] = None  # (bottom, top) — stable across window shifts
     used_fvg_keys:       set             = set() # FVG zones used today; reset each trading day
     _prev_date:          str             = ""    # tracks calendar-day boundary
+
+    # ── Rejection log state (only used when rejection_log is not None) ───────
+    _rlog_event:   dict | None = None   # pending event for current FVG zone
+    _rlog_depth_ok: bool       = False  # depth threshold reached in this zone
+
+    def _rlog_in_window(t: str) -> bool:
+        if inspect_window is None:
+            return True
+        return inspect_window[0] <= t[:10] <= inspect_window[1]
+
+    def _rlog_finalize(outcome: str, **extra) -> None:
+        nonlocal _rlog_event, _rlog_depth_ok
+        if _rlog_event is not None:
+            rejection_log.append({**_rlog_event, "outcome": outcome, **extra})
+        _rlog_event = None
+        _rlog_depth_ok = False
 
     # HTF cache — recomputed only when a new HTF bar closes
     prev_htf_pos:  int             = -1
@@ -484,6 +517,8 @@ def run_backtest(
         ]
         if not in_zone:
             if current_fvg_key is not None:
+                if rejection_log is not None:
+                    _rlog_finalize("depth_never_reached" if not _rlog_depth_ok else "ltf_confirmation")
                 in_fvg_since    = -1
                 current_fvg_key = None
             i += 1
@@ -494,6 +529,17 @@ def run_backtest(
         # Identity by price zone (stable even as the HTF window shifts forward)
         fvg_key = (round(fvg["bottom"], 4), round(fvg["top"], 4))
         if fvg_key != current_fvg_key:
+            if rejection_log is not None:
+                _rlog_finalize("depth_never_reached" if not _rlog_depth_ok else "ltf_confirmation")
+                if _rlog_in_window(t):
+                    _rlog_event = {
+                        "touch_time": t,
+                        "fvg_bottom": fvg["bottom"],
+                        "fvg_top":    fvg["top"],
+                        "direction":  fvg["direction"],
+                        "trend":      trend,
+                        "wick":       round(wick, 4),
+                    }
             current_fvg_key = fvg_key
             in_fvg_since    = i
 
@@ -502,10 +548,17 @@ def run_backtest(
         if depth < params.fvg_entry_depth_pct:
             i += 1
             continue
+        if rejection_log is not None and _rlog_event is not None and not _rlog_depth_ok:
+            _rlog_depth_ok = True
+            _rlog_event["depth_time"] = t
+            _rlog_event["depth"]      = round(depth, 3)
 
         # ── 5a. LVN overlap filter ────────────────────────────────────────
         if params.require_lvn_overlap:
             if not fvg_overlaps_lvn(fvg, vp_edges, vp_vols, params.lvn_threshold):
+                if rejection_log is not None:
+                    _rlog_finalize("lvn_filter",
+                                   detail=f"zone vol >= {params.lvn_threshold:.0%} of max")
                 i += 1
                 continue
 
@@ -513,6 +566,11 @@ def run_backtest(
         if params.displacement_required:
             if not is_displacement_candle(htf_view, fvg["idx"], params.displacement_atr_mult,
                                            params.displacement_body_ratio, params.displacement_lookback):
+                if rejection_log is not None:
+                    _rlog_finalize("displacement_filter",
+                                   detail=f"middle candle not displacement "
+                                          f"(atr_mult={params.displacement_atr_mult}, "
+                                          f"body_ratio={params.displacement_body_ratio})")
                 i += 1
                 continue
 
@@ -537,6 +595,8 @@ def run_backtest(
             sl_candidates = [s for s in lows_sw  if s["price"] < bar_cls]
             tp_candidates = [s for s in highs_sw if s["price"] > bar_cls]
             if not sl_candidates or not tp_candidates:
+                if rejection_log is not None:
+                    _rlog_finalize("no_sl_tp", detail="no valid swing levels for SL/TP")
                 i += 1
                 continue
             sl_price = sl_candidates[-1]["price"] * (1.0 - params.sl_buffer_pct)
@@ -547,6 +607,8 @@ def run_backtest(
             sl_candidates = [s for s in highs_sw if s["price"] > bar_cls]
             tp_candidates = [s for s in lows_sw  if s["price"] < bar_cls]
             if not sl_candidates or not tp_candidates:
+                if rejection_log is not None:
+                    _rlog_finalize("no_sl_tp", detail="no valid swing levels for SL/TP")
                 i += 1
                 continue
             sl_price = sl_candidates[-1]["price"] * (1.0 + params.sl_buffer_pct)
@@ -555,15 +617,22 @@ def run_backtest(
             tp_dist  = bar_cls  - tp_price
 
         if sl_dist <= 0 or tp_dist <= 0:
+            if rejection_log is not None:
+                _rlog_finalize("no_sl_tp", detail="sl_dist or tp_dist <= 0")
             i += 1
             continue
 
         # ── 8. Risk / SL-size filters ─────────────────────────────────────
         if (sl_dist / bar_cls) > params.max_sl_pct:
+            if rejection_log is not None:
+                _rlog_finalize("max_sl_pct",
+                               detail=f"sl={sl_dist/bar_cls:.4f} > max={params.max_sl_pct}")
             i += 1
             continue
         rr = tp_dist / sl_dist
         if rr < params.min_rr:
+            if rejection_log is not None:
+                _rlog_finalize("min_rr", detail=f"rr={rr:.2f} < min={params.min_rr}")
             i += 1
             continue
 
@@ -577,7 +646,11 @@ def run_backtest(
             planned_rr    = rr,
             entry_time    = t,
             entry_ltf_bar = i,
+            fvg_top       = fvg["top"],
+            fvg_bottom    = fvg["bottom"],
         )
+        if rejection_log is not None:
+            _rlog_finalize("entered", trade_id=active_trade.trade_id)
         active_trade_bar = i
         in_fvg_since     = -1
         current_fvg_key  = None
