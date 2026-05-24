@@ -134,7 +134,8 @@ class BacktestParams:
     # Supported: "bos_choch", "kd"
     htf_trend_methods:    tuple  = ("bos_choch",)
     # Per-method config dict, keyed by "<method>_<param>".
-    # e.g. {"kd_fast": 25, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.0}
+    # e.g. {"kd_fast": 25, "kd_slow": 90, "kd_window": 10,
+    #        "kd_flat_threshold": 0.0, "kd_atr_threshold": 0.05, "kd_atr_period": 14}
     htf_trend_params:     dict   = field(default_factory=dict)
 
     def label(self) -> str:
@@ -149,10 +150,12 @@ class BacktestParams:
         tp = self.htf_trend_params
         kd_tag = ""
         if "kd" in self.htf_trend_methods:
-            ft = tp.get("kd_flat_threshold", 0.0)
+            ft   = tp.get("kd_flat_threshold", 0.0)
+            at   = tp.get("kd_atr_threshold", 0.0)
             ft_tag = f"f{ft}" if ft else ""
+            at_tag = f"a{at}" if at else ""
             kd_tag = (f" kd{tp.get('kd_fast',25)}/{tp.get('kd_slow',90)}"
-                      f"w{tp.get('kd_window',10)}{ft_tag}")
+                      f"w{tp.get('kd_window',10)}{ft_tag}{at_tag}")
         return (
             f"{self.trend_tf}/{self.entry_tf} [{methods}]{kd_tag}"
             f" lb{self.swing_lookback} bos{self.bos_count} w{self.htf_window_bars}"
@@ -492,6 +495,8 @@ def run_backtest(
                         slow=tp.get("kd_slow", 90),
                         window=tp.get("kd_window", 10),
                         flat_threshold=tp.get("kd_flat_threshold", 0.0),
+                        atr_threshold=tp.get("kd_atr_threshold", 0.0),
+                        atr_period=tp.get("kd_atr_period", 14),
                     ))
 
             # All methods must agree on the same direction.
