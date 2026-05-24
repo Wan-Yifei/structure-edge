@@ -5,7 +5,8 @@
     "workers": 4,
     "top_n": 20,
     "tf_pairs": [
-        ["15m", "1m"]
+        ["15m", "1m"],
+        ["15m", "3m"]
     ],
     "tf_pairs_fast": [
         ["15m", "1m"]
