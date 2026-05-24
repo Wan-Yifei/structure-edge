@@ -225,26 +225,23 @@ PARAM_GRID_COMBINED: dict[str, list] = {
 }
 
 PARAM_GRID_FOCUSED: dict[str, list] = {
-    # Derived from combined bos_choch+kd random search (2026-05-23, 150 samples, SNDK).
-    # kd_fast=15 dominated; slow=60/90, window=5/10/20, flat_threshold=0.0/0.10 added.
-    # flat_threshold=0.10 ≈ abs_median/2 for SNDK 15m width distribution.
-    # 12 KD configs × strategy grid = 2304 combos across 15m/1m + 15m/3m.
+    # Adaptive segment mode: zero-crossing segmentation + conditional lag comp.
+    # kd_fast=15 dominated in prior random search; slow=60/90 both included.
+    # smooth=3 pre-smoothing; min_bars=3 prevents noise micro-segments.
+    # atr_threshold=0.0/0.05: without vs with flat-segment filter.
+    # 8 KD configs × strategy grid = 1536 combos across 15m/1m + 15m/3m.
     "htf_trend_methods": [("bos_choch", "kd")],
     "htf_trend_params": [
-        # flat_threshold=0.0: no dead-zone filter
-        {"kd_fast": 15, "kd_slow": 60, "kd_window":  5, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 60, "kd_window": 10, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 60, "kd_window": 20, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 90, "kd_window":  5, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 90, "kd_window": 20, "kd_flat_threshold": 0.0},
-        # flat_threshold=0.10: filters ~35% weakest momentum bars (≈ abs_median/2 for SNDK 15m)
-        {"kd_fast": 15, "kd_slow": 60, "kd_window":  5, "kd_flat_threshold": 0.10},
-        {"kd_fast": 15, "kd_slow": 60, "kd_window": 10, "kd_flat_threshold": 0.10},
-        {"kd_fast": 15, "kd_slow": 60, "kd_window": 20, "kd_flat_threshold": 0.10},
-        {"kd_fast": 15, "kd_slow": 90, "kd_window":  5, "kd_flat_threshold": 0.10},
-        {"kd_fast": 15, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.10},
-        {"kd_fast": 15, "kd_slow": 90, "kd_window": 20, "kd_flat_threshold": 0.10},
+        # no flat filter
+        {"kd_fast": 15, "kd_slow": 60, "kd_smooth": 3, "kd_min_bars": 3, "kd_atr_threshold": 0.0},
+        {"kd_fast": 15, "kd_slow": 60, "kd_smooth": 3, "kd_min_bars": 5, "kd_atr_threshold": 0.0},
+        {"kd_fast": 15, "kd_slow": 90, "kd_smooth": 3, "kd_min_bars": 3, "kd_atr_threshold": 0.0},
+        {"kd_fast": 15, "kd_slow": 90, "kd_smooth": 3, "kd_min_bars": 5, "kd_atr_threshold": 0.0},
+        # atr_threshold=0.05: flat-segment filter
+        {"kd_fast": 15, "kd_slow": 60, "kd_smooth": 3, "kd_min_bars": 3, "kd_atr_threshold": 0.05},
+        {"kd_fast": 15, "kd_slow": 60, "kd_smooth": 3, "kd_min_bars": 5, "kd_atr_threshold": 0.05},
+        {"kd_fast": 15, "kd_slow": 90, "kd_smooth": 3, "kd_min_bars": 3, "kd_atr_threshold": 0.05},
+        {"kd_fast": 15, "kd_slow": 90, "kd_smooth": 3, "kd_min_bars": 5, "kd_atr_threshold": 0.05},
     ],
     "htf_window_bars":           [50],
     "swing_lookback":            [2],

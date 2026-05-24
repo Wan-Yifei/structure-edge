@@ -12,14 +12,18 @@ Indicator formula (mirrors the original EasyLanguage definition):
     spread = MID1 - MID2             ← fast vs slow positioning
     width  = spread - spread.shift(1) ← rate-of-change (Δspread per bar)
 
-Trend classification:
-    avg(width[-window:]) > +flat_threshold  → "bull"
-    avg(width[-window:]) < -flat_threshold  → "bear"
-    otherwise                               → None (flat / consolidation)
+Trend classification — two modes:
 
-ATR-normalised filter (recommended over flat_threshold):
-    |avg_width| / avg_ATR < atr_threshold   → None
-    This makes the threshold scale-invariant across price levels and volatility.
+  Adaptive (smooth > 0, default):
+    Segments are defined by zero-crossings of lightly-smoothed width.
+    At each crossing boundary the previous bar is conditionally moved into
+    the new segment when its raw width already points the new direction
+    (lag compensation).  Segments shorter than min_bars are merged into
+    the preceding segment.  The current segment's mean width / mean ATR
+    is compared against atr_threshold to determine bull / bear / flat.
+
+  Fixed-window (smooth == 0, legacy):
+    avg(width[-window:]) compared against flat_threshold / atr_threshold.
 """
 
 from __future__ import annotations
@@ -70,6 +74,54 @@ def compute_kd(
     )
 
 
+def _adaptive_seg_start(
+    smooth_w: pd.Series,
+    raw_w: pd.Series,
+    atr: pd.Series,
+    atr_threshold: float,
+    min_bars: int,
+) -> int:
+    """Return the index position (iloc) where the current segment starts.
+
+    Implements conditional lag compensation and minimum segment length merge,
+    matching the notebook exploration logic exactly.
+    """
+    n     = len(smooth_w)
+    signs = np.sign(smooth_w.fillna(0))
+    sw_v  = smooth_w.values
+    rw_v  = raw_w.values
+    at_v  = atr.values
+
+    boundaries: list[int] = [0]
+    for i in range(1, n):
+        ps, cs = signs.iloc[i - 1], signs.iloc[i]
+        if cs == 0 or ps == 0 or cs == ps:
+            continue
+        new_dir = cs
+        # Don't shift into a flat segment
+        flat = (atr_threshold > 0.0 and at_v[i] > 0.0
+                and abs(sw_v[i]) / at_v[i] < atr_threshold)
+        if flat:
+            boundaries.append(i)
+        elif np.sign(rw_v[i - 1]) == new_dir:
+            boundaries.append(i - 1)   # raw width already turned: shift earlier
+        else:
+            boundaries.append(i)
+
+    # Enforce minimum segment length (merge short segments backward)
+    if len(boundaries) > 1 and boundaries[1] - boundaries[0] < min_bars:
+        boundaries.pop(1)
+    i = 1
+    while i < len(boundaries):
+        end = boundaries[i + 1] if i + 1 < len(boundaries) else n
+        if end - boundaries[i] < min_bars:
+            boundaries.pop(i)
+        else:
+            i += 1
+
+    return boundaries[-1]  # start of the current (last) segment
+
+
 def kd_trend(
     klines: pd.DataFrame,
     fast: int = 25,
@@ -78,36 +130,52 @@ def kd_trend(
     flat_threshold: float = 0.0,
     atr_threshold: float = 0.0,
     atr_period: int = 14,
+    smooth: int = 3,
+    min_bars: int = 3,
 ) -> str | None:
     """Return HTF trend direction using the KD channel indicator.
 
-    Trend is determined by the average WIDTH (Δspread) over the last `window`
-    bars — i.e. which direction the spread has been moving recently, not its
-    absolute level.  Only recent bars are relevant to the current trend.
-
     Args:
-        klines:          OHLCV DataFrame.
+        klines:          OHLCV DataFrame (full history up to current bar).
         fast:            EMA span for the fast channel (default 25).
         slow:            EMA span for the slow channel (default 90).
-        window:          Number of recent bars to average WIDTH over.
-        flat_threshold:  |avg_width| below this → no trend (price units/bar).
-                         0 = no flat filter.
-        atr_threshold:   |avg_width| / avg_ATR below this → no trend (dimensionless).
-                         Preferred over flat_threshold — scale-invariant across stocks.
-                         0 = disabled.
+        window:          Fixed-window size; used only when smooth == 0.
+        flat_threshold:  Legacy price-unit filter; used only when smooth == 0.
+        atr_threshold:   |seg_avg_width| / seg_avg_ATR below this → flat.
+                         Scale-invariant; recommended over flat_threshold.
         atr_period:      ATR rolling period (default 14).
+        smooth:          Pre-smoothing window for zero-crossing detection.
+                         > 0 → adaptive segment mode (default 3).
+                         0   → legacy fixed-window mode.
+        min_bars:        Minimum bars per segment; short segments are merged
+                         into the previous one (adaptive mode only).
 
     Returns:
-        "bull"  if avg WIDTH over window is sufficiently positive
-        "bear"  if avg WIDTH over window is sufficiently negative
-        None    if near flat or insufficient data
+        "bull" / "bear" / None
     """
-    if len(klines) < slow + window:
+    min_len = slow + (smooth if smooth > 0 else window)
+    if len(klines) < min_len:
         return None
 
     kd = compute_kd(klines, fast, slow, atr_period)
-    avg_width = float(kd["width"].iloc[-window:].mean())
 
+    # ── Adaptive segment mode ─────────────────────────────────────────────────
+    if smooth > 0:
+        smooth_w = kd["width"].rolling(smooth, min_periods=1).mean()
+        seg_start = _adaptive_seg_start(
+            smooth_w, kd["width"], kd["atr"], atr_threshold, min_bars
+        )
+        seg_w   = float(smooth_w.iloc[seg_start:].mean())
+        seg_atr = float(kd["atr"].iloc[seg_start:].mean())
+
+        if np.isnan(seg_w) or np.isnan(seg_atr) or seg_atr == 0.0:
+            return None
+        if atr_threshold > 0.0 and abs(seg_w) / seg_atr < atr_threshold:
+            return None
+        return "bull" if seg_w > 0 else "bear"
+
+    # ── Legacy fixed-window mode (smooth == 0) ────────────────────────────────
+    avg_width = float(kd["width"].iloc[-window:].mean())
     if np.isnan(avg_width):
         return None
     if abs(avg_width) <= flat_threshold:
@@ -117,5 +185,4 @@ def kd_trend(
         if not np.isnan(avg_atr) and avg_atr > 0.0:
             if abs(avg_width) / avg_atr < atr_threshold:
                 return None
-
     return "bull" if avg_width > 0 else "bear"

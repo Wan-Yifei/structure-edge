@@ -1,3 +1,0 @@
-n_trades,win_rate,total_r,avg_r,profit_factor,max_drawdown_r,max_loss_r,trend_tf,entry_tf,swing_lookback,bos_count,fvg_min_width_pct,fvg_entry_depth_pct,displacement_required,require_lvn_overlap,lvn_threshold,sl_buffer_pct,max_sl_pct,min_rr
-3,0.333,1.41,0.469,1.7,2.0,1.0,60m,15m,2,1,0.002,0.2,False,False,0.3,0.001,0.01,1.5
-0,0.0,0.0,0.0,0.0,0.0,0.0,1d,60m,2,1,0.002,0.2,False,False,0.3,0.001,0.01,1.5

@@ -119,10 +119,12 @@ def _kpi_section(df: pd.DataFrame) -> str:
 
 # ── 2. Top N table ────────────────────────────────────────────────────────────
 
+_INIT_CAPITAL = 10_000.0
+
 def _top_table(df: pd.DataFrame, top_n: int = 20) -> str:
     active = df[df["n_trades"] > 0].copy()
     top = active.nlargest(top_n, "profit_factor")
-    cols = ["trend_tf", "entry_tf", "n_trades", "win_rate", "total_r",
+    cols = ["trend_tf", "entry_tf", "n_trades", "win_rate", "total_r", "final_value",
             "avg_r", "profit_factor", "max_drawdown_r", "sharpe", "sortino",
             "swing_lookback", "bos_count", "fvg_min_width_pct",
             "fvg_entry_depth_pct", "require_ltf_confirmation",
@@ -140,6 +142,12 @@ def _top_table(df: pd.DataFrame, top_n: int = 20) -> str:
         if col == "total_r":
             colour = _GREEN if val > 0 else _RED
             return f'<span style="color:{colour}">{val:.2f}</span>'
+        if col == "final_value":
+            colour = _GREEN if val > _INIT_CAPITAL else _RED
+            gain_pct = (val / _INIT_CAPITAL - 1) * 100
+            sign = "+" if gain_pct >= 0 else ""
+            return (f'<span style="color:{colour}">'
+                    f'${val:,.0f} ({sign}{gain_pct:.1f}%)</span>')
         if col == "sharpe":
             colour = _GREEN if val > 1.0 else (_GOLD if val > 0.5 else (_FG if val >= 0 else _RED))
             return f'<span style="color:{colour}">{val:.2f}</span>'
@@ -160,11 +168,13 @@ def _top_table(df: pd.DataFrame, top_n: int = 20) -> str:
         cells = "".join(f"<td>{fmt(row[c], c)}</td>" for c in cols)
         rows += f"<tr>{cells}</tr>"
 
+    note = (f'<p style="color:{_FG};opacity:0.55;font-size:11px;margin:4px 0 0 4px">'
+            f'final_value: $10,000 initial capital, 1% compounding risk per trade.</p>')
     return (
         '<div class="table-wrap"><table class="result-table">'
         f"<thead><tr>{header}</tr></thead>"
         f"<tbody>{rows}</tbody>"
-        "</table></div>"
+        f"</table>{note}</div>"
     )
 
 

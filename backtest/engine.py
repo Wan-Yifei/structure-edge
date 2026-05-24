@@ -134,8 +134,10 @@ class BacktestParams:
     # Supported: "bos_choch", "kd"
     htf_trend_methods:    tuple  = ("bos_choch",)
     # Per-method config dict, keyed by "<method>_<param>".
-    # e.g. {"kd_fast": 25, "kd_slow": 90, "kd_window": 10,
-    #        "kd_flat_threshold": 0.0, "kd_atr_threshold": 0.05, "kd_atr_period": 14}
+    # Adaptive mode (default): {"kd_fast": 15, "kd_slow": 60,
+    #   "kd_smooth": 3, "kd_min_bars": 3, "kd_atr_threshold": 0.05}
+    # Legacy fixed-window:     {"kd_fast": 15, "kd_slow": 60,
+    #   "kd_smooth": 0, "kd_window": 10, "kd_atr_threshold": 0.05}
     htf_trend_params:     dict   = field(default_factory=dict)
 
     def label(self) -> str:
@@ -150,12 +152,16 @@ class BacktestParams:
         tp = self.htf_trend_params
         kd_tag = ""
         if "kd" in self.htf_trend_methods:
-            ft   = tp.get("kd_flat_threshold", 0.0)
-            at   = tp.get("kd_atr_threshold", 0.0)
-            ft_tag = f"f{ft}" if ft else ""
+            at     = tp.get("kd_atr_threshold", 0.0)
             at_tag = f"a{at}" if at else ""
+            sm     = tp.get("kd_smooth", 3)
+            if sm > 0:
+                filt_tag = f"s{sm}m{tp.get('kd_min_bars', 3)}{at_tag}"
+            else:
+                ft       = tp.get("kd_flat_threshold", 0.0)
+                filt_tag = f"w{tp.get('kd_window', 10)}{'f'+str(ft) if ft else ''}{at_tag}"
             kd_tag = (f" kd{tp.get('kd_fast',25)}/{tp.get('kd_slow',90)}"
-                      f"w{tp.get('kd_window',10)}{ft_tag}{at_tag}")
+                      f"{filt_tag}")
         return (
             f"{self.trend_tf}/{self.entry_tf} [{methods}]{kd_tag}"
             f" lb{self.swing_lookback} bos{self.bos_count} w{self.htf_window_bars}"
@@ -262,6 +268,14 @@ class BacktestResult:
         losses = [-t.r_multiple for t in self.trades if t.r_multiple < 0]
         return max(losses) if losses else 0.0
 
+    @property
+    def final_value(self) -> float:
+        """Compounding equity from $10,000 initial, risking 1% of current equity per trade."""
+        equity = 10_000.0
+        for t in self.trades:
+            equity += t.r_multiple * (equity * 0.01)
+        return round(equity, 2)
+
     def summary_dict(self) -> dict:
         rs = [t.r_multiple for t in self.trades]
         bull = [t for t in self.trades if t.direction == "bull"]
@@ -284,6 +298,7 @@ class BacktestResult:
             "bear_win_rate":   round(bear_wins / len(bear), 3) if bear else 0.0,
             "bull_total_r":    round(sum(t.r_multiple for t in bull), 2),
             "bear_total_r":    round(sum(t.r_multiple for t in bear), 2),
+            "final_value":     self.final_value,
             **self.params.to_dict(),
         }
 
@@ -497,6 +512,8 @@ def run_backtest(
                         flat_threshold=tp.get("kd_flat_threshold", 0.0),
                         atr_threshold=tp.get("kd_atr_threshold", 0.0),
                         atr_period=tp.get("kd_atr_period", 14),
+                        smooth=tp.get("kd_smooth", 3),
+                        min_bars=tp.get("kd_min_bars", 3),
                     ))
 
             # All methods must agree on the same direction.
@@ -571,6 +588,20 @@ def run_backtest(
             _rlog_depth_ok = True
             _rlog_event["depth_time"] = t
             _rlog_event["depth"]      = round(depth, 3)
+
+        # ── 4a. Over-refilling guard ──────────────────────────────────────
+        # Entry close must not punch through the far side of the FVG;
+        # if it does, price has over-filled the gap, signalling reversal risk.
+        if trend == "bull" and bar_cls < fvg["bottom"]:
+            if rejection_log is not None:
+                _rlog_finalize("over_refill", detail="close below FVG bottom")
+            i += 1
+            continue
+        if trend == "bear" and bar_cls > fvg["top"]:
+            if rejection_log is not None:
+                _rlog_finalize("over_refill", detail="close above FVG top")
+            i += 1
+            continue
 
         # ── 5a. LVN overlap filter ────────────────────────────────────────
         if params.require_lvn_overlap:
