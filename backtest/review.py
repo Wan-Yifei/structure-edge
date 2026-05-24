@@ -11,7 +11,7 @@ Produces a self-contained HTML file for a single BacktestParams combo:
 Usage:
     uv run backtest/review.py --code US.SNDK --start 2025-05-22 --end 2026-05-22
 
-Or import and call generate_report() directly.
+Or import and call generate_report() directly (generates per-combo trade charts).
 """
 
 from __future__ import annotations

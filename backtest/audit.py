@@ -1,14 +1,16 @@
-"""Backtest HTML report generator.
+"""Backtest audit report generator.
 
-Generates a self-contained HTML report from a backtest results CSV.
+Generates a self-contained HTML audit report from a backtest results CSV.
+Provides a human-inspection window over grid search results: KPI summary,
+top-N combo table, equity curves, R-distribution, and parameter heatmaps.
 Charts are rendered via Plotly (interactive, WebGL-accelerated).
 
 Usage:
-    from backtest.report import generate_report
-    generate_report("backtest/results/20260521_1200/results_US_SNDK.csv")
+    from backtest.audit import generate_audit
+    generate_audit("backtest/results/20260521_1200/results_US_SNDK.csv")
 
     # or from CLI:
-    uv run python -m backtest.report backtest/results/20260521_1200/results_US_SNDK.csv
+    uv run python -m backtest.audit backtest/results/20260521_1200/results_US_SNDK.csv
 """
 
 from __future__ import annotations
@@ -417,8 +419,8 @@ def _direction_fig(df: pd.DataFrame, top_n: int = 20) -> go.Figure:
 
     top = active.nlargest(top_n, "profit_factor").reset_index(drop=True)
     labels = [
-        f"{r['trend_tf']}/{r['entry_tf']} PF={r['profit_factor']:.2f}"
-        for _, r in top.iterrows()
+        f"#{i+1} {r['trend_tf']}/{r['entry_tf']} PF={r['profit_factor']:.2f} T={int(r['n_trades'])}"
+        for i, (_, r) in enumerate(top.iterrows())
     ]
 
     fig = go.Figure()
@@ -556,14 +558,14 @@ def _chart_grid(*html_parts: str) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def generate_report(
+def generate_audit(
     csv_path: str | pathlib.Path,
     output_path: Optional[str | pathlib.Path] = None,
     top_n: int = 20,
     metric: str = "total_r",
     open_browser: bool = False,
 ) -> pathlib.Path:
-    """Generate a self-contained HTML report from a backtest results CSV.
+    """Generate a self-contained HTML audit report from a backtest results CSV.
 
     Args:
         csv_path:     Path to results CSV produced by run.py.
@@ -577,7 +579,7 @@ def generate_report(
     """
     csv_path = pathlib.Path(csv_path)
     if output_path is None:
-        output_path = csv_path.parent / (csv_path.stem + "_report.html")
+        output_path = csv_path.parent / (csv_path.stem + "_audit.html")
     output_path = pathlib.Path(output_path)
 
     df = pd.read_csv(csv_path)
@@ -647,9 +649,9 @@ def generate_report(
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: uv run python -m backtest.report <results.csv> [--open]")
+        print("Usage: uv run python -m backtest.audit <results.csv> [--open]")
         sys.exit(1)
 
     csv = sys.argv[1]
     open_b = "--open" in sys.argv
-    generate_report(csv, open_browser=open_b)
+    generate_audit(csv, open_browser=open_b)

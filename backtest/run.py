@@ -76,7 +76,7 @@ def _git_commit_hash() -> str:
 
 _COMMIT_HASH = _git_commit_hash()
 from backtest.viz     import plot_backtest_results, plot_from_csv
-from backtest.report  import generate_report
+from backtest.audit   import generate_audit
 from backtest.logger  import make_listener, worker_init, get_logger
 from backtest.db      import BacktestDB
 
@@ -673,7 +673,7 @@ def main() -> None:
             sys.exit(1)
         cfg_top = args.top or BacktestConfig().top_n
         if not args.no_report:
-            generate_report(csv_in, top_n=cfg_top, open_browser=args.show_chart)
+            generate_audit(csv_in, top_n=cfg_top, open_browser=args.show_chart)
         else:
             plot_from_csv(csv_path=csv_in, show=args.show_chart, top_n=cfg_top)
         return
@@ -818,7 +818,7 @@ def main() -> None:
 
         # ── Per-code HTML report (default) ───────────────────────────────
         if not cfg.no_viz and not args.no_report:
-            generate_report(
+            generate_audit(
                 code_csv,
                 output_path=code_csv.parent / f"report_{code_slug}.html",
                 top_n=cfg.top_n,
