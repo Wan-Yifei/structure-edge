@@ -116,18 +116,34 @@ def _render_html(
           <td>{tid_html}</td>
         </tr>"""
 
-    outcome_summary = ""
     counts: dict[str, int] = {}
     for e in events:
         counts[e["outcome"]] = counts.get(e["outcome"], 0) + 1
-    for outcome, count in sorted(counts.items(), key=lambda x: -x[1]):
-        meta = _OUTCOME_META.get(outcome, {"label": outcome, "color": "#bdc3c7"})
-        outcome_summary += (
-            f'<span style="display:inline-block;margin:4px 8px 4px 0;padding:3px 10px;'
-            f'border-radius:12px;background:{meta["color"]}22;color:{meta["color"]};'
-            f'border:1px solid {meta["color"]}44;font-size:13px">'
-            f'{meta["label"]}: <strong>{count}</strong></span>'
-        )
+    sorted_counts = sorted(counts.items(), key=lambda x: -x[1])
+    max_count = max(counts.values()) if counts else 1
+
+    # Horizontal bar chart rows
+    bar_rows = ""
+    for outcome, count in sorted_counts:
+        meta  = _OUTCOME_META.get(outcome, {"label": outcome, "color": "#bdc3c7"})
+        pct   = count / total * 100 if total else 0
+        width = count / max_count * 100
+        bar_rows += f"""
+        <tr>
+          <td style="width:160px;color:{meta['color']};font-weight:600;white-space:nowrap">
+            {meta['label']}
+          </td>
+          <td style="width:100%">
+            <div style="background:{meta['color']};height:16px;border-radius:3px;
+                        width:{width:.1f}%;min-width:2px"></div>
+          </td>
+          <td style="width:40px;text-align:right;font-variant-numeric:tabular-nums">
+            {count}
+          </td>
+          <td style="width:48px;text-align:right;color:#666;font-size:12px">
+            {pct:.0f}%
+          </td>
+        </tr>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -135,12 +151,15 @@ def _render_html(
 <meta charset="utf-8">
 <title>FVG Inspect — {code} {inspect_start} → {inspect_end}</title>
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         background:#111; color:#ddd; margin:0; padding:20px; }}
-  h1   {{ color:#f0f0f0; font-size:18px; margin-bottom:4px; }}
-  .sub {{ color:#888; font-size:13px; margin-bottom:20px; }}
-  .summary {{ margin-bottom:20px; }}
+  body  {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          background:#111; color:#ddd; margin:0; padding:20px; }}
+  h1    {{ color:#f0f0f0; font-size:18px; margin-bottom:4px; }}
+  h2    {{ color:#aaa; font-size:13px; font-weight:600; margin:24px 0 10px; text-transform:uppercase;
+           letter-spacing:.06em; }}
+  .sub  {{ color:#888; font-size:13px; margin-bottom:20px; }}
   table {{ border-collapse:collapse; width:100%; font-size:13px; }}
+  .bar-table td {{ padding:4px 8px; border:none; }}
+  .bar-table tr:hover td {{ background:transparent; }}
   th    {{ background:#1e1e1e; color:#aaa; text-align:left; padding:8px 10px;
            position:sticky; top:0; border-bottom:1px solid #333; }}
   td    {{ padding:7px 10px; border-bottom:1px solid #222; vertical-align:top; }}
@@ -156,7 +175,10 @@ def _render_html(
   {total} events &nbsp;|&nbsp; {entered} entered &nbsp;|&nbsp;
   {total - entered} filtered
 </div>
-<div class="summary">{outcome_summary}</div>
+<h2>Outcome breakdown</h2>
+<table class="bar-table" style="max-width:520px;margin-bottom:28px">
+  <tbody>{bar_rows}</tbody>
+</table>
 <table>
   <thead>
     <tr>
