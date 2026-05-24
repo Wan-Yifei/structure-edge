@@ -1,657 +1,706 @@
-"""Backtest audit report generator.
+"""Trade Audit Report Generator.
 
-Generates a self-contained HTML audit report from a backtest results CSV.
-Provides a human-inspection window over grid search results: KPI summary,
-top-N combo table, equity curves, R-distribution, and parameter heatmaps.
-Charts are rendered via Plotly (interactive, WebGL-accelerated).
+Produces a self-contained HTML file for a single BacktestParams combo.
+Provides a human-inspection window into trade logic:
+  · Combo parameters + full statistics (WR, PF, Sharpe, DD, …)
+  · Mini equity-curve chart
+  · All-trades table with trade IDs
+  · Longest consecutive win / loss streaks (with per-trade charts)
+  · Top-N largest losses (with per-trade charts)
+  · Top-N largest wins  (with per-trade charts)
 
 Usage:
-    from backtest.audit import generate_audit
-    generate_audit("backtest/results/20260521_1200/results_US_SNDK.csv")
+    uv run backtest/audit.py --code US.SNDK --start 2025-05-22 --end 2026-05-22
 
-    # or from CLI:
-    uv run python -m backtest.audit backtest/results/20260521_1200/results_US_SNDK.csv
+Or import and call generate_audit() directly.
 """
 
 from __future__ import annotations
 
+import argparse
+import base64
+import io
+import math
 import pathlib
 import sys
+from dataclasses import asdict
 from datetime import datetime
-from typing import Optional
+from typing import Sequence
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
 
-# ── Colour palette (matches viz.py dark theme) ────────────────────────────────
-_BG      = "#0b1120"
-_BG2     = "#131f30"
-_FG      = "#cdd6f4"
-_GRID    = "#1e2d42"
-_GREEN   = "#26a69a"
-_RED     = "#ef5350"
-_GOLD    = "#f9a825"
-_BLUE    = "#5c9cf5"
-_PURPLE  = "#ce93d8"
-_CYAN    = "#80cbc4"
-_ORANGE  = "#ff8a65"
-_ACCENT  = [_GREEN, _BLUE, _GOLD, _PURPLE, _CYAN, _ORANGE, "#a5d6a7", "#ef9a9a"]
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
-_PARAM_COLS = [
-    "swing_lookback", "bos_count", "fvg_min_width_pct",
-    "fvg_entry_depth_pct", "require_ltf_confirmation",
-    "displacement_required", "sl_buffer_pct", "max_sl_pct", "min_rr",
-]
-_METRIC_COLS = ["n_trades", "win_rate", "total_r", "avg_r",
-                "profit_factor", "max_drawdown_r", "max_loss_r", "sharpe", "sortino"]
-
-_PLOTLY_LAYOUT = dict(
-    paper_bgcolor=_BG,
-    plot_bgcolor=_BG2,
-    font=dict(color=_FG, size=11),
-    margin=dict(l=60, r=30, t=50, b=50),
-    xaxis=dict(gridcolor=_GRID, linecolor=_GRID, zerolinecolor=_GRID),
-    yaxis=dict(gridcolor=_GRID, linecolor=_GRID, zerolinecolor=_GRID),
+from backtest.engine import BacktestParams, BacktestResult, Trade, run_backtest
+from backtest.stats  import sharpe_ratio, sortino_ratio
+from core.chart      import BG_BAR, FG, GREEN, RED, GOLD, GRID, UP, DOWN
+from core.draw       import draw_candles, draw_fvg, draw_bos_choch
+from feeds.fetcher   import fetch_klines
+from strategy.smc   import (
+    find_swings, detect_bos_choch, detect_fvg, determine_trend,
 )
+from strategy.smc.kd_trend import compute_kd, kd_trend as _kd_trend
+
+_HTF_CHART_BARS   = 80   # total HTF bars shown, centered on entry bar
+_HTF_HALF         = _HTF_CHART_BARS // 2
+_LTF_PRE_BARS     = 40   # LTF bars shown before entry
+_LTF_POST_BARS    = 20   # LTF bars shown after exit
+_TOP_N_LOSSES     = 5
+_TOP_N_WINS       = 3
+_RESULTS_DIR      = pathlib.Path(__file__).parent / "results"
+
+# ── Streak detection ──────────────────────────────────────────────────────────
+
+def _find_streaks(trades: list[Trade]) -> dict:
+    """Return longest win/loss streaks as lists of Trade objects."""
+    best_win: list[Trade]  = []
+    best_loss: list[Trade] = []
+    cur_win:  list[Trade]  = []
+    cur_loss: list[Trade]  = []
+
+    for t in trades:
+        if t.result == "win":
+            cur_win.append(t)
+            cur_loss = []
+        elif t.result == "loss":
+            cur_loss.append(t)
+            cur_win = []
+        else:  # timeout — resets both streaks
+            cur_win  = []
+            cur_loss = []
+        if len(cur_win)  > len(best_win):
+            best_win  = list(cur_win)
+        if len(cur_loss) > len(best_loss):
+            best_loss = list(cur_loss)
+
+    return {"win": best_win, "loss": best_loss}
 
 
-def _apply_layout(fig: go.Figure, title: str = "", **kwargs) -> go.Figure:
-    layout = dict(_PLOTLY_LAYOUT)
-    layout.update(kwargs)
-    if title:
-        layout["title"] = dict(text=title, font=dict(size=13, color=_FG))
-    fig.update_layout(**layout)
-    return fig
+# ── Chart helpers ─────────────────────────────────────────────────────────────
 
+def _entry_fvg(
+    fvgs: list[dict],
+    entry_price: float,
+    direction: str,
+    entry_bar: int,
+) -> list[dict]:
+    """Return the single FVG most directly responsible for this trade entry.
 
-def _to_html(fig: go.Figure) -> str:
-    return fig.to_html(full_html=False, include_plotlyjs=False, config={"responsive": True})
-
-
-# ── 1. KPI cards ──────────────────────────────────────────────────────────────
-
-def _kpi_section(df: pd.DataFrame) -> str:
-    active = df[df["n_trades"] > 0]
-    best = active.loc[active["profit_factor"].idxmax()] if not active.empty else None
-
-    def card(label: str, value: str, colour: str = _FG) -> str:
-        return (
-            f'<div class="kpi-card">'
-            f'<div class="kpi-label">{label}</div>'
-            f'<div class="kpi-value" style="color:{colour}">{value}</div>'
-            f'</div>'
-        )
-
-    n_pos = (df["total_r"] > 0).sum()
-    pct_pos = n_pos / len(df) * 100 if len(df) else 0
-
-    cards = [
-        card("Total combos", f"{len(df):,}"),
-        card("With trades", f"{len(active):,}"),
-        card("Profitable", f"{n_pos:,} ({pct_pos:.0f}%)",
-             _GREEN if pct_pos > 25 else _RED),
+    Selects the most recent FVG that (a) matches trade direction, (b) formed at
+    or before entry_bar, and (c) contains the entry price. Falls back to the
+    most recent same-direction FVG if none contain the price.
+    """
+    candidates = [
+        f for f in fvgs
+        if f["direction"] == direction and f["idx"] <= entry_bar
     ]
-    if best is not None:
-        cards += [
-            card("Best total R", f"{best['total_r']:.2f}R", _GREEN),
-            card("Best PF", f"{best['profit_factor']:.2f}", _GREEN),
-            card("Best win rate", f"{best['win_rate']:.1%}",
-                 _GREEN if best["win_rate"] > 0.5 else _GOLD),
-            card("Trades (best)", f"{int(best['n_trades'])}"),
-        ]
-        if "sharpe" in best.index:
-            sh = best["sharpe"]
-            so = best["sortino"]
-            cards += [
-                card("Best Sharpe", f"{sh:.2f}",
-                     _GREEN if sh > 1.0 else (_GOLD if sh > 0.5 else _FG)),
-                card("Best Sortino", f"{so:.2f}" if so != float("inf") else "∞",
-                     _GREEN if so > 1.5 else (_GOLD if so > 0.75 else _FG)),
-            ]
-
-    return (
-        '<div class="kpi-row">'
-        + "".join(cards)
-        + "</div>"
-    )
-
-
-# ── 2. Top N table ────────────────────────────────────────────────────────────
-
-def _top_table(df: pd.DataFrame, top_n: int = 20) -> str:
-    active = df[df["n_trades"] > 0].copy()
-    top = active.nlargest(top_n, "profit_factor")
-    cols = ["trend_tf", "entry_tf", "n_trades", "win_rate", "total_r",
-            "avg_r", "profit_factor", "max_drawdown_r", "sharpe", "sortino",
-            "swing_lookback", "bos_count", "fvg_min_width_pct",
-            "fvg_entry_depth_pct", "require_ltf_confirmation",
-            "sl_buffer_pct", "max_sl_pct", "min_rr"]
-    cols = [c for c in cols if c in top.columns]
-    top = top[cols].reset_index(drop=True)
-
-    def fmt(val, col: str) -> str:
-        if col == "win_rate":
-            colour = _GREEN if val > 0.5 else (_GOLD if val > 0.35 else _RED)
-            return f'<span style="color:{colour}">{val:.1%}</span>'
-        if col == "profit_factor":
-            colour = _GREEN if val >= 1.5 else (_GOLD if val >= 1.0 else _RED)
-            return f'<span style="color:{colour}">{val:.2f}</span>'
-        if col == "total_r":
-            colour = _GREEN if val > 0 else _RED
-            return f'<span style="color:{colour}">{val:.2f}</span>'
-        if col == "sharpe":
-            colour = _GREEN if val > 1.0 else (_GOLD if val > 0.5 else (_FG if val >= 0 else _RED))
-            return f'<span style="color:{colour}">{val:.2f}</span>'
-        if col == "sortino":
-            if val == float("inf") or val > 999:
-                return f'<span style="color:{_GREEN}">∞</span>'
-            colour = _GREEN if val > 1.5 else (_GOLD if val > 0.75 else (_FG if val >= 0 else _RED))
-            return f'<span style="color:{colour}">{val:.2f}</span>'
-        if isinstance(val, float):
-            return f"{val:.3g}"
-        if isinstance(val, bool):
-            return "✓" if val else "✗"
-        return str(val)
-
-    header = "".join(f"<th>{c}</th>" for c in cols)
-    rows = ""
-    for _, row in top.iterrows():
-        cells = "".join(f"<td>{fmt(row[c], c)}</td>" for c in cols)
-        rows += f"<tr>{cells}</tr>"
-
-    return (
-        '<div class="table-wrap"><table class="result-table">'
-        f"<thead><tr>{header}</tr></thead>"
-        f"<tbody>{rows}</tbody>"
-        "</table></div>"
-    )
-
-
-# ── 3. Equity curves (top N by profit factor) ─────────────────────────────────
-
-def _equity_fig(df: pd.DataFrame, top_n: int = 10) -> go.Figure:
-    """Cumulative R bar chart (no trade-level data available from CSV)."""
-    active = df[df["n_trades"] > 0].copy()
-    top = active.nlargest(top_n, "profit_factor").reset_index(drop=True)
-
-    fig = go.Figure()
-    for i, row in top.iterrows():
-        label = (
-            f"{row['trend_tf']}/{row['entry_tf']} "
-            f"PF={row['profit_factor']:.2f} "
-            f"WR={row['win_rate']:.0%} "
-            f"T={int(row['n_trades'])}"
-        )
-        colour = _ACCENT[i % len(_ACCENT)]
-        fig.add_trace(go.Bar(
-            name=label,
-            x=[label],
-            y=[row["total_r"]],
-            marker_color=colour,
-            text=f"{row['total_r']:.2f}R",
-            textposition="outside",
-        ))
-
-    fig.add_hline(y=0, line_color=_GRID, line_width=1)
-    _apply_layout(fig, f"Top {top_n} Combos — Total R",
-                  showlegend=False, barmode="group",
-                  yaxis_title="Total R", height=380)
-    return fig
-
-
-# ── 4. R-multiple distribution ────────────────────────────────────────────────
-
-def _r_dist_fig(df: pd.DataFrame) -> go.Figure:
-    """Distribution of avg_r across all combos."""
-    active = df[df["n_trades"] > 0]
-    if active.empty:
-        return go.Figure()
-
-    fig = go.Figure()
-    wins  = active[active["avg_r"] >= 0]["avg_r"]
-    loses = active[active["avg_r"] <  0]["avg_r"]
-
-    bins = dict(start=active["avg_r"].min() - 0.05,
-                end=active["avg_r"].max() + 0.05, size=0.1)
-
-    if len(wins):
-        fig.add_trace(go.Histogram(
-            x=wins, xbins=bins, name="avg_r ≥ 0",
-            marker_color=_GREEN, opacity=0.75,
-        ))
-    if len(loses):
-        fig.add_trace(go.Histogram(
-            x=loses, xbins=bins, name="avg_r < 0",
-            marker_color=_RED, opacity=0.75,
-        ))
-
-    fig.add_vline(x=0, line_color=_FG, line_width=1, line_dash="dash")
-    fig.add_vline(x=active["avg_r"].mean(), line_color=_GOLD,
-                  line_width=1.5, line_dash="dot",
-                  annotation_text=f"mean {active['avg_r'].mean():.2f}R",
-                  annotation_font_color=_GOLD)
-
-    _apply_layout(fig, "Avg R Distribution (all combos)",
-                  barmode="overlay", xaxis_title="Avg R per combo",
-                  yaxis_title="Count", height=340)
-    return fig
-
-
-# ── 5. Win rate × Profit factor scatter ───────────────────────────────────────
-
-def _scatter_fig(df: pd.DataFrame) -> go.Figure:
-    active = df[df["n_trades"] > 0].copy()
-    if active.empty:
-        return go.Figure()
-
-    active["tf_pair"] = active["trend_tf"] + "/" + active["entry_tf"]
-    active["size"] = np.clip(active["n_trades"] * 5, 8, 80)
-
-    fig = go.Figure()
-    for i, (pair, grp) in enumerate(active.groupby("tf_pair")):
-        fig.add_trace(go.Scatter(
-            x=grp["win_rate"],
-            y=grp["profit_factor"],
-            mode="markers",
-            name=str(pair),
-            marker=dict(
-                size=grp["size"],
-                color=_ACCENT[i % len(_ACCENT)],
-                opacity=0.65,
-                line=dict(width=0.3, color=_BG),
-            ),
-            text=[
-                f"WR={r['win_rate']:.1%} PF={r['profit_factor']:.2f} T={int(r['n_trades'])}"
-                for _, r in grp.iterrows()
-            ],
-            hoverinfo="text+name",
-        ))
-
-    fig.add_hline(y=1.0, line_color=_GRID, line_width=1, line_dash="dash")
-    _apply_layout(fig, "Win Rate × Profit Factor (all combos)",
-                  xaxis_title="Win Rate", yaxis_title="Profit Factor",
-                  xaxis_tickformat=".0%", height=400)
-    return fig
-
-
-# ── 6. 2D Sensitivity heatmap ─────────────────────────────────────────────────
-
-def _pick_axes(df: pd.DataFrame) -> tuple[str, str]:
-    """Pick the two param columns with highest group-mean variance."""
-    candidates = [c for c in _PARAM_COLS if c in df.columns and df[c].nunique() >= 2]
-    variances = {}
-    for col in candidates:
-        gm = df.groupby(col)["profit_factor"].mean()
-        variances[col] = float(gm.var())
-    top2 = sorted(variances, key=variances.get, reverse=True)[:2]  # type: ignore[arg-type]
-    return (top2[0], top2[1]) if len(top2) >= 2 else (candidates[0], candidates[1])
-
-
-def _heatmap_fig(df: pd.DataFrame) -> go.Figure:
-    if df.empty:
-        return go.Figure()
-
-    row_col, col_col = _pick_axes(df)
-    pivot = df.pivot_table(
-        values="profit_factor",
-        index=row_col, columns=col_col,
-        aggfunc="mean",
-    )
-
-    z = pivot.values
-    z_text = [[f"{v:.2f}" if not np.isnan(v) else "" for v in row] for row in z]
-
-    fig = go.Figure(go.Heatmap(
-        z=z,
-        x=[str(v) for v in pivot.columns],
-        y=[str(v) for v in pivot.index],
-        text=z_text,
-        texttemplate="%{text}",
-        textfont=dict(size=10),
-        colorscale="RdYlGn",
-        zmin=max(0, float(np.nanmin(z))),
-        zmax=float(np.nanmax(z)),
-        colorbar=dict(title="Mean PF", tickfont=dict(color=_FG)),
-    ))
-
-    _apply_layout(
-        fig,
-        f"Sensitivity: {row_col} × {col_col}  (mean profit factor)",
-        xaxis_title=col_col, yaxis_title=row_col, height=380,
-    )
-    return fig
-
-
-# ── 7. 3D surface — two params vs metric ──────────────────────────────────────
-
-def _surface_fig(df: pd.DataFrame, metric: str = "total_r") -> go.Figure:
-    """3D scatter/surface of best two params vs chosen metric."""
-    if df.empty:
-        return go.Figure()
-
-    x_col, y_col = _pick_axes(df)
-    active = df[df["n_trades"] > 0].copy()
-    if active.empty:
-        return go.Figure()
-
-    grp = active.groupby([x_col, y_col])[metric].mean().reset_index()
-
-    fig = go.Figure(go.Scatter3d(
-        x=grp[x_col].astype(str),
-        y=grp[y_col].astype(str),
-        z=grp[metric],
-        mode="markers",
-        marker=dict(
-            size=6,
-            color=grp[metric],
-            colorscale="RdYlGn",
-            colorbar=dict(title=metric, thickness=12,
-                          tickfont=dict(color=_FG)),
-            opacity=0.85,
-        ),
-        text=[
-            f"{x_col}={r[x_col]}<br>{y_col}={r[y_col]}<br>{metric}={r[metric]:.2f}"
-            for _, r in grp.iterrows()
-        ],
-        hoverinfo="text",
-    ))
-
-    fig.update_layout(
-        **_PLOTLY_LAYOUT,
-        title=dict(text=f"3D: {x_col} × {y_col} → {metric}", font=dict(size=13, color=_FG)),
-        scene=dict(
-            xaxis=dict(title=x_col, backgroundcolor=_BG2, gridcolor=_GRID,
-                       tickfont=dict(color=_FG)),
-            yaxis=dict(title=y_col, backgroundcolor=_BG2, gridcolor=_GRID,
-                       tickfont=dict(color=_FG)),
-            zaxis=dict(title=metric, backgroundcolor=_BG2, gridcolor=_GRID,
-                       tickfont=dict(color=_FG)),
-            bgcolor=_BG2,
-        ),
-        height=480,
-    )
-    return fig
-
-
-# ── 8. Parameter importance ───────────────────────────────────────────────────
-
-def _importance_fig(df: pd.DataFrame) -> go.Figure:
-    """Variance of group-mean profit_factor for each parameter (higher = more impact)."""
-    candidates = [c for c in _PARAM_COLS if c in df.columns and df[c].nunique() >= 2]
-    records = []
-    for col in candidates:
-        gm = df.groupby(col)["profit_factor"].mean()
-        records.append({"param": col, "variance": float(gm.var()),
-                        "range": float(gm.max() - gm.min())})
-
-    imp = pd.DataFrame(records).sort_values("range", ascending=True)
-    colours = [_GREEN if v > imp["range"].median() else _BLUE for v in imp["range"]]
-
-    fig = go.Figure(go.Bar(
-        x=imp["range"],
-        y=imp["param"],
-        orientation="h",
-        marker_color=colours,
-        text=[f"{v:.3f}" for v in imp["range"]],
-        textposition="outside",
-    ))
-
-    _apply_layout(fig, "Parameter Impact (PF range across param values)",
-                  xaxis_title="Mean PF range (max − min)", height=340)
-    return fig
-
-
-# ── 9. Long / short breakdown ─────────────────────────────────────────────────
-
-def _direction_fig(df: pd.DataFrame, top_n: int = 20) -> go.Figure:
-    """Bull vs bear win-rate and total-R for the top N combos by profit factor."""
-    need = {"bull_trades", "bear_trades", "bull_win_rate", "bear_win_rate",
-            "bull_total_r", "bear_total_r"}
-    if not need.issubset(df.columns):
-        return go.Figure()
-
-    active = df[df["n_trades"] > 0].copy()
-    if active.empty:
-        return go.Figure()
-
-    top = active.nlargest(top_n, "profit_factor").reset_index(drop=True)
-    labels = [
-        f"#{i+1} {r['trend_tf']}/{r['entry_tf']} PF={r['profit_factor']:.2f} T={int(r['n_trades'])}"
-        for i, (_, r) in enumerate(top.iterrows())
+    if not candidates:
+        return []
+    containing = [
+        f for f in candidates
+        if f["bottom"] <= entry_price <= f["top"]
     ]
-
-    fig = go.Figure()
-
-    # Win-rate bars
-    fig.add_trace(go.Bar(
-        name="Bull win rate", x=labels, y=top["bull_win_rate"],
-        marker_color=_GREEN, opacity=0.85,
-        yaxis="y", offsetgroup="bull",
-        text=[f"{v:.0%}" for v in top["bull_win_rate"]], textposition="outside",
-    ))
-    fig.add_trace(go.Bar(
-        name="Bear win rate", x=labels, y=top["bear_win_rate"],
-        marker_color=_RED, opacity=0.85,
-        yaxis="y", offsetgroup="bear",
-        text=[f"{v:.0%}" for v in top["bear_win_rate"]], textposition="outside",
-    ))
-
-    # Total-R dots on secondary axis
-    fig.add_trace(go.Scatter(
-        name="Bull total R", x=labels, y=top["bull_total_r"],
-        mode="markers", marker=dict(symbol="circle", size=9, color=_GREEN,
-                                    line=dict(width=1, color=_BG)),
-        yaxis="y2",
-    ))
-    fig.add_trace(go.Scatter(
-        name="Bear total R", x=labels, y=top["bear_total_r"],
-        mode="markers", marker=dict(symbol="diamond", size=9, color=_RED,
-                                    line=dict(width=1, color=_BG)),
-        yaxis="y2",
-    ))
-
-    layout = dict(_PLOTLY_LAYOUT)
-    layout.update(dict(
-        title=dict(text=f"Long vs Short — Top {top_n} by PF",
-                   font=dict(size=13, color=_FG)),
-        barmode="group",
-        height=420,
-        yaxis=dict(title="Win Rate", tickformat=".0%",
-                   gridcolor=_GRID, linecolor=_GRID, range=[0, 0.9]),
-        yaxis2=dict(title="Total R", overlaying="y", side="right",
-                    gridcolor=_GRID, zeroline=True, zerolinecolor=_GRID),
-        legend=dict(orientation="h", y=1.08, font=dict(size=10)),
-    ))
-    fig.update_layout(**layout)
-    return fig
+    if containing:
+        return [max(containing, key=lambda f: f["idx"])]
+    return [max(candidates, key=lambda f: f["idx"])]
 
 
-# ── 10. Parallel coordinates ──────────────────────────────────────────────────
+def _style_ax(ax):
+    ax.set_facecolor(BG_BAR)
+    ax.tick_params(colors=FG, labelsize=7)
+    for sp in ax.spines.values():
+        sp.set_edgecolor("#444466")
+    ax.grid(axis="y", color=GRID, linewidth=0.4)
 
-def _parcoords_fig(df: pd.DataFrame, metric: str = "total_r") -> go.Figure:
-    """Multi-factor view: all numeric params × metric, coloured by metric."""
-    active = df[df["n_trades"] > 0].copy()
-    if active.empty:
-        return go.Figure()
 
-    num_params = [
-        c for c in _PARAM_COLS
-        if c in active.columns and pd.api.types.is_numeric_dtype(active[c])
-        and active[c].nunique() >= 2
-    ]
-    cols = num_params + [metric]
+def _fig_to_b64(fig) -> str:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=110, bbox_inches="tight",
+                facecolor=BG_BAR, edgecolor="none")
+    plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode()
 
-    # encode booleans as 0/1 for parcoords
-    plot_df = active[cols].copy()
-    for c in plot_df.columns:
-        if plot_df[c].dtype == bool:
-            plot_df[c] = plot_df[c].astype(int)
 
-    dimensions = [
-        dict(label=c, values=plot_df[c])
-        for c in cols
-    ]
+def _equity_curve_b64(trades: list[Trade]) -> str:
+    rs = [t.r_multiple for t in trades]
+    cum = np.cumsum(rs)
+    xs  = np.arange(1, len(rs) + 1)
 
-    fig = go.Figure(go.Parcoords(
-        line=dict(
-            color=plot_df[metric],
-            colorscale="RdYlGn",
-            showscale=True,
-            colorbar=dict(title=metric, tickfont=dict(color=_FG)),
-        ),
-        dimensions=dimensions,
-        labelangle=-30,
-        labelside="bottom",
-    ))
+    fig, ax = plt.subplots(figsize=(9, 2.5))
+    fig.patch.set_facecolor(BG_BAR)
+    _style_ax(ax)
 
-    fig.update_layout(
-        **_PLOTLY_LAYOUT,
-        title=dict(text=f"Parallel Coordinates — coloured by {metric}",
-                   font=dict(size=13, color=_FG)),
-        height=460,
+    colors = [GREEN if r >= 0 else RED for r in rs]
+    ax.bar(xs, rs, color=colors, width=0.6, alpha=0.7, zorder=2)
+    ax.plot(xs, cum, color=GOLD, lw=1.5, zorder=3, label="Cumulative R")
+    ax.axhline(0, color=GRID, lw=0.8)
+    ax.set_xlabel("Trade #", color=FG, fontsize=8)
+    ax.set_ylabel("R", color=FG, fontsize=8)
+    ax.legend(fontsize=7, facecolor=BG_BAR, labelcolor=FG)
+    fig.suptitle("Equity Curve (per-trade R + cumulative)", color=FG, fontsize=9)
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
+def _trade_chart_b64(
+    trade: Trade,
+    htf: pd.DataFrame,
+    ltf: pd.DataFrame,
+    params: BacktestParams,
+) -> str:
+    """Two-panel chart: HTF context (left) + LTF entry zoom (right)."""
+    htf_times = htf["time_key"].values.astype(str)
+    ltf_times = ltf["time_key"].values.astype(str)
+
+    # ── locate bars ──────────────────────────────────────────────────────
+    entry_str = str(trade.entry_time)
+    exit_str  = str(trade.exit_time)
+
+    # HTF: center on entry bar so you can see context before and after
+    htf_pos   = int(np.searchsorted(htf_times, entry_str, side="right")) - 1
+    htf_pos   = max(0, min(htf_pos, len(htf) - 1))
+    htf_start = max(0, htf_pos - _HTF_HALF)
+    htf_end   = min(len(htf), htf_pos + _HTF_HALF + 1)
+    htf_slice = htf.iloc[htf_start:htf_end].reset_index(drop=True)
+    rel_entry_htf = htf_pos - htf_start  # entry bar position within the slice
+
+    # LTF: use stored bar index
+    entry_bar = trade.entry_ltf_bar
+    exit_bar  = int(np.searchsorted(ltf_times, exit_str, side="right")) - 1
+    exit_bar  = max(entry_bar, min(exit_bar, len(ltf) - 1))
+    ltf_start = max(0, entry_bar - _LTF_PRE_BARS)
+    ltf_end   = min(len(ltf), exit_bar + _LTF_POST_BARS + 1)
+    ltf_slice = ltf.iloc[ltf_start:ltf_end].reset_index(drop=True)
+    # local indices relative to the slice
+    rel_entry = entry_bar - ltf_start
+    rel_exit  = exit_bar  - ltf_start
+
+    # ── reconstruct SMC signals matching the engine's backward window ─────
+    # The engine sees 200 HTF bars ending at the current bar; the chart only
+    # shows 80 bars centred on entry.  Re-running detect_bos_choch on the
+    # narrow chart slice gives different (and often wrong) signals because the
+    # trend-setting CHoCH might be 50-150 bars back — outside the visible window.
+    # Solution: run BOS detection on the engine's full backward window, then
+    # remap signal indices into the chart coordinate system.
+    eng_start   = max(0, htf_pos + 1 - params.htf_window_bars)
+    htf_eng     = htf.iloc[eng_start : htf_pos + 1].reset_index(drop=True)
+    htf_bos_eng = detect_bos_choch(htf_eng, params.swing_lookback)
+
+    # Remap: engine bar k → absolute htf index = eng_start + k
+    #        chart  bar m → absolute htf index = htf_start + m
+    #        so chart_m = k + (eng_start - htf_start)
+    idx_offset = eng_start - htf_start
+    n_chart = len(htf_slice)
+    htf_bos: list[dict] = []
+    for sig in htf_bos_eng:
+        s = dict(sig)
+        s["idx"]      = sig["idx"] + idx_offset
+        s["from_idx"] = sig.get("from_idx", max(0, sig["idx"] - 1)) + idx_offset
+        # Only include signals with at least one endpoint visible in chart
+        if s["from_idx"] < n_chart and s["idx"] >= 0:
+            htf_bos.append(s)
+
+    all_htf_fvgs = detect_fvg(htf_slice, params.fvg_min_width_pct)
+    # Show only the FVG directly responsible for this trade entry (not all FVGs)
+    htf_fvgs   = _entry_fvg(all_htf_fvgs, trade.entry_price, trade.direction, rel_entry_htf)
+
+    # ── reconstruct LTF BOS/CHoCH (only if ltf_confirmation was used) ────
+    ltf_bos: list[dict] = []
+    if params.require_ltf_confirmation:
+        ltf_bos = detect_bos_choch(ltf_slice, lookback=1)
+
+    # ── draw ──────────────────────────────────────────────────────────────
+    fig, (ax_h, ax_l) = plt.subplots(
+        1, 2, figsize=(14, 4),
+        gridspec_kw={"width_ratios": [1.4, 1]},
     )
-    return fig
+    fig.patch.set_facecolor(BG_BAR)
+    _style_ax(ax_h)
+    _style_ax(ax_l)
+
+    # HTF panel
+    labels_h = draw_candles(ax_h, htf_slice)
+    draw_fvg(ax_h, htf_slice, htf_fvgs, max_bars=_HTF_CHART_BARS)
+    draw_bos_choch(ax_h, htf_slice, htf_bos)
+    n_h = len(htf_slice)
+    step_h = max(1, n_h // 8)
+    ax_h.set_xticks(range(0, n_h, step_h))
+    ax_h.set_xticklabels([labels_h[i] for i in range(0, n_h, step_h)],
+                         rotation=30, fontsize=6, color=FG)
+
+    # vertical line at entry bar (centered in window)
+    dir_label   = "LONG"  if trade.direction == "bull" else "SHORT"
+    trend_color = UP if trade.direction == "bull" else DOWN
+    ax_h.axvline(rel_entry_htf, color=GOLD, lw=1, linestyle="--", alpha=0.7)
+
+    # entry price + SL/TP horizontal reference lines on HTF
+    ax_h.axhline(trade.entry_price, color=GOLD,  lw=0.9, linestyle=":",  alpha=0.7,
+                 label=f"Entry {trade.entry_price:.2f}")
+    ax_h.axhline(trade.sl,          color=RED,   lw=0.9, linestyle="--", alpha=0.6,
+                 label=f"SL {trade.sl:.2f}")
+    ax_h.axhline(trade.tp,          color=GREEN, lw=0.9, linestyle="--", alpha=0.6,
+                 label=f"TP {trade.tp:.2f}")
+
+    # Engine's trend from the full 200-bar window (same calculation the engine did)
+    eng_trend = determine_trend(htf_bos_eng, params.bos_count)
+
+    # Find the last CHoCH that established the current trend direction
+    trend_choch_info = ""
+    if htf_bos_eng:
+        last_choch = None
+        for sig in htf_bos_eng:
+            if sig["type"] == "CHoCH":
+                last_choch = sig
+        if last_choch is not None:
+            bars_ago = len(htf_eng) - 1 - last_choch["idx"]
+            abs_choch = eng_start + last_choch["idx"]
+            choch_dir = "bull" if last_choch["direction"] == "bull" else "bear"
+            choch_chart = abs_choch - htf_start  # chart coordinate
+            if 0 <= choch_chart < n_chart:
+                # CHoCH is visible — draw a vertical dashed line
+                ax_h.axvline(choch_chart, color=trend_color, lw=0.8, linestyle=":", alpha=0.5)
+            trend_choch_info = (
+                f"  CHoCH {choch_dir} {bars_ago}bars ago"
+                if bars_ago > 0 else ""
+            )
+
+    # trend direction badge (top-left)
+    trend_arrow = "▲" if trade.direction == "bull" else "▼"
+    ax_h.text(0.02, 0.97, f"{trend_arrow} {dir_label}{trend_choch_info}",
+              transform=ax_h.transAxes, color=trend_color, fontsize=7,
+              fontweight="bold", va="top", ha="left", zorder=10,
+              bbox=dict(fc=BG_BAR, ec=trend_color, alpha=0.85, pad=3, boxstyle="round"))
+
+    ax_h.set_title(
+        f"HTF {params.trend_tf}  — {dir_label} setup  [engine window: last {min(htf_pos+1, params.htf_window_bars)} bars]",
+        color=FG, fontsize=8)
+    ax_h.legend(fontsize=6, facecolor=BG_BAR, labelcolor=FG)
+
+    # LTF panel
+    labels_l = draw_candles(ax_l, ltf_slice)
+    if ltf_bos:
+        draw_bos_choch(ax_l, ltf_slice, ltf_bos)
+    n_l = len(ltf_slice)
+
+    # SL / TP lines
+    ax_l.axhline(trade.sl, color=RED,  lw=1.2, linestyle="--", alpha=0.85,
+                 label=f"SL {trade.sl:.2f}")
+    ax_l.axhline(trade.tp, color=GREEN, lw=1.2, linestyle="--", alpha=0.85,
+                 label=f"TP {trade.tp:.2f}")
+
+    # Entry arrow
+    entry_y = trade.entry_price
+    arrow_dy = (trade.tp - trade.entry_price) * 0.15
+    ax_l.annotate(
+        f"  {dir_label} {trade.entry_price:.2f}",
+        xy=(rel_entry, entry_y),
+        xytext=(rel_entry, entry_y - arrow_dy),
+        arrowprops=dict(arrowstyle="->", color=GOLD, lw=1.5),
+        color=GOLD, fontsize=7, va="center",
+    )
+
+    # Exit marker
+    exit_color = GREEN if trade.result == "win" else (RED if trade.result == "loss" else GOLD)
+    r_label = f"{trade.r_multiple:+.2f}R ({trade.result})"
+    ax_l.scatter([rel_exit], [trade.exit_price], marker="X", s=80,
+                 color=exit_color, zorder=5, label=r_label)
+
+    step_l = max(1, n_l // 8)
+    ax_l.set_xticks(range(0, n_l, step_l))
+    ax_l.set_xticklabels([labels_l[i] for i in range(0, n_l, step_l)],
+                         rotation=30, fontsize=6, color=FG)
+    ax_l.set_title(
+        f"LTF {params.entry_tf}  — {trade.entry_time[:16]}  →  {trade.exit_time[:16]}",
+        color=FG, fontsize=8,
+    )
+    ax_l.legend(fontsize=6, facecolor=BG_BAR, labelcolor=FG)
+
+    fig.suptitle(
+        f"Trade {trade.trade_id}  |  {dir_label}  |  {trade.result.upper()}  {trade.r_multiple:+.2f}R",
+        color=FG, fontsize=9, fontweight="bold",
+    )
+    fig.tight_layout()
+    return _fig_to_b64(fig)
 
 
-# ── HTML template ─────────────────────────────────────────────────────────────
+# ── HTML assembly ─────────────────────────────────────────────────────────────
 
 _CSS = """
-<style>
-  body { background: #0b1120; color: #cdd6f4; font-family: 'Segoe UI', sans-serif;
-         margin: 0; padding: 20px 30px; }
-  h1   { color: #5c9cf5; font-size: 1.4rem; margin-bottom: 4px; }
-  h2   { color: #cdd6f4; font-size: 1.05rem; margin: 28px 0 10px;
-         border-bottom: 1px solid #1e2d42; padding-bottom: 4px; }
-  .meta { color: #6e7a9b; font-size: 0.85rem; margin-bottom: 20px; }
-  .kpi-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0 24px; }
-  .kpi-card { background: #131f30; border: 1px solid #1e2d42; border-radius: 8px;
-              padding: 12px 18px; min-width: 120px; }
-  .kpi-label { font-size: 0.75rem; color: #6e7a9b; text-transform: uppercase;
-               letter-spacing: 0.04em; }
-  .kpi-value { font-size: 1.35rem; font-weight: 600; margin-top: 4px; }
-  .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
-  .chart-full { margin-bottom: 16px; }
-  .table-wrap { overflow-x: auto; margin-bottom: 20px; }
-  .result-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
-  .result-table th { background: #131f30; color: #6e7a9b; padding: 7px 10px;
-                     text-align: left; font-weight: 500; white-space: nowrap;
-                     border-bottom: 1px solid #1e2d42; }
-  .result-table td { padding: 5px 10px; border-bottom: 1px solid #131f30;
-                     white-space: nowrap; }
-  .result-table tr:hover td { background: #131f30; }
-  .plotly-graph-div { border-radius: 8px; overflow: hidden; }
-</style>
+body { background:#0d0d1a; color:#c8c8e8; font-family:Consolas,monospace;
+       font-size:13px; margin:0; padding:16px; }
+h1   { color:#FFA005; border-bottom:1px solid #333366; padding-bottom:6px; }
+h2   { color:#8888cc; margin-top:28px; }
+h3   { color:#aaaadd; margin-top:16px; }
+table{ border-collapse:collapse; width:100%; margin-top:8px; }
+th   { background:#1a1a2e; color:#8888cc; padding:5px 8px;
+       border:1px solid #333366; text-align:left; }
+td   { padding:4px 8px; border:1px solid #222244; }
+tr:hover td { background:#1a1a2e; }
+tr.win  td  { color:#4caf50; }
+tr.loss td  { color:#ef5350; }
+tr.timeout td { color:#888899; }
+tr.highlight td { outline:1px solid #FFA005; }
+.kpi-grid { display:flex; flex-wrap:wrap; gap:12px; margin-top:12px; }
+.kpi { background:#12122a; border:1px solid #333366; border-radius:6px;
+       padding:10px 18px; min-width:120px; text-align:center; }
+.kpi .val { font-size:1.5em; font-weight:bold; color:#FFA005; }
+.kpi .lbl { font-size:0.75em; color:#8888cc; margin-top:2px; }
+.kpi.good .val { color:#4caf50; }
+.kpi.bad  .val { color:#ef5350; }
+.kpi.neutral .val { color:#8888ff; }
+.trade-card { background:#0e0e22; border:1px solid #333366; border-radius:6px;
+              margin:12px 0; padding:12px; }
+.trade-card h4 { margin:0 0 8px 0; color:#aaaadd; }
+img { max-width:100%; border-radius:4px; }
+.param-grid { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.param-badge { background:#1a1a2e; border:1px solid #333366; border-radius:4px;
+               padding:3px 10px; font-size:0.85em; }
+.param-badge .k { color:#8888cc; }
+.param-badge .v { color:#FFA005; }
+.streak-label { display:inline-block; background:#1a1a2e; border:1px solid #FFA005;
+                border-radius:12px; padding:2px 10px; font-size:0.85em;
+                color:#FFA005; margin-bottom:8px; }
 """
 
 
-def _html_section(title: str, content: str) -> str:
-    return f"<h2>{title}</h2>\n{content}\n"
+def _kpi(label: str, val: str, kind: str = "neutral") -> str:
+    return (f'<div class="kpi {kind}">'
+            f'<div class="val">{val}</div>'
+            f'<div class="lbl">{label}</div></div>')
 
 
-def _chart_grid(*html_parts: str) -> str:
-    cells = "".join(f'<div class="chart-cell">{p}</div>' for p in html_parts)
-    return f'<div class="chart-grid">{cells}</div>'
+def _params_html(params: BacktestParams) -> str:
+    skip = {"trend_tf", "entry_tf"}
+    badges = "".join(
+        f'<span class="param-badge"><span class="k">{k}</span> '
+        f'<span class="v">{v}</span></span>'
+        for k, v in asdict(params).items() if k not in skip
+    )
+    return f'<div class="param-grid">{badges}</div>'
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+def _trades_table(trades: list[Trade], highlight_ids: set[str]) -> str:
+    rows = []
+    for i, t in enumerate(trades, 1):
+        cls = t.result
+        hl  = " highlight" if t.trade_id in highlight_ids else ""
+        rows.append(
+            f'<tr class="{cls}{hl}">'
+            f"<td>{i}</td>"
+            f"<td><code>{t.trade_id}</code></td>"
+            f"<td>{t.entry_time[:16]}</td>"
+            f"<td>{'L' if t.direction == 'bull' else 'S'}</td>"
+            f"<td>{t.entry_price:.2f}</td>"
+            f"<td>{t.sl:.2f}</td>"
+            f"<td>{t.tp:.2f}</td>"
+            f"<td>{t.exit_price:.2f}</td>"
+            f"<td>{t.r_multiple:+.2f}</td>"
+            f"<td>{t.result}</td>"
+            f"</tr>"
+        )
+    header = (
+        "<tr>"
+        "<th>#</th><th>trade_id</th><th>Entry time</th><th>Dir</th>"
+        "<th>Entry</th><th>SL</th><th>TP</th><th>Exit</th>"
+        "<th>R</th><th>Result</th>"
+        "</tr>"
+    )
+    return f"<table>{header}{''.join(rows)}</table>"
 
-def generate_audit(
-    csv_path: str | pathlib.Path,
-    output_path: Optional[str | pathlib.Path] = None,
-    top_n: int = 20,
-    metric: str = "total_r",
-    open_browser: bool = False,
-) -> pathlib.Path:
-    """Generate a self-contained HTML audit report from a backtest results CSV.
 
-    Args:
-        csv_path:     Path to results CSV produced by run.py.
-        output_path:  Where to save the HTML (default: same dir as CSV).
-        top_n:        Number of combos shown in top-N table and equity chart.
-        metric:       Primary metric for 3D surface and parallel coords.
-        open_browser: If True, open the report in the default browser.
+def _kd_at_entry(trade: Trade, htf: pd.DataFrame, params: BacktestParams) -> tuple[float, str | None]:
+    """Return (avg_width, trend) from KD indicator at trade entry time."""
+    tp     = params.htf_trend_params
+    fast   = tp.get("kd_fast", 25)
+    slow   = tp.get("kd_slow", 90)
+    window = tp.get("kd_window", 10)
+    flat_t = tp.get("kd_flat_threshold", 0.0)
+    htf_times = htf["time_key"].values.astype(str)
+    htf_pos   = int(np.searchsorted(htf_times, str(trade.entry_time), side="right")) - 1
+    htf_pos   = max(0, min(htf_pos, len(htf) - 1))
+    htf_full  = htf.iloc[: htf_pos + 1].reset_index(drop=True)
+    kd        = compute_kd(htf_full, fast=fast, slow=slow)
+    avg_w     = float(kd["width"].iloc[-window:].mean()) if len(kd) >= window else float("nan")
+    trend     = _kd_trend(htf_full, fast=fast, slow=slow, window=window, flat_threshold=flat_t)
+    return avg_w, trend
 
-    Returns:
-        Path to the generated HTML file.
-    """
-    csv_path = pathlib.Path(csv_path)
-    if output_path is None:
-        output_path = csv_path.parent / (csv_path.stem + "_audit.html")
-    output_path = pathlib.Path(output_path)
 
-    df = pd.read_csv(csv_path)
-
-    # ── Build charts ──────────────────────────────────────────────────────────
-    kpi_html    = _kpi_section(df)
-    table_html  = _top_table(df, top_n)
-    equity_html = _to_html(_equity_fig(df, top_n))
-    rdist_html  = _to_html(_r_dist_fig(df))
-    scatter_html = _to_html(_scatter_fig(df))
-    heatmap_html = _to_html(_heatmap_fig(df))
-    surface_html = _to_html(_surface_fig(df, metric))
-    import_html    = _to_html(_importance_fig(df))
-    direction_html = _to_html(_direction_fig(df, top_n))
-    parcoords_html = _to_html(_parcoords_fig(df, metric))
-
-    # ── Assemble ──────────────────────────────────────────────────────────────
-    title = f"SMC Backtest Report — {csv_path.parent.name} / {csv_path.stem}"
-    ts    = datetime.now().strftime("%Y-%m-%d %H:%M")
-    meta  = (f"<div class='meta'>Generated {ts} &nbsp;|&nbsp; "
-             f"{len(df):,} combos &nbsp;|&nbsp; source: {csv_path.name}</div>")
-
-    body = (
-        meta
-        + kpi_html
-        + _html_section(f"Top {top_n} Combinations", table_html)
-        + _html_section("Performance Overview", _chart_grid(equity_html, rdist_html))
-        + _html_section("Long vs Short Breakdown",
-                        f'<div class="chart-full">{direction_html}</div>')
-        + _html_section("All Combos: Win Rate × Profit Factor",
-                        f'<div class="chart-full">{scatter_html}</div>')
-        + _html_section("Parameter Sensitivity",
-                        _chart_grid(heatmap_html, import_html))
-        + _html_section(f"3D: Parameter Interaction → {metric}",
-                        f'<div class="chart-full">{surface_html}</div>')
-        + _html_section("Parallel Coordinates — Multi-factor View",
-                        f'<div class="chart-full">{parcoords_html}</div>')
+def _trade_card(trade: Trade, htf: pd.DataFrame, ltf: pd.DataFrame,
+                params: BacktestParams, idx: int | None = None,
+                kd_cache: dict | None = None) -> str:
+    b64 = _trade_chart_b64(trade, htf, ltf, params)
+    label = f"#{idx}  " if idx is not None else ""
+    r_color = "color:#4caf50" if trade.r_multiple >= 0 else "color:#ef5350"
+    kd_html = ""
+    if kd_cache is not None:
+        meta = kd_cache.get(trade.trade_id)
+        if meta:
+            avg_w, trend = meta
+            if not math.isnan(avg_w):
+                trend_label = trend if trend else "flat"
+                trend_color = "#4caf50" if trend == "bull" else ("#ef5350" if trend == "bear" else "#888888")
+                kd_html = (
+                    f'  ·  <span style="color:#aaaadd">KDW&nbsp;{avg_w:+.4f}</span>'
+                    f'  <span style="color:{trend_color}">▸&nbsp;{trend_label}</span>'
+                )
+    return (
+        f'<div class="trade-card">'
+        f"<h4>{label}<code>{trade.trade_id}</code>  ·  "
+        f"{trade.entry_time[:16]}  ·  {trade.direction.upper()}  ·  "
+        f'<span style="{r_color}">{trade.r_multiple:+.2f}R  ({trade.result})</span>'
+        f"{kd_html}</h4>"
+        f'<img src="data:image/png;base64,{b64}" />'
+        f"</div>"
     )
 
-    html = f"""<!DOCTYPE html>
-<html lang="en">
+
+# ── Main report generator ─────────────────────────────────────────────────────
+
+def generate_audit(
+    code:       str,
+    params:     BacktestParams,
+    start:      str,
+    end:        str,
+    out_dir:    pathlib.Path | None = None,
+    top_losses: int = _TOP_N_LOSSES,
+    top_wins:   int = _TOP_N_WINS,
+) -> pathlib.Path:
+    """Run the backtest for one combo and write an HTML review report.
+
+    Returns the path to the generated HTML file.
+    """
+    print(f"[review] Fetching klines: {code}  {params.trend_tf} + {params.entry_tf} …")
+    htf = fetch_klines(code, params.trend_tf, start, end)
+    ltf = fetch_klines(code, params.entry_tf, start, end)
+    if htf is None or ltf is None or htf.empty or ltf.empty:
+        raise RuntimeError(f"No kline data for {code}")
+
+    print(f"[review] Running backtest ({params.label()}) …")
+    result: BacktestResult = run_backtest(htf, ltf, params)
+    trades = result.trades
+    if not trades:
+        raise RuntimeError("No trades produced — try different parameters or date range")
+    print(f"[review] {len(trades)} trades found. Generating charts …")
+
+    # Persist trades so trade_viewer can look them up by ID without manual date entry.
+    try:
+        from backtest.db import BacktestDB
+        with BacktestDB() as _db:
+            _db.insert_review_trades(code, params.to_dict(), trades)
+    except Exception:
+        pass  # DB unavailable (locked, missing) — not fatal for HTML report
+
+    # ── Statistics ─────────────────────────────────────────────────────────
+    rs        = [t.r_multiple for t in trades]
+    n_trades  = len(trades)
+    n_wins    = sum(1 for t in trades if t.result == "win")
+    n_losses  = sum(1 for t in trades if t.result == "loss")
+    n_timeout = sum(1 for t in trades if t.result == "timeout")
+    wr        = n_wins / n_trades
+    total_r   = sum(rs)
+    avg_r     = total_r / n_trades
+    wins_r    = sum(r for r in rs if r > 0)
+    loss_r    = sum(-r for r in rs if r < 0)
+    pf        = wins_r / loss_r if loss_r else float("inf")
+    sharpe    = sharpe_ratio(rs)
+    sortino   = sortino_ratio(rs)
+    max_dd    = result.max_drawdown_r
+    max_loss  = result.max_loss_r
+
+    # ── Special-case trade sets ────────────────────────────────────────────
+    streaks       = _find_streaks(trades)
+    loss_sorted   = sorted(
+        [t for t in trades if t.result == "loss"],
+        key=lambda t: t.r_multiple,
+    )[:top_losses]
+    win_sorted    = sorted(
+        [t for t in trades if t.result == "win"],
+        key=lambda t: -t.r_multiple,
+    )[:top_wins]
+
+    highlight_ids = (
+        {t.trade_id for t in streaks["win"]}
+        | {t.trade_id for t in streaks["loss"]}
+        | {t.trade_id for t in loss_sorted}
+        | {t.trade_id for t in win_sorted}
+    )
+
+    # ── Equity curve ───────────────────────────────────────────────────────
+    eq_b64 = _equity_curve_b64(trades)
+
+    # ── KPI boxes ──────────────────────────────────────────────────────────
+    pf_kind      = "good" if pf >= 1.5 else ("bad" if pf < 1.0 else "neutral")
+    sharpe_kind  = "good" if sharpe >= 1.0 else ("bad" if sharpe < 0 else "neutral")
+    dd_kind      = "good" if max_dd <= 5 else ("bad" if max_dd > 15 else "neutral")
+    kpis = "".join([
+        _kpi("Trades",        str(n_trades),           "neutral"),
+        _kpi("Win Rate",      f"{wr:.1%}",              "good" if wr >= 0.4 else "bad"),
+        _kpi("W / L / T",    f"{n_wins}/{n_losses}/{n_timeout}", "neutral"),
+        _kpi("Total R",       f"{total_r:+.2f}",        "good" if total_r > 0 else "bad"),
+        _kpi("Avg R",         f"{avg_r:+.3f}",          "good" if avg_r > 0 else "bad"),
+        _kpi("Profit Factor", f"{pf:.2f}",              pf_kind),
+        _kpi("Sharpe",        f"{sharpe:.3f}",          sharpe_kind),
+        _kpi("Sortino",       f"{sortino:.3f}",         sharpe_kind),
+        _kpi("Max DD",        f"{max_dd:.2f}R",         dd_kind),
+        _kpi("Max Loss",      f"{max_loss:.2f}R",       "bad" if max_loss > 3 else "neutral"),
+    ])
+
+    # ── Section: streaks ───────────────────────────────────────────────────
+    def streak_section(label: str, streak_trades: list[Trade], color: str) -> str:
+        if not streak_trades:
+            return f"<p style='color:#666688'>No {label.lower()} streak found.</p>"
+        ids = ", ".join(f"<code>{t.trade_id}</code>" for t in streak_trades)
+        cards = "".join(
+            _trade_card(t, htf, ltf, params, i + 1, kd_cache or None)
+            for i, t in enumerate(streak_trades)
+        )
+        return (
+            f'<span class="streak-label" style="border-color:{color};color:{color}">'
+            f"{len(streak_trades)}-trade streak</span>  {ids}"
+            f"{cards}"
+        )
+
+    # ── KD cache for featured trades ───────────────────────────────────────
+    kd_cache: dict[str, tuple] = {}
+    if "kd" in params.htf_trend_methods:
+        featured = streaks["win"] + streaks["loss"] + loss_sorted + win_sorted
+        for t in featured:
+            if t.trade_id not in kd_cache:
+                kd_cache[t.trade_id] = _kd_at_entry(t, htf, params)
+
+    # ── Section: top loss / win cards ──────────────────────────────────────
+    def ranked_cards(trade_list: list[Trade], offset: int = 0) -> str:
+        return "".join(
+            _trade_card(t, htf, ltf, params, i + 1 + offset, kd_cache or None)
+            for i, t in enumerate(trade_list)
+        )
+
+    # ── Assemble HTML ──────────────────────────────────────────────────────
+    tf_label = f"{params.trend_tf}/{params.entry_tf}"
+    now_str  = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    body = f"""<!DOCTYPE html>
+<html lang="zh">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title}</title>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-{_CSS}
+<meta charset="utf-8">
+<title>Trade Review — {code}  {tf_label}</title>
+<style>{_CSS}</style>
 </head>
 <body>
-<h1>{title}</h1>
-{body}
+<h1>Trade Review — {code} &nbsp; {tf_label} &nbsp;
+    <small style="font-size:0.55em;color:#666688">{start} → {end} &nbsp;|&nbsp; {now_str}</small>
+</h1>
+
+<!-- ── Parameters ─────────────────────────────────────────────────────── -->
+<h2>Parameters</h2>
+{_params_html(params)}
+
+<!-- ── Statistics ─────────────────────────────────────────────────────── -->
+<h2>Statistics</h2>
+<div class="kpi-grid">{kpis}</div>
+<br>
+<img src="data:image/png;base64,{eq_b64}" style="width:100%;max-width:900px"/>
+
+<!-- ── All Trades ─────────────────────────────────────────────────────── -->
+<h2>All Trades &nbsp; <small style="font-size:0.65em;color:#666688">
+  (highlighted = featured in sections below)</small></h2>
+{_trades_table(trades, highlight_ids)}
+
+<!-- ── Streaks ────────────────────────────────────────────────────────── -->
+<h2>Consecutive Streaks</h2>
+<h3>Longest Win Streak</h3>
+{streak_section("Win", streaks["win"], "#4caf50")}
+<h3>Longest Loss Streak</h3>
+{streak_section("Loss", streaks["loss"], "#ef5350")}
+
+<!-- ── Top Losses ─────────────────────────────────────────────────────── -->
+<h2>Largest Losses (Top {top_losses})</h2>
+{ranked_cards(loss_sorted)}
+
+<!-- ── Top Wins ───────────────────────────────────────────────────────── -->
+<h2>Best Wins (Top {top_wins})</h2>
+{ranked_cards(win_sorted)}
+
 </body>
 </html>"""
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html, encoding="utf-8")
-    print(f"Report saved → {output_path}")
+    # ── Write file ─────────────────────────────────────────────────────────
+    if out_dir is None:
+        ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = _RESULTS_DIR / f"review_{ts}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    slug = f"{code.replace('.','_')}_{params.trend_tf}_{params.entry_tf}"
+    out_path = out_dir / f"audit_{slug}.html"
+    out_path.write_text(body, encoding="utf-8")
+    print(f"[review] Report written → {out_path}")
+    return out_path
 
-    if open_browser:
-        import webbrowser
-        webbrowser.open(output_path.resolve().as_uri())
 
-    return output_path
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
+def _build_params_from_args(args) -> BacktestParams:
+    return BacktestParams(
+        trend_tf                 = args.trend_tf,
+        entry_tf                 = args.entry_tf,
+        htf_window_bars          = args.htf_window_bars,
+        swing_lookback           = args.swing_lookback,
+        bos_count                = args.bos_count,
+        fvg_min_width_pct        = args.fvg_min_width_pct,
+        fvg_entry_depth_pct      = args.fvg_entry_depth_pct,
+        displacement_required    = args.displacement_required,
+        require_ltf_confirmation = args.require_ltf_confirmation,
+        sl_buffer_pct            = args.sl_buffer_pct,
+        max_sl_pct               = args.max_sl_pct,
+        min_rr                   = args.min_rr,
+    )
 
-# ── CLI entry point ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: uv run python -m backtest.audit <results.csv> [--open]")
-        sys.exit(1)
+    ap = argparse.ArgumentParser(description="Generate a trade review HTML report")
+    ap.add_argument("--code",  required=True, help="e.g. US.SNDK")
+    ap.add_argument("--start", required=True, help="YYYY-MM-DD")
+    ap.add_argument("--end",   required=True, help="YYYY-MM-DD")
+    # Strategy params — best-cluster defaults from SNDK grid search
+    ap.add_argument("--trend-tf",                 default="15m")
+    ap.add_argument("--entry-tf",                 default="1m")
+    ap.add_argument("--htf-window-bars",          type=int,   default=20,
+                    help="HTF bars for trend window (20 × 15 m ≈ 5 h, min ~20 for swing detection)")
+    ap.add_argument("--swing-lookback",           type=int,   default=2)
+    ap.add_argument("--bos-count",                type=int,   default=1)
+    ap.add_argument("--fvg-min-width-pct",        type=float, default=0.001)
+    ap.add_argument("--fvg-entry-depth-pct",      type=float, default=0.20)
+    ap.add_argument("--displacement-required",    action="store_true")
+    ap.add_argument("--no-displacement",          dest="displacement_required",
+                                                  action="store_false")
+    ap.set_defaults(displacement_required=False)
+    ap.add_argument("--require-ltf-confirmation", action="store_true")
+    ap.add_argument("--no-ltf-confirmation",      dest="require_ltf_confirmation",
+                                                  action="store_false")
+    ap.set_defaults(require_ltf_confirmation=False)
+    ap.add_argument("--sl-buffer-pct",            type=float, default=0.003)
+    ap.add_argument("--max-sl-pct",               type=float, default=0.010)
+    ap.add_argument("--min-rr",                   type=float, default=2.0)
+    ap.add_argument("--top-losses",               type=int,   default=_TOP_N_LOSSES)
+    ap.add_argument("--top-wins",                 type=int,   default=_TOP_N_WINS)
+    ap.add_argument("--out-dir",                  default=None,
+                    help="Output directory (default: backtest/results/review_<timestamp>/)")
 
-    csv = sys.argv[1]
-    open_b = "--open" in sys.argv
-    generate_audit(csv, open_browser=open_b)
+    args = ap.parse_args()
+    params   = _build_params_from_args(args)
+    out_dir  = pathlib.Path(args.out_dir) if args.out_dir else None
+    out_path = generate_audit(
+        code       = args.code,
+        params     = params,
+        start      = args.start,
+        end        = args.end,
+        out_dir    = out_dir,
+        top_losses = args.top_losses,
+        top_wins   = args.top_wins,
+    )
+    print(f"\nOpen: {out_path}")
