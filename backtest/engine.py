@@ -39,7 +39,21 @@ from strategy.smc import (
 )
 from backtest.stats import sharpe_ratio, sortino_ratio
 
-ALGO_VERSION = "smc_v1"  # bump when algorithm logic changes significantly; must match a git tag
+def _algo_version() -> str:
+    """Return the most recent smc_v* git tag on HEAD, falling back to 'smc_unknown'."""
+    import subprocess, pathlib
+    try:
+        return subprocess.check_output(
+            ["git", "describe", "--tags", "--match", "smc_v*", "--abbrev=0"],
+            cwd=pathlib.Path(__file__).parent,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return "smc_unknown"
+
+
+ALGO_VERSION = _algo_version()
 
 _HTF_WINDOW_DEFAULT = 20  # default HTF bars (~5 h at 15 m ≈ one trading day; override via BacktestParams.htf_window_bars)
 _WARMUP      = 40   # skip the first N LTF bars while indicators warm up
