@@ -1,14 +1,13 @@
 {
-    "codes": ["US.MU"],
+    "codes": ["US.CSCO", "US.AMD", "US.NVDA", "US.QCOM"],
     "start": "2025-05-22",
     "end": "2026-05-22",
-    "workers": 4,
+    "workers": 6,
     "top_n": 20,
     "tf_pairs": [
-        ["15m", "1m"],
         ["15m", "3m"]
     ],
     "tf_pairs_fast": [
-        ["15m", "1m"]
+        ["15m", "3m"]
     ]
 }
