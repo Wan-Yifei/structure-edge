@@ -2032,13 +2032,14 @@ class OrderFlowApp(tk.Tk):
             return
 
         centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage = result
+        _show_neu = self._show_neutral.get()
         self._profile_centers = centers
-        self._profile_total   = buy_v + sell_v + neutral_v + ohlcv_v
+        self._profile_total   = buy_v + sell_v + ohlcv_v + (neutral_v if _show_neu else 0)
         date_label = self.date_var.get().strip()
         rects, vl, leg, poc_price, vah, val = draw_hybrid_profile(
             self.ax_p, centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage,
             date_label=date_label,
-            show_neutral=self._show_neutral.get(),
+            show_neutral=_show_neu,
         )
         self._profile_bar_rects = rects
         self._profile_axvline   = vl
@@ -2077,14 +2078,15 @@ class OrderFlowApp(tk.Tk):
             return 0, None, None, None
 
         centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage = result
+        _show_neu = self._show_neutral.get()
         self._profile_centers = centers
-        self._profile_total   = buy_v + sell_v + neutral_v + ohlcv_v
+        self._profile_total   = buy_v + sell_v + ohlcv_v + (neutral_v if _show_neu else 0)
         date_label = self.date_var.get().strip()
         rects, vl, leg, poc_price, vah, val = draw_hybrid_profile(
             self.ax_p,
             centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage,
             date_label=date_label,
-            show_neutral=self._show_neutral.get(),
+            show_neutral=_show_neu,
         )
         self._profile_bar_rects    = rects
         self._profile_axvline      = vl
@@ -2246,16 +2248,24 @@ class OrderFlowApp(tk.Tk):
         row  = self._klines_data.iloc[candle_idx]
         c_lo = float(row["low"])
         c_hi = float(row["high"])
+        show_neu = self._show_neutral.get()
         rects, vl, leg = draw_tick_profile_bars(
             self.ax_t, prices, buy_v, sell_v, neu_v, title=title,
             lo=c_lo, hi=c_hi, max_bins=30,
-            show_neutral=self._show_neutral.get())
+            show_neutral=show_neu)
         self._tick_bar_rects = rects
         self._tick_axvline   = vl
         self._tick_legend    = leg
-        # Adaptive ylim: fit the candle's own price range so bars fill the panel.
-        margin = max((c_hi - c_lo) * 0.25, 0.01)
-        self.ax_t.set_ylim(c_lo - margin, c_hi + margin)
+        # Tight ylim: use the price range where effective (visible) volume exists.
+        eff = np.array(buy_v) + np.array(sell_v) + (np.array(neu_v) if show_neu else 0)
+        nz  = [p for p, v in zip(prices, eff) if v > 0]
+        if len(nz) >= 2:
+            t_lo, t_hi = min(nz), max(nz)
+            margin = max((t_hi - t_lo) * 0.20, 0.5)
+        else:
+            t_lo, t_hi = c_lo, c_hi
+            margin = max((c_hi - c_lo) * 0.25, 0.01)
+        self.ax_t.set_ylim(t_lo - margin, t_hi + margin)
         self.ax_t.grid(axis="y", color=GRID, linewidth=0.3, alpha=0.5)
 
         self._tick_shown_idx = candle_idx
