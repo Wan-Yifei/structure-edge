@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.patches import Rectangle as MplRect, Patch
 from matplotlib.collections import LineCollection
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 from core.chart import (
     BG_BAR, BG_TIP, FG, GREEN, RED, GREY, GRID, GOLD, UP, DOWN,
@@ -99,6 +100,15 @@ def _bin_profile(
     return centers, new_buy, new_sell, new_neu
 
 
+def _apply_volume_xaxis(ax_p) -> None:
+    """Format the x-axis of a volume profile panel: limit tick count, abbreviate labels."""
+    ax_p.xaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+    ax_p.xaxis.set_major_formatter(
+        FuncFormatter(lambda x, _: f"{x/1_000_000:.1f}M" if x >= 1_000_000
+                      else (f"{x/1_000:.0f}K" if x >= 1_000 else f"{int(x)}"))
+    )
+
+
 def draw_tick_profile_bars(
     ax_p,
     prices: list[float],
@@ -152,6 +162,7 @@ def draw_tick_profile_bars(
     ax_p.set_xlabel("Volume", color=FG, fontsize=8)
     ax_p.tick_params(axis="x", colors=FG, labelsize=7)
     ax_p.grid(axis="x", color=GRID, linewidth=0.5)
+    _apply_volume_xaxis(ax_p)
 
     return patches, vl, leg
 
@@ -293,10 +304,12 @@ def build_hybrid_profile(
     if hi_max - lo_min < 1e-9:
         return None
 
-    edges   = np.linspace(lo_min, hi_max, n_bins + 1)
-    centers = (edges[:-1] + edges[1:]) / 2.0
-    tick_v  = np.zeros(n_bins, dtype=float)
-    ohlcv_v = np.zeros(n_bins, dtype=float)
+    edges     = np.linspace(lo_min, hi_max, n_bins + 1)
+    centers   = (edges[:-1] + edges[1:]) / 2.0
+    buy_v     = np.zeros(n_bins, dtype=float)
+    sell_v    = np.zeros(n_bins, dtype=float)
+    neutral_v = np.zeros(n_bins, dtype=float)
+    ohlcv_v   = np.zeros(n_bins, dtype=float)
 
     tick_candles = 0
 
@@ -318,7 +331,9 @@ def build_hybrid_profile(
                         np.searchsorted(edges[1:], p, side="left"),
                         0, n_bins - 1,
                     ))
-                    tick_v[idx] += counts["buy"] + counts["sell"] + counts["neutral"]
+                    buy_v[idx]     += counts["buy"]
+                    sell_v[idx]    += counts["sell"]
+                    neutral_v[idx] += counts["neutral"]
         elif not tick_only:
             lo  = float(row["low"])
             hi  = float(row["high"])
@@ -334,30 +349,54 @@ def build_hybrid_profile(
 
     n_candles    = len(klines)
     coverage_pct = int(100 * tick_candles / n_candles) if n_candles > 0 else 0
-    return centers, tick_v, ohlcv_v, coverage_pct
+    return centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage_pct
 
 
 def draw_hybrid_profile(
     ax_p,
     centers: np.ndarray,
-    tick_v: np.ndarray,
+    buy_v: np.ndarray,
+    sell_v: np.ndarray,
+    neutral_v: np.ndarray,
     ohlcv_v: np.ndarray,
     coverage_pct: int,
     date_label: str = "",
 ) -> tuple[list, object, object, float | None, float | None, float | None]:
-    """Draw hybrid profile: OHLCV estimate (gray) + tick volume (coloured) per price bin.
+    """Draw hybrid profile on ax_p.
+
+    Two rendering modes depending on whether ohlcv_v is non-zero:
+    - Tick-only (ohlcv_v all zero): stacked buy/sell/neutral bars with distinct colours.
+    - Hybrid: combined tick volume (one colour) overlaid on OHLCV estimate (gray).
 
     Returns (patch_list, axvline, legend, poc_price, vah, val).
     poc_price/vah/val are in data coordinates, or None when there is no volume.
-    The caller is responsible for drawing POC/VA on the main candle axis AFTER its
-    ylim has been enforced — this function only marks them on ax_p.
     """
     h = float(centers[1] - centers[0]) * 0.8 if len(centers) > 1 else 0.05
+    tick_only_mode = not ohlcv_v.any()
 
-    bars_est  = ax_p.barh(centers, ohlcv_v, height=h, color=GREY, alpha=0.35)
-    bars_tick = ax_p.barh(centers, tick_v,  height=h, color=UP,   alpha=0.75)
+    if tick_only_mode:
+        bars1 = ax_p.barh(centers, buy_v,                         height=h, color=UP,   alpha=0.85)
+        bars2 = ax_p.barh(centers, neutral_v, left=buy_v,         height=h, color=GREY, alpha=0.70)
+        bars3 = ax_p.barh(centers, sell_v,    left=buy_v+neutral_v, height=h, color=DOWN, alpha=0.85)
+        bar_groups = [bars1, bars2, bars3]
+        legend_handles = [
+            Patch(color=UP,   alpha=0.85, label="Buy"),
+            Patch(color=GREY, alpha=0.70, label="Neutral"),
+            Patch(color=DOWN, alpha=0.85, label="Sell"),
+            Patch(color=_VA_COLOR, alpha=0.35, label="VA 70%"),
+        ]
+    else:
+        tick_v   = buy_v + sell_v + neutral_v
+        bars_est  = ax_p.barh(centers, ohlcv_v, height=h, color=GREY, alpha=0.35)
+        bars_tick = ax_p.barh(centers, tick_v,  height=h, color=UP,   alpha=0.75)
+        bar_groups = [bars_est, bars_tick]
+        legend_handles = [
+            Patch(color=UP,   alpha=0.75, label="Tick"),
+            Patch(color=GREY, alpha=0.35, label="Est"),
+            Patch(color=_VA_COLOR, alpha=0.35, label="VA 70%"),
+        ]
 
-    total     = tick_v + ohlcv_v
+    total = buy_v + sell_v + neutral_v + ohlcv_v
     poc_price: float | None = None
     vah: float | None = None
     val: float | None = None
@@ -383,18 +422,15 @@ def draw_hybrid_profile(
     ax_p.set_xlabel("Volume", color=FG, fontsize=8)
     ax_p.tick_params(axis="x", colors=FG, labelsize=7)
     ax_p.grid(axis="x", color=GRID, linewidth=0.5)
+    _apply_volume_xaxis(ax_p)
 
-    legend_handles = [Patch(color=UP, alpha=0.75, label="Tick")]
-    if ohlcv_v.any():
-        legend_handles.append(Patch(color=GREY, alpha=0.35, label="Est"))
-    legend_handles.append(Patch(color=_VA_COLOR, alpha=0.35, label="VA 70%"))
     leg = ax_p.legend(
         handles=legend_handles,
         loc="lower right", fontsize=7,
         facecolor=BG_BAR, labelcolor=FG, edgecolor="#444466",
     )
 
-    patches = [p for c in [bars_est, bars_tick] for p in c.patches] + poc_artists + va_artists
+    patches = [p for c in bar_groups for p in c.patches] + poc_artists + va_artists
     return patches, vl, leg, poc_price, vah, val
 
 

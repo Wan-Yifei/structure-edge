@@ -1991,10 +1991,11 @@ class OrderFlowApp(tk.Tk):
             self.ax_p.set_title("Vol Profile\ninsufficient range", color=FG, fontsize=9)
             return
 
-        centers, tick_v, ohlcv_v, coverage = result
+        centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage = result
         date_label = self.date_var.get().strip()
         rects, vl, leg, poc_price, vah, val = draw_hybrid_profile(
-            self.ax_p, centers, tick_v, ohlcv_v, coverage, date_label=date_label,
+            self.ax_p, centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage,
+            date_label=date_label,
         )
         self._profile_bar_rects = rects
         self._profile_axvline   = vl
@@ -2032,11 +2033,11 @@ class OrderFlowApp(tk.Tk):
             self.ax_p.set_title("Vol Profile\ninsufficient range", color=FG, fontsize=9)
             return 0, None, None, None
 
-        centers, tick_v, ohlcv_v, coverage = result
+        centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage = result
         date_label = self.date_var.get().strip()
         rects, vl, leg, poc_price, vah, val = draw_hybrid_profile(
             self.ax_p,
-            centers, tick_v, ohlcv_v, coverage,
+            centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage,
             date_label=date_label,
         )
         self._profile_bar_rects    = rects
