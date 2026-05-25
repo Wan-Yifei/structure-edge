@@ -1198,7 +1198,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/26/57/252af3eef59527e7c
 
 [[package]]
 name = "moomoo-project"
-version = "0.1.0"
+version = "0.2.0"
 source = { virtual = "." }
 dependencies = [
     { name = "backtrader" },
