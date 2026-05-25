@@ -237,6 +237,7 @@ class OrderFlowApp(tk.Tk):
 
         # session filter checkboxes (populated by _build_toolbar)
         self._sess_vars: dict[str, tk.BooleanVar] = {}
+        self._show_neutral = tk.BooleanVar(value=True)
 
         # tracked per-candle tick panel artists (ax_t — rebuilt on each hover)
         self._tick_bar_rects: list = []
@@ -514,6 +515,13 @@ class OrderFlowApp(tk.Tk):
                 command=self._on_session_toggle,
                 style="Ind.TCheckbutton",
             ).pack(side=tk.LEFT, padx=(2, 0))
+
+        tk.Label(ind_bar, text="|", bg=BG_BAR, fg=GREY).pack(side=tk.LEFT, padx=8)
+        ttk.Checkbutton(
+            ind_bar, text="Neutral", variable=self._show_neutral,
+            command=self._on_neutral_toggle,
+            style="Ind.TCheckbutton",
+        ).pack(side=tk.LEFT, padx=(2, 0))
 
         # ── Trade ID row ──────────────────────────────────────────────────
         self._trade_bar = tk.Frame(self, bg=BG_BAR, pady=4)
@@ -1917,6 +1925,15 @@ class OrderFlowApp(tk.Tk):
         self._bg = self._bg_t = self._bg_p = None
         self.canvas.draw_idle()
 
+    def _on_neutral_toggle(self):
+        """Neutral-order visibility changed — rebuild profile and per-candle tick panel."""
+        self._rebuild_zoomed_profile()
+        # Re-render the currently hovered candle so ax_t also respects the new setting.
+        if self._tick_shown_idx is not None:
+            self._update_hover_tick(self._tick_shown_idx)
+        self._bg = self._bg_t = self._bg_p = None
+        self.canvas.draw_idle()
+
     # ── POC + VA overlay on the candle axis ───────────────────────────────────
 
     def _clear_candle_profile_artists(self):
@@ -2021,6 +2038,7 @@ class OrderFlowApp(tk.Tk):
         rects, vl, leg, poc_price, vah, val = draw_hybrid_profile(
             self.ax_p, centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage,
             date_label=date_label,
+            show_neutral=self._show_neutral.get(),
         )
         self._profile_bar_rects = rects
         self._profile_axvline   = vl
@@ -2066,6 +2084,7 @@ class OrderFlowApp(tk.Tk):
             self.ax_p,
             centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage,
             date_label=date_label,
+            show_neutral=self._show_neutral.get(),
         )
         self._profile_bar_rects    = rects
         self._profile_axvline      = vl
@@ -2095,7 +2114,8 @@ class OrderFlowApp(tk.Tk):
         title  = f"Vol Profile\n{latest.strftime('%Y-%m-%d')}"
         rects, vl, leg = draw_tick_profile_bars(
             self.ax_p, prices, buy_v, sell_v, neu_v, title,
-            lo=kl_lo, hi=kl_hi, max_bins=40)
+            lo=kl_lo, hi=kl_hi, max_bins=40,
+            show_neutral=self._show_neutral.get())
         self._profile_bar_rects    = rects
         self._profile_axvline      = vl
         self._profile_legend       = leg
@@ -2228,7 +2248,8 @@ class OrderFlowApp(tk.Tk):
         c_hi = float(row["high"])
         rects, vl, leg = draw_tick_profile_bars(
             self.ax_t, prices, buy_v, sell_v, neu_v, title=title,
-            lo=c_lo, hi=c_hi, max_bins=30)
+            lo=c_lo, hi=c_hi, max_bins=30,
+            show_neutral=self._show_neutral.get())
         self._tick_bar_rects = rects
         self._tick_axvline   = vl
         self._tick_legend    = leg

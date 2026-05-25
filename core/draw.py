@@ -119,6 +119,7 @@ def draw_tick_profile_bars(
     max_bins: int = _MAX_PROFILE_BINS,
     lo: float | None = None,
     hi: float | None = None,
+    show_neutral: bool = True,
 ) -> tuple[list, object, object]:
     """Draw stacked buy/sell/neutral horizontal bars on ax_p.
 
@@ -131,14 +132,15 @@ def draw_tick_profile_bars(
                                              max_bins=max_bins, lo=lo, hi=hi)
     h = float((y[1] - y[0]) * 0.8) if len(y) > 1 else 0.05
 
-    bars1 = ax_p.barh(y, buy_v,             height=h, color=UP,   alpha=0.85)
-    bars2 = ax_p.barh(y, neu_v, left=buy_v, height=h, color=GREY, alpha=0.70)
-    bars3 = ax_p.barh(y, sell_v, left=buy_v + neu_v,
+    eff_neu = neu_v if show_neutral else np.zeros_like(neu_v)
+    bars1 = ax_p.barh(y, buy_v,               height=h, color=UP,   alpha=0.85)
+    bars2 = ax_p.barh(y, eff_neu, left=buy_v, height=h, color=GREY, alpha=0.70)
+    bars3 = ax_p.barh(y, sell_v, left=buy_v + eff_neu,
                       height=h, color=DOWN, alpha=0.85)
     vl  = ax_p.axvline(0, color=FG, linewidth=0.5, alpha=0.4)
 
-    # POC line — max total-volume bin
-    total_v   = buy_v + sell_v + neu_v
+    # POC line — max total-volume bin (neutral excluded if hidden)
+    total_v = buy_v + sell_v + eff_neu
     poc_extra: list = []
     if total_v.any():
         poc_price = y[int(np.argmax(total_v))]
@@ -149,10 +151,12 @@ def draw_tick_profile_bars(
                               ha="left", zorder=6)
         poc_extra = [poc_line, poc_txt]
 
+    legend_handles = [Patch(color=UP, alpha=0.85, label="Buy")]
+    if show_neutral:
+        legend_handles.append(Patch(color=GREY, alpha=0.70, label="Neutral"))
+    legend_handles.append(Patch(color=DOWN, alpha=0.85, label="Sell"))
     leg = ax_p.legend(
-        handles=[Patch(color=UP, alpha=0.85, label="Buy"),
-                 Patch(color=GREY, alpha=0.70, label="Neutral"),
-                 Patch(color=DOWN, alpha=0.85, label="Sell")],
+        handles=legend_handles,
         loc="lower right", fontsize=7,
         facecolor=BG_BAR, labelcolor=FG, edgecolor="#444466")
 
@@ -361,6 +365,7 @@ def draw_hybrid_profile(
     ohlcv_v: np.ndarray,
     coverage_pct: int,
     date_label: str = "",
+    show_neutral: bool = True,
 ) -> tuple[list, object, object, float | None, float | None, float | None]:
     """Draw hybrid profile on ax_p.
 
@@ -368,25 +373,30 @@ def draw_hybrid_profile(
     - Tick-only (ohlcv_v all zero): stacked buy/sell/neutral bars with distinct colours.
     - Hybrid: combined tick volume (one colour) overlaid on OHLCV estimate (gray).
 
+    When show_neutral=False the neutral component is excluded from bars, legend, and
+    POC/VA totals, so the profile reflects only directional (buy + sell) flow.
+
     Returns (patch_list, axvline, legend, poc_price, vah, val).
     poc_price/vah/val are in data coordinates, or None when there is no volume.
     """
     h = float(centers[1] - centers[0]) * 0.8 if len(centers) > 1 else 0.05
     tick_only_mode = not ohlcv_v.any()
+    eff_neu = neutral_v if show_neutral else np.zeros_like(neutral_v)
 
     if tick_only_mode:
-        bars1 = ax_p.barh(centers, buy_v,                         height=h, color=UP,   alpha=0.85)
-        bars2 = ax_p.barh(centers, neutral_v, left=buy_v,         height=h, color=GREY, alpha=0.70)
-        bars3 = ax_p.barh(centers, sell_v,    left=buy_v+neutral_v, height=h, color=DOWN, alpha=0.85)
+        bars1 = ax_p.barh(centers, buy_v,               height=h, color=UP,   alpha=0.85)
+        bars2 = ax_p.barh(centers, eff_neu, left=buy_v, height=h, color=GREY, alpha=0.70)
+        bars3 = ax_p.barh(centers, sell_v, left=buy_v + eff_neu, height=h, color=DOWN, alpha=0.85)
         bar_groups = [bars1, bars2, bars3]
-        legend_handles = [
-            Patch(color=UP,   alpha=0.85, label="Buy"),
-            Patch(color=GREY, alpha=0.70, label="Neutral"),
+        legend_handles = [Patch(color=UP, alpha=0.85, label="Buy")]
+        if show_neutral:
+            legend_handles.append(Patch(color=GREY, alpha=0.70, label="Neutral"))
+        legend_handles += [
             Patch(color=DOWN, alpha=0.85, label="Sell"),
             Patch(color=_VA_COLOR, alpha=0.35, label="VA 70%"),
         ]
     else:
-        tick_v   = buy_v + sell_v + neutral_v
+        tick_v    = buy_v + sell_v + eff_neu
         bars_est  = ax_p.barh(centers, ohlcv_v, height=h, color=GREY, alpha=0.35)
         bars_tick = ax_p.barh(centers, tick_v,  height=h, color=UP,   alpha=0.75)
         bar_groups = [bars_est, bars_tick]
@@ -396,7 +406,7 @@ def draw_hybrid_profile(
             Patch(color=_VA_COLOR, alpha=0.35, label="VA 70%"),
         ]
 
-    total = buy_v + sell_v + neutral_v + ohlcv_v
+    total = buy_v + sell_v + eff_neu + ohlcv_v
     poc_price: float | None = None
     vah: float | None = None
     val: float | None = None
