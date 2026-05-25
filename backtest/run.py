@@ -82,7 +82,7 @@ from backtest.db      import BacktestDB
 
 _RESULTS_DIR    = pathlib.Path(__file__).parent / "results"
 _CHECKPOINT_DIR = pathlib.Path(__file__).parent / "results" / "checkpoints"
-_DEFAULT_CONFIG = pathlib.Path(__file__).parent.parent / "config" / "backtest.json"
+_DEFAULT_CONFIG = pathlib.Path(__file__).parent.parent / "config" / "backtest" / "default_smc_v2.json"
 
 
 def _load_json_config(path: pathlib.Path) -> dict:
