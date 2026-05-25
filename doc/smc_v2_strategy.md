@@ -32,7 +32,7 @@ filters → SL/TP → trade management) is unchanged from v1.
 | `smc_v1` | Baseline: BOS/CHoCH trend, FVG touch/depth, LTF confirmation, LVN + displacement filters, swing-based SL/TP |
 | `smc_v2` | + KD channel trend detector; `htf_trend_methods` / `htf_trend_params` replace direct fields; consensus mode (bos_choch + kd); full HTF history EMA warmup |
 | `smc_v2.1` | + Over-refill guard; adaptive KD segmentation; ATR-normalised flat filter (`kd_atr_threshold`); `ALGO_VERSION` from git tag; `fvg_inspect` tool; `audit.py` (replaces `review.py`); versioned trade IDs |
-| dev (post-v2.1) | + `kd_sl_fallback`; `direction_mismatch` rejection logging; `screener.py`; `PARAM_GRID_MU` / `--mu` |
+| dev (post-v2.1) | + `kd_sl_fallback`; `direction_mismatch` rejection logging; `screener.py` |
 
 ---
 
