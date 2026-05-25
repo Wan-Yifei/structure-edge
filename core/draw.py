@@ -272,14 +272,19 @@ def build_hybrid_profile(
     buckets: dict,
     candle_mins: int,
     n_bins: int = 40,
+    tick_only: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int] | None:
     """Build a session-level volume-at-price profile mixing tick data and OHLCV estimates.
 
     For each candle:
     - If a tick bucket exists: accumulate actual tick volumes into price bins.
-    - Otherwise: distribute the candle's reported volume using a normal distribution
-      centred on the typical price (H+L+C)/3 with σ = (H−L)/4, so that ≈95 % of
-      estimated volume falls within the candle's range.
+    - Otherwise (and only when tick_only=False): distribute the candle's reported volume
+      using a normal distribution centred on the typical price (H+L+C)/3 with σ = (H−L)/4,
+      so that ≈95 % of estimated volume falls within the candle's range.
+
+    When tick_only=True the OHLCV normal-distribution fallback is skipped entirely;
+    ohlcv_vol is returned as an all-zero array.  Use this for Regular-session-only
+    profiles where real tick data should not be blended with estimates.
 
     Returns (centers, tick_vol, ohlcv_vol, coverage_pct) or None on degenerate range.
     """
@@ -314,7 +319,7 @@ def build_hybrid_profile(
                         0, n_bins - 1,
                     ))
                     tick_v[idx] += counts["buy"] + counts["sell"] + counts["neutral"]
-        else:
+        elif not tick_only:
             lo  = float(row["low"])
             hi  = float(row["high"])
             vol = float(row["volume"])
@@ -379,12 +384,12 @@ def draw_hybrid_profile(
     ax_p.tick_params(axis="x", colors=FG, labelsize=7)
     ax_p.grid(axis="x", color=GRID, linewidth=0.5)
 
+    legend_handles = [Patch(color=UP, alpha=0.75, label="Tick")]
+    if ohlcv_v.any():
+        legend_handles.append(Patch(color=GREY, alpha=0.35, label="Est"))
+    legend_handles.append(Patch(color=_VA_COLOR, alpha=0.35, label="VA 70%"))
     leg = ax_p.legend(
-        handles=[
-            Patch(color=UP,   alpha=0.75, label="Tick"),
-            Patch(color=GREY, alpha=0.35, label="Est"),
-            Patch(color=_VA_COLOR, alpha=0.35, label="VA 70%"),
-        ],
+        handles=legend_handles,
         loc="lower right", fontsize=7,
         facecolor=BG_BAR, labelcolor=FG, edgecolor="#444466",
     )

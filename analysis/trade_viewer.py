@@ -1983,7 +1983,9 @@ class OrderFlowApp(tk.Tk):
 
         _, cm = TIMEFRAME_MAP[self.tf_var.get()]
         buckets = self._hist_buckets or {}
-        result  = build_hybrid_profile(filtered, buckets, cm, n_bins=40)
+        enabled = {k for k, v in self._sess_vars.items() if v.get()}
+        tick_only = (enabled == {"regular"})
+        result  = build_hybrid_profile(filtered, buckets, cm, n_bins=40, tick_only=tick_only)
 
         if result is None:
             self.ax_p.set_title("Vol Profile\ninsufficient range", color=FG, fontsize=9)
@@ -2023,7 +2025,9 @@ class OrderFlowApp(tk.Tk):
         self._profile_tick  = None
 
         _, cm = TIMEFRAME_MAP[self.tf_var.get()]
-        result = build_hybrid_profile(klines, buckets, cm, n_bins=40)
+        enabled = {k for k, v in self._sess_vars.items() if v.get()}
+        result = build_hybrid_profile(klines, buckets, cm, n_bins=40,
+                                      tick_only=(enabled == {"regular"}))
         if result is None:
             self.ax_p.set_title("Vol Profile\ninsufficient range", color=FG, fontsize=9)
             return 0, None, None, None
