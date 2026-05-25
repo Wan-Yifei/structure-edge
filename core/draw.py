@@ -162,9 +162,13 @@ def draw_tick_profile_bars(
 
     patches = [p for c in [bars1, bars2, bars3] for p in c.patches] + poc_extra
 
+    # Explicit xlim so toggle from neutral-on to neutral-off shrinks the axis.
+    xmax = float(total_v.max()) if total_v.any() else 1.0
+    ax_p.set_xlim(0, xmax * 1.08)
+
     ax_p.set_title(title, color=FG, fontsize=9)
     ax_p.set_xlabel("Volume", color=FG, fontsize=8)
-    ax_p.tick_params(axis="x", colors=FG, labelsize=7)
+    ax_p.tick_params(axis="x", colors=FG, labelsize=7, labelbottom=True)
     ax_p.grid(axis="x", color=GRID, linewidth=0.5)
     _apply_volume_xaxis(ax_p)
 
@@ -427,10 +431,14 @@ def draw_hybrid_profile(
 
     vl = ax_p.axvline(0, color=FG, linewidth=0.5, alpha=0.4)
 
+    # Explicit xlim so toggling neutral shrinks the x-range immediately.
+    xmax = float(total.max()) if total.any() else 1.0
+    ax_p.set_xlim(0, xmax * 1.08)
+
     suffix = f"\n{date_label}" if date_label else ""
     ax_p.set_title(f"Vol Profile ({coverage_pct}% tick){suffix}", color=FG, fontsize=9)
     ax_p.set_xlabel("Volume", color=FG, fontsize=8)
-    ax_p.tick_params(axis="x", colors=FG, labelsize=7)
+    ax_p.tick_params(axis="x", colors=FG, labelsize=7, labelbottom=True)
     ax_p.grid(axis="x", color=GRID, linewidth=0.5)
     _apply_volume_xaxis(ax_p)
 
