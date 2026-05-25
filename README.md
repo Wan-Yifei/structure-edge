@@ -240,6 +240,8 @@ uv run backtest/fvg_inspect.py \
 | 文件 | 内容 |
 |------|------|
 | [`strategy/smc/STRATEGY.md`](strategy/smc/STRATEGY.md) | SMC 策略逻辑 & 参数完整说明（Pipeline、过滤器、风控、KD 趋势方法）|
+| [`doc/smc_v2_strategy.md`](doc/smc_v2_strategy.md) | smc_v2 / smc_v2.1 变更说明（KD 趋势、over-refill guard、自适应分段、与 v1 对比）|
+| [`doc/smc_v1_strategy.md`](doc/smc_v1_strategy.md) | smc_v1 策略归档文档 |
 | [`db/README.md`](db/README.md) | 数据库文件说明 + 完整 schema |
 | [`doc/BACKTEST_SYSTEM_GUIDE.md`](doc/BACKTEST_SYSTEM_GUIDE.md) | 回测系统设计指南（架构决策、性能优化、实施状态、参考文献）|
 
