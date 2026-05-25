@@ -9,6 +9,31 @@ import numpy as np
 import pandas as pd
 
 
+def _session_key(time_key: str) -> str:
+    """Return a composite session identifier: YYYY-MM-DD_<pre|regular|post>.
+
+    Used by detect_bos_choch with max_session_gap=0 so that pre-market,
+    regular, and post-market bars are treated as distinct sessions even when
+    they share the same calendar date.
+
+    US ET boundaries (minutes since midnight):
+        pre     04:00–09:30  [240, 570)
+        regular 09:30–16:00  [570, 960)
+        post    16:00–20:00  [960, 1200)
+    """
+    date = time_key[:10]
+    h = int(time_key[11:13])
+    m = int(time_key[14:16])
+    mins = h * 60 + m
+    if 240 <= mins < 570:
+        seg = "pre"
+    elif 570 <= mins <= 960:   # include 16:00 (=960) — it's the regular close bar
+        seg = "regular"
+    else:
+        seg = "post"
+    return f"{date}_{seg}"
+
+
 def determine_trend(bos_signals: list[dict], min_consecutive: int = 1) -> str | None:
     """Return current trend direction from a BOS/CHoCH signal list.
 
@@ -143,11 +168,18 @@ def _price_accepted(
 def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
                      filter_choch: bool = True,
                      trend_window: int = 20,
-                     max_span_bars: int | None = None) -> list[dict]:
+                     max_span_bars: int | None = None,
+                     max_session_gap: int | None = None) -> list[dict]:
     """Detect Break of Structure (BOS) and Change of Character (CHoCH).
 
     BOS: price breaks a swing level in the direction of the current trend.
     CHoCH: price breaks a swing level against the current trend (reversal signal).
+
+    Args:
+        max_session_gap: max overnight session boundaries allowed between the reference
+            swing and the break bar.  0 = same trading day only (prevents overnight gaps
+            from triggering intraday structure breaks).  None = no restriction.
+            Requires a 'time_key' column (YYYY-MM-DD ...) in klines.
 
     Returns list of dicts:
         {type: 'BOS'|'CHoCH', direction: 'bull'|'bear',
@@ -168,6 +200,13 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
     lows_ar  = klines["low"].values
     n        = len(klines)
 
+    # Extract per-bar session keys for boundary filtering.
+    # Uses sub-session granularity (pre/regular/post) so that extended-hours bars
+    # don't corrupt intraday regular-session structure even on the same calendar date.
+    _dates: list[str] | None = None
+    if max_session_gap is not None and "time_key" in klines.columns:
+        _dates = [_session_key(str(t)) for t in klines["time_key"].values]
+
     # Per-bar local trend: backward-looking window so each signal is classified
     # against the trend *at that moment*, not a global state from bar 0.
     local_t  = _local_trend_array(closes, trend_window)
@@ -177,9 +216,9 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
     processed_break_bars: set[int] = set()  # one signal per break bar
 
     # Bar index where the current trend was last confirmed (by CHoCH or initialisation).
-    # Swing levels formed before this bar belong to the previous trend context and must
-    # NOT be reused as reference levels — otherwise a CHoCH from one colour can span
-    # across a CHoCH from the opposite colour, creating impossible overlaps.
+    # Set to the reference-swing index (from_idx) of the most recent CHoCH, NOT the
+    # break bar: this keeps swing levels formed between the reference and the break bar
+    # available as future reference points in the new trend context.
     trend_started_at: int = 0
 
     for i in range(2, len(swings)):
@@ -197,9 +236,12 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
             # Use wick high as break threshold — close-based swing price can sit below
             # the actual wick, causing a premature BOS before the true structural break.
             ref_high = float(highs_ar[prev_high["idx"]])
+            ref_date = _dates[prev_high["idx"]] if _dates else None
             for j in range(sw["idx"] + 1, n):
                 if max_span_bars is not None and j - prev_high["idx"] > max_span_bars:
                     break
+                if ref_date is not None and _dates[j] != ref_date:
+                    break  # crossed a session boundary — stop scanning
                 if closes[j] > ref_high:
                     if j not in processed_break_bars:
                         sig_type = "BOS" if local_t[j] == "up" else "CHoCH"
@@ -219,7 +261,7 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
                             })
                             processed_break_bars.add(j)
                         if sig_type == "CHoCH":   # always reset context, even if filtered
-                            trend_started_at = j
+                            trend_started_at = prev_high["idx"]
                     processed_highs.add(prev_high["idx"])
                     break
 
@@ -233,9 +275,12 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
                 continue
             # Use wick low as break threshold — symmetric with bull case.
             ref_low = float(lows_ar[prev_low["idx"]])
+            ref_date = _dates[prev_low["idx"]] if _dates else None
             for j in range(sw["idx"] + 1, n):
                 if max_span_bars is not None and j - prev_low["idx"] > max_span_bars:
                     break
+                if ref_date is not None and _dates[j] != ref_date:
+                    break  # crossed a session boundary — stop scanning
                 if closes[j] < ref_low:
                     if j not in processed_break_bars:
                         sig_type = "BOS" if local_t[j] == "down" else "CHoCH"
@@ -255,7 +300,7 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
                             })
                             processed_break_bars.add(j)
                         if sig_type == "CHoCH":   # always reset context, even if filtered
-                            trend_started_at = j
+                            trend_started_at = prev_low["idx"]
                     processed_lows.add(prev_low["idx"])
                     break
 

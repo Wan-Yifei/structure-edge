@@ -1,11 +1,24 @@
 {
   "_comment": "Toggle each indicator overlay in the chart window.",
   "indicators": {
-    "heatmap": true,
-    "delta": true,
+    "heatmap": false,
+    "delta": false,
     "bos_choch": true,
-    "fvg": true,
+    "fvg": false,
     "ob": false,
-    "trade_review": true
+    "trade_review": false
+  },
+  "bos_choch": {
+    "_comment": "max_session_gap: max overnight boundaries between reference swing and break bar. 0 = same trading day only (prevents overnight gaps from firing intraday CHoCH). null = no restriction (use for 1h/4h/1d).",
+    "max_session_gap": {
+      "1m": 0,
+      "3m": 0,
+      "5m": 0,
+      "15m": 0,
+      "30m": 0,
+      "1h": null,
+      "4h": null,
+      "1d": null
+    }
   }
 }

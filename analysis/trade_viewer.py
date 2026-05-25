@@ -167,15 +167,29 @@ _DAY_CANDLES: dict[str, int] = {
     "4h":    6,
 }
 
-# Max BOS/CHoCH span in bars per timeframe.
-# Shorter TFs use a 4H window; 4H uses a 1-week window (~5 trading days).
+# Max BOS/CHoCH span in bars per timeframe (natural-time calibrated).
 _BOS_MAX_SPAN: dict[str, int] = {
-    "1m":  240,   # 4H
-    "5m":   48,   # 4H
-    "15m":  16,   # 4H
-    "30m":  14,   # 1 day
-    "1h":    7,   # 1 day
-    "4h":   30,   # 1 week (5 days × 6 bars/day)
+    "1m":   60,   # 1h
+    "3m":   20,   # 1h
+    "5m":   12,   # 1h
+    "15m":  26,   # 1 trading day
+    "30m":  13,   # 1 trading day
+    "1h":    7,   # 1 trading day
+    "4h":    8,   # 1 week (~5 days)
+    "1d":    5,   # 1 week
+}
+
+# trend_window for detect_bos_choch: bars used to classify local trend at each break bar.
+# Same natural-time calibration as _BOS_MAX_SPAN.
+_TREND_WINDOW: dict[str, int] = {
+    "1m":   60,   # 1h
+    "3m":   20,   # 1h
+    "5m":   12,   # 1h
+    "15m":  26,   # 1 trading day
+    "30m":  13,   # 1 trading day
+    "1h":    7,   # 1 trading day
+    "4h":    8,   # 1 week
+    "1d":    5,   # 1 week
 }
 
 # ── Technical indicator registries ────────────────────────────────────────────
@@ -238,6 +252,8 @@ class OrderFlowApp(tk.Tk):
         # session filter checkboxes (populated by _build_toolbar)
         self._sess_vars: dict[str, tk.BooleanVar] = {}
         self._show_neutral = tk.BooleanVar(value=True)
+        # profile range selector: "1d" | "3d" | "7d"
+        self._profile_range_var = tk.StringVar(value="1d")
 
         # tracked per-candle tick panel artists (ax_t — rebuilt on each hover)
         self._tick_bar_rects: list = []
@@ -353,23 +369,34 @@ class OrderFlowApp(tk.Tk):
     }
 
     def _load_indicator_cfg(self):
-        cfg = {}
+        raw = {}
         if self._cfg_path.exists():
             try:
-                cfg = json.loads(self._cfg_path.read_text(encoding="utf-8")).get("indicators", {})
+                raw = json.loads(self._cfg_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
+        cfg = raw.get("indicators", {})
         for key, default in self._IND_DEFAULTS.items():
             # trade_review is always available; orderflow keys respect avail config
             if key != "trade_review" and key not in self._avail_orderflow:
                 continue
             self._ind[key] = tk.BooleanVar(value=cfg.get(key, default))
 
+        # BOS/CHoCH session-gap filter: keyed by timeframe string, None = no limit.
+        bos_cfg = raw.get("bos_choch", {})
+        self._bos_session_gap: dict[str, int | None] = bos_cfg.get("max_session_gap", {})
+
     def _save_indicator_cfg(self):
-        data = {"_comment": "Toggle each indicator overlay in the chart window.",
-                "indicators": {k: v.get() for k, v in self._ind.items()}}
+        # Preserve all existing keys in chart.json; only overwrite "indicators".
+        raw: dict = {}
+        if self._cfg_path.exists():
+            try:
+                raw = json.loads(self._cfg_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        raw["indicators"] = {k: v.get() for k, v in self._ind.items()}
         try:
-            self._cfg_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            self._cfg_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
         except Exception:
             pass
 
@@ -522,6 +549,19 @@ class OrderFlowApp(tk.Tk):
             command=self._on_neutral_toggle,
             style="Ind.TCheckbutton",
         ).pack(side=tk.LEFT, padx=(2, 0))
+
+        # ── Profile POC/VA range selector ────────────────────────────────
+        tk.Label(ind_bar, text="|", bg=BG_BAR, fg=GREY).pack(side=tk.LEFT, padx=8)
+        tk.Label(ind_bar, text="Range:", bg=BG_BAR, fg=GREY,
+                 font=("TkDefaultFont", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        for _rval, _rlbl in [("1d", "1D"), ("3d", "3D"), ("7d", "1W")]:
+            tk.Radiobutton(
+                ind_bar, text=_rlbl, variable=self._profile_range_var, value=_rval,
+                command=self._on_profile_range_change,
+                bg=BG_BAR, fg=FG, selectcolor=BG_BAR,
+                activebackground=BG_BAR, activeforeground=FG,
+                relief=tk.FLAT, font=("TkDefaultFont", 8),
+            ).pack(side=tk.LEFT, padx=(2, 0))
 
         # ── Trade ID row ──────────────────────────────────────────────────
         self._trade_bar = tk.Frame(self, bg=BG_BAR, pady=4)
@@ -1266,11 +1306,14 @@ class OrderFlowApp(tk.Tk):
         if self.mode_var.get() == "Historical":
             date_str = self.date_var.get().strip()
             dt   = datetime.strptime(date_str, "%Y-%m-%d")
-            prev = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
             # Extend end by 3 calendar days so the user can pan forward into
             # subsequent sessions after the anchor date.
             end_dt = dt + timedelta(days=3)
-            start, end = f"{prev} 20:00:00", f"{end_dt.strftime('%Y-%m-%d')} 23:59:59"
+            # Fetch 8 calendar days back so the 1W profile range has enough data.
+            # For high-frequency TFs (1m) the API max_count=2000 limit still applies,
+            # but the anchor date's candles are always included (API returns most-recent first).
+            start = (dt - timedelta(days=8)).strftime("%Y-%m-%d 20:00:00")
+            end   = f"{end_dt.strftime('%Y-%m-%d')} 23:59:59"
 
             # Trade Review: expand window to cover pre-entry context + exit date
             tr_active = self._ind.get("trade_review") and self._ind["trade_review"].get()
@@ -1388,7 +1431,12 @@ class OrderFlowApp(tk.Tk):
 
             smc_raw: list[dict] = []
             if not trade_review_active and (ind["bos_choch"] or ind["ob"]):
-                smc_raw = detect_bos_choch(warmup, max_span_bars=_BOS_MAX_SPAN.get(tf))
+                smc_raw = detect_bos_choch(
+                    warmup,
+                    max_span_bars=_BOS_MAX_SPAN.get(tf),
+                    trend_window=_TREND_WINDOW.get(tf, 20),
+                    max_session_gap=self._bos_session_gap.get(tf),
+                )
 
             smc_signals: list[dict] | None = None
             if not trade_review_active and ind["bos_choch"]:
@@ -1558,7 +1606,8 @@ class OrderFlowApp(tk.Tk):
         # ── right-panel profile ───────────────────────────────────────────────
         if historical:
             self._hist_klines = klines   # stored for zoom-responsive rebuild
-            filtered_klines   = self._filter_klines_by_session(klines)
+            profile_klines = self._apply_profile_range(klines)
+            filtered_klines = self._filter_klines_by_session(profile_klines)
             coverage, poc_price, _vah, _val = self._draw_hist_tick_profile(
                 ticks or {}, filtered_klines, candle_mins
             )
@@ -1891,6 +1940,27 @@ class OrderFlowApp(tk.Tk):
         "night":   (20 * 60,     4 * 60),          # 20:00–04:00 (wraps midnight)
     }
 
+    def _apply_profile_range(self, klines: pd.DataFrame) -> pd.DataFrame:
+        """Return klines trimmed to the selected profile date range.
+
+        Anchor date is the last bar in klines (the rightmost visible or the
+        date_var date on initial load).  Range options:
+          "1d"  — anchor date only
+          "3d"  — anchor date + 2 prior calendar days
+          "7d"  — anchor date + 6 prior calendar days
+        """
+        if klines.empty:
+            return klines
+        range_val = self._profile_range_var.get()
+        _days_back = {"1d": 0, "3d": 2, "7d": 6}
+        if range_val not in _days_back:
+            return klines
+        anchor_date = str(klines.iloc[-1]["time_key"])[:10]
+        anchor_dt   = datetime.strptime(anchor_date, "%Y-%m-%d")
+        start_date  = (anchor_dt - timedelta(days=_days_back[range_val])).strftime("%Y-%m-%d")
+        times = klines["time_key"].astype(str).str[:10]
+        return klines[(times >= start_date) & (times <= anchor_date)]
+
     def _filter_klines_by_session(self, klines: pd.DataFrame) -> pd.DataFrame:
         """Return klines filtered to the sessions selected by _sess_vars checkboxes."""
         if not self._sess_vars:
@@ -1931,6 +2001,12 @@ class OrderFlowApp(tk.Tk):
         # Re-render the currently hovered candle so ax_t also respects the new setting.
         if self._tick_shown_idx is not None:
             self._update_hover_tick(self._tick_shown_idx)
+        self._bg = self._bg_t = self._bg_p = None
+        self.canvas.draw_idle()
+
+    def _on_profile_range_change(self):
+        """Profile range radio button changed — rebuild POC/VA for the new date range."""
+        self._rebuild_zoomed_profile()
         self._bg = self._bg_t = self._bg_p = None
         self.canvas.draw_idle()
 
@@ -1995,9 +2071,10 @@ class OrderFlowApp(tk.Tk):
         return "+".join(active)
 
     def _rebuild_zoomed_profile(self) -> None:
-        """Rebuild ax_p profile for the currently visible candle x-range.
+        """Rebuild ax_p profile for the selected date range (or visible viewport).
 
-        Called from _flush_scroll (after debounce) and _on_session_toggle.
+        Called from _flush_scroll (after debounce), _on_session_toggle,
+        _on_neutral_toggle, and _on_profile_range_change.
         No-op in live mode or when no klines are stored.
         """
         if self._hist_klines is None or self.mode_var.get() != "Historical":
@@ -2011,7 +2088,19 @@ class OrderFlowApp(tk.Tk):
         if hi_idx < lo_idx:
             return
 
-        visible  = self._hist_klines.iloc[lo_idx : hi_idx + 1]
+        range_val = self._profile_range_var.get()  # "1d" | "3d" | "7d"
+        _range_lbl = {"1d": "1D", "3d": "3D", "7d": "1W"}
+
+        if range_val in _range_lbl:
+            # Use all klines up to the rightmost visible bar, then trim by date range.
+            candidate  = self._hist_klines.iloc[: hi_idx + 1]
+            visible    = self._apply_profile_range(candidate)
+            anchor_date = str(self._hist_klines.iloc[hi_idx]["time_key"])[:10]
+            date_label = f"{anchor_date} [{_range_lbl[range_val]}]"
+        else:
+            visible    = self._hist_klines.iloc[lo_idx : hi_idx + 1]
+            date_label = self.date_var.get().strip()
+
         filtered = self._filter_klines_by_session(visible)
 
         # Always reset ax_p before drawing so no old patches survive.
@@ -2035,7 +2124,6 @@ class OrderFlowApp(tk.Tk):
         _show_neu = self._show_neutral.get()
         self._profile_centers = centers
         self._profile_total   = buy_v + sell_v + ohlcv_v + (neutral_v if _show_neu else 0)
-        date_label = self.date_var.get().strip()
         rects, vl, leg, poc_price, vah, val = draw_hybrid_profile(
             self.ax_p, centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage,
             date_label=date_label,
