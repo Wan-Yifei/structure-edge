@@ -113,8 +113,13 @@ class BacktestConfig:
     show_chart:    bool      = False
 
 
-def _config_from_json(path: pathlib.Path) -> tuple[BacktestConfig, list, list]:
-    """Load BacktestConfig + TF_PAIRS + TF_PAIRS_FAST from a JSON file."""
+def _config_from_json(path: pathlib.Path) -> tuple[BacktestConfig, list, list, dict | None]:
+    """Load BacktestConfig + TF_PAIRS + TF_PAIRS_FAST + optional param_grid from a JSON file.
+
+    If the JSON contains a "param_grid" key, it overrides the built-in PARAM_GRID.
+    This is the preferred way to define stock-specific parameter sets without
+    modifying run.py.
+    """
     raw = _load_json_config(path)
     cfg = BacktestConfig(
         codes=raw.get("codes", ["US.SNDK"]),
@@ -125,7 +130,8 @@ def _config_from_json(path: pathlib.Path) -> tuple[BacktestConfig, list, list]:
     )
     pairs      = [tuple(p) for p in raw.get("tf_pairs",      [])]
     pairs_fast = [tuple(p) for p in raw.get("tf_pairs_fast", [])]
-    return cfg, pairs, pairs_fast
+    param_grid = raw.get("param_grid", None)
+    return cfg, pairs, pairs_fast, param_grid
 
 
 # ── Timeframe pairs — loaded from config.json at startup ─────────────────────
@@ -152,7 +158,7 @@ _TF_PAIRS_FAST_DEFAULT: list[tuple[str, str]] = [
 ]
 
 if _DEFAULT_CONFIG.exists():
-    _json_cfg, TF_PAIRS, TF_PAIRS_FAST = _config_from_json(_DEFAULT_CONFIG)
+    _json_cfg, TF_PAIRS, TF_PAIRS_FAST, _ = _config_from_json(_DEFAULT_CONFIG)
 else:
     _json_cfg      = BacktestConfig()
     TF_PAIRS       = _TF_PAIRS_DEFAULT
@@ -256,25 +262,6 @@ PARAM_GRID_FOCUSED: dict[str, list] = {
     "min_rr":                    [1.5, 2.0],
 }
 
-PARAM_GRID_MU: dict[str, list] = {
-    # Focused grid derived from MU random-100 results (2026-05-25).
-    # Core finding: direction_mismatch (80% of events) is the primary blocker.
-    # fvg_max_age_bars added as a new lever — shorter values expire stale
-    # counter-trend FVGs faster, directly attacking the mismatch problem.
-    # Fixed: 15m/3m only, htf_window=50, lb=2, fvg_min=0.001, bos=2, ltf=False.
-    "htf_window_bars":          [50],
-    "swing_lookback":           [2],
-    "bos_count":                [2],
-    "fvg_min_width_pct":        [0.001],
-    "fvg_entry_depth_pct":      [0.05, 0.10, 0.20, 0.50],
-    "fvg_max_age_bars":         [15, 25, 50],
-    "require_ltf_confirmation": [False],
-    "displacement_required":    [True, False],
-    "sl_buffer_pct":            [0.003, 0.005],
-    "max_sl_pct":               [0.020, 0.030],
-    "min_rr":                   [1.5, 2.0],
-    "kd_sl_fallback":           [True, False],
-}
 
 PARAM_GRID_FAST: dict[str, list] = {
     "htf_window_bars":            [20],
@@ -800,8 +787,6 @@ def main() -> None:
                     help="Exclude combos with fewer than N trades from top-N ranking (default: 10)")
     ap.add_argument("--no-report",  action="store_true",
                     help="Skip HTML report generation")
-    ap.add_argument("--mu",         action="store_true",
-                    help="Use MU-focused grid (PARAM_GRID_MU), forces 15m/3m only")
     ap.add_argument("--from-csv",   metavar="PATH",
                     help="Regenerate chart/report from an existing CSV (skips backtest)")
     args = ap.parse_args()
@@ -821,11 +806,12 @@ def main() -> None:
     # ── Load JSON config (CLI flag > default path > hardcoded fallback) ───
     config_path = pathlib.Path(args.config) if args.config else _DEFAULT_CONFIG
     if config_path.exists():
-        cfg, pairs_normal, pairs_fast = _config_from_json(config_path)
+        cfg, pairs_normal, pairs_fast, json_param_grid = _config_from_json(config_path)
     else:
-        cfg          = BacktestConfig()
-        pairs_normal = _TF_PAIRS_DEFAULT
-        pairs_fast   = _TF_PAIRS_FAST_DEFAULT
+        cfg             = BacktestConfig()
+        pairs_normal    = _TF_PAIRS_DEFAULT
+        pairs_fast      = _TF_PAIRS_FAST_DEFAULT
+        json_param_grid = None
 
     # ── CLI overrides ─────────────────────────────────────────────────────
     if args.codes:   cfg.codes         = args.codes
@@ -849,15 +835,14 @@ def main() -> None:
         pairs  = pairs_fast if cfg.fast else pairs_normal
         if cfg.fast:
             grid = PARAM_GRID_FAST
-        elif args.mu:
-            grid  = PARAM_GRID_MU
-            pairs = [("15m", "3m")]   # MU grid is 15m/3m only
         elif args.grid:
             grid = PARAM_GRID_FOCUSED
         elif args.combined:
             grid = PARAM_GRID_COMBINED
         elif args.kd:
             grid = PARAM_GRID_KD
+        elif json_param_grid is not None:
+            grid = json_param_grid
         else:
             grid = PARAM_GRID
         if args.random > 0:
@@ -879,14 +864,16 @@ def main() -> None:
     print(f"Resume:      {'disabled (--no-resume)' if args.no_resume else 'enabled'}")
     print(f"Total runs:  {len(params) * len(cfg.codes)}")
 
-    if args.mu:
-        grid_tag = "mu_"
-    elif args.grid:
+    if args.grid:
         grid_tag = "focused_"
     elif args.combined:
         grid_tag = "combined_"
     elif args.kd:
         grid_tag = "kd_"
+    elif json_param_grid is not None:
+        # Use config file stem as tag (e.g. "backtest_mu.json" → "mu_")
+        stem = pathlib.Path(config_path).stem  # e.g. "backtest_mu"
+        grid_tag = stem.removeprefix("backtest_") + "_" if stem != "backtest" else ""
     else:
         grid_tag = ""
     if cfg.fast:
