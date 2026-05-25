@@ -1477,6 +1477,11 @@ class OrderFlowApp(tk.Tk):
                 sp.set_edgecolor("#444466")
             ax_panel.spines["left"].set_visible(False)
             ax_panel.yaxis.set_tick_params(labelleft=False, left=False)
+        # ax_t x-axis labels (volume scale) sit at the left edge of the panel and
+        # overlap with ax_c's rotated date labels.  They are not meaningful during
+        # the placeholder state and are restored per-hover by draw_tick_profile_bars.
+        self.ax_t.tick_params(labelbottom=False)
+        self.ax_t.set_xlabel("")
 
         mode_label = f"Historical  {date_str}" if historical else "Live"
         self.fig.suptitle(f"{code}   {tf}   {mode_label}",
@@ -1497,12 +1502,16 @@ class OrderFlowApp(tk.Tk):
         else:
             anchor_idx = n - 1
 
-        # Density based on viewport width so ~20 labels show in the initial view.
-        step = max(1, num_view // 20)
+        # Target ~7 labels in the initial viewport.  ha='right' anchors the text at
+        # the tick position so rotated labels extend left (into the chart) rather
+        # than right (where they would overlap ax_t's x-axis labels).
+        step = max(1, num_view // 7)
         shown = list(range(0, n, step))
         self.ax_c.set_xticks(shown)
-        self.ax_c.set_xticklabels([labels[i] for i in shown],
-                                   rotation=45, fontsize=7, color=FG)
+        self.ax_c.set_xticklabels(
+            [labels[i] for i in shown],
+            rotation=45, ha='right', va='top', fontsize=7, color=FG,
+        )
         self.ax_c.set_ylabel("Price", color=FG)
         self.ax_c.grid(axis="y", color=GRID, linewidth=0.5)
         self.ax_c.set_xlim(-0.5, n - 0.5)  # overridden below after TA subplots
@@ -1859,7 +1868,8 @@ class OrderFlowApp(tk.Tk):
                        ha="center", va="center", color=GREY, fontsize=8,
                        transform=self.ax_t.transAxes)
         self.ax_t.set_title("Tick", color=FG, fontsize=9)
-        self.ax_t.set_xlabel("Volume", color=FG, fontsize=7)
+        self.ax_t.set_xlabel("", color=FG, fontsize=7)
+        self.ax_t.tick_params(labelbottom=False)
         self._tick_shown_idx = None
 
     # ── Session filter ────────────────────────────────────────────────────────
