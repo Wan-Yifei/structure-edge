@@ -203,6 +203,68 @@ def prices_arrays(
     return prices, buy_v, sell_v, neu_v
 
 
+# ── Value Area ───────────────────────────────────────────────────────────────
+
+_VA_COLOR = "#4fc3f7"   # light blue — distinct from GOLD (POC) and green/red candles
+_VA_ALPHA = 0.12        # band fill alpha
+
+
+def compute_value_area(
+    centers: np.ndarray,
+    volumes: np.ndarray,
+    pct: float = 0.70,
+) -> tuple[float, float]:
+    """Compute Value Area High (VAH) and Low (VAL) from a volume profile.
+
+    Standard Market Profile algorithm: start from the POC bin and expand
+    up/down, always adding the adjacent side with higher volume, until the
+    cumulative volume reaches `pct` of the total.
+
+    Returns (vah, val) in price-coordinate terms (bin centres).
+    """
+    total = float(volumes.sum())
+    if total == 0.0:
+        mid = float(centers[len(centers) // 2])
+        return mid, mid
+
+    target  = total * pct
+    poc_idx = int(np.argmax(volumes))
+    included = float(volumes[poc_idx])
+    lo_idx   = poc_idx
+    hi_idx   = poc_idx
+
+    while included < target:
+        can_up   = hi_idx + 1 < len(volumes)
+        can_down = lo_idx - 1 >= 0
+        if not can_up and not can_down:
+            break
+        vol_up   = float(volumes[hi_idx + 1]) if can_up   else -1.0
+        vol_down = float(volumes[lo_idx - 1]) if can_down else -1.0
+        if vol_up >= vol_down:
+            hi_idx   += 1
+            included += float(volumes[hi_idx])
+        else:
+            lo_idx   -= 1
+            included += float(volumes[lo_idx])
+
+    return float(centers[hi_idx]), float(centers[lo_idx])
+
+
+def _draw_value_area(ax, vah: float, val: float, poc_price: float) -> list:
+    """Draw VA band + VAH/VAL lines on a profile axes.  Returns artist list."""
+    artists: list = []
+    span = ax.axhspan(val, vah, color=_VA_COLOR, alpha=_VA_ALPHA, zorder=1)
+    artists.append(span)
+    for price, label in ((vah, "VAH"), (val, "VAL")):
+        line = ax.axhline(price, color=_VA_COLOR, lw=0.8, linestyle="--", alpha=0.75, zorder=4)
+        txt  = ax.text(
+            0, price, f" {label} {price:.2f}",
+            color=_VA_COLOR, fontsize=6, va="bottom", ha="left", zorder=6,
+        )
+        artists += [line, txt]
+    return artists
+
+
 # ── Hybrid profile (tick + OHLCV normal-distribution estimate) ───────────────
 
 def build_hybrid_profile(
@@ -277,14 +339,13 @@ def draw_hybrid_profile(
     ohlcv_v: np.ndarray,
     coverage_pct: int,
     date_label: str = "",
-) -> tuple[list, object, object, float | None]:
+) -> tuple[list, object, object, float | None, float | None, float | None]:
     """Draw hybrid profile: OHLCV estimate (gray) + tick volume (coloured) per price bin.
 
-    Returns (patch_list, axvline, legend, poc_price).
-    poc_price is the POC price in data coordinates, or None when there is no volume.
-    The caller is responsible for drawing the POC on the main candle axis AFTER its
-    ylim has been enforced — this function only marks the POC on ax_p to avoid
-    inadvertently expanding the candle chart's y range.
+    Returns (patch_list, axvline, legend, poc_price, vah, val).
+    poc_price/vah/val are in data coordinates, or None when there is no volume.
+    The caller is responsible for drawing POC/VA on the main candle axis AFTER its
+    ylim has been enforced — this function only marks them on ax_p.
     """
     h = float(centers[1] - centers[0]) * 0.8 if len(centers) > 1 else 0.05
 
@@ -293,7 +354,10 @@ def draw_hybrid_profile(
 
     total     = tick_v + ohlcv_v
     poc_price: float | None = None
+    vah: float | None = None
+    val: float | None = None
     poc_artists: list = []
+    va_artists:  list = []
     if total.any():
         poc_price = float(centers[int(np.argmax(total))])
         poc_line  = ax_p.axhline(poc_price, color=GOLD, lw=0.9,
@@ -303,6 +367,9 @@ def draw_hybrid_profile(
             color=GOLD, fontsize=6, va="bottom", ha="left", zorder=6,
         )
         poc_artists = [poc_line, poc_txt]
+
+        vah, val = compute_value_area(centers, total)
+        va_artists = _draw_value_area(ax_p, vah, val, poc_price)
 
     vl = ax_p.axvline(0, color=FG, linewidth=0.5, alpha=0.4)
 
@@ -316,13 +383,14 @@ def draw_hybrid_profile(
         handles=[
             Patch(color=UP,   alpha=0.75, label="Tick"),
             Patch(color=GREY, alpha=0.35, label="Est"),
+            Patch(color=_VA_COLOR, alpha=0.35, label="VA 70%"),
         ],
         loc="lower right", fontsize=7,
         facecolor=BG_BAR, labelcolor=FG, edgecolor="#444466",
     )
 
-    patches = [p for c in [bars_est, bars_tick] for p in c.patches] + poc_artists
-    return patches, vl, leg, poc_price
+    patches = [p for c in [bars_est, bars_tick] for p in c.patches] + poc_artists + va_artists
+    return patches, vl, leg, poc_price, vah, val
 
 
 # ── OHLCV profile ─────────────────────────────────────────────────────────────
@@ -353,11 +421,18 @@ def draw_ohlcv_profile(
                for v in volumes]
     ax_p.barh(centers, volumes, height=bin_h, color=colors, alpha=0.85)
 
-    poc_price = centers[int(np.argmax(volumes))]
+    poc_price = float(centers[int(np.argmax(volumes))])
     for ax in (ax_c, ax_p):
         ax.axhline(poc_price, color=GOLD, linewidth=0.9, linestyle="--", alpha=0.8, zorder=5)
     ax_c.text(len(klines) - 0.5, poc_price, f" POC {poc_price:.2f}",
-              color=GOLD, fontsize=7, va="center", ha="left")
+              color=GOLD, fontsize=7, va="center", ha="left", clip_on=True)
+
+    vah, val = compute_value_area(centers, volumes)
+    _draw_value_area(ax_p, vah, val, poc_price)
+    for price, label in ((vah, "VAH"), (val, "VAL")):
+        ax_c.axhline(price, color=_VA_COLOR, lw=0.8, linestyle="--", alpha=0.75, zorder=4)
+        ax_c.text(len(klines) - 0.5, price, f" {label} {price:.2f}",
+                  color=_VA_COLOR, fontsize=7, va="center", ha="left", clip_on=True)
 
     ax_p.set_title(f"Vol Profile (OHLCV)\n{date_label}", color=FG, fontsize=9)
     ax_p.set_xlabel("Volume", color=FG, fontsize=8)
@@ -502,7 +577,7 @@ def draw_candle_deltas(
             i, float(row["low"]) - offset, txt,
             ha="center", va="top", fontsize=6,
             color=UP if delta >= 0 else DOWN,
-            fontweight="bold", zorder=6,
+            fontweight="bold", zorder=6, clip_on=True,
         )
 
 
@@ -595,7 +670,7 @@ def draw_bos_choch(ax_c, klines: pd.DataFrame, signals: list[dict]) -> list:
         lbl = ax_c.text(
             (from_idx + break_idx) / 2.0, y_line, sig["type"],
             color=color, fontsize=7, va=va, ha="center",
-            fontweight="bold", zorder=5,
+            fontweight="bold", zorder=5, clip_on=True,
             bbox=dict(fc=BG_TIP, ec="none", alpha=0.70, pad=1.5),
         )
         artists.append(lbl)
@@ -629,7 +704,7 @@ def draw_fvg(ax_c, klines: pd.DataFrame, gaps: list[dict], max_bars: int = 20) -
         lbl = ax_c.text(
             x_start, (gap["top"] + gap["bottom"]) / 2,
             "FVG", color=color, fontsize=6, va="center", ha="left",
-            fontweight="bold", zorder=5,
+            fontweight="bold", zorder=5, clip_on=True,
             bbox=dict(fc=BG_TIP, ec="none", alpha=0.65, pad=1),
         )
         artists.extend([rect, lbl])
@@ -672,7 +747,7 @@ def draw_order_blocks(ax_c, klines: pd.DataFrame, blocks: list[dict], max_bars: 
         lbl = ax_c.text(
             x_start, blk["top"], f" {subtype}",
             color=color, fontsize=6, va="bottom", ha="left",
-            fontweight="bold", zorder=5,
+            fontweight="bold", zorder=5, clip_on=True,
             bbox=dict(fc=BG_TIP, ec="none", alpha=0.65, pad=1),
         )
         artists.extend([rect, lbl])

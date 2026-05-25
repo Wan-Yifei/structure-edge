@@ -71,6 +71,7 @@ from core.draw import (
     draw_candle_heatmap, draw_candle_deltas,
     draw_bos_choch, draw_fvg, draw_order_blocks, draw_kd,
     aggregate_buckets, bucket_coverage, prices_arrays,
+    _VA_COLOR,
 )
 from strategy.smc.market_structure import detect_bos_choch
 from strategy.smc.fvg import detect_fvg
@@ -223,12 +224,17 @@ class OrderFlowApp(tk.Tk):
         self._profile_ohlcv: tuple | None        = None
         self._profile_tick:  dict | None         = None
 
-        # tracked session-profile artists (ax_p — rebuilt on chart refresh only)
-        self._profile_bar_rects: list = []
+        # tracked session-profile artists
+        self._profile_bar_rects: list = []      # bars on ax_p
         self._profile_axvline         = None
         self._profile_legend          = None
+        self._candle_profile_artists: list = []  # POC + VA lines on ax_c
+        self._hist_klines: pd.DataFrame | None = None   # full unfiltered klines for zoom rebuild
         self._live_buckets: dict = {}
         self._hist_buckets: dict | None = None
+
+        # session filter checkboxes (populated by _build_toolbar)
+        self._sess_vars: dict[str, tk.BooleanVar] = {}
 
         # tracked per-candle tick panel artists (ax_t — rebuilt on each hover)
         self._tick_bar_rects: list = []
@@ -487,6 +493,25 @@ class OrderFlowApp(tk.Tk):
             command=self._on_indicator_toggle,
             style="Ind.TCheckbutton",
         ).pack(side=tk.LEFT, padx=6)
+
+        # ── Profile session filter ────────────────────────────────────────
+        tk.Label(ind_bar, text="|", bg=BG_BAR, fg=GREY).pack(side=tk.LEFT, padx=8)
+        tk.Label(ind_bar, text="Profile:", bg=BG_BAR, fg=GREY,
+                 font=("TkDefaultFont", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        _SESS_LABELS = [
+            ("regular", "Regular"),
+            ("pre",     "Pre"),
+            ("post",    "Post"),
+            ("night",   "Night"),
+        ]
+        for key, label in _SESS_LABELS:
+            var = tk.BooleanVar(value=True)
+            self._sess_vars[key] = var
+            ttk.Checkbutton(
+                ind_bar, text=label, variable=var,
+                command=self._on_session_toggle,
+                style="Ind.TCheckbutton",
+            ).pack(side=tk.LEFT, padx=(2, 0))
 
         # ── Trade ID row ──────────────────────────────────────────────────
         self._trade_bar = tk.Frame(self, bg=BG_BAR, pady=4)
@@ -1020,6 +1045,7 @@ class OrderFlowApp(tk.Tk):
         self._scroll_job = None
         self._bg = self._bg_t = self._bg_p = None
         self._perf.start("scroll_render")
+        self._rebuild_zoomed_profile()
         self.canvas.draw_idle()
 
     def _on_axes_leave(self, event):
@@ -1406,8 +1432,12 @@ class OrderFlowApp(tk.Tk):
 
         # rebuild figure — layout depends on active subplot indicators
         self.fig.clear()
-        self._profile_hover_band    = None   # axes recreated; old refs are invalid
-        self._profile_hover_line    = None
+        self._profile_hover_band     = None   # axes recreated; old refs are invalid
+        self._profile_hover_line     = None
+        self._profile_bar_rects      = []     # old axes gone; drop stale refs
+        self._profile_axvline        = None
+        self._profile_legend         = None
+        self._candle_profile_artists = []
         panels = self._subplot_panels()   # MAVOL merged into Vol when both active
         n_sub  = len(panels)
         if n_sub == 0:
@@ -1506,11 +1536,16 @@ class OrderFlowApp(tk.Tk):
 
         # ── right-panel profile ───────────────────────────────────────────────
         if historical:
-            # Always build the hybrid profile; empty buckets → 0% tick coverage
-            coverage, poc_price = self._draw_hist_tick_profile(ticks or {}, klines, candle_mins)
+            self._hist_klines = klines   # stored for zoom-responsive rebuild
+            filtered_klines   = self._filter_klines_by_session(klines)
+            coverage, poc_price, _vah, _val = self._draw_hist_tick_profile(
+                ticks or {}, filtered_klines, candle_mins
+            )
             src_label = f"Hybrid profile ({coverage}% tick)  |  Hover candle for single-bar profile"
         else:
+            self._hist_klines = None
             poc_price = None
+            _vah = _val = None
             src_label = None
             self._draw_live_tick_profile(ticks, klines)
 
@@ -1546,16 +1581,8 @@ class OrderFlowApp(tk.Tk):
         margin_bot = pr * 0.10 if ind.get("delta") else pr * 0.05
         self.ax_c.set_ylim(kl_lo - margin_bot, kl_hi + pr * 0.05)
 
-        # Draw POC on main chart only when it falls within the candle price range,
-        # and add a price label at the right edge of the initial viewport.
-        if poc_price is not None and kl_lo <= poc_price <= kl_hi:
-            self.ax_c.axhline(poc_price, color=GOLD, lw=0.9,
-                              linestyle="--", alpha=0.8, zorder=5)
-            self.ax_c.text(
-                anchor_idx + 0.5, poc_price, f" POC {poc_price:.2f}",
-                color=GOLD, fontsize=7, va="center", ha="left", zorder=6,
-                bbox=dict(fc=BG_TIP, ec="none", alpha=0.7, pad=1.5),
-            )
+        # Draw POC + VA on main chart after ylim is finalised (tracked for zoom rebuild).
+        self._draw_poc_va_on_candles(poc_price, _vah, _val, kl_lo, kl_hi, anchor_idx + 0.5)
 
         # Re-sync profile ylim after main-chart ylim is finalised.
         self._sync_profile_ylim()
@@ -1807,11 +1834,10 @@ class OrderFlowApp(tk.Tk):
             return None
 
     def _sync_profile_ylim(self):
-        """Align ax_t and ax_p y-axes to ax_c."""
+        """Align ax_p y-axis to ax_c.  ax_t keeps its own per-candle ylim."""
         ylim = self.ax_c.get_ylim()
-        for ax in (self.ax_t, self.ax_p):
-            ax.set_ylim(ylim)
-            ax.grid(axis="y", color=GRID, linewidth=0.3, alpha=0.5)
+        self.ax_p.set_ylim(ylim)
+        self.ax_p.grid(axis="y", color=GRID, linewidth=0.3, alpha=0.5)
 
     def _draw_tick_placeholder(self):
         """Reset ax_t to its default 'hover for tick' state."""
@@ -1823,10 +1849,176 @@ class OrderFlowApp(tk.Tk):
         self.ax_t.set_xlabel("Volume", color=FG, fontsize=7)
         self._tick_shown_idx = None
 
+    # ── Session filter ────────────────────────────────────────────────────────
+
+    # Session boundaries in minutes-since-midnight (US ET / exchange local time).
+    # "night" wraps midnight: bars with mins >= 1200 OR mins < 240 qualify.
+    _SESS_MINUTES: dict[str, tuple[int, int]] = {
+        "pre":     (4 * 60,      9 * 60 + 30),   # 04:00–09:30
+        "regular": (9 * 60 + 30, 16 * 60),        # 09:30–16:00
+        "post":    (16 * 60,     20 * 60),         # 16:00–20:00
+        "night":   (20 * 60,     4 * 60),          # 20:00–04:00 (wraps midnight)
+    }
+
+    def _filter_klines_by_session(self, klines: pd.DataFrame) -> pd.DataFrame:
+        """Return klines filtered to the sessions selected by _sess_vars checkboxes."""
+        if not self._sess_vars:
+            return klines
+
+        enabled = {k for k, v in self._sess_vars.items() if v.get()}
+        if not enabled:
+            return klines.iloc[:0].copy()   # all disabled → empty
+
+        def _in_session(row) -> bool:
+            try:
+                t = datetime.strptime(str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+            except ValueError:
+                return True
+            mins = t.hour * 60 + t.minute
+            for key in enabled:
+                lo, hi = self._SESS_MINUTES[key]
+                if key == "night":
+                    if mins >= lo or mins < hi:
+                        return True
+                else:
+                    if lo <= mins < hi:
+                        return True
+            return False
+
+        mask = klines.apply(_in_session, axis=1)
+        return klines[mask]
+
+    def _on_session_toggle(self):
+        """Session checkbox changed — rebuild the profile for the current view."""
+        self._rebuild_zoomed_profile()
+        self._bg = self._bg_t = self._bg_p = None
+        self.canvas.draw_idle()
+
+    # ── POC + VA overlay on the candle axis ───────────────────────────────────
+
+    def _clear_candle_profile_artists(self):
+        """Remove POC + VA artists drawn on ax_c."""
+        for artist in self._candle_profile_artists:
+            try: artist.remove()
+            except Exception: pass
+        self._candle_profile_artists = []
+
+    def _draw_poc_va_on_candles(
+        self,
+        poc_price: float | None,
+        vah: float | None,
+        val: float | None,
+        kl_lo: float,
+        kl_hi: float,
+        x_right: float,
+    ) -> None:
+        """Draw POC dashed line + VA band on ax_c.  Tracks artists for later removal."""
+        self._clear_candle_profile_artists()
+        artists: list = []
+
+        if poc_price is not None and kl_lo <= poc_price <= kl_hi:
+            ln = self.ax_c.axhline(poc_price, color=GOLD, lw=0.9,
+                                   linestyle="--", alpha=0.8, zorder=5)
+            txt = self.ax_c.text(
+                x_right, poc_price, f" POC {poc_price:.2f}",
+                color=GOLD, fontsize=7, va="center", ha="left", zorder=6, clip_on=True,
+                bbox=dict(fc=BG_TIP, ec="none", alpha=0.7, pad=1.5),
+            )
+            artists += [ln, txt]
+
+        if vah is not None and val is not None:
+            span = self.ax_c.axhspan(val, vah, color=_VA_COLOR, alpha=0.07, zorder=1)
+            artists.append(span)
+            for price, label in ((vah, "VAH"), (val, "VAL")):
+                if kl_lo <= price <= kl_hi:
+                    ln = self.ax_c.axhline(
+                        price, color=_VA_COLOR, lw=0.8, linestyle="--", alpha=0.75, zorder=4,
+                    )
+                    txt = self.ax_c.text(
+                        x_right, price, f" {label} {price:.2f}",
+                        color=_VA_COLOR, fontsize=7, va="center", ha="left", zorder=6, clip_on=True,
+                        bbox=dict(fc=BG_TIP, ec="none", alpha=0.7, pad=1.5),
+                    )
+                    artists += [ln, txt]
+
+        self._candle_profile_artists = artists
+
+    # ── Zoom-responsive profile rebuild ───────────────────────────────────────
+
+    def _active_sessions_label(self) -> str:
+        """Return a short label of active session keys, e.g. 'Reg+Post'."""
+        _SHORT = {"regular": "Reg", "pre": "Pre", "post": "Post", "night": "Night"}
+        active = [_SHORT[k] for k in ("regular", "pre", "post", "night")
+                  if self._sess_vars.get(k) and self._sess_vars[k].get()]
+        if len(active) == 4 or not active:
+            return ""   # all on (or all off) — no extra label needed
+        return "+".join(active)
+
+    def _rebuild_zoomed_profile(self) -> None:
+        """Rebuild ax_p profile for the currently visible candle x-range.
+
+        Called from _flush_scroll (after debounce) and _on_session_toggle.
+        No-op in live mode or when no klines are stored.
+        """
+        if self._hist_klines is None or self.mode_var.get() != "Historical":
+            return
+        if not hasattr(self, "ax_c") or self.ax_c is None:
+            return
+
+        xlo, xhi = self.ax_c.get_xlim()
+        lo_idx = max(0, int(np.floor(xlo + 0.5)))
+        hi_idx = min(len(self._hist_klines) - 1, int(np.floor(xhi + 0.5)))
+        if hi_idx < lo_idx:
+            return
+
+        visible  = self._hist_klines.iloc[lo_idx : hi_idx + 1]
+        filtered = self._filter_klines_by_session(visible)
+
+        # Always reset ax_p before drawing so no old patches survive.
+        self._reset_profile_panel()
+
+        if filtered.empty:
+            self.ax_p.set_title("Vol Profile\n(no session data)", color=FG, fontsize=9)
+            return
+
+        _, cm = TIMEFRAME_MAP[self.tf_var.get()]
+        buckets = self._hist_buckets or {}
+        result  = build_hybrid_profile(filtered, buckets, cm, n_bins=40)
+
+        if result is None:
+            self.ax_p.set_title("Vol Profile\ninsufficient range", color=FG, fontsize=9)
+            return
+
+        centers, tick_v, ohlcv_v, coverage = result
+        date_label = self.date_var.get().strip()
+        rects, vl, leg, poc_price, vah, val = draw_hybrid_profile(
+            self.ax_p, centers, tick_v, ohlcv_v, coverage, date_label=date_label,
+        )
+        self._profile_bar_rects = rects
+        self._profile_axvline   = vl
+        self._profile_legend    = leg
+
+        # Override title to show active session filter (visual confirmation of rebuild).
+        sess_lbl = self._active_sessions_label()
+        if sess_lbl:
+            self.ax_p.set_title(
+                f"Vol Profile ({coverage}% tick)\n{date_label}  [{sess_lbl}]",
+                color=FG, fontsize=9,
+            )
+
+        self._sync_profile_ylim()
+
+        kl_lo, kl_hi = self.ax_c.get_ylim()
+        self._draw_poc_va_on_candles(poc_price, vah, val, kl_lo, kl_hi, xhi)
+
     def _draw_hist_tick_profile(
         self, buckets: dict, klines: pd.DataFrame, candle_mins: int
-    ) -> int:
-        """Draw hybrid profile (tick + OHLCV normal estimate).  Returns coverage %."""
+    ) -> tuple:
+        """Draw hybrid profile (tick + OHLCV normal estimate).
+
+        Returns (coverage_pct, poc_price, vah, val).
+        VA lines on ax_c must be drawn by the caller after ylim is finalised.
+        """
         self._profile_ohlcv = None
         self._profile_tick  = None
 
@@ -1834,11 +2026,11 @@ class OrderFlowApp(tk.Tk):
         result = build_hybrid_profile(klines, buckets, cm, n_bins=40)
         if result is None:
             self.ax_p.set_title("Vol Profile\ninsufficient range", color=FG, fontsize=9)
-            return 0
+            return 0, None, None, None
 
         centers, tick_v, ohlcv_v, coverage = result
         date_label = self.date_var.get().strip()
-        rects, vl, leg, poc_price = draw_hybrid_profile(
+        rects, vl, leg, poc_price, vah, val = draw_hybrid_profile(
             self.ax_p,
             centers, tick_v, ohlcv_v, coverage,
             date_label=date_label,
@@ -1847,7 +2039,7 @@ class OrderFlowApp(tk.Tk):
         self._profile_axvline      = vl
         self._profile_legend       = leg
         self._sync_profile_ylim()
-        return coverage, poc_price
+        return coverage, poc_price, vah, val
 
     def _draw_live_tick_profile(self, buckets: dict, klines: pd.DataFrame):
         self._profile_ohlcv     = None
@@ -1879,18 +2071,46 @@ class OrderFlowApp(tk.Tk):
 
     # ── Session profile artists (ax_p) ────────────────────────────────────────
 
+    def _reset_profile_panel(self) -> None:
+        """Clear ax_p completely (cla) and recreate the crosshair line.
+
+        More reliable than removing individual patches: cla() removes everything
+        including any lingering artists that slipped through the tracking lists.
+        Must be called before redrawing the session profile.
+        """
+        self.ax_p.cla()
+        # Recreate the profile crosshair line that cla() just destroyed.
+        kw = dict(color=CROSS, linewidth=0.7, linestyle="--",
+                  alpha=0.65, visible=False, zorder=8, animated=True)
+        self._ch_hline_p = self.ax_p.axhline(0, **kw)
+        # Sync ylim so the profile y-range is correct before bars are drawn.
+        self._sync_profile_ylim()
+        # Invalidate the per-axes blit cache (old bbox snapshot is now stale).
+        self._bg_p = None
+        # Reset tracking lists — all old references are now dead.
+        self._profile_bar_rects = []
+        self._profile_axvline   = None
+        self._profile_legend    = None
+        self._clear_candle_profile_artists()
+
     def _clear_profile_artists(self):
+        """Remove profile artists from ax_p.  Prefer _reset_profile_panel() for
+        dynamic rebuilds; this is kept for the live-mode path."""
         for patch in self._profile_bar_rects:
             try: patch.remove()
             except Exception: pass
         self._profile_bar_rects = []
-        self.ax_p.containers.clear()
+        try:
+            self.ax_p.containers.clear()
+        except Exception:
+            pass
         for attr in ("_profile_axvline", "_profile_legend"):
             obj = getattr(self, attr)
             if obj is not None:
                 try: obj.remove()
                 except Exception: pass
                 setattr(self, attr, None)
+        self._clear_candle_profile_artists()
 
     # ── Per-candle tick panel (ax_t) ──────────────────────────────────────────
 
@@ -1947,7 +2167,11 @@ class OrderFlowApp(tk.Tk):
                            ha="center", va="center", color=GREY, fontsize=8,
                            transform=self.ax_t.transAxes)
             self.ax_t.set_title(f"Tick\n{tk_str[5:16]}", color=FG, fontsize=9)
-            self.ax_t.set_ylim(self.ax_c.get_ylim())
+            row_no_tick = self._klines_data.iloc[candle_idx]
+            _clo = float(row_no_tick["low"]);  _chi = float(row_no_tick["high"])
+            _mg  = max((_chi - _clo) * 0.25, 0.01)
+            self.ax_t.set_ylim(_clo - _mg, _chi + _mg)
+            self.ax_t.grid(axis="y", color=GRID, linewidth=0.3, alpha=0.5)
             self._tick_shown_idx = candle_idx
             self._bg = self._bg_t = self._bg_p = None
             self.canvas.draw_idle()
@@ -1974,7 +2198,10 @@ class OrderFlowApp(tk.Tk):
         self._tick_bar_rects = rects
         self._tick_axvline   = vl
         self._tick_legend    = leg
-        self.ax_t.set_ylim(self.ax_c.get_ylim())
+        # Adaptive ylim: fit the candle's own price range so bars fill the panel.
+        margin = max((c_hi - c_lo) * 0.25, 0.01)
+        self.ax_t.set_ylim(c_lo - margin, c_hi + margin)
+        self.ax_t.grid(axis="y", color=GRID, linewidth=0.3, alpha=0.5)
 
         self._tick_shown_idx = candle_idx
         self._bg = self._bg_t = self._bg_p = None
