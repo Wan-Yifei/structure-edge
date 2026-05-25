@@ -30,6 +30,7 @@ moomoo/
 │   ├── run.py                   #   批量网格/随机搜索 CLI（自动写入 review_trades.duckdb）
 │   ├── audit.py                 #   单组合交易审计报告（K 线图 + 统计，自包含 HTML）
 │   ├── fvg_inspect.py           #   FVG 过滤诊断工具：显示指定时段内每个 FVG 触碰被过滤的原因
+│   ├── screener.py              #   策略适配性筛选器：FVG/KD/ATR/换手率特征评分 + 相关性矩阵
 │   ├── db.py                    #   DuckDB 读写（runs / trades / run_stats / live_trades / review_trades）
 │   ├── stats.py                 #   统计函数：Sharpe / Sortino / heatmap
 │   ├── report.py                #   HTML 报告生成（Plotly）
@@ -41,6 +42,7 @@ moomoo/
 │   └── smc/                     #   Smart Money Concepts 实现
 │       ├── fvg.py               #     Fair Value Gap 检测
 │       ├── market_structure.py  #     摆动高低点 / BOS / CHoCH
+│       ├── kd_trend.py          #     KD 通道趋势指标（快/慢 EMA 通道 + 自适应分段）
 │       ├── confirmation.py      #     LTF 入场确认
 │       └── order_blocks.py      #     Order Block 检测
 │
@@ -165,6 +167,30 @@ uv run backtest/audit.py --code US.SNDK --start 2025-05-22 --end 2026-05-22 \
 
 报告内容：10 项 KPI 卡片（WR / PF / Sharpe / Sortino / DD 等）、净值曲线、全部交易列表（含 trade_id）、最长连胜/连亏 K 线图、Top-5 亏损与 Top-3 盈利交易图。同时将交易记录写入 `db/review_trades.duckdb`，供 Trade Viewer 按 trade_id 查询。
 
+### 策略适配性筛选器（`screener.py`）
+
+对一批股票计算 SMC 策略适配特征（FVG 有效性、KD 清晰度、ATR、日均成交金额），输出评分排行榜、收益率相关矩阵和成交量相关矩阵。
+
+```bash
+# 使用 config/schedule.json 中的股票列表
+uv run backtest/screener.py --start 2025-01-01
+
+# 指定股票列表和输出路径
+uv run backtest/screener.py --codes US.SNDK US.NVDA US.AMD --start 2025-01-01 --out backtest/results/my_screen.html
+```
+
+**输出特征说明：**
+
+| 特征 | 含义 |
+|------|------|
+| `Touch%` | FVG 区间被价格影线触及的比例（越高 = 价格越会回测缺口）|
+| `Bounce%` | 触及后收盘在区间正确侧的比例（关键评分指标）|
+| `Overfill%` | 触及后穿越另一侧的比例（越低越好）|
+| `FVG/100bar` | 每 100 HTF bar 的 FVG 数量（信号密度）|
+| `KD clarity%` | KD 通道清晰度：40-60% 区间最优 |
+| `ATR%` | 归一化波动率，甜点约 1.0% |
+| `AvgDV($M)` | 日均成交金额（百万美元），衡量流动性 |
+
 ### FVG 过滤诊断（`fvg_inspect.py`）
 
 用于手工对照：在指定时间窗口内，引擎检测到的每个 FVG 触碰在哪一步被过滤（或成功入场）。
@@ -183,11 +209,12 @@ uv run backtest/fvg_inspect.py \
 
 | 结果 | 含义 |
 |------|------|
+| `direction_mismatch` | FVG 方向与当前趋势方向不一致（如牛市趋势中出现熊向 FVG），直接跳过 |
 | `depth_never_reached` | 影线进入 FVG 但从未达到 `fvg_entry_depth_pct` 阈值，区间失效 |
 | `ltf_confirmation` | 深度已达到，但区间失效前始终未完成 LTF CHoCH+BOS 确认 |
 | `lvn_filter` | FVG 区间不在低成交量节点（LVN）内 |
 | `displacement_filter` | FVG 中间蜡烛不满足位移蜡烛条件 |
-| `no_sl_tp` | 无法找到有效的止损/止盈摆动位 |
+| `no_sl_tp` | 无法找到有效的止损/止盈摆动位（含 KD fallback 也失败）|
 | `max_sl_pct` | 止损距离超过 `max_sl_pct` 上限 |
 | `min_rr` | 盈亏比不足 `min_rr` |
 | `entered` | 所有条件通过，入场交易（显示 trade_id）|
@@ -212,6 +239,7 @@ uv run backtest/fvg_inspect.py \
 
 | 文件 | 内容 |
 |------|------|
+| [`strategy/smc/STRATEGY.md`](strategy/smc/STRATEGY.md) | SMC 策略逻辑 & 参数完整说明（Pipeline、过滤器、风控、KD 趋势方法）|
 | [`db/README.md`](db/README.md) | 数据库文件说明 + 完整 schema |
 | [`doc/BACKTEST_SYSTEM_GUIDE.md`](doc/BACKTEST_SYSTEM_GUIDE.md) | 回测系统设计指南（架构决策、性能优化、实施状态、参考文献）|
 

@@ -128,7 +128,7 @@ def kd_trend(
     slow: int = 90,
     window: int = 10,
     flat_threshold: float = 0.0,
-    atr_threshold: float = 0.0,
+    atr_threshold: float = 0.036,  # p25 of |seg_avg_width|/ATR on SNDK 1545-bar HTF history
     atr_period: int = 14,
     smooth: int = 3,
     min_bars: int = 3,
@@ -142,7 +142,8 @@ def kd_trend(
         window:          Fixed-window size; used only when smooth == 0.
         flat_threshold:  Legacy price-unit filter; used only when smooth == 0.
         atr_threshold:   |seg_avg_width| / seg_avg_ATR below this → flat.
-                         Scale-invariant; recommended over flat_threshold.
+                         Scale-invariant; default 0.036 = p25 of the empirical
+                         distribution (SNDK HTF history), filters weakest 25% of segments.
         atr_period:      ATR rolling period (default 14).
         smooth:          Pre-smoothing window for zero-crossing detection.
                          > 0 → adaptive segment mode (default 3).

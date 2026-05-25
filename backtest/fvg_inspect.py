@@ -50,6 +50,7 @@ _OUTCOME_META = {
     "no_sl_tp":            {"label": "No SL/TP swing",       "color": "#e74c3c"},
     "max_sl_pct":          {"label": "SL too wide",          "color": "#c0392b"},
     "min_rr":              {"label": "RR too low",           "color": "#e74c3c"},
+    "direction_mismatch":  {"label": "Wrong FVG direction",  "color": "#f39c12"},
 }
 
 
@@ -109,7 +110,7 @@ def _render_html(
           <td>{e['touch_time']}</td>
           <td>{e['fvg_bottom']:.4f} – {e['fvg_top']:.4f}</td>
           <td>{'▲' if e['direction'] == 'bull' else '▼'} {e['direction']}</td>
-          <td>{e.get('depth_time', '—')}</td>
+          <td>{e.get('depth_time') or '—'}</td>
           <td>{depth}</td>
           <td style="color:{meta['color']};font-weight:600">{meta['label']}</td>
           <td style="font-size:11px;color:#888">{detail}</td>

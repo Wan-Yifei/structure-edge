@@ -35,6 +35,7 @@ from strategy.smc import (
     check_ltf_confirmation,
     compute_volume_profile,
     fvg_overlaps_lvn,
+    compute_kd,
     kd_trend,
 )
 from backtest.stats import sharpe_ratio, sortino_ratio
@@ -130,6 +131,7 @@ class BacktestParams:
     htf_window_bars:      int   = 20     # HTF bars for trend/structure (20 × 15 m ≈ 5 h ≈ one trading day)
     allow_short:          bool  = True   # False = long-only (skip bear setups)
     intraday_only:        bool  = False  # True = force-close positions at end of trading day
+    kd_sl_fallback:       bool  = False  # use KD slow-channel lo2/up2 as fallback SL/TP anchor
     # Trend method(s) — applied in order; all must agree for a valid trend signal.
     # Supported: "bos_choch", "kd"
     htf_trend_methods:    tuple  = ("bos_choch",)
@@ -148,6 +150,8 @@ class BacktestParams:
             flags += " Lo"
         if self.intraday_only:
             flags += " ID"
+        if self.kd_sl_fallback:
+            flags += " kF"
         methods = "+".join(self.htf_trend_methods)
         tp = self.htf_trend_params
         kd_tag = ""
@@ -373,6 +377,8 @@ def run_backtest(
     trend:         Optional[str]   = None
     vp_edges:      object          = None   # volume profile edges (np.ndarray | None)
     vp_vols:       object          = None   # volume profile bins  (np.ndarray | None)
+    htf_kd_lo2:    float           = float("nan")  # KD slow-channel lower band (SL anchor)
+    htf_kd_up2:    float           = float("nan")  # KD slow-channel upper band (SL anchor)
 
     # Precompute last-bar-of-day index for each LTF bar (intraday_only mode).
     # Groups bars by calendar date (first 10 chars of time_key) and records the
@@ -494,6 +500,11 @@ def run_backtest(
             htf_bos    = []
             tp         = params.htf_trend_params
             per_method = []
+
+            # Pre-compute full-history slice once (shared by kd trend + SL fallback)
+            _need_kd = "kd" in params.htf_trend_methods or params.kd_sl_fallback
+            _htf_full = htf.iloc[: htf_pos + 1].reset_index(drop=True) if _need_kd else None
+
             for method in params.htf_trend_methods:
                 if method == "bos_choch":
                     bos = detect_bos_choch(htf_view, params.swing_lookback,
@@ -501,10 +512,8 @@ def run_backtest(
                     htf_bos = bos
                     per_method.append(determine_trend(bos, params.bos_count))
                 elif method == "kd":
-                    # Use full history so EMA has enough bars to warm up.
-                    htf_full = htf.iloc[: htf_pos + 1].reset_index(drop=True)
                     per_method.append(kd_trend(
-                        htf_full,
+                        _htf_full,
                         fast=tp.get("kd_fast", 25),
                         slow=tp.get("kd_slow", 90),
                         window=tp.get("kd_window", 10),
@@ -520,6 +529,19 @@ def run_backtest(
                 trend = per_method[0]
             else:
                 trend = None
+
+            # KD slow-channel boundaries for optional SL/TP fallback
+            if _need_kd:
+                _kd_df = compute_kd(
+                    _htf_full,
+                    fast=tp.get("kd_fast", 25),
+                    slow=tp.get("kd_slow", 90),
+                    atr_period=tp.get("kd_atr_period", 14),
+                )
+                htf_kd_lo2 = float(_kd_df["lo2"].iloc[-1])
+                htf_kd_up2 = float(_kd_df["up2"].iloc[-1])
+            else:
+                htf_kd_lo2 = htf_kd_up2 = float("nan")
 
             prev_htf_pos = htf_pos
 
@@ -542,6 +564,29 @@ def run_backtest(
         # Bear FVG: price bounces from below   — use bar high (wick) to detect touch.
         wick = bar_lo if trend == "bull" else bar_hi
         htf_view_last = len(htf_view) - 1
+
+        # Rejection log only: capture counter-trend FVG touches that are
+        # silently excluded by the direction filter in the trade path below.
+        if rejection_log is not None and _rlog_in_window(t):
+            for _g in htf_fvgs:
+                if (not _g["filled"]
+                        and _g["direction"] != trend
+                        and (htf_view_last - _g["idx"]) <= params.fvg_max_age_bars
+                        and (wick <= _g["top"] if trend == "bull" else wick >= _g["bottom"])
+                        and (round(_g["bottom"], 4), round(_g["top"], 4)) not in used_fvg_keys):
+                    rejection_log.append({
+                        "touch_time": t,
+                        "fvg_bottom": _g["bottom"],
+                        "fvg_top":    _g["top"],
+                        "direction":  _g["direction"],
+                        "trend":      trend,
+                        "wick":       round(wick, 4),
+                        "depth_time": None,
+                        "depth":      None,
+                        "outcome":    "direction_mismatch",
+                        "detail":     f"FVG {_g['direction']} vs trend {trend}",
+                    })
+
         in_zone = [
             g for g in htf_fvgs
             if not g["filled"]
@@ -637,33 +682,70 @@ def run_backtest(
                 continue
 
         # ── 7. SL / TP levels ─────────────────────────────────────────────
+        # Primary: HTF swing-based anchors.
+        # Fallback (kd_sl_fallback=True): KD slow-channel lo2/up2 when no
+        # swing is available.  The same fallback is retried at step 8 when
+        # the swing SL exists but exceeds max_sl_pct.
         lows_sw  = [s for s in htf_swings if s["kind"] == "low"]
         highs_sw = [s for s in htf_swings if s["kind"] == "high"]
 
         if trend == "bull":
             sl_candidates = [s for s in lows_sw  if s["price"] < bar_cls]
             tp_candidates = [s for s in highs_sw if s["price"] > bar_cls]
-            if not sl_candidates or not tp_candidates:
+
+            if sl_candidates:
+                sl_price = sl_candidates[-1]["price"] * (1.0 - params.sl_buffer_pct)
+            elif (params.kd_sl_fallback
+                  and not np.isnan(htf_kd_lo2) and htf_kd_lo2 < bar_cls):
+                sl_price = htf_kd_lo2 * (1.0 - params.sl_buffer_pct)
+            else:
                 if rejection_log is not None:
-                    _rlog_finalize("no_sl_tp", detail="no valid swing levels for SL/TP")
+                    _rlog_finalize("no_sl_tp", detail="no swing low for SL")
                 i += 1
                 continue
-            sl_price = sl_candidates[-1]["price"] * (1.0 - params.sl_buffer_pct)
-            tp_price = min(s["price"] for s in tp_candidates)
-            sl_dist  = bar_cls - sl_price
-            tp_dist  = tp_price - bar_cls
+
+            if tp_candidates:
+                tp_price = min(s["price"] for s in tp_candidates)
+            elif (params.kd_sl_fallback
+                  and not np.isnan(htf_kd_up2) and htf_kd_up2 > bar_cls):
+                tp_price = htf_kd_up2
+            else:
+                if rejection_log is not None:
+                    _rlog_finalize("no_sl_tp", detail="no swing high for TP")
+                i += 1
+                continue
+
+            sl_dist = bar_cls - sl_price
+            tp_dist = tp_price - bar_cls
+
         else:  # bear
             sl_candidates = [s for s in highs_sw if s["price"] > bar_cls]
             tp_candidates = [s for s in lows_sw  if s["price"] < bar_cls]
-            if not sl_candidates or not tp_candidates:
+
+            if sl_candidates:
+                sl_price = sl_candidates[-1]["price"] * (1.0 + params.sl_buffer_pct)
+            elif (params.kd_sl_fallback
+                  and not np.isnan(htf_kd_up2) and htf_kd_up2 > bar_cls):
+                sl_price = htf_kd_up2 * (1.0 + params.sl_buffer_pct)
+            else:
                 if rejection_log is not None:
-                    _rlog_finalize("no_sl_tp", detail="no valid swing levels for SL/TP")
+                    _rlog_finalize("no_sl_tp", detail="no swing high for SL")
                 i += 1
                 continue
-            sl_price = sl_candidates[-1]["price"] * (1.0 + params.sl_buffer_pct)
-            tp_price = max(s["price"] for s in tp_candidates)
-            sl_dist  = sl_price - bar_cls
-            tp_dist  = bar_cls  - tp_price
+
+            if tp_candidates:
+                tp_price = max(s["price"] for s in tp_candidates)
+            elif (params.kd_sl_fallback
+                  and not np.isnan(htf_kd_lo2) and htf_kd_lo2 < bar_cls):
+                tp_price = htf_kd_lo2
+            else:
+                if rejection_log is not None:
+                    _rlog_finalize("no_sl_tp", detail="no swing low for TP")
+                i += 1
+                continue
+
+            sl_dist = sl_price - bar_cls
+            tp_dist = bar_cls  - tp_price
 
         if sl_dist <= 0 or tp_dist <= 0:
             if rejection_log is not None:
@@ -672,6 +754,22 @@ def run_backtest(
             continue
 
         # ── 8. Risk / SL-size filters ─────────────────────────────────────
+        # When swing SL is too wide, try KD slow-channel lo2/up2 as a
+        # tighter fallback before hard-rejecting the setup.
+        if (sl_dist / bar_cls) > params.max_sl_pct and params.kd_sl_fallback:
+            if trend == "bull" and not np.isnan(htf_kd_lo2) and htf_kd_lo2 < bar_cls:
+                _kd_sl      = htf_kd_lo2 * (1.0 - params.sl_buffer_pct)
+                _kd_sl_dist = bar_cls - _kd_sl
+                if 0 < _kd_sl_dist / bar_cls <= params.max_sl_pct:
+                    sl_price = _kd_sl
+                    sl_dist  = _kd_sl_dist
+            elif trend == "bear" and not np.isnan(htf_kd_up2) and htf_kd_up2 > bar_cls:
+                _kd_sl      = htf_kd_up2 * (1.0 + params.sl_buffer_pct)
+                _kd_sl_dist = _kd_sl - bar_cls
+                if 0 < _kd_sl_dist / bar_cls <= params.max_sl_pct:
+                    sl_price = _kd_sl
+                    sl_dist  = _kd_sl_dist
+
         if (sl_dist / bar_cls) > params.max_sl_pct:
             if rejection_log is not None:
                 _rlog_finalize("max_sl_pct",

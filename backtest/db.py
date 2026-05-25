@@ -299,7 +299,7 @@ class BacktestDB:
         try:
             self._conn.execute("DELETE FROM trades WHERE run_id = ?", [run_id])
             self._conn.executemany(
-                "INSERT INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows
+                "INSERT OR IGNORE INTO trades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows
             )
             self._conn.execute("COMMIT")
         except Exception:
