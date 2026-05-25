@@ -230,6 +230,8 @@ class OrderFlowApp(tk.Tk):
         self._profile_legend          = None
         self._candle_profile_artists: list = []  # POC + VA lines on ax_c
         self._hist_klines: pd.DataFrame | None = None   # full unfiltered klines for zoom rebuild
+        self._profile_centers: np.ndarray | None = None  # bin centres from last profile draw
+        self._profile_total:   np.ndarray | None = None  # total volume per bin (for tight ylim)
         self._live_buckets: dict = {}
         self._hist_buckets: dict | None = None
 
@@ -1438,6 +1440,8 @@ class OrderFlowApp(tk.Tk):
         self._profile_axvline        = None
         self._profile_legend         = None
         self._candle_profile_artists = []
+        self._profile_centers        = None
+        self._profile_total          = None
         panels = self._subplot_panels()   # MAVOL merged into Vol when both active
         n_sub  = len(panels)
         if n_sub == 0:
@@ -1834,9 +1838,18 @@ class OrderFlowApp(tk.Tk):
             return None
 
     def _sync_profile_ylim(self):
-        """Align ax_p y-axis to ax_c.  ax_t keeps its own per-candle ylim."""
-        ylim = self.ax_c.get_ylim()
-        self.ax_p.set_ylim(ylim)
+        """Set ax_p y-range. Uses tight bounds around actual volume when profile
+        data is available; falls back to matching ax_c when the panel is empty."""
+        if self._profile_centers is not None and self._profile_total is not None:
+            nonzero = np.where(self._profile_total > 0)[0]
+            if len(nonzero) >= 2:
+                lo = float(self._profile_centers[nonzero[0]])
+                hi = float(self._profile_centers[nonzero[-1]])
+                margin = max((hi - lo) * 0.10, 0.5)
+                self.ax_p.set_ylim(lo - margin, hi + margin)
+                self.ax_p.grid(axis="y", color=GRID, linewidth=0.3, alpha=0.5)
+                return
+        self.ax_p.set_ylim(self.ax_c.get_ylim())
         self.ax_p.grid(axis="y", color=GRID, linewidth=0.3, alpha=0.5)
 
     def _draw_tick_placeholder(self):
@@ -1992,6 +2005,8 @@ class OrderFlowApp(tk.Tk):
             return
 
         centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage = result
+        self._profile_centers = centers
+        self._profile_total   = buy_v + sell_v + neutral_v + ohlcv_v
         date_label = self.date_var.get().strip()
         rects, vl, leg, poc_price, vah, val = draw_hybrid_profile(
             self.ax_p, centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage,
@@ -2034,6 +2049,8 @@ class OrderFlowApp(tk.Tk):
             return 0, None, None, None
 
         centers, buy_v, sell_v, neutral_v, ohlcv_v, coverage = result
+        self._profile_centers = centers
+        self._profile_total   = buy_v + sell_v + neutral_v + ohlcv_v
         date_label = self.date_var.get().strip()
         rects, vl, leg, poc_price, vah, val = draw_hybrid_profile(
             self.ax_p,
@@ -2088,7 +2105,9 @@ class OrderFlowApp(tk.Tk):
         kw = dict(color=CROSS, linewidth=0.7, linestyle="--",
                   alpha=0.65, visible=False, zorder=8, animated=True)
         self._ch_hline_p = self.ax_p.axhline(0, **kw)
-        # Sync ylim so the profile y-range is correct before bars are drawn.
+        # Clear stored profile data so _sync_profile_ylim falls back to ax_c range.
+        self._profile_centers = None
+        self._profile_total   = None
         self._sync_profile_ylim()
         # Invalidate the per-axes blit cache (old bbox snapshot is now stale).
         self._bg_p = None
