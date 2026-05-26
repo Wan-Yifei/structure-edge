@@ -187,12 +187,15 @@ class BacktestDB:
                     pass
 
     def close(self) -> None:
+        """Close the DuckDB connection."""
         self._conn.close()
 
     def __enter__(self) -> "BacktestDB":
+        """Return self for use as a context manager."""
         return self
 
     def __exit__(self, *_) -> None:
+        """Close the connection on block exit."""
         self.close()
 
     # ── runs ──────────────────────────────────────────────────────────────────
@@ -249,12 +252,14 @@ class BacktestDB:
             raise RuntimeError("BacktestDB opened in read-only mode — write operations not allowed")
 
     def mark_running(self, run_id: str) -> None:
+        """Mark a run as in-progress (status='running')."""
         self._require_write()
         self._conn.execute(
             "UPDATE runs SET status='running' WHERE run_id=?", [run_id]
         )
 
     def mark_done(self, run_id: str) -> None:
+        """Mark a run as completed and stamp finished_at to now."""
         self._require_write()
         self._conn.execute(
             "UPDATE runs SET status='done', finished_at=? WHERE run_id=?",
@@ -262,6 +267,7 @@ class BacktestDB:
         )
 
     def mark_failed(self, run_id: str, error: str) -> None:
+        """Mark a run as failed; the error message is logged externally."""
         self._require_write()
         self._conn.execute(
             "UPDATE runs SET status='failed' WHERE run_id=?", [run_id]
@@ -392,11 +398,13 @@ class BacktestDB:
     # ── queries ───────────────────────────────────────────────────────────────
 
     def get_trades(self, run_id: str) -> pd.DataFrame:
+        """Return all trades for a run_id as a DataFrame, ordered by entry_time."""
         return self._conn.execute(
             "SELECT * FROM trades WHERE run_id = ? ORDER BY entry_time", [run_id]
         ).df()
 
     def get_run_stats(self, top_n: int = 20) -> pd.DataFrame:
+        """Return top-N completed runs sorted by profit_factor, joined with run metadata."""
         return self._conn.execute(
             "SELECT r.symbol, r.trend_tf, r.entry_tf, r.algo_version, r.commit_hash, r.config_hash, "
             "s.n_trades, s.win_rate, s.total_r, s.avg_r, "
@@ -580,12 +588,15 @@ class ReviewTradesDB:
             self._conn = duckdb.connect(str(self.db_path), read_only=True)
 
     def close(self) -> None:
+        """Close the DuckDB connection."""
         self._conn.close()
 
     def __enter__(self) -> "ReviewTradesDB":
+        """Return self for use as a context manager."""
         return self
 
     def __exit__(self, *_) -> None:
+        """Close the connection on block exit."""
         self.close()
 
     def insert_trades(self, symbol: str, params_dict: dict, trades: list[Trade]) -> None:

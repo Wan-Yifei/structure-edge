@@ -31,6 +31,7 @@ _COLS = ["time_key", "open", "high", "low", "close", "volume"]
 
 class KlineStore:
     def __init__(self, db_path: str | pathlib.Path = _DEFAULT_DB):
+        """Open (or create) the kline cache DuckDB and initialise the schema."""
         self._path = pathlib.Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._con = duckdb.connect(str(self._path))
@@ -89,10 +90,13 @@ class KlineStore:
         return row[0], row[1]
 
     def close(self):
+        """Close the DuckDB connection."""
         self._con.close()
 
     def __enter__(self):
+        """Return self for use as a context manager."""
         return self
 
     def __exit__(self, *_):
+        """Close the connection on block exit."""
         self.close()

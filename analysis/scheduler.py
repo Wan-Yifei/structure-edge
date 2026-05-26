@@ -59,16 +59,19 @@ def _is_edt(dt_utc: datetime) -> bool:
 
 
 def utc_now() -> datetime:
+    """Return the current UTC datetime with timezone info."""
     return datetime.now(tz=timezone.utc)
 
 
 def et_now() -> datetime:
+    """Return the current Eastern Time (EDT or EST depending on DST)."""
     utc = utc_now()
     offset = timedelta(hours=-4 if _is_edt(utc) else -5)
     return utc + offset
 
 
 def beijing_now() -> datetime:
+    """Return the current Beijing Time (UTC+8, no DST)."""
     utc = utc_now()
     return utc + timedelta(hours=8)
 
@@ -76,6 +79,7 @@ def beijing_now() -> datetime:
 # ── Session state logic ───────────────────────────────────────────────────────
 
 def _to_time(s: str) -> time:
+    """Parse an 'HH:MM' string into a datetime.time object."""
     h, m = s.split(":")
     return time(int(h), int(m))
 

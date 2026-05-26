@@ -41,7 +41,13 @@ from strategy.smc import (
 from backtest.stats import sharpe_ratio, sortino_ratio
 
 def _algo_version() -> str:
-    """Return the most recent smc_v* git tag on HEAD, falling back to 'smc_unknown'."""
+    """Return the most recent smc_v* git tag on HEAD.
+
+    Used to version-stamp every trade ID so that the same entry bar under a
+    different algo version produces a distinct ID, preventing cross-version
+    DB collisions.  Falls back to 'smc_unknown' when not in a git repo or
+    when no matching tag exists.
+    """
     import subprocess, pathlib
     try:
         return subprocess.check_output(
@@ -143,6 +149,12 @@ class BacktestParams:
     htf_trend_params:     dict   = field(default_factory=dict)
 
     def label(self) -> str:
+        """Return a compact human-readable string summarising all strategy parameters.
+
+        Used as a logging tag and for comparing combos in printed result tables.
+        Format: '<trend_tf>/<entry_tf> [<methods>] lb<lookback> bos<count> w<window>
+                  fvg<min_pct> dp<depth> <disp> <conf> sl<buf> msl<max_sl> rr<min_rr> [flags]'
+        """
         d    = f"D{self.displacement_atr_mult:.1f}b{self.displacement_body_ratio:.1f}" if self.displacement_required else "d"
         conf = "ltf" if self.require_ltf_confirmation else "raw"
         flags = ""
@@ -176,6 +188,11 @@ class BacktestParams:
         )
 
     def to_dict(self) -> dict:
+        """Serialise all fields to a plain dict for DB storage and CSV output.
+
+        `htf_trend_methods` and `htf_trend_params` are JSON-encoded so they
+        survive round-trips through DuckDB columns and pandas DataFrames.
+        """
         d = {k: getattr(self, k) for k in self.__dataclass_fields__}   # type: ignore[attr-defined]
         d["htf_trend_methods"] = json.dumps(list(self.htf_trend_methods))
         d["htf_trend_params"]  = json.dumps(self.htf_trend_params, sort_keys=True)
@@ -183,6 +200,11 @@ class BacktestParams:
 
     @classmethod
     def from_dict(cls, d: dict) -> "BacktestParams":
+        """Deserialise from a DB row or CSV row dict.
+
+        Strips unknown keys and decodes JSON-encoded tuple/dict fields so the
+        result is identical to the original BacktestParams instance.
+        """
         d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         if "htf_trend_methods" in d and isinstance(d["htf_trend_methods"], str):
             d["htf_trend_methods"] = tuple(json.loads(d["htf_trend_methods"]))
@@ -228,26 +250,32 @@ class BacktestResult:
 
     @property
     def n_trades(self) -> int:
+        """Total number of completed trades."""
         return len(self.trades)
 
     @property
     def n_wins(self) -> int:
+        """Number of trades that hit TP."""
         return sum(1 for t in self.trades if t.result == "win")
 
     @property
     def win_rate(self) -> float:
+        """Fraction of trades that hit TP; 0.0 when no trades."""
         return self.n_wins / self.n_trades if self.n_trades else 0.0
 
     @property
     def total_r(self) -> float:
+        """Sum of all R-multiples (positive = net profit, negative = net loss)."""
         return sum(t.r_multiple for t in self.trades)
 
     @property
     def avg_r(self) -> float:
+        """Mean R-multiple per trade; 0.0 when no trades."""
         return self.total_r / self.n_trades if self.n_trades else 0.0
 
     @property
     def profit_factor(self) -> float:
+        """Gross profit / gross loss.  inf when no losses; 0.0 when no trades."""
         wins  = sum(t.r_multiple for t in self.trades if t.r_multiple > 0)
         losses = sum(-t.r_multiple for t in self.trades if t.r_multiple < 0)
         if losses == 0:
@@ -256,6 +284,7 @@ class BacktestResult:
 
     @property
     def max_drawdown_r(self) -> float:
+        """Maximum peak-to-trough drawdown in cumulative R."""
         equity = peak = max_dd = 0.0
         for t in self.trades:
             equity += t.r_multiple
@@ -268,6 +297,7 @@ class BacktestResult:
 
     @property
     def max_loss_r(self) -> float:
+        """Largest single losing trade expressed as positive R magnitude."""
         losses = [-t.r_multiple for t in self.trades if t.r_multiple < 0]
         return max(losses) if losses else 0.0
 

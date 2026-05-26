@@ -62,6 +62,7 @@ from backtest.engine  import ALGO_VERSION, BacktestParams, BacktestResult, run_b
 
 
 def _git_commit_hash() -> str:
+    """Return the current git short commit hash, or empty string if unavailable."""
     import subprocess
     try:
         return subprocess.check_output(
@@ -91,7 +92,7 @@ def _load_json_config(path: pathlib.Path) -> dict:
 
 
 def _resolve_workers(w: int) -> int:
-    """≤ 0 → auto (cpu_count - 1, min 1)."""
+    """Resolve worker count: ≤ 0 means auto (cpu_count − 1, minimum 1)."""
     if w <= 0:
         return max(1, (os.cpu_count() or 4) - 1)
     return w
@@ -410,6 +411,7 @@ def _params_hash(params: BacktestParams) -> str:
 
 
 def _ckpt_path(key: str) -> pathlib.Path:
+    """Return the filesystem path for a checkpoint file identified by *key*."""
     return _CHECKPOINT_DIR / f"{key}.pkl"
 
 
@@ -463,9 +465,11 @@ def _coverage_gaps(
 
 
 def _next_day(d: str) -> str:
+    """Return the ISO date string for the calendar day after *d* ('YYYY-MM-DD')."""
     return (date.fromisoformat(d) + timedelta(days=1)).isoformat()
 
 def _prev_day(d: str) -> str:
+    """Return the ISO date string for the calendar day before *d* ('YYYY-MM-DD')."""
     return (date.fromisoformat(d) - timedelta(days=1)).isoformat()
 
 def _warmup_start(gap_start: str) -> str:
@@ -497,6 +501,15 @@ def build_param_list(
     pairs: list[tuple[str, str]],
     grid: dict,
 ) -> list[BacktestParams]:
+    """Expand a parameter grid into a flat list of BacktestParams via cartesian product.
+
+    Args:
+        pairs: List of (trend_tf, entry_tf) timeframe pairs to iterate over.
+        grid:  Dict mapping param name → list of candidate values.
+
+    Returns:
+        One BacktestParams per (TF pair × param combination).
+    """
     keys   = list(grid.keys())
     values = list(grid.values())
     result: list[BacktestParams] = []
@@ -544,7 +557,12 @@ def _write_review_trades(code: str, params: BacktestParams, trades: list) -> Non
 
 
 def _worker(args: tuple) -> tuple[int, BacktestResult]:
-    """Top-level so ProcessPoolExecutor can pickle it on Windows (spawn mode)."""
+    """Execute a single backtest combo inside a worker process.
+
+    Must be a module-level function so ProcessPoolExecutor can pickle it on
+    Windows (spawn mode does not support closures or lambda).
+    Returns (combo_index, result) so the main process can match futures.
+    """
     idx, params, htf, ltf = args
     log = get_logger(f"W{idx:04d} {params.trend_tf}/{params.entry_tf} lb{params.swing_lookback}")
     log.debug("Starting combo %d: %s", idx, params.label())
@@ -554,6 +572,7 @@ def _worker(args: tuple) -> tuple[int, BacktestResult]:
 
 
 def _fmt_row(d: dict) -> str:
+    """Format a summary dict as a compact one-line string for console output."""
     return (
         f"  trades={d['n_trades']:3d}  wr={d['win_rate']:.1%}  "
         f"R={d['total_r']:+.1f}  avgR={d['avg_r']:+.3f}  "
@@ -576,6 +595,29 @@ def run_grid(
     end_date: str = "",
     no_reuse: bool = False,
 ) -> list[BacktestResult]:
+    """Run all parameter combinations for one stock code in parallel workers.
+
+    Handles checkpoint resume, DB date-range reuse, progress bar, and
+    intermediate checkpoint saves. Returns results in combo-index order.
+
+    Args:
+        code:           Moomoo stock code, used for DB lookup and log tagging.
+        klines:         Mapping of timeframe string → DataFrame for that TF.
+        params_list:    All combos to run, produced by build_param_list().
+        workers:        Number of parallel worker processes (None = use cpu_count).
+        checkpoint_key: Opaque hash identifying this run config for checkpoint I/O.
+        no_resume:      When True, ignore any existing checkpoint and rerun all combos.
+        save_every:     Checkpoint write frequency in completed-combo count.
+        log_path:       If provided, worker log messages are written to this file.
+        db:             BacktestDB instance; when provided, trades are persisted and
+                        already-covered date ranges are reused to skip redundant work.
+        start_date:     Run start date (YYYY-MM-DD); used for DB coverage checks.
+        end_date:       Run end date (YYYY-MM-DD); used for DB coverage checks.
+        no_reuse:       Skip DB date-range reuse even when db is provided.
+
+    Returns:
+        List of BacktestResult, one per combo, sorted by combo index.
+    """
     n = len(params_list)
     log = get_logger("main")
 
@@ -753,6 +795,14 @@ def run_grid(
 
 
 def main() -> None:
+    """CLI entry point for the SMC backtest grid search.
+
+    Parses command-line arguments, fetches klines for each stock code, runs
+    the parameter grid (exhaustive, random, or an explicit top-N list), writes
+    per-code CSV files and an optional HTML report, and prints a ranked
+    results table.  Multiple codes are processed sequentially; within each
+    code all combos run in parallel worker processes.
+    """
     ap = argparse.ArgumentParser(description="SMC backtest grid search")
     ap.add_argument("--config",  default=None, metavar="PATH",
                     help=f"JSON config file (default: {_DEFAULT_CONFIG})")

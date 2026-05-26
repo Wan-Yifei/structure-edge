@@ -23,6 +23,7 @@ _KTYPE_KEYS = {"1m", "3m", "5m", "15m", "30m", "60m", "1d"}
 
 
 def _ktype_map():
+    """Return the moomoo KLType enum map (lazily imported to avoid import-time errors)."""
     from moomoo import KLType
     return {
         "1m":  KLType.K_1M,
@@ -44,6 +45,7 @@ _SYNTH_TF: dict[str, str] = {
 
 
 def _ktype_obj(ktype: str):
+    """Convert a timeframe string to the corresponding moomoo KLType enum value."""
     m = _ktype_map()
     if ktype not in m:
         raise ValueError(f"Unknown ktype {ktype!r}. Choose from {sorted(m)}")

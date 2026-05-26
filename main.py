@@ -16,6 +16,7 @@ COMMANDS = {
 
 
 def main():
+    """Parse the subcommand and delegate to the appropriate module's main()."""
     p = argparse.ArgumentParser(
         prog="main.py",
         description="moomoo toolkit",

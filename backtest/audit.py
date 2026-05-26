@@ -111,6 +111,7 @@ def _entry_fvg(
 
 
 def _style_ax(ax):
+    """Apply dark-theme styling to a matplotlib Axes."""
     ax.set_facecolor(BG_BAR)
     ax.tick_params(colors=FG, labelsize=7)
     for sp in ax.spines.values():
@@ -119,6 +120,7 @@ def _style_ax(ax):
 
 
 def _fig_to_b64(fig) -> str:
+    """Render a figure to a base64 PNG string and close it."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110, bbox_inches="tight",
                 facecolor=BG_BAR, edgecolor="none")
@@ -128,6 +130,7 @@ def _fig_to_b64(fig) -> str:
 
 
 def _equity_curve_b64(trades: list[Trade]) -> str:
+    """Render per-trade R bars and cumulative equity curve; return a base64 PNG string."""
     rs = [t.r_multiple for t in trades]
     cum = np.cumsum(rs)
     xs  = np.arange(1, len(rs) + 1)
@@ -370,12 +373,14 @@ img { max-width:100%; border-radius:4px; }
 
 
 def _kpi(label: str, val: str, kind: str = "neutral") -> str:
+    """Return HTML for a single KPI box with label, value, and colour class."""
     return (f'<div class="kpi {kind}">'
             f'<div class="val">{val}</div>'
             f'<div class="lbl">{label}</div></div>')
 
 
 def _params_html(params: BacktestParams) -> str:
+    """Return an HTML badge row listing all strategy parameters except TF pair."""
     skip = {"trend_tf", "entry_tf"}
     badges = "".join(
         f'<span class="param-badge"><span class="k">{k}</span> '
@@ -386,6 +391,7 @@ def _params_html(params: BacktestParams) -> str:
 
 
 def _trades_table(trades: list[Trade], highlight_ids: set[str]) -> str:
+    """Return an HTML table of all trades, with highlighted rows for featured IDs."""
     rows = []
     for i, t in enumerate(trades, 1):
         cls = t.result
@@ -434,6 +440,7 @@ def _kd_at_entry(trade: Trade, htf: pd.DataFrame, params: BacktestParams) -> tup
 def _trade_card(trade: Trade, htf: pd.DataFrame, ltf: pd.DataFrame,
                 params: BacktestParams, idx: int | None = None,
                 kd_cache: dict | None = None) -> str:
+    """Return an HTML trade-card div with embedded HTF/LTF chart images."""
     b64 = _trade_chart_b64(trade, htf, ltf, params)
     label = f"#{idx}  " if idx is not None else ""
     r_color = "color:#4caf50" if trade.r_multiple >= 0 else "color:#ef5350"

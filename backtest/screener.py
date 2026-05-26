@@ -264,6 +264,11 @@ def _cell_color(col: str, val: float) -> str:
 
 
 def _build_html(df: pd.DataFrame, start: str, end: str) -> str:
+    """Render the ranked screener DataFrame as a self-contained HTML string.
+
+    Leaves two placeholder tokens — ``{corr_table}`` and ``{vol_corr_table}``
+    — that the caller replaces with the correlation matrix HTML fragments.
+    """
     display_cols = ["rank", "code", "n_bars", "score",
                     "fvg_touch_rate", "fvg_bounce_rate", "fvg_overfill_rate",
                     "fvg_freq_per100", "kd_clarity_pct", "atr_pct", "avg_dollar_vol_m"]
@@ -410,6 +415,17 @@ def run_screener(
     end: str,
     out_path: pathlib.Path | None = None,
 ) -> pd.DataFrame:
+    """Fetch HTF klines for each code, compute features, score, and write HTML report.
+
+    Args:
+        codes:    List of moomoo stock codes to screen.
+        start:    Start date 'YYYY-MM-DD'.
+        end:      End date 'YYYY-MM-DD'.
+        out_path: Override output HTML path; defaults to a timestamped file in results/.
+
+    Returns:
+        DataFrame of scored and ranked results (one row per code).
+    """
     records  = []
     htf_map  = {}   # code → DataFrame, kept for correlation computation
 
@@ -468,6 +484,7 @@ def run_screener(
 
 
 def main() -> None:
+    """CLI entry point: parse arguments and run the strategy fitness screener."""
     ap = argparse.ArgumentParser(description="SMC strategy fitness screener")
     ap.add_argument("--config", default=str(_DEFAULT_CFG),
                     help="schedule.json with 'targets' list (default: config/schedule.json)")
