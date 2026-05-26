@@ -148,6 +148,10 @@ class BacktestParams:
     #   "kd_smooth": 0, "kd_window": 10, "kd_atr_threshold": 0.05}
     htf_trend_params:     dict   = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if isinstance(self.htf_trend_methods, list):
+            self.htf_trend_methods = tuple(self.htf_trend_methods)
+
     def label(self) -> str:
         """Return a compact human-readable string summarising all strategy parameters.
 

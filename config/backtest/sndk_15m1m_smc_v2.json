@@ -9,5 +9,18 @@
     ],
     "tf_pairs_fast": [
         ["15m", "1m"]
-    ]
+    ],
+    "param_grid": {
+        "htf_window_bars":            [20, 30, 50],
+        "swing_lookback":             [2, 3],
+        "bos_count":                  [2],
+        "fvg_min_width_pct":          [0.001, 0.003, 0.005],
+        "fvg_entry_depth_pct":        [0.05, 0.20, 0.50, 0.70],
+        "require_ltf_confirmation":   [true, false],
+        "displacement_required":      [true, false],
+        "sl_buffer_pct":              [0.001, 0.003, 0.005],
+        "max_sl_pct":                 [0.005, 0.010, 0.020, 0.030],
+        "min_rr":                     [1.5, 2.0],
+        "kd_sl_fallback":             [true, false]
+    }
 }

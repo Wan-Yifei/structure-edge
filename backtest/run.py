@@ -165,223 +165,6 @@ else:
     TF_PAIRS       = _TF_PAIRS_DEFAULT
     TF_PAIRS_FAST  = _TF_PAIRS_FAST_DEFAULT
 
-# ── Parameter grid ────────────────────────────────────────────────────────────
-
-PARAM_GRID: dict[str, list] = {
-    # Focused grid: derived from random-search results (2026-05-22, 50 samples, 15m/1m SNDK).
-    # bos_count=2 and min_rr=1.5 dominated top performers; displacement_required added
-    # (was absent from random sample due to grid default); rr=3.0 dropped (too few trades).
-    "htf_window_bars":            [20, 30, 50],   # ~5 h / ~8 h / ~13 h at 15 m (min ~20 for reliable swing detection)
-    "swing_lookback":             [2, 3],
-    "bos_count":                  [2],
-    "fvg_min_width_pct":          [0.001, 0.003, 0.005],
-    "fvg_entry_depth_pct":        [0.05, 0.20, 0.50, 0.70],
-    "require_ltf_confirmation":   [True, False],
-    "displacement_required":      [True, False],
-    "sl_buffer_pct":              [0.001, 0.003, 0.005],
-    "max_sl_pct":                 [0.005, 0.010, 0.020, 0.030],
-    "min_rr":                     [1.5, 2.0],
-    "kd_sl_fallback":             [True, False],
-}
-
-PARAM_GRID_KD: dict[str, list] = {
-    "htf_trend_methods": [("kd",)],
-    "htf_trend_params": [
-        {"kd_fast": 15, "kd_slow": 60, "kd_window":  5, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 60, "kd_window": 10, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 90, "kd_window":  5, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.0},
-        {"kd_fast": 25, "kd_slow": 60, "kd_window":  5, "kd_flat_threshold": 0.0},
-        {"kd_fast": 25, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.0},
-        {"kd_fast": 25, "kd_slow": 90, "kd_window": 20, "kd_flat_threshold": 0.0},
-        {"kd_fast": 25, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.05},
-    ],
-    "htf_window_bars":           [50],
-    "swing_lookback":            [2],
-    "bos_count":                 [2],
-    "fvg_min_width_pct":         [0.001, 0.003, 0.005],
-    "fvg_entry_depth_pct":       [0.05, 0.10, 0.20, 0.50],
-    "require_ltf_confirmation":  [False],
-    "displacement_required":     [False],
-    "sl_buffer_pct":             [0.003, 0.005],
-    "max_sl_pct":                [0.010, 0.020],
-    "min_rr":                    [1.5, 2.0],
-}
-
-PARAM_GRID_COMBINED: dict[str, list] = {
-    "htf_trend_methods": [("bos_choch", "kd")],
-    "htf_trend_params": [
-        {"kd_fast": 15, "kd_slow": 60, "kd_window":  5, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 60, "kd_window": 10, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 90, "kd_window":  5, "kd_flat_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.0},
-        {"kd_fast": 25, "kd_slow": 60, "kd_window":  5, "kd_flat_threshold": 0.0},
-        {"kd_fast": 25, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.0},
-        {"kd_fast": 25, "kd_slow": 90, "kd_window": 20, "kd_flat_threshold": 0.0},
-        {"kd_fast": 25, "kd_slow": 90, "kd_window": 10, "kd_flat_threshold": 0.05},
-    ],
-    "htf_window_bars":           [50],
-    "swing_lookback":            [2],
-    "bos_count":                 [2],
-    "fvg_min_width_pct":         [0.001, 0.003, 0.005],
-    "fvg_entry_depth_pct":       [0.05, 0.10, 0.20, 0.50],
-    "require_ltf_confirmation":  [False],
-    "displacement_required":     [False],
-    "sl_buffer_pct":             [0.003, 0.005],
-    "max_sl_pct":                [0.010, 0.020],
-    "min_rr":                    [1.5, 2.0],
-}
-
-PARAM_GRID_FOCUSED: dict[str, list] = {
-    # Adaptive segment mode: zero-crossing segmentation + conditional lag comp.
-    # kd_fast=15 dominated in prior random search; slow=60/90 both included.
-    # smooth=3 pre-smoothing; min_bars=3 prevents noise micro-segments.
-    # atr_threshold=0.0/0.036: without vs with flat-segment filter (0.036 = p25, data-driven).
-    # 8 KD configs × strategy grid = 1536 combos across 15m/1m + 15m/3m.
-    "htf_trend_methods": [("bos_choch", "kd")],
-    "htf_trend_params": [
-        # no flat filter
-        {"kd_fast": 15, "kd_slow": 60, "kd_smooth": 3, "kd_min_bars": 3, "kd_atr_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 60, "kd_smooth": 3, "kd_min_bars": 5, "kd_atr_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 90, "kd_smooth": 3, "kd_min_bars": 3, "kd_atr_threshold": 0.0},
-        {"kd_fast": 15, "kd_slow": 90, "kd_smooth": 3, "kd_min_bars": 5, "kd_atr_threshold": 0.0},
-        # atr_threshold=0.05: flat-segment filter
-        {"kd_fast": 15, "kd_slow": 60, "kd_smooth": 3, "kd_min_bars": 3, "kd_atr_threshold": 0.05},
-        {"kd_fast": 15, "kd_slow": 60, "kd_smooth": 3, "kd_min_bars": 5, "kd_atr_threshold": 0.05},
-        {"kd_fast": 15, "kd_slow": 90, "kd_smooth": 3, "kd_min_bars": 3, "kd_atr_threshold": 0.05},
-        {"kd_fast": 15, "kd_slow": 90, "kd_smooth": 3, "kd_min_bars": 5, "kd_atr_threshold": 0.05},
-    ],
-    "htf_window_bars":           [50],
-    "swing_lookback":            [2],
-    "bos_count":                 [2],
-    "fvg_min_width_pct":         [0.001, 0.003, 0.005],
-    "fvg_entry_depth_pct":       [0.05, 0.10, 0.20, 0.50],
-    "require_ltf_confirmation":  [False],
-    "displacement_required":     [False],
-    "sl_buffer_pct":             [0.003, 0.005],
-    "max_sl_pct":                [0.010, 0.020],
-    "min_rr":                    [1.5, 2.0],
-}
-
-
-PARAM_GRID_FAST: dict[str, list] = {
-    "htf_window_bars":            [20],
-    "swing_lookback":             [2],
-    "bos_count":                  [1],
-    "fvg_min_width_pct":          [0.002],
-    "fvg_entry_depth_pct":        [0.20, 0.50],
-    "require_ltf_confirmation":   [True, False],
-    "displacement_required":      [False],
-    "sl_buffer_pct":              [0.001],
-    "max_sl_pct":                 [0.010],
-    "min_rr":                     [1.5],
-}
-
-_KD_LEGACY = {"kd_fast": 15, "kd_slow": 60, "kd_smooth": 0}
-
-# Top-10 combos from 20260523 SNDK focused-grid run (smc_v2), re-run with
-# kd_smooth=0 (legacy mode) to isolate the effect of the over-refill guard.
-# fvg_min_width_pct values read directly from that CSV (not the dataclass default).
-LEGACY_TOP_PARAMS: list[BacktestParams] = [
-    BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                   htf_window_bars=50, fvg_min_width_pct=0.005, fvg_entry_depth_pct=0.10,
-                   sl_buffer_pct=0.003, max_sl_pct=0.02, min_rr=2.0,
-                   htf_trend_methods=("bos_choch", "kd"),
-                   htf_trend_params={**_KD_LEGACY, "kd_window": 10, "kd_flat_threshold": 0.0}),
-    BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                   htf_window_bars=50, fvg_min_width_pct=0.005, fvg_entry_depth_pct=0.20,
-                   sl_buffer_pct=0.003, max_sl_pct=0.02, min_rr=2.0,
-                   htf_trend_methods=("bos_choch", "kd"),
-                   htf_trend_params={**_KD_LEGACY, "kd_window": 10, "kd_flat_threshold": 0.0}),
-    BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                   htf_window_bars=50, fvg_min_width_pct=0.005, fvg_entry_depth_pct=0.50,
-                   sl_buffer_pct=0.003, max_sl_pct=0.02, min_rr=2.0,
-                   htf_trend_methods=("bos_choch", "kd"),
-                   htf_trend_params={**_KD_LEGACY, "kd_window": 10, "kd_flat_threshold": 0.0}),
-    BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                   htf_window_bars=50, fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.10,
-                   sl_buffer_pct=0.005, max_sl_pct=0.02, min_rr=2.0,
-                   htf_trend_methods=("bos_choch", "kd"),
-                   htf_trend_params={**_KD_LEGACY, "kd_window": 5, "kd_flat_threshold": 0.0}),
-    BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                   htf_window_bars=50, fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.20,
-                   sl_buffer_pct=0.005, max_sl_pct=0.02, min_rr=2.0,
-                   htf_trend_methods=("bos_choch", "kd"),
-                   htf_trend_params={**_KD_LEGACY, "kd_window": 5, "kd_flat_threshold": 0.0}),
-    BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                   htf_window_bars=50, fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.50,
-                   sl_buffer_pct=0.005, max_sl_pct=0.02, min_rr=2.0,
-                   htf_trend_methods=("bos_choch", "kd"),
-                   htf_trend_params={**_KD_LEGACY, "kd_window": 5, "kd_flat_threshold": 0.0}),
-    BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                   htf_window_bars=50, fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.10,
-                   sl_buffer_pct=0.005, max_sl_pct=0.01, min_rr=1.5,
-                   htf_trend_methods=("bos_choch", "kd"),
-                   htf_trend_params={**_KD_LEGACY, "kd_window": 10, "kd_flat_threshold": 0.1}),
-    BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                   htf_window_bars=50, fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.20,
-                   sl_buffer_pct=0.005, max_sl_pct=0.01, min_rr=1.5,
-                   htf_trend_methods=("bos_choch", "kd"),
-                   htf_trend_params={**_KD_LEGACY, "kd_window": 10, "kd_flat_threshold": 0.1}),
-    BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                   htf_window_bars=50, fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.50,
-                   sl_buffer_pct=0.005, max_sl_pct=0.01, min_rr=1.5,
-                   htf_trend_methods=("bos_choch", "kd"),
-                   htf_trend_params={**_KD_LEGACY, "kd_window": 10, "kd_flat_threshold": 0.1}),
-    BacktestParams(trend_tf="15m", entry_tf="1m", swing_lookback=2, bos_count=2,
-                   htf_window_bars=50, fvg_min_width_pct=0.005, fvg_entry_depth_pct=0.05,
-                   sl_buffer_pct=0.005, max_sl_pct=0.02, min_rr=2.0,
-                   htf_trend_methods=("bos_choch", "kd"),
-                   htf_trend_params={**_KD_LEGACY, "kd_window": 10, "kd_flat_threshold": 0.0}),
-]
-
-_KD_ADAPTIVE = {"kd_fast": 15, "kd_slow": 60, "kd_smooth": 3, "kd_min_bars": 3}
-
-# Same 7 strategy configs as above (flat_threshold=0.0 only — those are the valid
-# smc_v2 baselines), re-run in adaptive-segment mode with two atr_threshold levels.
-ADAPTIVE_TOP_PARAMS: list[BacktestParams] = [
-    p
-    for atr in (0.0, 0.036)
-    for p in [
-        BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                       htf_window_bars=50, fvg_min_width_pct=0.005, fvg_entry_depth_pct=0.10,
-                       sl_buffer_pct=0.003, max_sl_pct=0.02, min_rr=2.0,
-                       htf_trend_methods=("bos_choch", "kd"),
-                       htf_trend_params={**_KD_ADAPTIVE, "kd_atr_threshold": atr}),
-        BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                       htf_window_bars=50, fvg_min_width_pct=0.005, fvg_entry_depth_pct=0.20,
-                       sl_buffer_pct=0.003, max_sl_pct=0.02, min_rr=2.0,
-                       htf_trend_methods=("bos_choch", "kd"),
-                       htf_trend_params={**_KD_ADAPTIVE, "kd_atr_threshold": atr}),
-        BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                       htf_window_bars=50, fvg_min_width_pct=0.005, fvg_entry_depth_pct=0.50,
-                       sl_buffer_pct=0.003, max_sl_pct=0.02, min_rr=2.0,
-                       htf_trend_methods=("bos_choch", "kd"),
-                       htf_trend_params={**_KD_ADAPTIVE, "kd_atr_threshold": atr}),
-        BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                       htf_window_bars=50, fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.10,
-                       sl_buffer_pct=0.005, max_sl_pct=0.02, min_rr=2.0,
-                       htf_trend_methods=("bos_choch", "kd"),
-                       htf_trend_params={**_KD_ADAPTIVE, "kd_atr_threshold": atr}),
-        BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                       htf_window_bars=50, fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.20,
-                       sl_buffer_pct=0.005, max_sl_pct=0.02, min_rr=2.0,
-                       htf_trend_methods=("bos_choch", "kd"),
-                       htf_trend_params={**_KD_ADAPTIVE, "kd_atr_threshold": atr}),
-        BacktestParams(trend_tf="15m", entry_tf="3m", swing_lookback=2, bos_count=2,
-                       htf_window_bars=50, fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.50,
-                       sl_buffer_pct=0.005, max_sl_pct=0.02, min_rr=2.0,
-                       htf_trend_methods=("bos_choch", "kd"),
-                       htf_trend_params={**_KD_ADAPTIVE, "kd_atr_threshold": atr}),
-        BacktestParams(trend_tf="15m", entry_tf="1m", swing_lookback=2, bos_count=2,
-                       htf_window_bars=50, fvg_min_width_pct=0.005, fvg_entry_depth_pct=0.05,
-                       sl_buffer_pct=0.005, max_sl_pct=0.02, min_rr=2.0,
-                       htf_trend_methods=("bos_choch", "kd"),
-                       htf_trend_params={**_KD_ADAPTIVE, "kd_atr_threshold": atr}),
-    ]
-]
-
-
 # ── Checkpoint helpers ────────────────────────────────────────────────────────
 
 def _checkpoint_key(
@@ -810,12 +593,7 @@ def main() -> None:
                     help="One or more moomoo stock codes (overrides config)")
     ap.add_argument("--start", default=None, help="YYYY-MM-DD (overrides config)")
     ap.add_argument("--end",   default=None, help="YYYY-MM-DD (overrides config)")
-    ap.add_argument("--fast",       action="store_true", help="Smoke test — 2 TF pairs, minimal params")
-    ap.add_argument("--legacy-top",   action="store_true", help="Run LEGACY_TOP_PARAMS (top-10 smc_v2 combos, kd_smooth=0)")
-    ap.add_argument("--adaptive-top", action="store_true", help="Run ADAPTIVE_TOP_PARAMS (top-7 smc_v2 combos in adaptive KD mode)")
-    ap.add_argument("--kd",         action="store_true", help="Use KD trend grid (PARAM_GRID_KD)")
-    ap.add_argument("--combined",   action="store_true", help="Use bos_choch+kd consensus grid (PARAM_GRID_COMBINED)")
-    ap.add_argument("--grid",       action="store_true", help="Use focused exhaustive grid derived from random search (PARAM_GRID_FOCUSED)")
+    ap.add_argument("--fast",       action="store_true", help="Smoke test — minimal param grid, no config param_grid needed")
     ap.add_argument("--force",      action="store_true", help="Re-fetch klines from API")
     ap.add_argument("--no-viz",     action="store_true", help="Skip the matplotlib visualisation")
     ap.add_argument("--show-chart", action="store_true", help="Open chart interactively (blocks)")
@@ -875,30 +653,29 @@ def main() -> None:
     if args.workers is not None:
         cfg.workers = _resolve_workers(args.workers)
 
-    if args.legacy_top:
-        params = LEGACY_TOP_PARAMS
-        pairs  = list({(p.trend_tf, p.entry_tf) for p in params})
-    elif args.adaptive_top:
-        params = ADAPTIVE_TOP_PARAMS
-        pairs  = list({(p.trend_tf, p.entry_tf) for p in params})
+    pairs = pairs_fast if cfg.fast else pairs_normal
+    if cfg.fast:
+        grid: dict = {
+            "htf_window_bars":          [20],
+            "swing_lookback":           [2],
+            "bos_count":                [1],
+            "fvg_min_width_pct":        [0.002],
+            "fvg_entry_depth_pct":      [0.20, 0.50],
+            "require_ltf_confirmation": [True, False],
+            "displacement_required":    [False],
+            "sl_buffer_pct":            [0.001],
+            "max_sl_pct":               [0.010],
+            "min_rr":                   [1.5],
+        }
+    elif json_param_grid is not None:
+        grid = json_param_grid
     else:
-        pairs  = pairs_fast if cfg.fast else pairs_normal
-        if cfg.fast:
-            grid = PARAM_GRID_FAST
-        elif args.grid:
-            grid = PARAM_GRID_FOCUSED
-        elif args.combined:
-            grid = PARAM_GRID_COMBINED
-        elif args.kd:
-            grid = PARAM_GRID_KD
-        elif json_param_grid is not None:
-            grid = json_param_grid
-        else:
-            grid = PARAM_GRID
-        if args.random > 0:
-            params = build_param_list_random(pairs, grid, n_samples=args.random, seed=args.seed)
-        else:
-            params = build_param_list(pairs, grid)
+        print("ERROR: config has no 'param_grid' section. Add one or use --fast.")
+        sys.exit(1)
+    if args.random > 0:
+        params = build_param_list_random(pairs, grid, n_samples=args.random, seed=args.seed)
+    else:
+        params = build_param_list(pairs, grid)
 
     needed_tfs = {tf for trend_tf, entry_tf in pairs for tf in (trend_tf, entry_tf)}
     tf_order   = ["1m", "3m", "5m", "15m", "30m", "60m", "2h", "3h", "4h", "1d"]
@@ -914,28 +691,14 @@ def main() -> None:
     print(f"Resume:      {'disabled (--no-resume)' if args.no_resume else 'enabled'}")
     print(f"Total runs:  {len(params) * len(cfg.codes)}")
 
-    if args.grid:
-        grid_tag = "focused_"
-    elif args.combined:
-        grid_tag = "combined_"
-    elif args.kd:
-        grid_tag = "kd_"
-    elif json_param_grid is not None:
-        # Use config file stem as tag (e.g. "backtest_mu.json" → "mu_")
-        stem = pathlib.Path(config_path).stem  # e.g. "backtest_mu"
-        grid_tag = stem.removeprefix("backtest_") + "_" if stem != "backtest" else ""
-    else:
-        grid_tag = ""
+    # Derive a short tag from the config filename so the results directory is self-describing.
+    cfg_stem = pathlib.Path(config_path).stem  # e.g. "default_smc_v2"
     if cfg.fast:
         mode_tag = "smoke"
-    elif args.legacy_top:
-        mode_tag = "legacy_top10"
-    elif args.adaptive_top:
-        mode_tag = "adaptive_top14"
     elif args.random > 0:
-        mode_tag = f"{grid_tag}random_{args.random}"
+        mode_tag = f"{cfg_stem}_random_{args.random}"
     else:
-        mode_tag = f"{grid_tag}grid"
+        mode_tag = f"{cfg_stem}_grid"
     run_tag     = f"{datetime.now().strftime('%Y%m%d_%H%M')}_{ALGO_VERSION}_{mode_tag}"
     results_dir = _RESULTS_DIR / run_tag
     csv_path    = results_dir / "backtest_results.csv"
@@ -961,8 +724,7 @@ def main() -> None:
             klines[tf] = df
 
         ck_key = _checkpoint_key(
-            code, cfg.start, cfg.end, pairs,
-            grid if not (args.legacy_top or args.adaptive_top) else {"_explicit": [p.label() for p in params]},
+            code, cfg.start, cfg.end, pairs, grid,
             random_n=args.random, random_seed=args.seed if args.random > 0 else None,
         )
         print(f"\n── Running grid for {code} ({cfg.workers} workers) ─────────────────────\n")
