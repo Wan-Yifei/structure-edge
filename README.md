@@ -28,6 +28,7 @@ moomoo/
 ├── backtest/                    # 回测框架
 │   ├── engine.py                #   回测引擎：run_backtest(), BacktestParams, Trade
 │   ├── run.py                   #   批量网格/随机搜索 CLI（自动写入 review_trades.duckdb）
+│   ├── aggregate_random.py      #   跨股票 random 结果聚合：对比 + HTML 报告 + 生成缩范围 config
 │   ├── audit.py                 #   单组合交易审计报告（K 线图 + 统计，自包含 HTML）
 │   ├── fvg_inspect.py           #   FVG 过滤诊断工具：显示指定时段内每个 FVG 触碰被过滤的原因
 │   ├── screener.py              #   策略适配性筛选器：FVG/KD/ATR/换手率特征评分 + 相关性矩阵
@@ -248,6 +249,7 @@ uv run backtest/fvg_inspect.py \
 
 | 文件 | 内容 |
 |------|------|
+| [`backtest/README.md`](backtest/README.md) | 回测模块各脚本功能说明 + 典型工作流 |
 | [`config/backtest/README.md`](config/backtest/README.md) | 回测 config JSON 字段说明 + 各配置文件用途 |
 | [`strategy/smc/STRATEGY.md`](strategy/smc/STRATEGY.md) | SMC 策略逻辑 & 参数完整说明（Pipeline、过滤器、风控、KD 趋势方法）|
 | [`doc/smc_v2_strategy.md`](doc/smc_v2_strategy.md) | smc_v2 / smc_v2.1 变更说明（KD 趋势、over-refill guard、自适应分段、与 v1 对比）|

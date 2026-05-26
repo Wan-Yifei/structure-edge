@@ -103,5 +103,27 @@ uv run backtest/run.py --fast --no-viz
 
 ```
 backtest/results/20260526_1000_default_smc_v2_grid/
-backtest/results/20260526_1010_kd_smc_v2_random_300/
+backtest/results/20260526_1010_default_smc_v2_random_200/
 ```
+
+---
+
+## 推荐工作流：Random → 聚合 → Grid
+
+```bash
+# 1. 多股票 random（固定 seed，所有股票跑相同的参数组合）
+uv run backtest/run.py \
+    --config config/backtest/default_smc_v2.json \
+    --random 200 --seed 42 --no-viz
+
+# 2. 聚合分析（生成 HTML 报告 + 缩范围 config）
+uv run backtest/aggregate_random.py \
+    --run-dir backtest/results/<timestamp>_default_smc_v2_random_200/ \
+    --src-config config/backtest/default_smc_v2.json \
+    --out-config cross_stock_grid_v1.json
+
+# 3. 全量 grid（参数空间已缩小，运行时间大幅缩短）
+uv run backtest/run.py --config config/backtest/cross_stock_grid_v1.json
+```
+
+`aggregate_random.py` 详细说明见 [`backtest/README.md`](../../backtest/README.md)。
