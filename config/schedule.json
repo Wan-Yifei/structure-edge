@@ -39,8 +39,11 @@
     "US.MU",
     "US.NVDA",
     "US.NVTS",
+    "US.OKLO",
     "US.Q",
     "US.QCOM",
+    "US.RKLB",
+    "US.RKLX",
     "US.SIMO",
     "US.SMCI",
     "US.SNDK",
@@ -50,5 +53,9 @@
     "US.TSM",
     "US.WDC"
   ],
-  "target_categories": {}
+  "target_categories": {
+    "US.OKLO": "nuclear fusion & energy",
+    "US.RKLX": "Space X family",
+    "US.RKLB": "Space X family"
+  }
 }
