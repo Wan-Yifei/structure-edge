@@ -49,5 +49,6 @@
     "US.TSEM",
     "US.TSM",
     "US.WDC"
-  ]
+  ],
+  "target_categories": {}
 }

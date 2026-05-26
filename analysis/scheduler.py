@@ -147,27 +147,50 @@ def next_event(cfg: dict, et: datetime) -> str:
 # ── Stock Picker Dialog ───────────────────────────────────────────────────────
 
 class StockPickerDialog(tk.Toplevel):
-    """Popup for selecting collection targets from moomoo watchlist groups."""
+    """Popup for managing collection targets.
+
+    Left panel: browse moomoo watchlist groups and tick stocks to add.
+    Right panel: current target table (Code + Category) with add/delete controls.
+    Adding a stock manually auto-saves immediately; watchlist changes require Save.
+    """
 
     def __init__(self, parent, host: str = "127.0.0.1", port: int = 11111):
         super().__init__(parent)
-        self._app    = parent
-        self._host   = host
-        self._port   = port
-        self._selected: set[str] = set(parent.cfg.get("targets", []))
-        self._groups: list[str]  = []
+        self._app        = parent
+        self._host       = host
+        self._port       = port
+        self._selected: set[str]                    = set(parent.cfg.get("targets", []))
+        self._categories: dict[str, str]            = dict(parent.cfg.get("target_categories", {}))
+        self._groups: list[str]                     = []
         self._group_cache: dict[str, list[tuple[str, str]]] = {}
-        self._check_vars: dict[str, tk.BooleanVar] = {}
+        self._check_vars: dict[str, tk.BooleanVar]  = {}
+        self._current_group: str                    = ""
 
-        self.title("Manage Collection Targets")
+        self.title("Collection Targets")
         self.configure(bg=BG_DARK)
-        self.geometry("720x520")
+        self.geometry("860x560")
         self.resizable(True, True)
         self.transient(parent)
         self.grab_set()
 
+        self._apply_tree_style()
         self._build_ui()
         self._load_groups()
+
+    # ── Treeview dark-theme style ─────────────────────────────────────────────
+
+    def _apply_tree_style(self):
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("Targets.Treeview",
+            background=BG_EDIT, foreground=FG, fieldbackground=BG_EDIT,
+            rowheight=22, font=("Courier", 9), borderwidth=0)
+        style.configure("Targets.Treeview.Heading",
+            background=BG_BAR, foreground=GREY,
+            font=("Helvetica", 9, "bold"), relief="flat")
+        style.map("Targets.Treeview",
+            background=[("selected", GREEN)],
+            foreground=[("selected", FG)])
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -177,13 +200,12 @@ class StockPickerDialog(tk.Toplevel):
         tk.Label(self, textvariable=self._status_var, bg=BG_BAR, fg=YELLOW,
                  font=("Courier", 9), anchor="w", padx=8).pack(fill=tk.X)
 
-        # ── Content row ──────────────────────────────────────────────────────
         content = tk.Frame(self, bg=BG_DARK)
         content.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 0))
 
-        # Left — group list
-        left = tk.Frame(content, bg=BG_DARK, width=170)
-        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6))
+        # ── Left: watchlist group browser ─────────────────────────────────────
+        left = tk.Frame(content, bg=BG_DARK, width=180)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
         left.pack_propagate(False)
 
         tk.Label(left, text="Watchlist Groups", bg=BG_DARK, fg=GREY,
@@ -198,15 +220,19 @@ class StockPickerDialog(tk.Toplevel):
         self._group_lb.pack(fill=tk.BOTH, expand=True)
         self._group_lb.bind("<<ListboxSelect>>", self._on_group_select)
 
-        # Right — stock checkboxes + target list
-        right = tk.Frame(content, bg=BG_DARK)
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(left, text="↑ click group → check stocks →",
+                 bg=BG_DARK, fg=DIM, font=("Helvetica", 8), wraplength=160
+                 ).pack(anchor="w", pady=(4, 0))
 
-        # Stock checkbox area
-        tk.Label(right, text="Stocks in group  (check to add)", bg=BG_DARK, fg=GREY,
+        # ── Middle: stock checkboxes ──────────────────────────────────────────
+        mid = tk.Frame(content, bg=BG_DARK, width=240)
+        mid.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        mid.pack_propagate(False)
+
+        tk.Label(mid, text="Stocks in group  (✓ = add)", bg=BG_DARK, fg=GREY,
                  font=("Helvetica", 9, "bold")).pack(anchor="w")
 
-        box = tk.Frame(right, bg=BG_EDIT, relief=tk.SUNKEN, bd=1)
+        box = tk.Frame(mid, bg=BG_EDIT, relief=tk.SUNKEN, bd=1)
         box.pack(fill=tk.BOTH, expand=True)
 
         self._canvas = tk.Canvas(box, bg=BG_EDIT, highlightthickness=0)
@@ -222,40 +248,79 @@ class StockPickerDialog(tk.Toplevel):
         self._canvas.bind("<Configure>", lambda e: self._canvas.itemconfig(
             self._cwin, width=e.width))
 
-        # Target list
-        tk.Label(right, text="Collection Targets", bg=BG_DARK, fg=GREY,
-                 font=("Helvetica", 9, "bold")).pack(anchor="w", pady=(6, 0))
+        # ── Right: targets table ──────────────────────────────────────────────
+        right = tk.Frame(content, bg=BG_DARK)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        tgt_row = tk.Frame(right, bg=BG_DARK)
-        tgt_row.pack(fill=tk.X)
-        self._targets_lb = tk.Listbox(
-            tgt_row, bg=BG_EDIT, fg=GREEN, font=("Courier", 9),
-            height=4, selectbackground=RED, exportselection=False,
+        hdr_row = tk.Frame(right, bg=BG_DARK)
+        hdr_row.pack(fill=tk.X)
+        tk.Label(hdr_row, text="Collection Targets", bg=BG_DARK, fg=GREY,
+                 font=("Helvetica", 9, "bold")).pack(side=tk.LEFT, anchor="w")
+        self._count_var = tk.StringVar(value="")
+        tk.Label(hdr_row, textvariable=self._count_var, bg=BG_DARK, fg=DIM,
+                 font=("Helvetica", 9)).pack(side=tk.LEFT, padx=6)
+
+        tree_frame = tk.Frame(right, bg=BG_EDIT, relief=tk.SUNKEN, bd=1)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        self._tree = ttk.Treeview(
+            tree_frame,
+            columns=("code", "category"),
+            show="headings",
+            style="Targets.Treeview",
+            selectmode="browse",
         )
-        self._targets_lb.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(tgt_row, text="Remove", bg=RED, fg=FG, width=8,
-                  relief=tk.FLAT, command=self._remove_target).pack(side=tk.LEFT, padx=4)
+        self._tree.heading("code",     text="Code",     anchor="w")
+        self._tree.heading("category", text="Category", anchor="w")
+        self._tree.column("code",     width=110, minwidth=80,  stretch=False)
+        self._tree.column("category", width=160, minwidth=100, stretch=True)
+        tree_sb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=tree_sb.set)
+        tree_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tree.pack(fill=tk.BOTH, expand=True)
 
-        # ── Bottom bar ───────────────────────────────────────────────────────
+        # Delete selected row
+        del_row = tk.Frame(right, bg=BG_DARK, pady=2)
+        del_row.pack(fill=tk.X)
+        tk.Button(del_row, text="Remove selected", bg=RED, fg=FG,
+                  relief=tk.FLAT, command=self._remove_target
+                  ).pack(side=tk.RIGHT)
+
+        # ── Bottom bar: manual add + save/close ───────────────────────────────
+        sep = tk.Frame(self, bg=DIM, height=1)
+        sep.pack(fill=tk.X, padx=8, pady=(4, 0))
+
         bot = tk.Frame(self, bg=BG_DARK, pady=6)
         bot.pack(fill=tk.X, padx=8)
 
-        tk.Label(bot, text="Add code:", bg=BG_DARK, fg=FG,
+        tk.Label(bot, text="Add manually:", bg=BG_DARK, fg=FG,
                  font=("Helvetica", 9)).pack(side=tk.LEFT)
-        self._add_var = tk.StringVar()
-        add_entry = tk.Entry(bot, textvariable=self._add_var, width=14,
-                             bg=BG_EDIT, fg=FG, insertbackground=FG)
-        add_entry.pack(side=tk.LEFT, padx=4)
-        add_entry.bind("<Return>", lambda e: self._add_custom())
-        tk.Button(bot, text="+ Add", bg=BG_BAR, fg=FG, width=7,
-                  relief=tk.FLAT, command=self._add_custom).pack(side=tk.LEFT, padx=(0, 16))
 
-        tk.Button(bot, text="Save", bg=GREEN, fg=FG, width=10,
+        self._add_var = tk.StringVar()
+        add_entry = tk.Entry(bot, textvariable=self._add_var, width=12,
+                             bg=BG_EDIT, fg=FG, insertbackground=FG,
+                             font=("Courier", 9))
+        add_entry.pack(side=tk.LEFT, padx=(4, 2))
+        add_entry.bind("<Return>", lambda e: self._add_custom())
+
+        tk.Label(bot, text="Category:", bg=BG_DARK, fg=FG,
+                 font=("Helvetica", 9)).pack(side=tk.LEFT, padx=(6, 2))
+        self._cat_var = tk.StringVar()
+        cat_entry = tk.Entry(bot, textvariable=self._cat_var, width=14,
+                             bg=BG_EDIT, fg=FG, insertbackground=FG,
+                             font=("Courier", 9))
+        cat_entry.pack(side=tk.LEFT, padx=(0, 4))
+        cat_entry.bind("<Return>", lambda e: self._add_custom())
+
+        tk.Button(bot, text="+ Add", bg=BG_BAR, fg=FG, width=7,
+                  relief=tk.FLAT, command=self._add_custom).pack(side=tk.LEFT, padx=(0, 20))
+
+        tk.Button(bot, text="Save & Close", bg=GREEN, fg=FG, width=12,
                   relief=tk.FLAT, command=self._save).pack(side=tk.RIGHT, padx=(4, 0))
         tk.Button(bot, text="Close", bg=BG_BAR, fg=FG, width=8,
                   relief=tk.FLAT, command=self.destroy).pack(side=tk.RIGHT)
 
-        self._refresh_targets()
+        self._refresh_target_tree()
 
     # ── API loading (background threads) ─────────────────────────────────────
 
@@ -274,7 +339,7 @@ class StockPickerDialog(tk.Toplevel):
             else:
                 self.after(0, self._status_var.set, f"Error: {data}")
         except Exception as exc:
-            self.after(0, self._status_var.set, f"OpenD error: {exc}")
+            self.after(0, self._status_var.set, f"OpenD offline — manual entry still works ({exc})")
 
     def _populate_groups(self, groups: list[str]):
         self._groups = groups
@@ -288,6 +353,7 @@ class StockPickerDialog(tk.Toplevel):
         if not sel:
             return
         group = self._groups[sel[0]]
+        self._current_group = group
         if group in self._group_cache:
             self._show_stocks(self._group_cache[group])
         else:
@@ -305,7 +371,7 @@ class StockPickerDialog(tk.Toplevel):
                 stocks = list(zip(data["code"].tolist(), names))
                 self._group_cache[group] = stocks
                 self.after(0, self._show_stocks, stocks)
-                self.after(0, self._status_var.set, f"{group}: {len(stocks)} stocks")
+                self.after(0, self._status_var.set, f"{group}: {len(stocks)} stocks  (check to add; group used as category)")
             else:
                 self.after(0, self._status_var.set, f"Error loading {group}: {data}")
         except Exception as exc:
@@ -321,7 +387,7 @@ class StockPickerDialog(tk.Toplevel):
         for code, name in stocks:
             var = tk.BooleanVar(value=(code in self._selected))
             self._check_vars[code] = var
-            label = f"{code}   {name[:24]}" if name else code
+            label = f"{code}   {name[:22]}" if name else code
             tk.Checkbutton(
                 self._stock_inner, text=label, variable=var,
                 bg=BG_EDIT, fg=FG, selectcolor=BG_DARK,
@@ -333,43 +399,65 @@ class StockPickerDialog(tk.Toplevel):
     def _toggle(self, code: str, var: tk.BooleanVar):
         if var.get():
             self._selected.add(code)
+            # Use watchlist group name as category when adding via group browser
+            if self._current_group and code not in self._categories:
+                self._categories[code] = self._current_group
         else:
             self._selected.discard(code)
-        self._refresh_targets()
+        self._refresh_target_tree()
 
-    # ── Target list helpers ───────────────────────────────────────────────────
+    # ── Target tree helpers ───────────────────────────────────────────────────
 
-    def _refresh_targets(self):
-        self._targets_lb.delete(0, tk.END)
+    def _refresh_target_tree(self):
+        self._tree.delete(*self._tree.get_children())
         for code in sorted(self._selected):
-            self._targets_lb.insert(tk.END, code)
+            cat = self._categories.get(code, "")
+            self._tree.insert("", tk.END, iid=code, values=(code, cat))
+        n = len(self._selected)
+        self._count_var.set(f"({n} stock{'s' if n != 1 else ''})")
 
     def _remove_target(self):
-        sel = self._targets_lb.curselection()
+        sel = self._tree.selection()
         if not sel:
             return
-        code = self._targets_lb.get(sel[0])
+        code = sel[0]  # iid == code
         self._selected.discard(code)
+        self._categories.pop(code, None)
         if code in self._check_vars:
             self._check_vars[code].set(False)
-        self._refresh_targets()
+        self._refresh_target_tree()
+        # Persist the removal immediately
+        self._persist()
+        self._status_var.set(f"Removed {code} from targets (existing DB data unchanged)")
 
     def _add_custom(self):
-        code = self._add_var.get().strip().upper()
-        if not code:
+        raw  = self._add_var.get().strip().upper()
+        cat  = self._cat_var.get().strip()
+        if not raw:
             return
-        if "." not in code:
-            self._status_var.set("Invalid format — use e.g. US.AAPL or HK.00700")
-            return
+        code = raw if "." in raw else f"US.{raw}"
+        is_new = code not in self._selected
         self._selected.add(code)
+        if cat:
+            self._categories[code] = cat
+        elif code not in self._categories and self._current_group:
+            self._categories[code] = self._current_group
         self._add_var.set("")
-        self._refresh_targets()
-        self._status_var.set(f"Added {code}")
+        self._refresh_target_tree()
+        # Auto-persist: new codes are saved to config immediately
+        self._persist()
+        action = "Added to config" if is_new else "Already in targets"
+        self._status_var.set(f"{action}: {code}  (category: {self._categories.get(code, '—')})")
 
-    def _save(self):
-        self._app.cfg["targets"] = sorted(self._selected)
+    def _persist(self):
+        """Write current targets and categories to config without closing the dialog."""
+        self._app.cfg["targets"]            = sorted(self._selected)
+        self._app.cfg["target_categories"]  = dict(self._categories)
         self._app.stocks_var.set(", ".join(sorted(self._selected)))
         self._app._save_config()
+
+    def _save(self):
+        self._persist()
         self.destroy()
 
 
@@ -405,7 +493,9 @@ class SchedulerApp(tk.Tk):
     def _load_config(self) -> dict:
         if CONFIG_PATH.exists():
             with open(CONFIG_PATH, encoding="utf-8") as f:
-                return json.load(f)
+                cfg = json.load(f)
+            cfg.setdefault("target_categories", {})
+            return cfg
         return {
             "prestart_minutes": 5,
             "data_timeout_minutes": 5,
@@ -420,14 +510,22 @@ class SchedulerApp(tk.Tk):
                                "label": "After-hours  16:00–20:00 ET"},
             },
             "targets": ["US.SNDK"],
+            "target_categories": {},
         }
 
     def _save_config(self):
         for name, widgets in self._row_widgets.items():
             self.cfg["sessions"][name]["enabled"] = bool(widgets["enabled"].get())
-        self.cfg["prestart_minutes"]      = int(self.prestart_var.get())
-        self.cfg["data_timeout_minutes"]  = int(self.timeout_var.get())
-        self.cfg["targets"] = [t.strip() for t in self.stocks_var.get().split(",") if t.strip()]
+        self.cfg["prestart_minutes"]     = int(self.prestart_var.get())
+        self.cfg["data_timeout_minutes"] = int(self.timeout_var.get())
+        new_codes = [t.strip() for t in self.stocks_var.get().split(",") if t.strip()]
+        # Auto-add codes typed directly into the stocks entry that aren't in targets yet
+        existing = set(self.cfg.get("targets", []))
+        for code in new_codes:
+            if code not in existing:
+                self._log(f"Auto-added new target: {code}")
+        self.cfg["targets"] = sorted(set(new_codes))
+        self.cfg.setdefault("target_categories", {})
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(self.cfg, f, indent=2, ensure_ascii=False)
