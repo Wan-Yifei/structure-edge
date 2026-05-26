@@ -37,6 +37,12 @@ moomoo/
 │   ├── viz.py                   #   matplotlib 可视化（结果图表）
 │   └── logger.py                #   多进程安全日志（QueueHandler）
 │
+├── config/                      # 配置文件
+│   ├── backtest/                #   回测参数配置（见 config/backtest/README.md）
+│   ├── trade_viewer.toml        #   Trade Viewer 默认显示参数
+│   ├── chart.json               #   K 线图表布局配置
+│   └── schedule.json            #   screener.py 默认股票列表
+│
 ├── strategy/                    # 策略逻辑
 │   ├── base.py                  #   BaseStrategy ABC + SMCStrategy 适配器
 │   └── smc/                     #   Smart Money Concepts 实现
@@ -73,14 +79,14 @@ moomoo/
 # K 线图表 / Order Flow 分析工具
 uv run main.py trade_viewer
 
-# 回测（快速冒烟测试）
+# 回测（快速冒烟测试，内置精简参数空间）
 uv run backtest/run.py --fast --no-viz
 
-# 全量网格搜索
-uv run backtest/run.py --codes US.SNDK --start 2025-02-13 --end 2025-12-31
+# 全量网格搜索（config 指定股票、日期、参数空间）
+uv run backtest/run.py --config config/backtest/default_smc_v2.json
 
 # 随机搜索（每个 TF pair 采样 300 个参数组合）
-uv run backtest/run.py --codes US.SNDK --random 300
+uv run backtest/run.py --config config/backtest/default_smc_v2.json --random 300
 
 # 单元测试
 uv run pytest tests/ -v
@@ -124,20 +130,23 @@ uv run analysis/trade_viewer.py --code US.SNDK --mode Historical --date 2026-05-
 ### 运行一次回测
 
 ```bash
-# 快速测试（2 TF pair，8 个参数组合）
+# 快速冒烟测试（内置精简参数空间，约 8 个组合）
 uv run backtest/run.py --fast --no-viz
 
-# 指定股票和日期范围
-uv run backtest/run.py --codes US.SNDK US.NVDA --start 2025-01-01 --end 2025-12-31
+# 全量网格搜索（stocks、日期、参数空间全部由 config 指定）
+uv run backtest/run.py --config config/backtest/default_smc_v2.json
 
-# 随机搜索（比穷举网格更高效）
-uv run backtest/run.py --codes US.SNDK --random 300 --no-viz
+# 随机搜索（比穷举网格更高效，每个 TF pair 采样 300 个组合）
+uv run backtest/run.py --config config/backtest/default_smc_v2.json --random 300 --no-viz
+
+# 覆盖 config 中的股票列表（只回测指定标的）
+uv run backtest/run.py --config config/backtest/default_smc_v2.json --codes US.NVDA
 
 # 强制重跑（忽略断点续跑缓存）
-uv run backtest/run.py --fast --no-resume
+uv run backtest/run.py --config config/backtest/default_smc_v2.json --no-resume
 
 # 强制重跑（忽略 DB 已有的日期段，不从数据库复用交易数据）
-uv run backtest/run.py --codes US.SNDK --no-reuse
+uv run backtest/run.py --config config/backtest/default_smc_v2.json --no-reuse
 ```
 
 ### 输出
@@ -239,6 +248,7 @@ uv run backtest/fvg_inspect.py \
 
 | 文件 | 内容 |
 |------|------|
+| [`config/backtest/README.md`](config/backtest/README.md) | 回测 config JSON 字段说明 + 各配置文件用途 |
 | [`strategy/smc/STRATEGY.md`](strategy/smc/STRATEGY.md) | SMC 策略逻辑 & 参数完整说明（Pipeline、过滤器、风控、KD 趋势方法）|
 | [`doc/smc_v2_strategy.md`](doc/smc_v2_strategy.md) | smc_v2 / smc_v2.1 变更说明（KD 趋势、over-refill guard、自适应分段、与 v1 对比）|
 | [`doc/smc_v1_strategy.md`](doc/smc_v1_strategy.md) | smc_v1 策略归档文档 |
