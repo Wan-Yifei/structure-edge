@@ -1,0 +1,1300 @@
+"""
+Trade Viewer Qt — PyQtGraph-based chart viewer
+
+Replaces Tkinter + Matplotlib with PyQt6 + PyQtGraph for significantly
+faster rendering, native zoom/pan, and smooth crosshair interaction.
+
+Phase 1 features:
+  - Live / Historical modes
+  - Candlestick chart with per-bin tick heatmap colouring
+  - Volume subplot
+  - Delta Δ annotations per candle
+  - BOS / CHoCH structure markers
+  - FVG zone overlays
+  - Session Vol Profile panel (right)
+  - Single-candle Tick Profile panel (centre-right, on hover)
+  - Crosshair + OHLCV tooltip (left-side, below price label)
+  - Indicator toggle toolbar
+  - Session filter checkboxes (Pre / Regular / Post / Night)
+  - Profile date-range selector (1D / 3D / 1W, trading-day aware)
+
+Usage:
+    uv run analysis/trade_viewer_qt.py
+    uv run analysis/trade_viewer_qt.py --code US.SNDK --tf 5m
+    uv run analysis/trade_viewer_qt.py --mode Historical --date 2026-05-20
+    uv run analysis/trade_viewer_qt.py --code US.AAPL --tf 15m --mode Historical --date 2026-05-15
+"""
+
+from __future__ import annotations
+
+import argparse
+import pathlib
+import sqlite3
+import sys
+import threading
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+import numpy as np
+import pandas as pd
+import pyqtgraph as pg
+from PyQt6.QtCore import (
+    Qt, QThread, QTimer, pyqtSignal, QRectF, QPointF,
+)
+from PyQt6.QtGui import (
+    QColor, QPainter, QPicture, QPen, QBrush, QFont,
+)
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QSplitter, QToolBar, QLabel, QComboBox, QLineEdit, QSpinBox,
+    QPushButton, QCheckBox, QButtonGroup, QRadioButton, QSizePolicy,
+    QFrame, QStatusBar,
+)
+
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+
+from core.time_utils import candle_start
+from feeds.fetcher import fetch_klines
+from strategy.smc.market_structure import detect_bos_choch
+from strategy.smc.fvg import detect_fvg
+from strategy.smc.kd_trend import compute_kd
+from moomoo import (
+    OpenQuoteContext, SubType, KLType, AuType,
+    TickerHandlerBase, RET_OK,
+)
+
+# ── PyQtGraph global config ───────────────────────────────────────────────────
+
+pg.setConfigOptions(antialias=True, useOpenGL=True, enableExperimental=True)
+
+# ── Colour palette (matches trade_viewer.py) ──────────────────────────────────
+
+_BG     = "#1a1a2e"
+_BG_BAR = "#16213e"
+_BG_TIP = "#0f3460"
+_FG     = "#e0e0e0"
+_GREEN  = "#26a69a"
+_RED    = "#ef5350"
+_GREY   = "#546e7a"
+_GRID   = "#263238"
+_GOLD   = "#ffa726"
+_CROSS  = "#b0bec5"
+_UP     = "#ffa005"   # heatmap gold  (buyer-dominant)
+_DOWN   = "#ab47bc"   # heatmap purple (seller-dominant)
+
+def _qc(hex_str: str, alpha: int = 255) -> QColor:
+    c = QColor(hex_str)
+    c.setAlpha(alpha)
+    return c
+
+# ── Timeframe / BOS config (mirrors trade_viewer.py) ─────────────────────────
+
+TIMEFRAME_MAP: dict[str, tuple[KLType, int]] = {
+    "1m":  (KLType.K_1M,    1),
+    "5m":  (KLType.K_5M,    5),
+    "15m": (KLType.K_15M,  15),
+    "30m": (KLType.K_30M,  30),
+    "1h":  (KLType.K_60M,  60),
+    "4h":  (KLType.K_240M, 240),
+}
+
+_DAY_CANDLES: dict[str, int] = {
+    "1m": 390, "5m": 78, "15m": 26, "30m": 14, "1h": 7, "4h": 6,
+}
+
+_BOS_MAX_SPAN: dict[str, int] = {
+    "1m": 60, "5m": 12, "15m": 26, "30m": 13, "1h": 7, "4h": 8,
+}
+
+_TREND_WINDOW: dict[str, int] = {
+    "1m": 60, "5m": 12, "15m": 26, "30m": 13, "1h": 7, "4h": 8,
+}
+
+_LIVE_LOOKBACK_DAYS: dict[str, int] = {
+    "1m": 2, "5m": 5, "15m": 7, "30m": 10, "1h": 14, "4h": 30,
+}
+
+# ── Shared tick-loading helper ────────────────────────────────────────────────
+
+def load_local_ticks(code: str, date_str: str, tf: str) -> dict | None:
+    """Load tick buckets from ticks.db for a given code and date."""
+    db_path = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
+    if not db_path.exists():
+        return None
+    from feeds.tick_store import TickStore
+    try:
+        dt             = datetime.strptime(date_str, "%Y-%m-%d")
+        _, candle_mins = TIMEFRAME_MAP[tf]
+        tick_start     = dt - timedelta(days=1) + timedelta(hours=20)
+        tick_end       = dt.replace(hour=23, minute=59, second=59)
+        with TickStore(db_path, read_only=True) as store:
+            rows = store.query_ticks(code, tick_start, tick_end)
+        if not rows:
+            return None
+        buckets: dict = defaultdict(
+            lambda: defaultdict(lambda: {"buy": 0, "sell": 0, "neutral": 0})
+        )
+        for r in rows:
+            ts = (r["ts"] if isinstance(r["ts"], datetime)
+                  else datetime.fromisoformat(str(r["ts"])))
+            bucket = candle_start(ts, candle_mins)
+            key = {"BUY": "buy", "SELL": "sell"}.get(
+                r["direction"].upper(), "neutral")
+            buckets[bucket][r["price"]][key] += r["volume"]
+        return dict(buckets)
+    except Exception:
+        return None
+
+
+def apply_profile_range(klines: pd.DataFrame, range_val: str) -> pd.DataFrame:
+    """Trim klines to N trading days ending at the last bar."""
+    if klines.empty:
+        return klines
+    n_days = {"1d": 1, "3d": 3, "7d": 5}.get(range_val)
+    if n_days is None:
+        return klines
+    times = klines["time_key"].astype(str).str[:10]
+    anchor = times.iloc[-1]
+    dates  = sorted(times[times <= anchor].unique())
+    start  = dates[-n_days] if len(dates) >= n_days else dates[0]
+    return klines[(times >= start) & (times <= anchor)]
+
+
+# ── Custom GraphicsItems ──────────────────────────────────────────────────────
+
+class CandlestickItem(pg.GraphicsObject):
+    """Draws OHLCV candles with optional per-bin tick heatmap colouring."""
+
+    HEATMAP_BINS = 20  # price bins per candle for heatmap
+
+    def __init__(self):
+        super().__init__()
+        self._klines:     pd.DataFrame | None = None
+        self._buckets:    dict | None         = None
+        self._candle_mins: int                = 1
+        self._show_heatmap: bool              = True
+        self._picture:    QPicture | None     = None
+        self._rect:       QRectF              = QRectF()
+
+    def set_data(self, klines: pd.DataFrame, buckets: dict | None,
+                 candle_mins: int, show_heatmap: bool = True) -> None:
+        self._klines      = klines
+        self._buckets     = buckets
+        self._candle_mins = candle_mins
+        self._show_heatmap = show_heatmap
+        self._picture     = None
+        if not klines.empty:
+            self._rect = QRectF(
+                -0.5,
+                float(klines["low"].min()),
+                float(len(klines)),
+                float(klines["high"].max() - klines["low"].min()),
+            )
+        self.prepareGeometryChange()
+        self.update()
+
+    # ── build QPicture once, replay on every paint ────────────────────────────
+
+    def _build(self) -> None:
+        pic = QPicture()
+        p   = QPainter(pic)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        klines      = self._klines
+        buckets     = self._buckets or {}
+        candle_mins = self._candle_mins
+
+        for i, (_, row) in enumerate(klines.iterrows()):
+            o = float(row["open"])
+            h = float(row["high"])
+            l = float(row["low"])
+            c = float(row["close"])
+            is_bull = c >= o
+
+            # Resolve tick bucket key
+            try:
+                bar_end = datetime.strptime(
+                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                bk = candle_start(
+                    bar_end - timedelta(minutes=candle_mins), candle_mins)
+            except ValueError:
+                bk = None
+
+            pd_ = buckets.get(bk) if bk else None
+
+            # Draw wick
+            wick_color = _qc(_GREEN if is_bull else _RED)
+            p.setPen(QPen(wick_color, 0))
+            p.drawLine(QPointF(i, l), QPointF(i, h))
+
+            # Draw body: heatmap bins or plain colour
+            body_lo = min(o, c)
+            body_hi = max(o, c)
+            if body_hi <= body_lo:
+                body_hi = body_lo + 0.0001  # minimal doji body
+
+            if self._show_heatmap and pd_:
+                self._draw_heatmap_body(p, i, l, h, body_lo, body_hi, pd_)
+            else:
+                color = _qc(_GREEN if is_bull else _RED)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(color))
+                p.drawRect(QRectF(i - 0.4, body_lo, 0.8, body_hi - body_lo))
+
+        p.end()
+        self._picture = pic
+
+    def _draw_heatmap_body(self, p: QPainter, i: int,
+                            low: float, high: float,
+                            body_lo: float, body_hi: float,
+                            pd_: dict) -> None:
+        """Colour the full wick range in heatmap bins."""
+        price_range = high - low
+        if price_range < 1e-9:
+            return
+        bins = self.HEATMAP_BINS
+        bin_h = price_range / bins
+
+        # Aggregate tick data into bins
+        all_prices = list(pd_.keys())
+        if not all_prices:
+            return
+        buys    = np.zeros(bins)
+        sells   = np.zeros(bins)
+        totals  = np.zeros(bins)
+        for price, counts in pd_.items():
+            b = int((price - low) / bin_h)
+            b = max(0, min(bins - 1, b))
+            buys[b]   += counts.get("buy", 0)
+            sells[b]  += counts.get("sell", 0)
+            totals[b] += (counts.get("buy", 0) + counts.get("sell", 0)
+                          + counts.get("neutral", 0))
+
+        max_total = float(totals.max()) if totals.max() > 0 else 1.0
+        p.setPen(Qt.PenStyle.NoPen)
+
+        for b in range(bins):
+            bin_lo = low + b * bin_h
+            bin_hi = bin_lo + bin_h
+            # Only colour within the body (wick drawn separately)
+            draw_lo = max(bin_lo, body_lo)
+            draw_hi = min(bin_hi, body_hi)
+            if draw_hi <= draw_lo:
+                # Outside body: draw faint full-range bin
+                draw_lo, draw_hi = bin_lo, bin_hi
+
+            total = buys[b] + sells[b]
+            vol_alpha = int(40 + 180 * min(totals[b] / max_total, 1.0))
+
+            if total > 0:
+                ratio = (buys[b] - sells[b]) / total  # -1..+1
+                if ratio >= 0:
+                    base = QColor(_UP)
+                    base.setAlpha(int(vol_alpha * (0.3 + 0.7 * ratio)))
+                else:
+                    base = QColor(_DOWN)
+                    base.setAlpha(int(vol_alpha * (0.3 + 0.7 * abs(ratio))))
+            else:
+                base = QColor(_GREY)
+                base.setAlpha(40)
+
+            p.setBrush(QBrush(base))
+            p.drawRect(QRectF(i - 0.4, draw_lo, 0.8, draw_hi - draw_lo))
+
+    def paint(self, p: QPainter, *args) -> None:
+        if self._klines is None or self._klines.empty:
+            return
+        if self._picture is None:
+            self._build()
+        self._picture.play(p)
+
+    def boundingRect(self) -> QRectF:
+        return self._rect
+
+
+class FvgItem(pg.GraphicsObject):
+    """Draws FVG (Fair Value Gap) zones as translucent rectangles."""
+
+    def __init__(self):
+        super().__init__()
+        self._gaps: list[dict] = []
+        self._n: int = 0
+        self._picture: QPicture | None = None
+        self._rect = QRectF()
+
+    def set_data(self, fvg_gaps: list[dict], n_bars: int) -> None:
+        self._gaps    = fvg_gaps
+        self._n       = n_bars
+        self._picture = None
+        self.prepareGeometryChange()
+        self.update()
+
+    def _build(self) -> None:
+        pic = QPicture()
+        p   = QPainter(pic)
+        bull_fill = _qc(_GREEN, 35)
+        bear_fill = _qc(_RED,   35)
+        bull_pen  = QPen(_qc(_GREEN, 120), 0)
+        bear_pen  = QPen(_qc(_RED,   120), 0)
+
+        for g in self._gaps:
+            x0   = float(g["idx"])
+            top  = float(g["top"])
+            bot  = float(g["bottom"])
+            bull = g.get("direction", "bull") == "bull"
+
+            p.setPen(bull_pen  if bull else bear_pen)
+            p.setBrush(QBrush(bull_fill if bull else bear_fill))
+            # Extend zone to right edge of chart
+            width = self._n - x0
+            if width > 0:
+                p.drawRect(QRectF(x0, bot, width, top - bot))
+        p.end()
+        self._picture = pic
+
+    def paint(self, p: QPainter, *args) -> None:
+        if not self._gaps:
+            return
+        if self._picture is None:
+            self._build()
+        self._picture.play(p)
+
+    def boundingRect(self) -> QRectF:
+        if not self._gaps:
+            return QRectF()
+        tops = [g["top"] for g in self._gaps]
+        bots = [g["bottom"] for g in self._gaps]
+        return QRectF(0, min(bots), self._n, max(tops) - min(bots))
+
+
+# ── Background data-fetch worker ──────────────────────────────────────────────
+
+class DataFetcher(QThread):
+    """Fetches klines + ticks in a background thread; emits ready when done."""
+
+    ready = pyqtSignal(object)   # emits a dict of results
+    error = pyqtSignal(str)
+
+    def __init__(self, ctx, params: dict):
+        super().__init__()
+        self._ctx    = ctx
+        self._params = params
+
+    def run(self) -> None:
+        p = self._params
+        try:
+            code        = p["code"]
+            tf          = p["tf"]
+            historical  = p["historical"]
+            date_str    = p["date_str"]
+            candle_mins = p["candle_mins"]
+            ind         = p["ind"]
+
+            # Determine fetch window
+            if historical:
+                dt       = datetime.strptime(date_str, "%Y-%m-%d")
+                end_dt   = dt + timedelta(days=3)
+                start    = (dt - timedelta(days=8)).strftime("%Y-%m-%d 20:00:00")
+                end      = f"{end_dt.strftime('%Y-%m-%d')} 23:59:59"
+            else:
+                end   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                lb    = _LIVE_LOOKBACK_DAYS.get(tf, 10)
+                start = (datetime.now() - timedelta(days=lb)).strftime(
+                    "%Y-%m-%d %H:%M:%S")
+
+            ktype, _ = TIMEFRAME_MAP[tf]
+            ret, df, _ = self._ctx.request_history_kline(
+                code, start=start, end=end, ktype=ktype,
+                autype=AuType.NONE, max_count=2000, extended_time=True,
+            )
+            if ret != RET_OK or df is None or df.empty:
+                self.error.emit(f"Kline fetch failed: ret={ret}")
+                return
+
+            # SMC detection on last N warmup bars
+            warmup_n = min(len(df), 400)
+            warmup   = df.iloc[-warmup_n:].reset_index(drop=True)
+
+            smc_signals: list[dict] = []
+            if ind.get("bos_choch"):
+                smc_signals = detect_bos_choch(
+                    warmup,
+                    max_span_bars=_BOS_MAX_SPAN.get(tf),
+                    trend_window=_TREND_WINDOW.get(tf, 20),
+                )
+
+            fvg_gaps: list[dict] = []
+            if ind.get("fvg"):
+                raw_fvgs = detect_fvg(warmup)
+                disp_off = warmup_n - min(warmup_n, len(df))
+                for g in raw_fvgs:
+                    r = dict(g)
+                    r["idx"] = max(0, g["idx"] - disp_off)
+                    fvg_gaps.append(r)
+
+            # Tick data
+            ticks: dict | None = None
+            if historical:
+                ticks = load_local_ticks(code, date_str, tf)
+            else:
+                ticks = p.get("live_ticks") or {}
+
+            self.ready.emit({
+                "klines": df,
+                "warmup": warmup,
+                "smc_signals": smc_signals,
+                "fvg_gaps": fvg_gaps,
+                "ticks": ticks,
+                "candle_mins": candle_mins,
+                "historical": historical,
+                "date_str": date_str,
+                "tf": tf,
+                "code": code,
+            })
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+# ── Main window ───────────────────────────────────────────────────────────────
+
+class TradeViewerQt(QMainWindow):
+    """PyQtGraph-based trade viewer window."""
+
+    def __init__(self, args=None):
+        super().__init__()
+        self.setWindowTitle("Trade Viewer Qt")
+        self.resize(1600, 900)
+
+        # moomoo API context
+        host = getattr(args, "host", "127.0.0.1")
+        port = getattr(args, "port", 11111)
+        self._ctx: OpenQuoteContext | None = None
+        self._ctx_lock = threading.Lock()
+
+        # State
+        self._klines:      pd.DataFrame | None = None
+        self._ticks:       dict | None         = None
+        self._live_ticks:  dict                = defaultdict(
+            lambda: defaultdict(lambda: {"buy": 0, "sell": 0, "neutral": 0}))
+        self._tick_lock    = threading.Lock()
+        self._fetcher:     DataFetcher | None  = None
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._trigger_fetch)
+        self._candle_mins  = 1
+        self._warmup:      pd.DataFrame | None = None
+        self._smc_signals: list[dict]          = []
+        self._fvg_gaps:    list[dict]          = []
+        self._hist_anchor_date: str | None     = None
+
+        # Build UI
+        self._build_toolbar(args)
+        self._build_central()
+        self._build_statusbar()
+
+        # Apply dark theme
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{ background: {_BG}; color: {_FG}; }}
+            QToolBar {{ background: {_BG_BAR}; border: none; spacing: 4px; }}
+            QLabel {{ color: {_FG}; }}
+            QComboBox, QLineEdit, QSpinBox {{
+                background: {_BG_BAR}; color: {_FG};
+                border: 1px solid {_GREY}; padding: 2px 4px;
+            }}
+            QPushButton {{
+                background: {_BG_BAR}; color: {_FG};
+                border: 1px solid {_GREY}; padding: 3px 8px;
+            }}
+            QPushButton:hover {{ background: {_BG_TIP}; }}
+            QPushButton:checked {{ background: {_BG_TIP}; border-color: {_GOLD}; }}
+            QCheckBox {{ color: {_FG}; spacing: 4px; }}
+            QRadioButton {{ color: {_FG}; spacing: 4px; }}
+        """)
+
+        # Auto-connect if args provided
+        if args:
+            self._connect_opend(host, port)
+
+    # ── Toolbar ───────────────────────────────────────────────────────────────
+
+    def _build_toolbar(self, args) -> None:
+        tb = QToolBar("Controls", self)
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        self.addToolBar(tb)
+
+        def _lbl(text: str) -> QLabel:
+            l = QLabel(text)
+            l.setStyleSheet(f"color: {_GREY}; font-size: 11px;")
+            return l
+
+        # Code
+        tb.addWidget(_lbl("Code:"))
+        self._code_edit = QLineEdit(getattr(args, "code", "US.SNDK") or "US.SNDK")
+        self._code_edit.setFixedWidth(90)
+        self._code_edit.returnPressed.connect(self._trigger_fetch)
+        tb.addWidget(self._code_edit)
+
+        tb.addSeparator()
+
+        # Timeframe
+        tb.addWidget(_lbl("TF:"))
+        self._tf_combo = QComboBox()
+        self._tf_combo.addItems(list(TIMEFRAME_MAP.keys()))
+        self._tf_combo.setCurrentText(getattr(args, "tf", "5m") or "5m")
+        self._tf_combo.currentTextChanged.connect(self._on_tf_changed)
+        tb.addWidget(self._tf_combo)
+
+        tb.addSeparator()
+
+        # Mode
+        tb.addWidget(_lbl("Mode:"))
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItems(["Live", "Historical"])
+        init_mode = getattr(args, "mode", "Live") or "Live"
+        self._mode_combo.setCurrentText(init_mode)
+        self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        tb.addWidget(self._mode_combo)
+
+        tb.addSeparator()
+
+        # Date (Historical)
+        tb.addWidget(_lbl("Date:"))
+        init_date = getattr(args, "date", None) or datetime.now().strftime("%Y-%m-%d")
+        self._date_edit = QLineEdit(init_date)
+        self._date_edit.setFixedWidth(90)
+        self._date_edit.setEnabled(init_mode == "Historical")
+        self._date_edit.returnPressed.connect(self._trigger_fetch)
+        tb.addWidget(self._date_edit)
+
+        tb.addSeparator()
+
+        # Refresh (Live)
+        tb.addWidget(_lbl("Refresh (s, minimum 5):"))
+        self._refresh_spin = QSpinBox()
+        self._refresh_spin.setRange(5, 300)
+        self._refresh_spin.setValue(getattr(args, "refresh", 15) or 15)
+        self._refresh_spin.setFixedWidth(55)
+        self._refresh_spin.valueChanged.connect(self._on_refresh_changed)
+        tb.addWidget(self._refresh_spin)
+
+        tb.addSeparator()
+
+        # Connect / Stop
+        self._conn_btn = QPushButton("Connect")
+        self._conn_btn.setCheckable(True)
+        self._conn_btn.clicked.connect(self._on_connect_toggle)
+        tb.addWidget(self._conn_btn)
+
+        tb.addSeparator()
+
+        # Indicators
+        tb.addWidget(_lbl("Indicators:"))
+        self._ind_checks: dict[str, QCheckBox] = {}
+        for key, label in [
+            ("heatmap",   "Heatmap"),
+            ("delta",     "Delta Δ"),
+            ("bos_choch", "BOS/CHoCH"),
+            ("fvg",       "FVG"),
+        ]:
+            cb = QCheckBox(label)
+            cb.setChecked(key in ("heatmap", "delta", "bos_choch"))
+            cb.stateChanged.connect(self._on_indicator_toggle)
+            self._ind_checks[key] = cb
+            tb.addWidget(cb)
+
+        tb.addSeparator()
+
+        # Session filters
+        tb.addWidget(_lbl("Session:"))
+        for key, label in [
+            ("regular", "Regular"), ("pre", "Pre"),
+            ("post", "Post"),       ("night", "Night"),
+        ]:
+            cb = QCheckBox(label)
+            cb.setChecked(key == "regular")
+            cb.stateChanged.connect(self._on_session_toggle)
+            self._ind_checks[f"sess_{key}"] = cb
+            tb.addWidget(cb)
+
+        tb.addSeparator()
+
+        # Profile range
+        tb.addWidget(_lbl("Range:"))
+        self._range_group = QButtonGroup(self)
+        for val, label in [("1d", "1D"), ("3d", "3D"), ("7d", "1W")]:
+            rb = QRadioButton(label)
+            rb.setChecked(val == "1d")
+            rb.toggled.connect(self._on_range_changed)
+            self._ind_checks[f"range_{val}"] = rb
+            self._range_group.addButton(rb)
+            tb.addWidget(rb)
+
+    # ── Central widget: chart + profiles ─────────────────────────────────────
+
+    def _build_central(self) -> None:
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        # ── Left: main chart (candles + volume) ──────────────────────────────
+        self._chart_widget = pg.GraphicsLayoutWidget()
+        self._chart_widget.setBackground(_BG)
+
+        # Candle plot
+        self._plot_c: pg.PlotItem = self._chart_widget.addPlot(row=0, col=0)
+        self._plot_c.showGrid(x=True, y=True, alpha=0.15)
+        self._plot_c.setLabel("left", "", **{"color": _FG})
+        self._plot_c.getAxis("left").setTextPen(_qc(_FG))
+        self._plot_c.getAxis("bottom").setTextPen(_qc(_FG))
+        self._plot_c.setMenuEnabled(False)
+
+        # Volume plot
+        self._chart_widget.nextRow()
+        self._plot_v: pg.PlotItem = self._chart_widget.addPlot(row=1, col=0)
+        self._plot_v.showGrid(x=True, y=True, alpha=0.10)
+        self._plot_v.setLabel("left", "Vol", **{"color": _FG})
+        self._plot_v.getAxis("left").setTextPen(_qc(_FG))
+        self._plot_v.getAxis("bottom").setTextPen(_qc(_FG))
+        self._plot_v.setMenuEnabled(False)
+        self._plot_v.setXLink(self._plot_c)
+        self._chart_widget.ci.layout.setRowStretchFactor(0, 4)
+        self._chart_widget.ci.layout.setRowStretchFactor(1, 1)
+
+        # Graphics items
+        self._candle_item = CandlestickItem()
+        self._plot_c.addItem(self._candle_item)
+
+        self._fvg_item = FvgItem()
+        self._plot_c.addItem(self._fvg_item)
+
+        self._bos_items: list = []  # TextItem + InfiniteLine per signal
+        self._delta_items: list = []  # TextItem per candle
+
+        # Volume bars
+        self._vol_item = pg.BarGraphItem(
+            x=[], height=[], width=0.8,
+            brush=_qc(_GREEN, 100), pen=Qt.PenStyle.NoPen,
+        )
+        self._plot_v.addItem(self._vol_item)
+
+        # Crosshair
+        cross_pen = pg.mkPen(_CROSS, width=1, style=Qt.PenStyle.DashLine)
+        self._vline = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._hline = pg.InfiniteLine(angle=0,  movable=False, pen=cross_pen)
+        self._vline.setVisible(False)
+        self._hline.setVisible(False)
+        self._plot_c.addItem(self._vline, ignoreBounds=True)
+        self._plot_c.addItem(self._hline, ignoreBounds=True)
+
+        # Price label (left y-axis, follows crosshair)
+        self._price_label = pg.TextItem(
+            text="", color=_GOLD, anchor=(1.0, 0.5),
+        )
+        self._price_label.setFont(QFont("Monospace", 7))
+        self._price_label.setVisible(False)
+        self._plot_c.addItem(self._price_label, ignoreBounds=True)
+
+        # OHLCV tooltip (below price label, left-aligned)
+        self._ohlcv_label = pg.TextItem(
+            text="", color=_FG, anchor=(1.0, 0.0),
+        )
+        self._ohlcv_label.setFont(QFont("Monospace", 8))
+        self._ohlcv_label.setVisible(False)
+        self._plot_c.addItem(self._ohlcv_label, ignoreBounds=True)
+
+        # Mouse tracking
+        self._proxy = pg.SignalProxy(
+            self._chart_widget.scene().sigMouseMoved,
+            rateLimit=60, slot=self._on_mouse_move,
+        )
+
+        splitter.addWidget(self._chart_widget)
+        splitter.setStretchFactor(0, 5)
+
+        # ── Right: session vol profile ────────────────────────────────────────
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+
+        # Single-candle tick profile (top-right, shown on hover)
+        self._tick_profile_widget = pg.PlotWidget()
+        self._tick_profile_widget.setBackground(_BG)
+        self._tick_profile_widget.setMinimumWidth(160)
+        self._tick_profile_widget.setMaximumWidth(200)
+        self._tick_profile_widget.getPlotItem().showGrid(
+            x=True, y=False, alpha=0.15)
+        self._tick_profile_widget.getPlotItem().setMenuEnabled(False)
+        self._tick_profile_title = pg.LabelItem(
+            "Tick profile", color=_FG, size="8pt")
+        self._tick_profile_widget.getPlotItem().setLabel(
+            "top", "", **{"color": _FG})
+        right_layout.addWidget(self._tick_profile_widget, 1)
+
+        # Session vol profile (bottom-right)
+        self._profile_widget = pg.PlotWidget()
+        self._profile_widget.setBackground(_BG)
+        self._profile_widget.setMinimumWidth(160)
+        self._profile_widget.setMaximumWidth(200)
+        self._profile_widget.getPlotItem().showGrid(
+            x=True, y=False, alpha=0.15)
+        self._profile_widget.getPlotItem().setMenuEnabled(False)
+        right_layout.addWidget(self._profile_widget, 2)
+
+        splitter.addWidget(right)
+        splitter.setStretchFactor(1, 1)
+
+        self.setCentralWidget(splitter)
+
+    # ── Status bar ────────────────────────────────────────────────────────────
+
+    def _build_statusbar(self) -> None:
+        self._status = QStatusBar()
+        self._status.setStyleSheet(
+            f"QStatusBar {{ background: {_BG_BAR}; color: {_FG}; font-size: 11px; }}")
+        self.setStatusBar(self._status)
+        self._log("Ready.")
+
+    def _log(self, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._status.showMessage(f"{ts}  {msg}")
+
+    # ── OpenD connection ──────────────────────────────────────────────────────
+
+    def _connect_opend(self, host: str = "127.0.0.1", port: int = 11111) -> None:
+        try:
+            with self._ctx_lock:
+                if self._ctx:
+                    self._ctx.close()
+                self._ctx = OpenQuoteContext(host=host, port=port)
+            self._conn_btn.setText("Stop")
+            self._conn_btn.setChecked(True)
+            self._log(f"Connected to OpenD {host}:{port}")
+            self._trigger_fetch()
+            if self._mode_combo.currentText() == "Live":
+                self._start_live()
+        except Exception as exc:
+            self._log(f"Connect failed: {exc}")
+            self._conn_btn.setChecked(False)
+
+    def _on_connect_toggle(self, checked: bool) -> None:
+        if checked:
+            self._connect_opend()
+        else:
+            self._stop_live()
+            with self._ctx_lock:
+                if self._ctx:
+                    self._ctx.close()
+                    self._ctx = None
+            self._conn_btn.setText("Connect")
+            self._log("Disconnected.")
+
+    # ── Live mode tick subscription ───────────────────────────────────────────
+
+    def _start_live(self) -> None:
+        code = self._code_edit.text().strip()
+        if not code or not self._ctx:
+            return
+        try:
+            self._ctx.subscribe(code, [SubType.TICKER])
+            tf = self._tf_combo.currentText()
+            _, candle_mins = TIMEFRAME_MAP[tf]
+
+            viewer = self
+
+            class _Handler(TickerHandlerBase):
+                def on_recv_rsp(self, rsp_str):
+                    ret, data = super().on_recv_rsp(rsp_str)
+                    if ret != RET_OK or data is None or data.empty:
+                        return
+                    with viewer._tick_lock:
+                        for _, row in data.iterrows():
+                            raw = str(row["time"])
+                            fmt = ("%Y-%m-%d %H:%M:%S.%f" if "." in raw
+                                   else "%Y-%m-%d %H:%M:%S")
+                            t      = datetime.strptime(raw, fmt)
+                            bucket = candle_start(t, candle_mins)
+                            price  = float(row["price"])
+                            vol    = int(row["volume"])
+                            d      = str(row["direction"]).upper()
+                            key    = ("buy" if d == "BUY"
+                                      else ("sell" if d == "SELL" else "neutral"))
+                            viewer._live_ticks[bucket][price][key] += vol
+
+            self._ctx.set_handler(_Handler())
+            interval = self._refresh_spin.value() * 1000
+            self._refresh_timer.start(interval)
+            self._log(f"Live: subscribed {code}, refreshing every "
+                      f"{self._refresh_spin.value()}s")
+        except Exception as exc:
+            self._log(f"Live start error: {exc}")
+
+    def _stop_live(self) -> None:
+        self._refresh_timer.stop()
+        code = self._code_edit.text().strip()
+        try:
+            if self._ctx and code:
+                self._ctx.unsubscribe(code, [SubType.TICKER])
+        except Exception:
+            pass
+
+    # ── Toolbar callbacks ─────────────────────────────────────────────────────
+
+    def _on_tf_changed(self, tf: str) -> None:
+        _, self._candle_mins = TIMEFRAME_MAP[tf]
+        self._trigger_fetch()
+
+    def _on_mode_changed(self, mode: str) -> None:
+        self._date_edit.setEnabled(mode == "Historical")
+        if mode == "Live":
+            self._start_live()
+        else:
+            self._stop_live()
+        self._trigger_fetch()
+
+    def _on_refresh_changed(self, value: int) -> None:
+        if self._refresh_timer.isActive():
+            self._refresh_timer.start(value * 1000)
+
+    def _on_indicator_toggle(self) -> None:
+        self._render(self._klines, self._ticks)
+
+    def _on_session_toggle(self) -> None:
+        self._rebuild_session_profile()
+
+    def _on_range_changed(self) -> None:
+        self._rebuild_session_profile()
+
+    def _get_range_val(self) -> str:
+        for val in ("1d", "3d", "7d"):
+            rb = self._ind_checks.get(f"range_{val}")
+            if rb and rb.isChecked():
+                return val
+        return "1d"
+
+    def _ind(self, key: str) -> bool:
+        cb = self._ind_checks.get(key)
+        return bool(cb and cb.isChecked())
+
+    def _active_sessions(self) -> set[str]:
+        sessions = set()
+        for key in ("regular", "pre", "post", "night"):
+            if self._ind(f"sess_{key}"):
+                sessions.add(key)
+        return sessions
+
+    # ── Data fetch ────────────────────────────────────────────────────────────
+
+    def _trigger_fetch(self) -> None:
+        with self._ctx_lock:
+            ctx = self._ctx
+        if ctx is None:
+            self._log("Not connected.")
+            return
+        if self._fetcher and self._fetcher.isRunning():
+            return  # previous fetch still in progress
+
+        tf          = self._tf_combo.currentText()
+        _, cm       = TIMEFRAME_MAP[tf]
+        self._candle_mins = cm
+        historical  = self._mode_combo.currentText() == "Historical"
+        date_str    = self._date_edit.text().strip()
+        ind         = {k: self._ind(k) for k in self._ind_checks}
+
+        with self._tick_lock:
+            live_snap = {k: dict(v) for k, v in self._live_ticks.items()}
+
+        params = {
+            "code":        self._code_edit.text().strip(),
+            "tf":          tf,
+            "historical":  historical,
+            "date_str":    date_str,
+            "candle_mins": cm,
+            "ind":         ind,
+            "live_ticks":  live_snap,
+        }
+        self._log(f"Fetching K-lines ({tf}) ...")
+        self._fetcher = DataFetcher(ctx, params)
+        self._fetcher.ready.connect(self._on_data_ready)
+        self._fetcher.error.connect(self._log)
+        self._fetcher.start()
+
+    def _on_data_ready(self, result: dict) -> None:
+        self._klines      = result["klines"]
+        self._ticks       = result["ticks"]
+        self._warmup      = result["warmup"]
+        self._smc_signals = result["smc_signals"]
+        self._fvg_gaps    = result["fvg_gaps"]
+        self._render(self._klines, self._ticks)
+
+    # ── Chart rendering ───────────────────────────────────────────────────────
+
+    def _render(self, klines: pd.DataFrame | None, ticks: dict | None) -> None:
+        if klines is None or klines.empty:
+            return
+
+        tf          = self._tf_combo.currentText()
+        _, cm       = TIMEFRAME_MAP[tf]
+        n           = len(klines)
+        show_hm     = self._ind("heatmap")
+        show_delta  = self._ind("delta")
+        show_bos    = self._ind("bos_choch")
+        show_fvg    = self._ind("fvg")
+
+        # Compose live + hist ticks
+        buckets: dict = {}
+        if ticks:
+            buckets.update(ticks)
+        if self._mode_combo.currentText() == "Live":
+            with self._tick_lock:
+                for bk, pd_ in self._live_ticks.items():
+                    if bk not in buckets:
+                        buckets[bk] = {}
+                    for price, counts in pd_.items():
+                        if price not in buckets[bk]:
+                            buckets[bk][price] = dict(counts)
+                        else:
+                            for k in counts:
+                                buckets[bk][price][k] = (
+                                    buckets[bk][price].get(k, 0) + counts[k])
+
+        # Candlesticks
+        self._candle_item.set_data(klines, buckets if show_hm else None,
+                                   cm, show_heatmap=show_hm)
+
+        # FVG zones
+        if show_fvg and self._fvg_gaps:
+            self._fvg_item.set_data(self._fvg_gaps, n)
+        else:
+            self._fvg_item.set_data([], n)
+
+        # Volume bars
+        x    = np.arange(n)
+        vols = klines["volume"].fillna(0).values.astype(float)
+        opens  = klines["open"].values.astype(float)
+        closes = klines["close"].values.astype(float)
+        vol_colors = [
+            pg.mkBrush(_qc(_GREEN, 100)) if c >= o else pg.mkBrush(_qc(_RED, 100))
+            for o, c in zip(opens, closes)
+        ]
+        self._vol_item.setOpts(
+            x=x, height=vols, width=0.8,
+            brushes=vol_colors, pens=[Qt.PenStyle.NoPen] * n,
+        )
+
+        # BOS / CHoCH
+        self._clear_bos_items()
+        if show_bos:
+            self._draw_bos_choch(self._smc_signals)
+
+        # Delta annotations
+        self._clear_delta_items()
+        if show_delta and buckets:
+            self._draw_delta(klines, buckets, cm)
+
+        # X-axis time labels
+        self._set_xaxis_ticks(klines)
+
+        # Session vol profile
+        self._rebuild_session_profile()
+
+        code = self._code_edit.text().strip()
+        mode = self._mode_combo.currentText()
+        self.setWindowTitle(
+            f"Trade Viewer Qt  —  {code}  {tf}  {mode}")
+        self._log(
+            f"Chart rendered | {n} candles | "
+            f"{'heatmap on' if show_hm else 'plain'}"
+        )
+
+    # ── Overlay helpers ───────────────────────────────────────────────────────
+
+    def _clear_bos_items(self) -> None:
+        for item in self._bos_items:
+            self._plot_c.removeItem(item)
+        self._bos_items.clear()
+
+    def _draw_bos_choch(self, signals: list[dict]) -> None:
+        # Show only the most recent 5 signals
+        recent = signals[-5:] if len(signals) > 5 else signals
+        for sig in recent:
+            color   = _GREEN if sig["direction"] == "bull" else _RED
+            label   = sig["type"]
+            idx     = sig["idx"]
+            price   = sig["price"]
+            from_i  = sig.get("from_idx", max(0, idx - 5))
+
+            # Horizontal reference line
+            line = pg.PlotCurveItem(
+                x=[from_i, idx], y=[price, price],
+                pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DotLine),
+            )
+            self._plot_c.addItem(line)
+            self._bos_items.append(line)
+
+            # Label at break point
+            txt = pg.TextItem(
+                text=label, color=color, anchor=(0.5, 1.0),
+            )
+            txt.setFont(QFont("Monospace", 7))
+            yoff = price * 1.0003 if sig["direction"] == "bull" else price * 0.9997
+            txt.setPos(idx, yoff)
+            self._plot_c.addItem(txt)
+            self._bos_items.append(txt)
+
+    def _clear_delta_items(self) -> None:
+        for item in self._delta_items:
+            self._plot_c.removeItem(item)
+        self._delta_items.clear()
+
+    def _draw_delta(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
+        for i, (_, row) in enumerate(klines.iterrows()):
+            try:
+                bar_end = datetime.strptime(
+                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
+            except ValueError:
+                continue
+            pd_ = buckets.get(bk)
+            if not pd_:
+                continue
+            total_buy  = sum(pd_[p]["buy"]  for p in pd_)
+            total_sell = sum(pd_[p]["sell"] for p in pd_)
+            delta = total_buy - total_sell
+            if delta == 0:
+                continue
+            sign = "+" if delta >= 0 else ""
+            if abs(delta) >= 1_000_000:
+                txt_str = f"{sign}{delta/1_000_000:.1f}M"
+            elif abs(delta) >= 1_000:
+                txt_str = f"{sign}{delta/1_000:.0f}K"
+            else:
+                txt_str = f"{sign}{delta}"
+
+            color = _UP if delta >= 0 else _DOWN
+            txt = pg.TextItem(text=txt_str, color=color, anchor=(0.5, 0.0))
+            txt.setFont(QFont("Monospace", 6))
+            txt.setPos(i, float(row["low"]) * 0.9998)
+            self._plot_c.addItem(txt)
+            self._delta_items.append(txt)
+
+    # ── Session vol profile ───────────────────────────────────────────────────
+
+    def _rebuild_session_profile(self) -> None:
+        if self._klines is None:
+            return
+        pw     = self._profile_widget
+        pw.clear()
+
+        range_val = self._get_range_val()
+        klines    = apply_profile_range(self._klines, range_val)
+        klines    = self._filter_sessions(klines)
+        if klines.empty:
+            return
+
+        lo   = float(klines["low"].min())
+        hi   = float(klines["high"].max())
+        if hi <= lo:
+            return
+        n_bins = 60
+        bins   = np.linspace(lo, hi, n_bins + 1)
+        centers = (bins[:-1] + bins[1:]) / 2
+        volumes = np.zeros(n_bins)
+        for _, row in klines.iterrows():
+            mask = (centers >= float(row["low"])) & (centers <= float(row["high"]))
+            n = int(mask.sum())
+            if n:
+                volumes[mask] += float(row["volume"]) / n
+
+        # Horizontal bar chart
+        bar = pg.BarGraphItem(
+            x=volumes, y=centers, height=(bins[1] - bins[0]) * 0.9,
+            orientation="horizontal",
+            brush=_qc(_GOLD, 80), pen=Qt.PenStyle.NoPen,
+        )
+        pw.addItem(bar)
+        pw.getPlotItem().setLabel("top", range_val.upper(),
+                                  **{"color": _FG, "size": "8pt"})
+
+        # POC line
+        poc_idx = int(np.argmax(volumes))
+        poc     = float(centers[poc_idx])
+        poc_line = pg.InfiniteLine(
+            pos=poc, angle=0, movable=False,
+            pen=pg.mkPen(_RED, width=1),
+            label=f"POC {poc:.2f}",
+            labelOpts={"color": _RED, "position": 0.95},
+        )
+        pw.addItem(poc_line)
+
+    def _filter_sessions(self, klines: pd.DataFrame) -> pd.DataFrame:
+        """Keep only rows whose time falls in the active session windows."""
+        active = self._active_sessions()
+        if not active or klines.empty:
+            return klines
+        sessions = {
+            "pre":     (4  * 60,      9  * 60 + 30),
+            "regular": (9  * 60 + 30, 16 * 60),
+            "post":    (16 * 60,      20 * 60),
+            "night":   (20 * 60,      28 * 60),  # wraps midnight (>= 20:00 or < 4:00)
+        }
+        def _in_session(ts: str) -> bool:
+            try:
+                t = datetime.strptime(str(ts)[11:16], "%H:%M")
+                mins = t.hour * 60 + t.minute
+            except ValueError:
+                return True
+            for s in active:
+                lo, hi = sessions.get(s, (0, 1440))
+                if lo < hi:
+                    if lo <= mins < hi:
+                        return True
+                else:  # wraps midnight
+                    if mins >= lo or mins < (hi - 24 * 60):
+                        return True
+            return False
+        mask = klines["time_key"].astype(str).apply(_in_session)
+        return klines[mask]
+
+    # ── Tick profile (single candle on hover) ─────────────────────────────────
+
+    def _show_tick_profile(self, candle_idx: int) -> None:
+        if self._klines is None or self._ticks is None:
+            return
+        if candle_idx < 0 or candle_idx >= len(self._klines):
+            return
+
+        row = self._klines.iloc[candle_idx]
+        try:
+            bar_end = datetime.strptime(
+                str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+            bk = candle_start(
+                bar_end - timedelta(minutes=self._candle_mins), self._candle_mins)
+        except ValueError:
+            return
+
+        pd_ = self._ticks.get(bk)
+        if not pd_:
+            return
+
+        prices  = sorted(pd_.keys())
+        buys    = [pd_[p]["buy"]  for p in prices]
+        sells   = [pd_[p]["sell"] for p in prices]
+
+        pw = self._tick_profile_widget
+        pw.clear()
+
+        buy_bar = pg.BarGraphItem(
+            x=buys, y=prices, height=0.01, orientation="horizontal",
+            brush=_qc(_GREEN, 140), pen=Qt.PenStyle.NoPen,
+        )
+        sell_bar = pg.BarGraphItem(
+            x=[-s for s in sells], y=prices, height=0.01,
+            orientation="horizontal",
+            brush=_qc(_RED, 140), pen=Qt.PenStyle.NoPen,
+        )
+        pw.addItem(buy_bar)
+        pw.addItem(sell_bar)
+        pw.getPlotItem().setLabel(
+            "top", str(row["time_key"])[:16], **{"color": _FG, "size": "7pt"})
+
+    # ── Crosshair + tooltip ───────────────────────────────────────────────────
+
+    def _on_mouse_move(self, evt) -> None:
+        pos = evt[0]
+        if not self._plot_c.sceneBoundingRect().contains(pos):
+            self._vline.setVisible(False)
+            self._hline.setVisible(False)
+            self._price_label.setVisible(False)
+            self._ohlcv_label.setVisible(False)
+            return
+
+        mouse_pt = self._plot_c.vb.mapSceneToView(pos)
+        x = mouse_pt.x()
+        y = mouse_pt.y()
+
+        # Crosshair
+        self._vline.setPos(x)
+        self._hline.setPos(y)
+        self._vline.setVisible(True)
+        self._hline.setVisible(True)
+
+        # Price label (left side, follows y)
+        xlo, xhi = self._plot_c.vb.viewRange()[0]
+        label_x  = xlo + (xhi - xlo) * 0.02   # ~2% from left edge
+        self._price_label.setPos(label_x, y)
+        self._price_label.setText(f" {y:.2f}")
+        self._price_label.setVisible(True)
+
+        # OHLCV tooltip for nearest candle
+        if self._klines is not None and not self._klines.empty:
+            idx = int(round(x))
+            idx = max(0, min(idx, len(self._klines) - 1))
+            row = self._klines.iloc[idx]
+            vol = int(row.get("volume", 0) or 0)
+            ylo, yhi = self._plot_c.vb.viewRange()[1]
+            self._ohlcv_label.setPos(label_x, y - (yhi - ylo) * 0.01)
+            self._ohlcv_label.setText(
+                f" {str(row['time_key'])[:16]}\n"
+                f" O {row['open']:.2f}  H {row['high']:.2f}\n"
+                f" L {row['low']:.2f}  C {row['close']:.2f}\n"
+                f" Vol {vol:,}"
+            )
+            self._ohlcv_label.setVisible(True)
+
+            # Update single-candle tick profile
+            self._show_tick_profile(idx)
+
+    # ── X-axis tick labels ────────────────────────────────────────────────────
+
+    def _set_xaxis_ticks(self, klines: pd.DataFrame) -> None:
+        """Map integer bar indices to time_key strings on x-axis."""
+        n = len(klines)
+        step = max(1, n // 10)
+        ticks = [
+            (i, str(klines.iloc[i]["time_key"])[5:16])
+            for i in range(0, n, step)
+        ]
+        self._plot_c.getAxis("bottom").setTicks([ticks])
+        self._plot_v.getAxis("bottom").setTicks([ticks])
+
+    # ── Cleanup ───────────────────────────────────────────────────────────────
+
+    def closeEvent(self, event) -> None:
+        self._stop_live()
+        with self._ctx_lock:
+            if self._ctx:
+                self._ctx.close()
+                self._ctx = None
+        if self._fetcher:
+            self._fetcher.quit()
+            self._fetcher.wait(1000)
+        event.accept()
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def _parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="Trade Viewer Qt (PyQtGraph)")
+    ap.add_argument("--code",    default="US.SNDK")
+    ap.add_argument("--tf",      default="5m",
+                    choices=list(TIMEFRAME_MAP.keys()))
+    ap.add_argument("--mode",    default="Live",
+                    choices=["Live", "Historical"])
+    ap.add_argument("--date",    default=None)
+    ap.add_argument("--host",    default="127.0.0.1")
+    ap.add_argument("--port",    type=int, default=11111)
+    ap.add_argument("--refresh", type=int, default=15)
+    return ap.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    app  = QApplication(sys.argv)
+    app.setApplicationName("Trade Viewer Qt")
+    win  = TradeViewerQt(args)
+    win.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

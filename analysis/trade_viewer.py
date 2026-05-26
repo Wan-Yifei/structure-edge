@@ -450,7 +450,7 @@ class OrderFlowApp(tk.Tk):
         self.date_entry.bind("<Return>",   lambda _e: self._on_date_change())
         self.date_entry.bind("<FocusOut>", lambda _e: self._on_date_change())
 
-        lbl("Refresh (s, min 5):")
+        lbl("Refresh (s, minimum 5):")
         self.refresh_var = tk.IntVar(value=15)
         self.refresh_spin = tk.Spinbox(bar, from_=5, to=300, textvariable=self.refresh_var,
                                        width=4, bg=BG_EDIT, fg=FG, buttonbackground=BG_BAR)
@@ -1143,12 +1143,20 @@ class OrderFlowApp(tk.Tk):
                     f"Vol {vol:,}"
                 )
                 self._tip_c.set_text(text)
-                # anchor to candle high — flip below only when near chart top
-                candle_high = float(row["high"])
-                self._tip_c.xy = (idx, candle_high)
+                # Anchor to cursor position (same x/y as _ch_label) and place
+                # the box just below the crosshair price label on the left side.
+                # Flip above _ch_label when cursor is near the chart bottom.
+                self._tip_c.xy = (event.xdata, event.ydata)
                 ylo, yhi = self.ax_c.get_ylim()
-                frac = (candle_high - ylo) / (yhi - ylo) if yhi > ylo else 0.5
-                self._tip_c.set_position((0, -60) if frac > 0.85 else (0, 14))
+                frac = (event.ydata - ylo) / (yhi - ylo) if yhi > ylo else 0.5
+                if frac > 0.20:
+                    # Normal: box top anchored 12 pts below cursor (below _ch_label)
+                    self._tip_c.set_va("top")
+                    self._tip_c.set_position((-72, -12))
+                else:
+                    # Near bottom: box bottom anchored 12 pts above cursor (above _ch_label)
+                    self._tip_c.set_va("bottom")
+                    self._tip_c.set_position((-72, 12))
                 self._tip_c.set_visible(True)
 
         elif event.inaxes is self.ax_p and event.ydata is not None \
@@ -1337,7 +1345,16 @@ class OrderFlowApp(tk.Tk):
                         end = f"{exit_date} 23:59:59"
         else:
             end   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            start = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
+            # max_count=2000 means the API returns the oldest 2000 bars starting from `start`.
+            # With extended_time=True, a 1m chart generates ~1080 bars/calendar-day, so a
+            # 10-day window overflows 2000 and the API never reaches today.
+            # Use a TF-specific lookback so the 2000-bar window always ends near `now`.
+            _live_lookback_days = {
+                "1m": 2, "3m": 3, "5m": 5, "15m": 7, "30m": 10,
+                "60m": 14, "1h": 14, "4h": 30, "1d": 90,
+            }
+            _lb = _live_lookback_days.get(self.tf_var.get(), 10)
+            start = (datetime.now() - timedelta(days=_lb)).strftime("%Y-%m-%d %H:%M:%S")
         ret, df, _ = self.ctx.request_history_kline(
             code, start=start, end=end, ktype=ktype, autype=AuType.NONE,
             max_count=2000, extended_time=True)
@@ -1456,11 +1473,17 @@ class OrderFlowApp(tk.Tk):
                     if d < n_disp:
                         r = dict(ob); r["idx"] = max(d, 0); ob_blocks.append(r)
 
-            self.after(0, self._render_chart,
-                       klines, ticks, historical, tf, code, date_str,
-                       ind, smc_signals, fvg_gaps, ob_blocks, candle_mins)
+            try:
+                self.after(0, self._render_chart,
+                           klines, ticks, historical, tf, code, date_str,
+                           ind, smc_signals, fvg_gaps, ob_blocks, candle_mins)
+            except RuntimeError:
+                pass  # window already destroyed — discard result silently
         except Exception as exc:
-            self.after(0, self._log, f"Fetch error: {exc}")
+            try:
+                self.after(0, self._log, f"Fetch error: {exc}")
+            except RuntimeError:
+                pass  # window already destroyed
         finally:
             self._fetching = False
 
@@ -1628,6 +1651,10 @@ class OrderFlowApp(tk.Tk):
 
         self._tip_c = make_float_tip(self.ax_c)
         self._tip_p = make_float_tip(self.ax_p)
+        # Override _tip_c alignment: right-aligned, sits below the crosshair
+        # price label (_ch_label) on the left side so it doesn't cover the
+        # right-side tick panel.
+        self._tip_c.set_ha("right")
         self._tip_c.set_animated(True)
         self._tip_p.set_animated(True)
         self._init_crosshair()
@@ -1945,20 +1972,25 @@ class OrderFlowApp(tk.Tk):
 
         Anchor date is the last bar in klines (the rightmost visible or the
         date_var date on initial load).  Range options:
-          "1d"  — anchor date only
-          "3d"  — anchor date + 2 prior calendar days
-          "7d"  — anchor date + 6 prior calendar days
+          "1d"  — 1 trading day  (anchor date only)
+          "3d"  — 3 trading days (anchor + 2 prior sessions)
+          "7d"  — 5 trading days (anchor + 4 prior sessions, i.e. one full week)
+
+        Trading days are derived from the dates actually present in klines, so
+        weekends and market holidays are skipped automatically.
         """
         if klines.empty:
             return klines
         range_val = self._profile_range_var.get()
-        _days_back = {"1d": 0, "3d": 2, "7d": 6}
-        if range_val not in _days_back:
+        _n_trading_days = {"1d": 1, "3d": 3, "7d": 5}
+        if range_val not in _n_trading_days:
             return klines
-        anchor_date = str(klines.iloc[-1]["time_key"])[:10]
-        anchor_dt   = datetime.strptime(anchor_date, "%Y-%m-%d")
-        start_date  = (anchor_dt - timedelta(days=_days_back[range_val])).strftime("%Y-%m-%d")
         times = klines["time_key"].astype(str).str[:10]
+        anchor_date = times.iloc[-1]
+        # Collect unique trading dates up to and including the anchor, sorted.
+        trading_dates = sorted(times[times <= anchor_date].unique())
+        n = _n_trading_days[range_val]
+        start_date = trading_dates[-n] if len(trading_dates) >= n else trading_dates[0]
         return klines[(times >= start_date) & (times <= anchor_date)]
 
     def _filter_klines_by_session(self, klines: pd.DataFrame) -> pd.DataFrame:

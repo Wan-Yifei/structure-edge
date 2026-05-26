@@ -387,8 +387,8 @@ def write_narrowed_config(
 
     # Extract unique htf_trend_params dicts from top_df rows that need KD
     if top_df is not None and "htf_trend_params" in top_df.columns:
-        kd_methods = {m for m in grid.get("htf_trend_methods", [])
-                      if "kd" in m}
+        kd_methods = [m for m in grid.get("htf_trend_methods", [])
+                      if "kd" in m]
         if kd_methods and "htf_trend_methods" in top_df.columns:
             kd_mask = top_df["htf_trend_methods"].apply(
                 lambda s: "kd" in str(s)
