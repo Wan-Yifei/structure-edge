@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import pathlib
 import sys
@@ -40,7 +41,10 @@ _PARAM_COLS = [
 ]
 
 # Subset of params that are candidates for grid narrowing
+# htf_trend_methods is included so the frequency table shows which trend methods dominate;
+# htf_trend_params (dicts) is handled separately in write_narrowed_config.
 _GRID_PARAMS = [
+    "htf_trend_methods",
     "htf_window_bars", "swing_lookback", "bos_count",
     "fvg_min_width_pct", "fvg_entry_depth_pct",
     "displacement_required", "require_ltf_confirmation",
@@ -323,22 +327,48 @@ def generate_html(
 
 # ── Config writer ─────────────────────────────────────────────────────────────
 
+def _parse_methods_str(s: str) -> list[str]:
+    """Convert a CSV methods string like \"('bos_choch', 'kd')\" to [\"bos_choch\", \"kd\"]."""
+    try:
+        parsed = ast.literal_eval(s)
+        if isinstance(parsed, (tuple, list)):
+            return list(parsed)
+    except Exception:
+        pass
+    return [s]
+
+
+def _parse_params_str(s: str) -> dict:
+    """Convert a CSV params string like \"{'kd_fast': 15}\" to a dict."""
+    try:
+        parsed = ast.literal_eval(s)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return {}
+
+
 def write_narrowed_config(
     run_dir:    pathlib.Path,
     narrowed:   dict,
     out_config: str,
     src_config: pathlib.Path | None,
+    top_df:     "pd.DataFrame | None" = None,
 ) -> pathlib.Path:
     """Write the narrowed param_grid into a new config JSON file.
 
     Copies top-level fields (codes, start, end, workers, top_n, tf_pairs,
     tf_pairs_fast) from src_config if provided, then replaces param_grid.
+    Converts htf_trend_methods strings back to list-of-lists, and extracts
+    unique htf_trend_params dicts from top_df rows that use KD methods.
 
     Args:
         run_dir:    Run directory (used to locate source config if not given).
         narrowed:   Narrowed param_grid dict from analyze_param_freq().
         out_config: Output filename (basename only, placed in config/backtest/).
         src_config: Source config to copy top-level fields from.
+        top_df:     Top-N aggregated rows; used to extract htf_trend_params.
 
     Returns:
         Path to the written config file.
@@ -348,7 +378,33 @@ def write_narrowed_config(
         with open(src_config) as f:
             base = json.load(f)
 
-    base["param_grid"] = narrowed
+    grid = dict(narrowed)
+
+    # Convert htf_trend_methods from repr strings back to list-of-lists
+    if "htf_trend_methods" in grid:
+        raw_methods = grid["htf_trend_methods"]
+        grid["htf_trend_methods"] = [_parse_methods_str(m) for m in raw_methods]
+
+    # Extract unique htf_trend_params dicts from top_df rows that need KD
+    if top_df is not None and "htf_trend_params" in top_df.columns:
+        kd_methods = {m for m in grid.get("htf_trend_methods", [])
+                      if "kd" in m}
+        if kd_methods and "htf_trend_methods" in top_df.columns:
+            kd_mask = top_df["htf_trend_methods"].apply(
+                lambda s: "kd" in str(s)
+            )
+            kd_rows = top_df[kd_mask]
+            seen, unique_params = set(), []
+            for raw in kd_rows["htf_trend_params"].dropna():
+                d = _parse_params_str(str(raw))
+                key = json.dumps(d, sort_keys=True)
+                if key not in seen and d:
+                    seen.add(key)
+                    unique_params.append(d)
+            if unique_params:
+                grid["htf_trend_params"] = unique_params
+
+    base["param_grid"] = grid
     out_path = ROOT / "config" / "backtest" / out_config
     with open(out_path, "w") as f:
         json.dump(base, f, indent=4, ensure_ascii=False)
@@ -365,12 +421,12 @@ def main() -> None:
                     help="Directory containing results_*.csv files")
     ap.add_argument("--top-n",      type=int,   default=30,
                     help="Number of top combos to analyse for narrowing (default: 30)")
-    ap.add_argument("--min-trades", type=int,   default=10,
-                    help="Exclude combos where any stock has fewer than N trades (default: 10)")
+    ap.add_argument("--min-trades", type=int,   default=5,
+                    help="Exclude combos where any stock has fewer than N trades (default: 5)")
     ap.add_argument("--min-freq",   type=float, default=0.25,
                     help="Min frequency (0–1) for a param value to be kept (default: 0.25)")
-    ap.add_argument("--out-config", type=str,   default="cross_stock_grid_v1.json",
-                    help="Output config filename in config/backtest/ (default: cross_stock_grid_v1.json)")
+    ap.add_argument("--out-config", type=str,   default="cross_stock_grid_v2.json",
+                    help="Output config filename in config/backtest/ (default: cross_stock_grid_v2.json)")
     ap.add_argument("--src-config", type=pathlib.Path, default=None,
                     help="Source config to copy top-level fields from (codes/start/end/workers/…)")
     ap.add_argument("--out",        type=pathlib.Path, default=None,
@@ -416,8 +472,9 @@ def main() -> None:
     out_html.write_text(html, encoding="utf-8")
     print(f"\nReport written: {out_html}")
 
-    # Write narrowed config
-    out_cfg = write_narrowed_config(run_dir, narrowed, args.out_config, args.src_config)
+    # Write narrowed config (pass top_df so htf_trend_params can be extracted)
+    top_df  = agg_df.head(args.top_n)
+    out_cfg = write_narrowed_config(run_dir, narrowed, args.out_config, args.src_config, top_df)
     print(f"Config written: {out_cfg}")
 
 
