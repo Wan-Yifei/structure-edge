@@ -260,6 +260,11 @@ class CandlestickItem(pg.GraphicsObject):
             c = float(row["close"])
             is_bull = c >= o
 
+            body_lo = min(o, c)
+            body_hi = max(o, c)
+            if body_hi <= body_lo:
+                body_hi = body_lo + 0.0001  # minimal doji body
+
             # Resolve tick bucket key
             try:
                 bar_end = datetime.strptime(
@@ -268,36 +273,36 @@ class CandlestickItem(pg.GraphicsObject):
                     bar_end - timedelta(minutes=candle_mins), candle_mins)
             except ValueError:
                 bk = None
-
             pd_ = buckets.get(bk) if bk else None
 
-            # Draw wick
+            # 1. Wick — always drawn first (cosmetic 1-px pen)
             wick_color = _qc(_GREEN if is_bull else _RED)
-            p.setPen(QPen(wick_color, 0))
+            p.setPen(QPen(wick_color, 1))
             p.drawLine(QPointF(i, l), QPointF(i, h))
 
-            # Draw body: heatmap bins or plain colour
-            body_lo = min(o, c)
-            body_hi = max(o, c)
-            if body_hi <= body_lo:
-                body_hi = body_lo + 0.0001  # minimal doji body
+            # 2. Solid base body — always fully opaque so candle is never invisible
+            base_col = _qc(_GREEN if is_bull else _RED)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(base_col))
+            p.drawRect(QRectF(i - 0.4, body_lo, 0.8, body_hi - body_lo))
 
+            # 3. Heatmap overlay — semi-transparent bins drawn on top of the body
             if self._show_heatmap and pd_:
-                self._draw_heatmap_body(p, i, l, h, body_lo, body_hi, pd_)
-            else:
-                color = _qc(_GREEN if is_bull else _RED)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(color))
-                p.drawRect(QRectF(i - 0.4, body_lo, 0.8, body_hi - body_lo))
+                self._draw_heatmap_overlay(p, i, l, h, body_lo, body_hi, pd_)
 
         p.end()
         self._picture = pic
 
-    def _draw_heatmap_body(self, p: QPainter, i: int,
-                            low: float, high: float,
-                            body_lo: float, body_hi: float,
-                            pd_: dict) -> None:
-        """Colour the full wick range in heatmap bins."""
+    def _draw_heatmap_overlay(self, p: QPainter, i: int,
+                               low: float, high: float,
+                               body_lo: float, body_hi: float,
+                               pd_: dict) -> None:
+        """Overlay semi-transparent buy/sell heatmap bins on the candle body.
+
+        Drawn AFTER the solid base body so the candle is always readable.
+        Bins outside the body (wick area) are drawn at reduced opacity.
+        Zero-volume bins are skipped entirely.
+        """
         price_range = high - low
         if price_range < 1e-9:
             return
@@ -308,8 +313,7 @@ class CandlestickItem(pg.GraphicsObject):
         sells  = np.zeros(bins)
         totals = np.zeros(bins)
         for price, counts in pd_.items():
-            b = int((price - low) / bin_h)
-            b = max(0, min(bins - 1, b))
+            b = max(0, min(bins - 1, int((price - low) / bin_h)))
             buys[b]   += counts.get("buy", 0)
             sells[b]  += counts.get("sell", 0)
             totals[b] += (counts.get("buy", 0) + counts.get("sell", 0)
@@ -319,30 +323,39 @@ class CandlestickItem(pg.GraphicsObject):
         p.setPen(Qt.PenStyle.NoPen)
 
         for b in range(bins):
-            bin_lo = low + b * bin_h
-            bin_hi = bin_lo + bin_h
-            draw_lo = max(bin_lo, body_lo)
-            draw_hi = min(bin_hi, body_hi)
-            if draw_hi <= draw_lo:
-                draw_lo, draw_hi = bin_lo, bin_hi
+            if totals[b] == 0:
+                continue   # skip empty bins entirely
 
-            total     = buys[b] + sells[b]
-            vol_alpha = int(40 + 180 * min(totals[b] / max_total, 1.0))
+            bin_lo = low  + b       * bin_h
+            bin_hi = bin_lo + bin_h
+
+            # Determine draw bounds: body region vs wick region
+            in_body = not (bin_hi <= body_lo or bin_lo >= body_hi)
+            if in_body:
+                draw_lo = max(bin_lo, body_lo)
+                draw_hi = min(bin_hi, body_hi)
+                wick_mult = 1.0
+            else:
+                draw_lo, draw_hi = bin_lo, bin_hi
+                wick_mult = 0.35   # fainter outside the body
+
+            total = buys[b] + sells[b]
+            vol_frac = min(totals[b] / max_total, 1.0)
 
             if total > 0:
                 ratio = (buys[b] - sells[b]) / total  # -1..+1
-                if ratio >= 0:
-                    base = QColor(_UP)
-                    base.setAlpha(int(vol_alpha * (0.3 + 0.7 * ratio)))
-                else:
-                    base = QColor(_DOWN)
-                    base.setAlpha(int(vol_alpha * (0.3 + 0.7 * abs(ratio))))
+                # alpha: floor 60, ceiling 200, scaled by volume intensity and delta magnitude
+                delta_frac = 0.5 + 0.5 * abs(ratio)   # 0.5 (neutral) .. 1.0 (pure)
+                alpha = int(min(200, max(60, 160 * vol_frac * delta_frac)) * wick_mult)
+                col = QColor(_UP if ratio >= 0 else _DOWN)
             else:
-                base = QColor(_GREY)
-                base.setAlpha(40)
+                alpha = int(50 * wick_mult)
+                col   = QColor(_GREY)
 
-            p.setBrush(QBrush(base))
-            p.drawRect(QRectF(i - 0.4, draw_lo, 0.8, draw_hi - draw_lo))
+            col.setAlpha(alpha)
+            p.setBrush(QBrush(col))
+            if draw_hi > draw_lo:
+                p.drawRect(QRectF(i - 0.4, draw_lo, 0.8, draw_hi - draw_lo))
 
     def paint(self, p: QPainter, *args) -> None:
         if self._klines is None or self._klines.empty:
@@ -1267,9 +1280,11 @@ class TradeViewerQt(QMainWindow):
 
             # Label at break point
             txt = pg.TextItem(
-                text=label, color=color, anchor=(0.5, 1.0),
+                text=label, color=color,
+                fill=pg.mkBrush(_qc(color, 120)),
+                anchor=(0.5, 1.0),
             )
-            txt.setFont(QFont("Monospace", 7))
+            txt.setFont(QFont("Monospace", 8))
             yoff = price * 1.0003 if sig["direction"] == "bull" else price * 0.9997
             txt.setPos(idx, yoff)
             self._plot_c.addItem(txt)
@@ -1304,10 +1319,16 @@ class TradeViewerQt(QMainWindow):
             else:
                 txt_str = f"{sign}{delta}"
 
+            # Use bright white with a coloured fill tag so text is always readable
+            # against the dark background, regardless of heatmap overlay colour.
             color = _UP if delta >= 0 else _DOWN
-            txt = pg.TextItem(text=txt_str, color=color, anchor=(0.5, 0.0))
-            txt.setFont(QFont("Monospace", 6))
-            txt.setPos(i, float(row["low"]) * 0.9998)
+            txt = pg.TextItem(
+                text=txt_str, color="#ffffff",
+                fill=pg.mkBrush(_qc(color, 180)),
+                anchor=(0.5, 0.0),
+            )
+            txt.setFont(QFont("Monospace", 8))
+            txt.setPos(i, float(row["low"]) * 0.9997)
             self._plot_c.addItem(txt)
             self._delta_items.append(txt)
 
