@@ -696,6 +696,14 @@ class TradeViewerQt(QMainWindow):
 
         tb.addSeparator()
 
+        # Manual load/refresh button
+        load_btn = QPushButton("Load")
+        load_btn.setToolTip("Fetch and render chart now")
+        load_btn.clicked.connect(self._trigger_fetch)
+        tb.addWidget(load_btn)
+
+        tb.addSeparator()
+
         # Refresh (Live)
         tb.addWidget(_lbl("Refresh (s, minimum 5):"))
         self._refresh_spin = QSpinBox()
@@ -1185,6 +1193,13 @@ class TradeViewerQt(QMainWindow):
 
         # X-axis time labels
         self._set_xaxis_ticks(klines)
+
+        # Force both plots to fit their new data extents.
+        # CandlestickItem is a custom GraphicsObject whose prepareGeometryChange()
+        # does NOT automatically re-trigger the ViewBox auto-range; we must call
+        # it explicitly here so candles and overlays are visible on first render.
+        self._plot_c.autoRange()
+        self._plot_v.autoRange()
 
         # Session vol profile
         self._rebuild_session_profile()
