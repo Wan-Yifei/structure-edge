@@ -1563,9 +1563,10 @@ class TradeViewerQt(QMainWindow):
             if n:
                 volumes[mask] += float(row["volume"]) / n
 
+        # Horizontal bars: x0=0 (left edge), x1=volume (right edge), y=price centre
         bar = pg.BarGraphItem(
-            x=volumes, y=centers, height=(bins[1] - bins[0]) * 0.9,
-            orientation="horizontal",
+            x0=np.zeros(n_bins), x1=volumes,
+            y=centers, height=(bins[1] - bins[0]) * 0.9,
             brush=_qc(_GOLD, 80), pen=pg.mkPen(None),
         )
         pw.addItem(bar)
@@ -1665,13 +1666,20 @@ class TradeViewerQt(QMainWindow):
         bin_h = (max(prices) - min(prices)) / max(len(prices), 1) * 0.9 if prices else 0.01
         bin_h = max(bin_h, 0.001)
 
+        buys_arr  = np.array(buys,  dtype=float)
+        sells_arr = np.array(sells, dtype=float)
+        zeros     = np.zeros(len(prices))
+
+        # Buys extend rightward: x0=0 → x1=buy_volume
         buy_bar = pg.BarGraphItem(
-            x=buys, y=prices, height=bin_h, orientation="horizontal",
+            x0=zeros, x1=buys_arr,
+            y=prices, height=bin_h,
             brush=_qc(_GREEN, 140), pen=pg.mkPen(None),
         )
+        # Sells extend leftward: x0=-sell_volume → x1=0
         sell_bar = pg.BarGraphItem(
-            x=[-s for s in sells], y=prices, height=bin_h,
-            orientation="horizontal",
+            x0=-sells_arr, x1=zeros,
+            y=prices, height=bin_h,
             brush=_qc(_RED, 140), pen=pg.mkPen(None),
         )
         pw.addItem(buy_bar)
@@ -1692,7 +1700,8 @@ class TradeViewerQt(QMainWindow):
         )
         dlbl.setFont(QFont("Monospace", 7))
         if prices:
-            dlbl.setPos(max(buys + [1]) / 2, max(prices))
+            dlbl.setPos(float(buys_arr.max()) / 2 if buys_arr.size else 0.0,
+                        float(max(prices)))
         pw.addItem(dlbl)
 
     # ── Crosshair + tooltip ───────────────────────────────────────────────────
