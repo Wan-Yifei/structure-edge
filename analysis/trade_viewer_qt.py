@@ -1686,16 +1686,30 @@ class TradeViewerQt(QMainWindow):
         pw.getPlotItem().setLabel("top", range_val.upper(),
                                   **{"color": _FG, "size": "8pt"})
 
-        # POC
+        # POC — line + separate TextItem so the label never clips at panel edges
         poc_idx = int(np.argmax(volumes))
         poc     = float(centers[poc_idx])
         poc_line = pg.InfiniteLine(
             pos=poc, angle=0, movable=False,
             pen=pg.mkPen(_RED, width=1),
-            label=f"POC {poc:.2f}",
-            labelOpts={"color": _RED, "position": 0.95},
         )
+        poc_label = pg.TextItem(
+            text=f"POC {poc:.2f}", color=_RED,
+            fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+            anchor=(0.0, 1.0),   # top-left: text grows right and upward from anchor
+        )
+        poc_label.setFont(QFont("Monospace", 7))
         pw.addItem(poc_line)
+        pw.addItem(poc_label, ignoreBounds=True)
+
+        def _pin_poc_label() -> None:
+            """Re-position POC label at left edge of current view."""
+            xlo = pw.vb.viewRange()[0][0]
+            poc_label.setPos(xlo, poc)
+
+        # Pin once now; re-pin whenever the view is panned / zoomed
+        pw.vb.sigRangeChanged.connect(lambda *_: _pin_poc_label())
+        _pin_poc_label()
 
         # VAH / VAL (70 % of volume)
         total_vol = float(volumes.sum())
@@ -1712,12 +1726,25 @@ class TradeViewerQt(QMainWindow):
                 vah = float(centers[max(va_indices)])
                 val = float(centers[min(va_indices)])
                 for price, lbl in [(vah, "VAH"), (val, "VAL")]:
-                    pw.addItem(pg.InfiniteLine(
+                    va_line = pg.InfiniteLine(
                         pos=price, angle=0, movable=False,
                         pen=pg.mkPen(_GOLD, width=1, style=Qt.PenStyle.DashLine),
-                        label=f"{lbl} {price:.2f}",
-                        labelOpts={"color": _GOLD, "position": 0.05},
-                    ))
+                    )
+                    va_label = pg.TextItem(
+                        text=f"{lbl} {price:.2f}", color=_GOLD,
+                        fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+                        anchor=(0.0, 0.0),   # top-left; text grows right and downward
+                    )
+                    va_label.setFont(QFont("Monospace", 7))
+                    pw.addItem(va_line)
+                    pw.addItem(va_label, ignoreBounds=True)
+
+                    def _pin_va(lbl_item=va_label, p=price) -> None:
+                        xlo = pw.vb.viewRange()[0][0]
+                        lbl_item.setPos(xlo, p)
+
+                    pw.vb.sigRangeChanged.connect(lambda *_, f=_pin_va: f())
+                    _pin_va()
 
     def _filter_sessions(self, klines: pd.DataFrame) -> pd.DataFrame:
         """Keep only rows whose time falls in the active session windows."""
