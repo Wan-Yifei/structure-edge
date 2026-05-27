@@ -607,7 +607,23 @@ class DataFetcher(QThread):
             if historical:
                 ticks = load_local_ticks(code, date_str, tf)
             else:
-                ticks = p.get("live_ticks") or {}
+                # Live mode: load today's ticks from DB first (covers the whole
+                # trading day even when the viewer is opened after hours), then
+                # overlay any ticks accumulated in this session on top.
+                today = datetime.now().strftime("%Y-%m-%d")
+                ticks = load_local_ticks(code, today, tf) or {}
+                live_snap: dict = p.get("live_ticks") or {}
+                for bk, pd_ in live_snap.items():
+                    if bk not in ticks:
+                        ticks[bk] = dict(pd_)
+                    else:
+                        for price, counts in pd_.items():
+                            if price not in ticks[bk]:
+                                ticks[bk][price] = dict(counts)
+                            else:
+                                for k in counts:
+                                    ticks[bk][price][k] = (
+                                        ticks[bk][price].get(k, 0) + counts[k])
 
             self.ready.emit({
                 "klines":      df,
@@ -1231,6 +1247,10 @@ class TradeViewerQt(QMainWindow):
                             for k in counts:
                                 buckets[bk][price][k] = (
                                     buckets[bk][price].get(k, 0) + counts[k])
+
+        # Keep self._ticks in sync with the fully-merged buckets so that
+        # _show_tick_profile (which reads self._ticks) also sees live data.
+        self._ticks = buckets if buckets else self._ticks
 
         # Candlesticks
         self._candle_item.set_data(klines, buckets if show_hm else None,
