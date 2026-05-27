@@ -133,6 +133,19 @@ _EMA_PERIODS = [20, 50, 200]
 _KD_FAST = 25
 _KD_SLOW = 90
 
+# ── chart.json config (BOS/CHoCH session-gap settings) ───────────────────────
+_ROOT_DIR = pathlib.Path(__file__).parent.parent
+_CHART_CFG: dict = {}
+try:
+    _CHART_CFG = json.loads((_ROOT_DIR / "config" / "chart.json").read_text())
+except Exception:
+    pass
+
+# max_session_gap per TF from config (None = no restriction)
+_BOS_SESSION_GAP: dict[str, int | None] = (
+    _CHART_CFG.get("bos_choch", {}).get("max_session_gap", {})
+)
+
 # ── Shared tick-loading helper ────────────────────────────────────────────────
 
 def load_local_ticks(code: str, date_str: str, tf: str) -> dict | None:
@@ -572,6 +585,8 @@ class DataFetcher(QThread):
                     warmup,
                     max_span_bars=_BOS_MAX_SPAN.get(tf),
                     trend_window=_TREND_WINDOW.get(tf, 20),
+                    filter_choch=False,          # viewer shows all CHoCH, no displacement filter
+                    max_session_gap=_BOS_SESSION_GAP.get(tf),  # respect chart.json session gap
                 )
 
             fvg_gaps: list[dict] = []
@@ -809,9 +824,9 @@ class TradeViewerQt(QMainWindow):
         tb2.addSeparator()
 
         # Color scheme toggle
-        cb_red_up = QCheckBox("红涨绿跌")
+        cb_red_up = QCheckBox("Red Up")
         cb_red_up.setChecked(False)   # default: Western green-up / red-down
-        cb_red_up.setToolTip("勾选 = 红涨绿跌 (中国习惯) | 不勾 = 绿涨红跌 (西方习惯)")
+        cb_red_up.setToolTip("Checked = red rises, green falls (CN convention)\nUnchecked = green rises, red falls (Western convention)")
         cb_red_up.stateChanged.connect(self._on_indicator_toggle)
         self._ind_checks["red_up"] = cb_red_up
         tb2.addWidget(cb_red_up)
@@ -1240,7 +1255,7 @@ class TradeViewerQt(QMainWindow):
         # BOS / CHoCH
         self._clear_bos_items()
         if show_bos:
-            self._draw_bos_choch(self._smc_signals)
+            self._draw_bos_choch(self._smc_signals, red_up=red_up)
 
         # Delta annotations
         self._clear_delta_items()
@@ -1291,11 +1306,13 @@ class TradeViewerQt(QMainWindow):
             self._plot_c.removeItem(item)
         self._bos_items.clear()
 
-    def _draw_bos_choch(self, signals: list[dict]) -> None:
+    def _draw_bos_choch(self, signals: list[dict], red_up: bool = False) -> None:
         # Show the most recent 8 signals to give context
         recent = signals[-8:] if len(signals) > 8 else signals
+        bull_col = _RED   if red_up else _GREEN
+        bear_col = _GREEN if red_up else _RED
         for sig in recent:
-            color   = _GREEN if sig["direction"] == "bull" else _RED
+            color   = bull_col if sig["direction"] == "bull" else bear_col
             label   = sig["type"]
             idx     = sig["idx"]
             price   = sig["price"]
