@@ -222,15 +222,18 @@ class CandlestickItem(pg.GraphicsObject):
         self._buckets:     dict | None         = None
         self._candle_mins: int                 = 1
         self._show_heatmap: bool               = True
+        self._red_up:      bool                = False   # True = 红涨绿跌
         self._picture:     QPicture | None     = None
         self._rect:        QRectF              = QRectF()
 
     def set_data(self, klines: pd.DataFrame, buckets: dict | None,
-                 candle_mins: int, show_heatmap: bool = True) -> None:
+                 candle_mins: int, show_heatmap: bool = True,
+                 red_up: bool = False) -> None:
         self._klines       = klines
         self._buckets      = buckets
         self._candle_mins  = candle_mins
         self._show_heatmap = show_heatmap
+        self._red_up       = red_up
         self._picture      = None
         if not klines.empty:
             self._rect = QRectF(
@@ -252,6 +255,10 @@ class CandlestickItem(pg.GraphicsObject):
         klines      = self._klines
         buckets     = self._buckets or {}
         candle_mins = self._candle_mins
+
+        # Color scheme: green-up/red-down (Western) OR red-up/green-down (Chinese)
+        _bull_col = _RED   if self._red_up else _GREEN
+        _bear_col = _GREEN if self._red_up else _RED
 
         # Pre-compute per-candle data so we can do a two-pass draw
         # (bodies + heatmap first, wicks on top last).
@@ -279,7 +286,7 @@ class CandlestickItem(pg.GraphicsObject):
         p.setPen(Qt.PenStyle.NoPen)
         for i, o, h, l, c, body_lo, body_hi, pd_ in candle_data:
             is_bull  = c >= o
-            base_col = _qc(_GREEN if is_bull else _RED)
+            base_col = _qc(_bull_col if is_bull else _bear_col)
             p.setBrush(QBrush(base_col))
             p.drawRect(QRectF(i - 0.35, body_lo, 0.7, body_hi - body_lo))
             if self._show_heatmap and pd_:
@@ -289,7 +296,7 @@ class CandlestickItem(pg.GraphicsObject):
         # width=0 → cosmetic pen: always 1 screen pixel regardless of zoom level.
         for i, o, h, l, c, body_lo, body_hi, _ in candle_data:
             is_bull    = c >= o
-            wick_color = _qc(_GREEN if is_bull else _RED)
+            wick_color = _qc(_bull_col if is_bull else _bear_col)
             p.setPen(QPen(wick_color, 0))
             p.setBrush(Qt.BrushStyle.NoBrush)
             # Upper wick
@@ -801,6 +808,16 @@ class TradeViewerQt(QMainWindow):
 
         tb2.addSeparator()
 
+        # Color scheme toggle
+        cb_red_up = QCheckBox("红涨绿跌")
+        cb_red_up.setChecked(False)   # default: Western green-up / red-down
+        cb_red_up.setToolTip("勾选 = 红涨绿跌 (中国习惯) | 不勾 = 绿涨红跌 (西方习惯)")
+        cb_red_up.stateChanged.connect(self._on_indicator_toggle)
+        self._ind_checks["red_up"] = cb_red_up
+        tb2.addWidget(cb_red_up)
+
+        tb2.addSeparator()
+
         # Trade Review input
         tb2.addWidget(_lbl("Trade ID:"))
         self._trade_id_edit = QLineEdit()
@@ -1172,6 +1189,9 @@ class TradeViewerQt(QMainWindow):
         show_ob     = self._ind("ob")
         show_kd     = self._ind("kd")
         show_ema    = self._ind("ema")
+        red_up      = self._ind("red_up")
+        bull_col    = _RED   if red_up else _GREEN
+        bear_col    = _GREEN if red_up else _RED
 
         # Compose live + historical ticks
         buckets: dict = {}
@@ -1192,7 +1212,7 @@ class TradeViewerQt(QMainWindow):
 
         # Candlesticks
         self._candle_item.set_data(klines, buckets if show_hm else None,
-                                   cm, show_heatmap=show_hm)
+                                   cm, show_heatmap=show_hm, red_up=red_up)
 
         # FVG zones
         self._fvg_item.set_data(
@@ -1208,7 +1228,8 @@ class TradeViewerQt(QMainWindow):
         opens  = klines["open"].values.astype(float)
         closes = klines["close"].values.astype(float)
         vol_colors = [
-            pg.mkBrush(_qc(_GREEN, 100)) if c >= o else pg.mkBrush(_qc(_RED, 100))
+            pg.mkBrush(_qc(bull_col, 100)) if c >= o
+            else pg.mkBrush(_qc(bear_col, 100))
             for o, c in zip(opens, closes)
         ]
         self._vol_item.setOpts(
