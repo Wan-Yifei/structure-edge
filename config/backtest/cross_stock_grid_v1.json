@@ -1,0 +1,62 @@
+{
+    "codes": [
+        "US.CSCO",
+        "US.AMD",
+        "US.NVDA",
+        "US.QCOM"
+    ],
+    "start": "2025-05-22",
+    "end": "2026-05-22",
+    "workers": 6,
+    "top_n": 20,
+    "tf_pairs": [
+        [
+            "15m",
+            "3m"
+        ]
+    ],
+    "tf_pairs_fast": [
+        [
+            "15m",
+            "3m"
+        ]
+    ],
+    "param_grid": {
+        "htf_window_bars": [
+            50
+        ],
+        "swing_lookback": [
+            3
+        ],
+        "bos_count": [
+            2
+        ],
+        "fvg_min_width_pct": [
+            0.001
+        ],
+        "fvg_entry_depth_pct": [
+            0.2
+        ],
+        "displacement_required": [
+            false
+        ],
+        "require_ltf_confirmation": [
+            false
+        ],
+        "sl_buffer_pct": [
+            0.001
+        ],
+        "max_sl_pct": [
+            0.005,
+            0.02
+        ],
+        "min_rr": [
+            1.5,
+            2
+        ],
+        "kd_sl_fallback": [
+            false,
+            true
+        ]
+    }
+}
