@@ -56,6 +56,7 @@ from tqdm import tqdm
 import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # prevent garbled output on Windows cp1252 consoles
 
 from feeds.fetcher import fetch_klines
 from backtest.engine  import ALGO_VERSION, BacktestParams, BacktestResult, run_backtest
@@ -572,7 +573,7 @@ def run_grid(
     # Final checkpoint save
     if checkpoint_key:
         _save_checkpoint(checkpoint_key, bt_results)
-        print(f"  Checkpoint saved ({len(bt_results)} combos) → {_ckpt_path(checkpoint_key).name}")
+        print(f"  Checkpoint saved ({len(bt_results)} combos) -> {_ckpt_path(checkpoint_key).name}")
 
     return [bt_results[i] for i in sorted(bt_results) if bt_results.get(i) is not None]
 
@@ -683,7 +684,7 @@ def main() -> None:
 
     search_mode = f"random(n={args.random}, seed={args.seed})" if args.random > 0 else "exhaustive"
     print(f"Codes:       {cfg.codes}")
-    print(f"Date range:  {cfg.start} → {cfg.end}")
+    print(f"Date range:  {cfg.start} -> {cfg.end}")
     print(f"TF pairs:    {len(pairs)}")
     print(f"Search:      {search_mode}")
     print(f"Combos/code: {len(params)}")
@@ -708,7 +709,7 @@ def main() -> None:
 
     db = BacktestDB()
     for code in cfg.codes:
-        print(f"\n── Fetching klines: {code} ───────────────────────────────────────────\n")
+        print(f"\n-- Fetching klines: {code} -------------------------------------------\n")
         klines: dict[str, pd.DataFrame] = {}
         for tf in sorted_tfs:
             df = fetch_klines(
@@ -717,8 +718,8 @@ def main() -> None:
                 force_refresh=cfg.force_refresh,
             )
             bar_range = (
-                f"{df['time_key'].iloc[0]} … {df['time_key'].iloc[-1]}"
-                if len(df) else "—"
+                f"{df['time_key'].iloc[0]} ... {df['time_key'].iloc[-1]}"
+                if len(df) else "-"
             )
             print(f"  {tf}: {len(df)} bars  ({bar_range})")
             klines[tf] = df
@@ -727,7 +728,7 @@ def main() -> None:
             code, cfg.start, cfg.end, pairs, grid,
             random_n=args.random, random_seed=args.seed if args.random > 0 else None,
         )
-        print(f"\n── Running grid for {code} ({cfg.workers} workers) ─────────────────────\n")
+        print(f"\n-- Running grid for {code} ({cfg.workers} workers) -------------------\n")
         print(f"  Checkpoint key: {ck_key}")
         bt_results = run_grid(
             code, klines, params,
@@ -755,7 +756,7 @@ def main() -> None:
         code_csv  = results_dir / f"results_{code_slug}.csv"
         code_viz  = results_dir / f"viz_{code_slug}.png"
         df_code.to_csv(code_csv, index=False)
-        print(f"  Saved {len(df_code)} results → {code_csv}")
+        print(f"  Saved {len(df_code)} results -> {code_csv}")
 
         # ── Per-code top N ────────────────────────────────────────────────
         min_trades = args.min_trades
@@ -765,7 +766,7 @@ def main() -> None:
             .head(cfg.top_n)
         )
         n_filtered = len(df_code) - len(df_code[df_code["n_trades"] >= min_trades])
-        print(f"\n── Top {cfg.top_n} [{code}] by profit factor  (min_trades≥{min_trades}, {n_filtered} excluded) ──\n")
+        print(f"\n-- Top {cfg.top_n} [{code}] by profit factor  (min_trades>={min_trades}, {n_filtered} excluded) --\n")
         for _, row in df_ranked_code.iterrows():
             p = BacktestParams.from_dict(row.to_dict())
             print(f"  {p.label()}")
@@ -790,7 +791,7 @@ def main() -> None:
                 save_path=code_viz,
                 show=cfg.show_chart,
             )
-            print(f"  Chart → {code_viz}")
+            print(f"  Chart -> {code_viz}")
 
     db.close()
 
@@ -802,14 +803,14 @@ def main() -> None:
     if len(all_frames) > 1:
         df_out = pd.concat(all_frames, ignore_index=True)
         df_out.to_csv(csv_path, index=False)
-        print(f"\nCombined {len(df_out)} results ({len(cfg.codes)} codes) → {csv_path}")
+        print(f"\nCombined {len(df_out)} results ({len(cfg.codes)} codes) -> {csv_path}")
 
         df_ranked = (
             df_out[df_out["n_trades"] >= min_trades]
             .sort_values(["profit_factor", "total_r"], ascending=[False, False])
             .head(cfg.top_n)
         )
-        print(f"\n── Top {cfg.top_n} across all codes  (min_trades≥{min_trades}) ───────────────\n")
+        print(f"\n-- Top {cfg.top_n} across all codes  (min_trades>={min_trades}) ----------------\n")
         for _, row in df_ranked.iterrows():
             p = BacktestParams.from_dict(row.to_dict())
             print(f"[{row['code']}]  {p.label()}")
