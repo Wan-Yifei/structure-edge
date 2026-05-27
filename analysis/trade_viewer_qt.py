@@ -284,7 +284,7 @@ class CandlestickItem(pg.GraphicsObject):
             base_col = _qc(_GREEN if is_bull else _RED)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QBrush(base_col))
-            p.drawRect(QRectF(i - 0.4, body_lo, 0.8, body_hi - body_lo))
+            p.drawRect(QRectF(i - 0.35, body_lo, 0.7, body_hi - body_lo))
 
             # 3. Heatmap overlay — semi-transparent bins drawn on top of the body
             if self._show_heatmap and pd_:
@@ -355,7 +355,7 @@ class CandlestickItem(pg.GraphicsObject):
             col.setAlpha(alpha)
             p.setBrush(QBrush(col))
             if draw_hi > draw_lo:
-                p.drawRect(QRectF(i - 0.4, draw_lo, 0.8, draw_hi - draw_lo))
+                p.drawRect(QRectF(i - 0.35, draw_lo, 0.7, draw_hi - draw_lo))
 
     def paint(self, p: QPainter, *args) -> None:
         if self._klines is None or self._klines.empty:
@@ -626,6 +626,9 @@ class TradeViewerQt(QMainWindow):
         self._fvg_gaps:     list[dict]          = []
         self._ob_blocks:    list[dict]          = []
         self._trade_record: dict | None         = None  # active trade review
+        # Track which (code, tf) was last auto-ranged; prevents live-refresh
+        # from resetting the user's manual pan/zoom on every tick.
+        self._last_chart_key: tuple             = ("", "")
 
         # Build UI
         self._build_toolbar(args)
@@ -870,7 +873,7 @@ class TradeViewerQt(QMainWindow):
 
         # Volume bars
         self._vol_item = pg.BarGraphItem(
-            x=[], height=[], width=0.8,
+            x=[], height=[], width=0.7,
             brush=_qc(_GREEN, 100), pen=pg.mkPen(None),
         )
         self._plot_v.addItem(self._vol_item)
@@ -919,11 +922,9 @@ class TradeViewerQt(QMainWindow):
         self._ohlcv_label.setVisible(False)
         self._plot_c.addItem(self._ohlcv_label, ignoreBounds=True)
 
-        # Mouse tracking
-        self._proxy = pg.SignalProxy(
-            self._chart_widget.scene().sigMouseMoved,
-            rateLimit=60, slot=self._on_mouse_move,
-        )
+        # Mouse tracking — direct connection (no SignalProxy buffer) for instant
+        # crosshair and tooltip response on every mouse-move event.
+        self._chart_widget.scene().sigMouseMoved.connect(self._on_mouse_move)
 
         splitter.addWidget(self._chart_widget)
         splitter.setStretchFactor(0, 5)
@@ -1202,7 +1203,7 @@ class TradeViewerQt(QMainWindow):
             for o, c in zip(opens, closes)
         ]
         self._vol_item.setOpts(
-            x=x, height=vols, width=0.8,
+            x=x, height=vols, width=0.7,
             brushes=vol_colors,
         )
 
@@ -1234,17 +1235,17 @@ class TradeViewerQt(QMainWindow):
         # X-axis time labels
         self._set_xaxis_ticks(klines)
 
-        # Force both plots to fit their new data extents.
-        # CandlestickItem is a custom GraphicsObject whose prepareGeometryChange()
-        # does NOT automatically re-trigger the ViewBox auto-range; we must call
-        # it explicitly here so candles and overlays are visible on first render.
-        self._plot_c.autoRange()
-        self._plot_v.autoRange()
+        # Set view range only when Code or TF changes (i.e. a genuinely new
+        # chart).  On live refreshes we preserve the user's pan/zoom state.
+        code = self._code_edit.text().strip()
+        chart_key = (code, tf)
+        if chart_key != self._last_chart_key:
+            self._last_chart_key = chart_key
+            self._reset_view(n)
 
         # Session vol profile
         self._rebuild_session_profile()
 
-        code = self._code_edit.text().strip()
         mode = self._mode_combo.currentText()
         self.setWindowTitle(
             f"Trade Viewer Qt  —  {code}  {tf}  {mode}")
@@ -1771,8 +1772,8 @@ class TradeViewerQt(QMainWindow):
 
     # ── Crosshair + tooltip ───────────────────────────────────────────────────
 
-    def _on_mouse_move(self, evt) -> None:
-        pos = evt[0]
+    def _on_mouse_move(self, pos) -> None:
+        # pos is QPointF emitted directly by scene.sigMouseMoved
         in_candle = self._plot_c.sceneBoundingRect().contains(pos)
         in_vol    = self._plot_v.sceneBoundingRect().contains(pos)
         in_kd     = self._plot_kd.sceneBoundingRect().contains(pos)
@@ -1841,6 +1842,21 @@ class TradeViewerQt(QMainWindow):
             self._show_tick_profile(idx)
 
     # ── X-axis tick labels ────────────────────────────────────────────────────
+
+    def _reset_view(self, n_bars: int, init_bars: int = 150) -> None:
+        """Set the initial X window to the last init_bars candles.
+
+        Y auto-range is left enabled so the candle plot adjusts its price
+        scale to whatever bars are currently visible — exactly like most
+        trading platforms.  Volume plot auto-ranges independently.
+        """
+        x_end   = n_bars - 1 + 3          # small right padding (empty space)
+        x_start = max(-1, n_bars - init_bars)
+        self._plot_c.setXRange(x_start, x_end, padding=0)
+        # Y auto-range tracks visible candles; stays active so zooming X also
+        # rescales price automatically.
+        self._plot_c.enableAutoRange(axis="y", enable=True)
+        self._plot_v.autoRange()
 
     def _set_xaxis_ticks(self, klines: pd.DataFrame) -> None:
         """Map integer bar indices to time_key strings on x-axis."""
