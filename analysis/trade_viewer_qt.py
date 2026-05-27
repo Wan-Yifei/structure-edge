@@ -844,7 +844,7 @@ class TradeViewerQt(QMainWindow):
         # Volume bars
         self._vol_item = pg.BarGraphItem(
             x=[], height=[], width=0.8,
-            brush=_qc(_GREEN, 100), pen=Qt.PenStyle.NoPen,
+            brush=_qc(_GREEN, 100), pen=pg.mkPen(None),
         )
         self._plot_v.addItem(self._vol_item)
 
@@ -1155,7 +1155,7 @@ class TradeViewerQt(QMainWindow):
         ]
         self._vol_item.setOpts(
             x=x, height=vols, width=0.8,
-            brushes=vol_colors, pens=[Qt.PenStyle.NoPen] * n,
+            brushes=vol_colors,
         )
 
         # BOS / CHoCH
@@ -1529,7 +1529,7 @@ class TradeViewerQt(QMainWindow):
                 values=[entry_idx, exit_idx],
                 orientation="vertical",
                 brush=region_col,
-                pen=Qt.PenStyle.NoPen,
+                pen=pg.mkPen(None),
                 movable=False,
             )
             self._plot_c.addItem(region)
@@ -1566,7 +1566,7 @@ class TradeViewerQt(QMainWindow):
         bar = pg.BarGraphItem(
             x=volumes, y=centers, height=(bins[1] - bins[0]) * 0.9,
             orientation="horizontal",
-            brush=_qc(_GOLD, 80), pen=Qt.PenStyle.NoPen,
+            brush=_qc(_GOLD, 80), pen=pg.mkPen(None),
         )
         pw.addItem(bar)
         pw.getPlotItem().setLabel("top", range_val.upper(),
@@ -1667,12 +1667,12 @@ class TradeViewerQt(QMainWindow):
 
         buy_bar = pg.BarGraphItem(
             x=buys, y=prices, height=bin_h, orientation="horizontal",
-            brush=_qc(_GREEN, 140), pen=Qt.PenStyle.NoPen,
+            brush=_qc(_GREEN, 140), pen=pg.mkPen(None),
         )
         sell_bar = pg.BarGraphItem(
             x=[-s for s in sells], y=prices, height=bin_h,
             orientation="horizontal",
-            brush=_qc(_RED, 140), pen=Qt.PenStyle.NoPen,
+            brush=_qc(_RED, 140), pen=pg.mkPen(None),
         )
         pw.addItem(buy_bar)
         pw.addItem(sell_bar)
