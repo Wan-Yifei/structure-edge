@@ -947,19 +947,26 @@ class TradeViewerQt(QMainWindow):
         )
         self._profile_hline.setVisible(False)
 
-        # Price label (follows crosshair Y, anchored at left edge — text grows right)
+        # Price label: yellow price tag that tracks cursor Y, left-aligned
         self._price_label = pg.TextItem(
-            text="", color=_GOLD, anchor=(0.0, 0.5),
+            text="", color=_GOLD,
+            fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+            anchor=(0.0, 0.5),   # left edge, vertically centered
         )
         self._price_label.setFont(QFont("Monospace", 7))
+        self._price_label.setZValue(100)
         self._price_label.setVisible(False)
         self._plot_c.addItem(self._price_label, ignoreBounds=True)
 
-        # OHLCV tooltip (fixed at top-left of chart — grows rightward and downward)
+        # OHLCV tooltip: floating multi-line label above cursor, with dark fill
+        # anchor=(0.0, 1.0): BOTTOM-LEFT at position → text body extends upward
         self._ohlcv_label = pg.TextItem(
-            text="", color=_FG, anchor=(0.0, 0.0),
+            text="", color="#ffffff",
+            fill=pg.mkBrush(_qc(_BG_TIP, 220)),
+            anchor=(0.0, 1.0),
         )
         self._ohlcv_label.setFont(QFont("Monospace", 8))
+        self._ohlcv_label.setZValue(100)
         self._ohlcv_label.setVisible(False)
         self._plot_c.addItem(self._ohlcv_label, ignoreBounds=True)
 
@@ -1308,33 +1315,62 @@ class TradeViewerQt(QMainWindow):
 
     def _draw_bos_choch(self, signals: list[dict], red_up: bool = False) -> None:
         # Show the most recent 8 signals to give context
-        recent = signals[-8:] if len(signals) > 8 else signals
+        recent   = signals[-8:] if len(signals) > 8 else signals
         bull_col = _RED   if red_up else _GREEN
         bear_col = _GREEN if red_up else _RED
+
+        # Y offset for label: 0.5 % of candle price (scale-invariant).
+        # Ensures label floats clearly above/below the wick regardless of zoom.
+        klines = self._klines
+        highs  = klines["high"].values.astype(float)  if klines is not None else None
+        lows   = klines["low"].values.astype(float)   if klines is not None else None
+        n      = len(highs) if highs is not None else 0
+
         for sig in recent:
             color   = bull_col if sig["direction"] == "bull" else bear_col
             label   = sig["type"]
             idx     = sig["idx"]
-            price   = sig["price"]
+            price   = sig["price"]          # the broken swing level
             from_i  = sig.get("from_idx", max(0, idx - 5))
+            is_bull = sig["direction"] == "bull"
 
-            # Horizontal reference line from swing to break bar
-            line = pg.PlotCurveItem(
+            # Candle wick extreme at the break bar
+            if highs is not None and 0 <= idx < n:
+                wick = float(highs[idx]) if is_bull else float(lows[idx])
+            else:
+                wick = price * (1.003 if is_bull else 0.997)
+
+            # Offset above/below the wick: 0.5 % of price
+            offset    = wick * 0.005
+            label_y   = wick + offset if is_bull else wick - offset
+
+            # ── 1. Horizontal dotted line: swing level → break bar ──────────
+            h_line = pg.PlotCurveItem(
                 x=[from_i, idx], y=[price, price],
                 pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DotLine),
             )
-            self._plot_c.addItem(line)
-            self._bos_items.append(line)
+            self._plot_c.addItem(h_line)
+            self._bos_items.append(h_line)
 
-            # Label at break point
+            # ── 2. Vertical dashed line: wick → label ───────────────────────
+            v_line = pg.PlotCurveItem(
+                x=[idx, idx], y=[wick, label_y],
+                pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
+            )
+            self._plot_c.addItem(v_line)
+            self._bos_items.append(v_line)
+
+            # ── 3. Label: floats above (bull) or below (bear) the wick ──────
+            # anchor y=1.0: bottom of text at label_y → text grows upward (bull)
+            # anchor y=0.0: top of text at label_y   → text grows downward (bear)
             txt = pg.TextItem(
                 text=label, color=color,
-                fill=pg.mkBrush(_qc(color, 120)),
-                anchor=(0.5, 1.0),
+                fill=pg.mkBrush(_qc(color, 140)),
+                anchor=(0.5, 1.0 if is_bull else 0.0),
             )
             txt.setFont(QFont("Monospace", 8))
-            yoff = price * 1.0003 if sig["direction"] == "bull" else price * 0.9997
-            txt.setPos(idx, yoff)
+            txt.setZValue(50)
+            txt.setPos(idx, label_y)
             self._plot_c.addItem(txt)
             self._bos_items.append(txt)
 
@@ -1896,8 +1932,10 @@ class TradeViewerQt(QMainWindow):
 
         xlo, xhi = self._plot_c.vb.viewRange()[0]
         ylo, yhi = self._plot_c.vb.viewRange()[1]
-        label_x  = xlo + (xhi - xlo) * 0.01  # ~1% from left edge; text grows rightward
-        # Price label tracks cursor Y, left-aligned so full text is visible
+        y_span   = yhi - ylo
+        label_x  = xlo + (xhi - xlo) * 0.01  # ~1% from left edge
+
+        # Price tag: left edge, vertically centered on cursor price
         self._price_label.setPos(label_x, y)
         self._price_label.setText(f"{y:.2f}")
         self._price_label.setVisible(True)
@@ -1907,9 +1945,12 @@ class TradeViewerQt(QMainWindow):
             idx = max(0, min(idx, len(self._klines) - 1))
             row = self._klines.iloc[idx]
             vol = int(row.get("volume", 0) or 0)
-            # OHLCV label is pinned to top-left corner of the chart (anchor 0,0)
-            top_y = yhi - (yhi - ylo) * 0.01
-            self._ohlcv_label.setPos(label_x, top_y)
+
+            # OHLCV tooltip: anchor bottom-left → body floats ABOVE position.
+            # Clamp so the anchor is at most 2% below the view top (avoids going
+            # off-screen when cursor is near the very top of the chart).
+            tip_y = min(y + y_span * 0.14, yhi - y_span * 0.02)
+            self._ohlcv_label.setPos(label_x, tip_y)
             self._ohlcv_label.setText(
                 f"{str(row['time_key'])[:16]}\n"
                 f"O {row['open']:.2f}  H {row['high']:.2f}\n"
