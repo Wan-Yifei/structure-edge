@@ -253,19 +253,18 @@ class CandlestickItem(pg.GraphicsObject):
         buckets     = self._buckets or {}
         candle_mins = self._candle_mins
 
+        # Pre-compute per-candle data so we can do a two-pass draw
+        # (bodies + heatmap first, wicks on top last).
+        candle_data: list[tuple] = []
         for i, (_, row) in enumerate(klines.iterrows()):
             o = float(row["open"])
             h = float(row["high"])
             l = float(row["low"])
             c = float(row["close"])
-            is_bull = c >= o
-
             body_lo = min(o, c)
             body_hi = max(o, c)
             if body_hi <= body_lo:
-                body_hi = body_lo + 0.0001  # minimal doji body
-
-            # Resolve tick bucket key
+                body_hi = body_lo + 0.0001
             try:
                 bar_end = datetime.strptime(
                     str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
@@ -274,21 +273,31 @@ class CandlestickItem(pg.GraphicsObject):
             except ValueError:
                 bk = None
             pd_ = buckets.get(bk) if bk else None
+            candle_data.append((i, o, h, l, c, body_lo, body_hi, pd_))
 
-            # 1. Wick — always drawn first (cosmetic 1-px pen)
-            wick_color = _qc(_GREEN if is_bull else _RED)
-            p.setPen(QPen(wick_color, 1))
-            p.drawLine(QPointF(i, l), QPointF(i, h))
-
-            # 2. Solid base body — always fully opaque so candle is never invisible
+        # Pass 1 — bodies + heatmap overlay
+        p.setPen(Qt.PenStyle.NoPen)
+        for i, o, h, l, c, body_lo, body_hi, pd_ in candle_data:
+            is_bull  = c >= o
             base_col = _qc(_GREEN if is_bull else _RED)
-            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QBrush(base_col))
             p.drawRect(QRectF(i - 0.35, body_lo, 0.7, body_hi - body_lo))
-
-            # 3. Heatmap overlay — semi-transparent bins drawn on top of the body
             if self._show_heatmap and pd_:
                 self._draw_heatmap_overlay(p, i, l, h, body_lo, body_hi, pd_)
+
+        # Pass 2 — wicks drawn on top of everything so they are never covered.
+        # width=0 → cosmetic pen: always 1 screen pixel regardless of zoom level.
+        for i, o, h, l, c, body_lo, body_hi, _ in candle_data:
+            is_bull    = c >= o
+            wick_color = _qc(_GREEN if is_bull else _RED)
+            p.setPen(QPen(wick_color, 0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            # Upper wick
+            if h > body_hi:
+                p.drawLine(QPointF(i, body_hi), QPointF(i, h))
+            # Lower wick
+            if l < body_lo:
+                p.drawLine(QPointF(i, l), QPointF(i, body_lo))
 
         p.end()
         self._picture = pic
@@ -1844,19 +1853,32 @@ class TradeViewerQt(QMainWindow):
     # ── X-axis tick labels ────────────────────────────────────────────────────
 
     def _reset_view(self, n_bars: int, init_bars: int = 150) -> None:
-        """Set the initial X window to the last init_bars candles.
+        """Set the initial view to the last init_bars candles.
 
-        Y auto-range is left enabled so the candle plot adjusts its price
-        scale to whatever bars are currently visible — exactly like most
-        trading platforms.  Volume plot auto-ranges independently.
+        Both X and Y are set explicitly — no autoRange() calls — so the
+        view is always correct on first load without being overridden by
+        the linked volume plot or a global bounding-rect auto-range.
+        Live refreshes skip this method entirely so user zoom is preserved.
         """
-        x_end   = n_bars - 1 + 3          # small right padding (empty space)
+        x_end   = n_bars - 1 + 3
         x_start = max(-1, n_bars - init_bars)
-        self._plot_c.setXRange(x_start, x_end, padding=0)
-        # Y auto-range tracks visible candles; stays active so zooming X also
-        # rescales price automatically.
-        self._plot_c.enableAutoRange(axis="y", enable=True)
-        self._plot_v.autoRange()
+
+        # Derive Y range from the actually visible bars
+        if self._klines is not None and not self._klines.empty:
+            vis    = self._klines.iloc[max(0, n_bars - init_bars):]
+            y_lo   = float(vis["low"].min())
+            y_hi   = float(vis["high"].max())
+            margin = (y_hi - y_lo) * 0.08
+            self._plot_c.setXRange(x_start, x_end, padding=0)
+            self._plot_c.setYRange(y_lo - margin, y_hi + margin, padding=0)
+        else:
+            self._plot_c.setXRange(x_start, x_end, padding=0)
+
+        # Volume plot: X is already linked; only need a Y reset
+        if self._klines is not None:
+            vis_v = self._klines.iloc[max(0, n_bars - init_bars):]
+            max_v = float(vis_v["volume"].max()) if not vis_v.empty else 1.0
+            self._plot_v.setYRange(0, max_v * 1.15, padding=0)
 
     def _set_xaxis_ticks(self, klines: pd.DataFrame) -> None:
         """Map integer bar indices to time_key strings on x-axis."""
