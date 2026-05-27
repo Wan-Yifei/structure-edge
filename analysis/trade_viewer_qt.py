@@ -932,17 +932,17 @@ class TradeViewerQt(QMainWindow):
         )
         self._profile_hline.setVisible(False)
 
-        # Price label (follows crosshair Y, left edge)
+        # Price label (follows crosshair Y, anchored at left edge — text grows right)
         self._price_label = pg.TextItem(
-            text="", color=_GOLD, anchor=(1.0, 0.5),
+            text="", color=_GOLD, anchor=(0.0, 0.5),
         )
         self._price_label.setFont(QFont("Monospace", 7))
         self._price_label.setVisible(False)
         self._plot_c.addItem(self._price_label, ignoreBounds=True)
 
-        # OHLCV tooltip (below price label, left-aligned)
+        # OHLCV tooltip (fixed at top-left of chart — grows rightward and downward)
         self._ohlcv_label = pg.TextItem(
-            text="", color=_FG, anchor=(1.0, 0.0),
+            text="", color=_FG, anchor=(0.0, 0.0),
         )
         self._ohlcv_label.setFont(QFont("Monospace", 8))
         self._ohlcv_label.setVisible(False)
@@ -1849,9 +1849,11 @@ class TradeViewerQt(QMainWindow):
         self._profile_hline.setVisible(True)
 
         xlo, xhi = self._plot_c.vb.viewRange()[0]
-        label_x  = xlo + (xhi - xlo) * 0.02  # ~2% from left edge
+        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        label_x  = xlo + (xhi - xlo) * 0.01  # ~1% from left edge; text grows rightward
+        # Price label tracks cursor Y, left-aligned so full text is visible
         self._price_label.setPos(label_x, y)
-        self._price_label.setText(f" {y:.2f}")
+        self._price_label.setText(f"{y:.2f}")
         self._price_label.setVisible(True)
 
         if self._klines is not None and not self._klines.empty:
@@ -1859,13 +1861,14 @@ class TradeViewerQt(QMainWindow):
             idx = max(0, min(idx, len(self._klines) - 1))
             row = self._klines.iloc[idx]
             vol = int(row.get("volume", 0) or 0)
-            ylo, yhi = self._plot_c.vb.viewRange()[1]
-            self._ohlcv_label.setPos(label_x, y - (yhi - ylo) * 0.01)
+            # OHLCV label is pinned to top-left corner of the chart (anchor 0,0)
+            top_y = yhi - (yhi - ylo) * 0.01
+            self._ohlcv_label.setPos(label_x, top_y)
             self._ohlcv_label.setText(
-                f" {str(row['time_key'])[:16]}\n"
-                f" O {row['open']:.2f}  H {row['high']:.2f}\n"
-                f" L {row['low']:.2f}  C {row['close']:.2f}\n"
-                f" Vol {vol:,}"
+                f"{str(row['time_key'])[:16]}\n"
+                f"O {row['open']:.2f}  H {row['high']:.2f}\n"
+                f"L {row['low']:.2f}  C {row['close']:.2f}\n"
+                f"Vol {vol:,}"
             )
             self._ohlcv_label.setVisible(True)
 
