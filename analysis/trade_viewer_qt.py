@@ -1702,13 +1702,15 @@ class TradeViewerQt(QMainWindow):
         pw.addItem(poc_line)
         pw.addItem(poc_label, ignoreBounds=True)
 
+        vb = pw.getViewBox()
+
         def _pin_poc_label() -> None:
             """Re-position POC label at left edge of current view."""
-            xlo = pw.vb.viewRange()[0][0]
+            xlo = vb.viewRange()[0][0]
             poc_label.setPos(xlo, poc)
 
         # Pin once now; re-pin whenever the view is panned / zoomed
-        pw.vb.sigRangeChanged.connect(lambda *_: _pin_poc_label())
+        vb.sigRangeChanged.connect(lambda *_: _pin_poc_label())
         _pin_poc_label()
 
         # VAH / VAL (70 % of volume)
@@ -1740,10 +1742,10 @@ class TradeViewerQt(QMainWindow):
                     pw.addItem(va_label, ignoreBounds=True)
 
                     def _pin_va(lbl_item=va_label, p=price) -> None:
-                        xlo = pw.vb.viewRange()[0][0]
+                        xlo = vb.viewRange()[0][0]
                         lbl_item.setPos(xlo, p)
 
-                    pw.vb.sigRangeChanged.connect(lambda *_, f=_pin_va: f())
+                    vb.sigRangeChanged.connect(lambda *_, f=_pin_va: f())
                     _pin_va()
 
     def _filter_sessions(self, klines: pd.DataFrame) -> pd.DataFrame:
