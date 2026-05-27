@@ -299,11 +299,17 @@ class CandlestickItem(pg.GraphicsObject):
         p.setPen(Qt.PenStyle.NoPen)
         for i, o, h, l, c, body_lo, body_hi, pd_ in candle_data:
             is_bull  = c >= o
-            base_col = _qc(_bull_col if is_bull else _bear_col)
-            p.setBrush(QBrush(base_col))
-            p.drawRect(QRectF(i - 0.35, body_lo, 0.7, body_hi - body_lo))
             if self._show_heatmap and pd_:
+                # Draw faint base body first (direction reference only),
+                # then overlay high-contrast buy/sell bins on top.
+                base_col = _qc(_bull_col if is_bull else _bear_col, 50)
+                p.setBrush(QBrush(base_col))
+                p.drawRect(QRectF(i - 0.35, body_lo, 0.7, body_hi - body_lo))
                 self._draw_heatmap_overlay(p, i, l, h, body_lo, body_hi, pd_)
+            else:
+                base_col = _qc(_bull_col if is_bull else _bear_col)
+                p.setBrush(QBrush(base_col))
+                p.drawRect(QRectF(i - 0.35, body_lo, 0.7, body_hi - body_lo))
 
         # Pass 2 — wicks drawn on top of everything so they are never covered.
         # width=0 → cosmetic pen: always 1 screen pixel regardless of zoom level.
@@ -326,11 +332,17 @@ class CandlestickItem(pg.GraphicsObject):
                                low: float, high: float,
                                body_lo: float, body_hi: float,
                                pd_: dict) -> None:
-        """Overlay semi-transparent buy/sell heatmap bins on the candle body.
+        """Draw buy/sell heatmap bins within the candle body only.
 
-        Drawn AFTER the solid base body so the candle is always readable.
-        Bins outside the body (wick area) are drawn at reduced opacity.
-        Zero-volume bins are skipped entirely.
+        Called AFTER a faint base body has already been painted (alpha=50).
+        Each body-range bin is painted at high opacity so the buy/sell signal
+        reads clearly over the faint base.
+
+        Color convention (independent of red-up toggle):
+            green (_GREEN) = buyer-dominant bin
+            red   (_RED)   = seller-dominant bin
+        Alpha = f(volume density, directional imbalance): 60 … 230.
+        Wick-range bins are skipped entirely for a clean look.
         """
         price_range = high - low
         if price_range < 1e-9:
@@ -352,39 +364,38 @@ class CandlestickItem(pg.GraphicsObject):
         p.setPen(Qt.PenStyle.NoPen)
 
         for b in range(bins):
-            if totals[b] == 0:
-                continue   # skip empty bins entirely
-
-            bin_lo = low  + b       * bin_h
+            bin_lo = low + b * bin_h
             bin_hi = bin_lo + bin_h
 
-            # Determine draw bounds: body region vs wick region
-            in_body = not (bin_hi <= body_lo or bin_lo >= body_hi)
-            if in_body:
-                draw_lo = max(bin_lo, body_lo)
-                draw_hi = min(bin_hi, body_hi)
-                wick_mult = 1.0
-            else:
-                draw_lo, draw_hi = bin_lo, bin_hi
-                wick_mult = 0.35   # fainter outside the body
+            # Skip bins entirely outside the body (no wick heatmap)
+            if bin_hi <= body_lo or bin_lo >= body_hi:
+                continue
+            draw_lo = max(bin_lo, body_lo)
+            draw_hi = min(bin_hi, body_hi)
+            if draw_hi <= draw_lo:
+                continue
 
-            total = buys[b] + sells[b]
             vol_frac = min(totals[b] / max_total, 1.0)
 
-            if total > 0:
-                ratio = (buys[b] - sells[b]) / total  # -1..+1
-                # alpha: floor 60, ceiling 200, scaled by volume intensity and delta magnitude
-                delta_frac = 0.5 + 0.5 * abs(ratio)   # 0.5 (neutral) .. 1.0 (pure)
-                alpha = int(min(200, max(60, 160 * vol_frac * delta_frac)) * wick_mult)
-                col = QColor(_UP if ratio >= 0 else _DOWN)
+            if totals[b] == 0:
+                continue   # fully empty bin — leave faint base body visible
+
+            total_dir = buys[b] + sells[b]
+            if total_dir > 0:
+                ratio = (buys[b] - sells[b]) / total_dir   # -1 (pure sell)..+1 (pure buy)
+                col   = QColor(_GREEN if ratio >= 0 else _RED)
+                # Alpha: baseline 60, up to 230; scales with volume density AND
+                # directional imbalance so pure-direction, high-volume bins are opaque.
+                imbalance = abs(ratio)                      # 0..1
+                alpha = int(min(230, 60 + 170 * vol_frac * (0.4 + 0.6 * imbalance)))
             else:
-                alpha = int(50 * wick_mult)
+                # Only neutral volume — draw light grey at reduced opacity
                 col   = QColor(_GREY)
+                alpha = int(min(80, 30 + 50 * vol_frac))
 
             col.setAlpha(alpha)
             p.setBrush(QBrush(col))
-            if draw_hi > draw_lo:
-                p.drawRect(QRectF(i - 0.35, draw_lo, 0.7, draw_hi - draw_lo))
+            p.drawRect(QRectF(i - 0.35, draw_lo, 0.7, draw_hi - draw_lo))
 
     def paint(self, p: QPainter, *args) -> None:
         if self._klines is None or self._klines.empty:
@@ -963,6 +974,13 @@ class TradeViewerQt(QMainWindow):
         )
         self._profile_hline.setVisible(False)
 
+        # Tick profile panel: same crosshair horizontal line
+        self._tick_profile_hline = pg.InfiniteLine(
+            angle=0, movable=False,
+            pen=pg.mkPen(_CROSS, width=1, style=Qt.PenStyle.DashLine),
+        )
+        self._tick_profile_hline.setVisible(False)
+
         # Price label: yellow price tag that tracks cursor Y, left-aligned
         self._price_label = pg.TextItem(
             text="", color=_GOLD,
@@ -1006,7 +1024,12 @@ class TradeViewerQt(QMainWindow):
         self._tick_profile_widget.setMaximumWidth(200)
         self._tick_profile_widget.getPlotItem().showGrid(x=True, y=False, alpha=0.15)
         self._tick_profile_widget.getPlotItem().setMenuEnabled(False)
+        # Add crosshair line (survives until next pw.clear() call; restored in _show_tick_profile)
+        self._tick_profile_widget.addItem(self._tick_profile_hline)
         right_layout.addWidget(self._tick_profile_widget, 1)
+
+        # Sync tick profile Y range whenever the main candle chart is panned/zoomed
+        self._plot_c.vb.sigRangeChanged.connect(self._on_main_range_changed)
 
         # Session vol profile (bottom-right)
         self._profile_widget = pg.PlotWidget()
@@ -1860,6 +1883,8 @@ class TradeViewerQt(QMainWindow):
 
         pw = self._tick_profile_widget
         pw.clear()
+        # Restore crosshair line after clear (clear() removes all items)
+        pw.addItem(self._tick_profile_hline)
 
         bin_h = (max(prices) - min(prices)) / max(len(prices), 1) * 0.9 if prices else 0.01
         bin_h = max(bin_h, 0.001)
@@ -1872,13 +1897,13 @@ class TradeViewerQt(QMainWindow):
         buy_bar = pg.BarGraphItem(
             x0=zeros, x1=buys_arr,
             y=prices, height=bin_h,
-            brush=_qc(_GREEN, 140), pen=pg.mkPen(None),
+            brush=_qc(_GREEN, 180), pen=pg.mkPen(None),
         )
         # Sells extend leftward: x0=-sell_volume → x1=0
         sell_bar = pg.BarGraphItem(
             x0=-sells_arr, x1=zeros,
             y=prices, height=bin_h,
-            brush=_qc(_RED, 140), pen=pg.mkPen(None),
+            brush=_qc(_RED, 180), pen=pg.mkPen(None),
         )
         pw.addItem(buy_bar)
         pw.addItem(sell_bar)
@@ -1902,6 +1927,23 @@ class TradeViewerQt(QMainWindow):
                         float(max(prices)))
         pw.addItem(dlbl)
 
+        # Sync Y range to main chart so tick profile always shows the same
+        # price range the user is looking at.
+        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        pw.setYRange(ylo, yhi, padding=0)
+
+    # ── Tick profile Y range sync ─────────────────────────────────────────────
+
+    def _on_main_range_changed(self, _vb, ranges) -> None:
+        """Keep tick profile Y axis in sync with main chart Y range.
+
+        Called by _plot_c.vb.sigRangeChanged(ViewBox, [[xlo,xhi],[ylo,yhi]]).
+        Updating the tick profile Y range here means any zoom/pan on the main
+        chart is immediately reflected in the tick profile panel.
+        """
+        ylo, yhi = ranges[1]
+        self._tick_profile_widget.setYRange(ylo, yhi, padding=0)
+
     # ── Crosshair + tooltip ───────────────────────────────────────────────────
 
     def _on_mouse_move(self, pos) -> None:
@@ -1915,7 +1957,7 @@ class TradeViewerQt(QMainWindow):
             for line in (self._vline, self._hline,
                          self._vline_v, self._vline_kd,
                          self._price_label, self._ohlcv_label,
-                         self._profile_hline):
+                         self._profile_hline, self._tick_profile_hline):
                 line.setVisible(False)
             return
 
@@ -1946,9 +1988,11 @@ class TradeViewerQt(QMainWindow):
         # Horizontal line only in candle plot
         self._hline.setPos(y);  self._hline.setVisible(in_candle)
 
-        # Profile panel sync line
+        # Profile panel sync lines (session profile + tick profile)
         self._profile_hline.setPos(y)
         self._profile_hline.setVisible(True)
+        self._tick_profile_hline.setPos(y)
+        self._tick_profile_hline.setVisible(True)
 
         xlo, xhi = self._plot_c.vb.viewRange()[0]
         ylo, yhi = self._plot_c.vb.viewRange()[1]
