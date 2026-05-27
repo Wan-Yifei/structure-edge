@@ -642,93 +642,99 @@ class TradeViewerQt(QMainWindow):
         if args:
             self._connect_opend(host, port)
 
-    # ── Toolbar ───────────────────────────────────────────────────────────────
+    # ── Toolbars (two rows) ───────────────────────────────────────────────────
 
     def _build_toolbar(self, args) -> None:
-        tb = QToolBar("Controls", self)
-        tb.setMovable(False)
-        tb.setFloatable(False)
-        self.addToolBar(tb)
-
         def _lbl(text: str) -> QLabel:
             l = QLabel(text)
-            l.setStyleSheet(f"color: {_GREY}; font-size: 11px;")
+            l.setStyleSheet(f"color: {_FG}; font-size: 11px; padding: 0 2px;")
             return l
 
+        # ── Row 1: core data controls ─────────────────────────────────────────
+        tb1 = QToolBar("Controls", self)
+        tb1.setMovable(False)
+        tb1.setFloatable(False)
+        self.addToolBar(tb1)
+
         # Code
-        tb.addWidget(_lbl("Code:"))
+        tb1.addWidget(_lbl("Code:"))
         self._code_edit = QLineEdit(getattr(args, "code", "US.SNDK") or "US.SNDK")
         self._code_edit.setFixedWidth(90)
         self._code_edit.returnPressed.connect(self._trigger_fetch)
-        tb.addWidget(self._code_edit)
+        tb1.addWidget(self._code_edit)
 
-        tb.addSeparator()
+        tb1.addSeparator()
 
         # Timeframe
-        tb.addWidget(_lbl("TF:"))
+        tb1.addWidget(_lbl("TF:"))
         self._tf_combo = QComboBox()
         self._tf_combo.addItems(list(TIMEFRAME_MAP.keys()))
         self._tf_combo.setCurrentText(getattr(args, "tf", "5m") or "5m")
         self._tf_combo.currentTextChanged.connect(self._on_tf_changed)
-        tb.addWidget(self._tf_combo)
+        tb1.addWidget(self._tf_combo)
 
-        tb.addSeparator()
+        tb1.addSeparator()
 
         # Mode
-        tb.addWidget(_lbl("Mode:"))
+        tb1.addWidget(_lbl("Mode:"))
         self._mode_combo = QComboBox()
         self._mode_combo.addItems(["Live", "Historical"])
         init_mode = getattr(args, "mode", "Live") or "Live"
         self._mode_combo.setCurrentText(init_mode)
         self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
-        tb.addWidget(self._mode_combo)
+        tb1.addWidget(self._mode_combo)
 
-        tb.addSeparator()
+        tb1.addSeparator()
 
         # Date (Historical)
-        tb.addWidget(_lbl("Date:"))
+        tb1.addWidget(_lbl("Date:"))
         init_date = getattr(args, "date", None) or datetime.now().strftime("%Y-%m-%d")
         self._date_edit = QLineEdit(init_date)
         self._date_edit.setFixedWidth(90)
         self._date_edit.setEnabled(init_mode == "Historical")
         self._date_edit.returnPressed.connect(self._trigger_fetch)
-        tb.addWidget(self._date_edit)
+        tb1.addWidget(self._date_edit)
 
-        tb.addSeparator()
+        tb1.addSeparator()
 
-        # Manual load/refresh button
+        # Load button
         load_btn = QPushButton("Load")
         load_btn.setToolTip("Fetch and render chart now")
         load_btn.clicked.connect(self._trigger_fetch)
-        tb.addWidget(load_btn)
+        tb1.addWidget(load_btn)
 
-        tb.addSeparator()
+        tb1.addSeparator()
 
         # Refresh (Live)
-        tb.addWidget(_lbl("Refresh (s, minimum 5):"))
+        tb1.addWidget(_lbl("Refresh (s, min 5):"))
         self._refresh_spin = QSpinBox()
         self._refresh_spin.setRange(5, 300)
         self._refresh_spin.setValue(getattr(args, "refresh", 15) or 15)
         self._refresh_spin.setFixedWidth(55)
         self._refresh_spin.valueChanged.connect(self._on_refresh_changed)
-        tb.addWidget(self._refresh_spin)
+        tb1.addWidget(self._refresh_spin)
 
-        tb.addSeparator()
+        tb1.addSeparator()
 
         # Connect / Stop
         self._conn_btn = QPushButton("Connect")
         self._conn_btn.setCheckable(True)
         self._conn_btn.clicked.connect(self._on_connect_toggle)
-        tb.addWidget(self._conn_btn)
+        tb1.addWidget(self._conn_btn)
 
-        tb.addSeparator()
+        # ── Row 2: indicators / session / range / trade review ────────────────
+        self.addToolBarBreak()
+        tb2 = QToolBar("Indicators", self)
+        tb2.setMovable(False)
+        tb2.setFloatable(False)
+        self.addToolBar(tb2)
 
         # Indicators
-        tb.addWidget(_lbl("Indicators:"))
+        tb2.addWidget(_lbl("Indicators:"))
         self._ind_checks: dict[str, QCheckBox | QRadioButton] = {}
         for key, label in [
             ("heatmap",   "Heatmap"),
-            ("delta",     "Delta Δ"),
+            ("delta",     "Δ Delta"),
             ("bos_choch", "BOS/CHoCH"),
             ("fvg",       "FVG"),
             ("ob",        "OB"),
@@ -739,12 +745,12 @@ class TradeViewerQt(QMainWindow):
             cb.setChecked(key in ("heatmap", "delta", "bos_choch"))
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
-            tb.addWidget(cb)
+            tb2.addWidget(cb)
 
-        tb.addSeparator()
+        tb2.addSeparator()
 
         # Session filters
-        tb.addWidget(_lbl("Session:"))
+        tb2.addWidget(_lbl("Session:"))
         for key, label in [
             ("regular", "Regular"), ("pre", "Pre"),
             ("post", "Post"),       ("night", "Night"),
@@ -753,12 +759,12 @@ class TradeViewerQt(QMainWindow):
             cb.setChecked(key == "regular")
             cb.stateChanged.connect(self._on_session_toggle)
             self._ind_checks[f"sess_{key}"] = cb
-            tb.addWidget(cb)
+            tb2.addWidget(cb)
 
-        tb.addSeparator()
+        tb2.addSeparator()
 
         # Profile range
-        tb.addWidget(_lbl("Range:"))
+        tb2.addWidget(_lbl("Range:"))
         self._range_group = QButtonGroup(self)
         for val, label in [("1d", "1D"), ("3d", "3D"), ("7d", "1W")]:
             rb = QRadioButton(label)
@@ -766,23 +772,23 @@ class TradeViewerQt(QMainWindow):
             rb.toggled.connect(self._on_range_changed)
             self._ind_checks[f"range_{val}"] = rb
             self._range_group.addButton(rb)
-            tb.addWidget(rb)
+            tb2.addWidget(rb)
 
-        tb.addSeparator()
+        tb2.addSeparator()
 
         # Trade Review input
-        tb.addWidget(_lbl("Trade ID:"))
+        tb2.addWidget(_lbl("Trade ID:"))
         self._trade_id_edit = QLineEdit()
         self._trade_id_edit.setPlaceholderText("trade UUID…")
-        self._trade_id_edit.setFixedWidth(220)
+        self._trade_id_edit.setFixedWidth(200)
         self._trade_id_edit.returnPressed.connect(self._load_trade_review)
-        tb.addWidget(self._trade_id_edit)
+        tb2.addWidget(self._trade_id_edit)
         review_btn = QPushButton("Review")
         review_btn.clicked.connect(self._load_trade_review)
-        tb.addWidget(review_btn)
+        tb2.addWidget(review_btn)
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self._clear_trade_review)
-        tb.addWidget(clear_btn)
+        tb2.addWidget(clear_btn)
 
     # ── Central widget: chart + profiles ─────────────────────────────────────
 
