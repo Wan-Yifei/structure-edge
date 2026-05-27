@@ -856,14 +856,33 @@ class TradeViewerQt(QMainWindow):
         )
         self._plot_v.addItem(self._vol_item)
 
-        # Crosshair
+        # Crosshair — one set per subplot so lines extend into every panel
         cross_pen = pg.mkPen(_CROSS, width=1, style=Qt.PenStyle.DashLine)
-        self._vline = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
-        self._hline = pg.InfiniteLine(angle=0,  movable=False, pen=cross_pen)
+
+        # Main candle plot: vertical + horizontal lines
+        self._vline    = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._hline    = pg.InfiniteLine(angle=0,  movable=False, pen=cross_pen)
         self._vline.setVisible(False)
         self._hline.setVisible(False)
         self._plot_c.addItem(self._vline, ignoreBounds=True)
         self._plot_c.addItem(self._hline, ignoreBounds=True)
+
+        # Volume subplot: vertical line only (no meaningful horizontal)
+        self._vline_v  = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._vline_v.setVisible(False)
+        self._plot_v.addItem(self._vline_v, ignoreBounds=True)
+
+        # KD subplot: vertical line only
+        self._vline_kd = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._vline_kd.setVisible(False)
+        self._plot_kd.addItem(self._vline_kd, ignoreBounds=True)
+
+        # Profile panel: horizontal line that follows main chart price (Y)
+        self._profile_hline = pg.InfiniteLine(
+            angle=0, movable=False,
+            pen=pg.mkPen(_CROSS, width=1, style=Qt.PenStyle.DashLine),
+        )
+        self._profile_hline.setVisible(False)
 
         # Price label (follows crosshair Y, left edge)
         self._price_label = pg.TextItem(
@@ -912,6 +931,8 @@ class TradeViewerQt(QMainWindow):
         self._profile_widget.setMaximumWidth(200)
         self._profile_widget.getPlotItem().showGrid(x=True, y=False, alpha=0.15)
         self._profile_widget.getPlotItem().setMenuEnabled(False)
+        # Add the crosshair sync line here so it persists across pw.clear() calls
+        self._profile_widget.addItem(self._profile_hline)
         right_layout.addWidget(self._profile_widget, 2)
 
         splitter.addWidget(right)
@@ -1557,6 +1578,8 @@ class TradeViewerQt(QMainWindow):
             return
         pw     = self._profile_widget
         pw.clear()
+        # pw.clear() removes all items — restore the crosshair sync line
+        pw.addItem(self._profile_hline)
 
         range_val = self._get_range_val()
         klines    = apply_profile_range(self._klines, range_val)
@@ -1723,21 +1746,49 @@ class TradeViewerQt(QMainWindow):
 
     def _on_mouse_move(self, evt) -> None:
         pos = evt[0]
-        if not self._plot_c.sceneBoundingRect().contains(pos):
-            self._vline.setVisible(False)
-            self._hline.setVisible(False)
-            self._price_label.setVisible(False)
-            self._ohlcv_label.setVisible(False)
+        in_candle = self._plot_c.sceneBoundingRect().contains(pos)
+        in_vol    = self._plot_v.sceneBoundingRect().contains(pos)
+        in_kd     = self._plot_kd.sceneBoundingRect().contains(pos)
+        in_any    = in_candle or in_vol or in_kd
+
+        if not in_any:
+            for line in (self._vline, self._hline,
+                         self._vline_v, self._vline_kd,
+                         self._price_label, self._ohlcv_label,
+                         self._profile_hline):
+                line.setVisible(False)
             return
 
-        mouse_pt = self._plot_c.vb.mapSceneToView(pos)
-        x = mouse_pt.x()
-        y = mouse_pt.y()
+        # Map scene position to candle-plot data coordinates regardless of which
+        # sub-plot the cursor is in (all share the same X axis via setXLink).
+        if in_candle:
+            mouse_pt = self._plot_c.vb.mapSceneToView(pos)
+        elif in_vol:
+            mouse_pt = self._plot_v.vb.mapSceneToView(pos)
+        else:
+            mouse_pt = self._plot_kd.vb.mapSceneToView(pos)
 
-        self._vline.setPos(x)
-        self._hline.setPos(y)
-        self._vline.setVisible(True)
-        self._hline.setVisible(True)
+        x = mouse_pt.x()
+        # Y price is only meaningful from the candle plot
+        if in_candle:
+            y = mouse_pt.y()
+        else:
+            # Convert cursor scene-Y to candle-plot data-Y for the price label
+            candle_pt = self._plot_c.vb.mapSceneToView(pos)
+            y = candle_pt.y()
+
+        # Update all vertical lines (shared X axis)
+        self._vline.setPos(x);    self._vline.setVisible(True)
+        self._vline_v.setPos(x);  self._vline_v.setVisible(True)
+        if self._plot_kd.isVisible():
+            self._vline_kd.setPos(x); self._vline_kd.setVisible(True)
+
+        # Horizontal line only in candle plot
+        self._hline.setPos(y);  self._hline.setVisible(in_candle)
+
+        # Profile panel sync line
+        self._profile_hline.setPos(y)
+        self._profile_hline.setVisible(True)
 
         xlo, xhi = self._plot_c.vb.viewRange()[0]
         label_x  = xlo + (xhi - xlo) * 0.02  # ~2% from left edge
