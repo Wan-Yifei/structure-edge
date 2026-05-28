@@ -796,6 +796,12 @@ class TradeViewerQt(QMainWindow):
         load_btn.clicked.connect(self._trigger_fetch)
         tb1.addWidget(load_btn)
 
+        home_btn = QPushButton("⌂")
+        home_btn.setFixedWidth(28)
+        home_btn.setToolTip("Reset zoom/pan to last 150 bars  (Home key)")
+        home_btn.clicked.connect(self._on_home)
+        tb1.addWidget(home_btn)
+
         tb1.addSeparator()
 
         # Refresh (Live)
@@ -990,15 +996,38 @@ class TradeViewerQt(QMainWindow):
         self._plot_c.addItem(self._vline, ignoreBounds=True)
         self._plot_c.addItem(self._hline, ignoreBounds=True)
 
-        # Volume subplot: vertical line only (no meaningful horizontal)
+        # Volume subplot: vertical line + value readout label
         self._vline_v  = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
         self._vline_v.setVisible(False)
         self._plot_v.addItem(self._vline_v, ignoreBounds=True)
 
-        # KD subplot: vertical line only
+        self._vol_label = pg.TextItem(
+            text="", color=_GOLD,
+            fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+            anchor=(0.0, 0.5),
+        )
+        self._vol_label.setFont(QFont("Monospace", 7))
+        self._vol_label.setZValue(100)
+        self._vol_label.setVisible(False)
+        self._plot_v.addItem(self._vol_label, ignoreBounds=True)
+
+        # KD subplot: vertical line + value readout label
         self._vline_kd = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
         self._vline_kd.setVisible(False)
         self._plot_kd.addItem(self._vline_kd, ignoreBounds=True)
+
+        self._kd_label = pg.TextItem(
+            text="", color=_GOLD,
+            fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+            anchor=(0.0, 0.5),
+        )
+        self._kd_label.setFont(QFont("Monospace", 7))
+        self._kd_label.setZValue(100)
+        self._kd_label.setVisible(False)
+        self._plot_kd.addItem(self._kd_label, ignoreBounds=True)
+
+        # Stored KD width array for crosshair readout (populated by _draw_kd)
+        self._kd_width_arr: np.ndarray | None = None
 
         # Profile panel: horizontal line that follows main chart price (Y)
         self._profile_hline = pg.InfiniteLine(
@@ -1474,7 +1503,7 @@ class TradeViewerQt(QMainWindow):
                 x=[from_i, idx], y=[line_y, line_y],
                 pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DotLine),
             )
-            self._plot_c.addItem(h_line)
+            self._plot_c.addItem(h_line, ignoreBounds=True)
             self._bos_items.append(h_line)
 
             # ── 2a. Left vertical: from the left candle wick up to line_y ────
@@ -1485,7 +1514,7 @@ class TradeViewerQt(QMainWindow):
                 x=[from_i, from_i], y=[left_start, line_y],
                 pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
             )
-            self._plot_c.addItem(v_left)
+            self._plot_c.addItem(v_left, ignoreBounds=True)
             self._bos_items.append(v_left)
 
             # ── 2b. Right vertical: from the break candle wick up to line_y ──
@@ -1494,7 +1523,7 @@ class TradeViewerQt(QMainWindow):
                 x=[idx, idx], y=[right_start, line_y],
                 pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
             )
-            self._plot_c.addItem(v_right)
+            self._plot_c.addItem(v_right, ignoreBounds=True)
             self._bos_items.append(v_right)
 
             # ── 3. Label at the mid-point of the horizontal line ─────────────
@@ -1510,7 +1539,7 @@ class TradeViewerQt(QMainWindow):
             txt.setFont(QFont("Monospace", 8))
             txt.setZValue(50)
             txt.setPos(mid_x, line_y)
-            self._plot_c.addItem(txt)
+            self._plot_c.addItem(txt, ignoreBounds=True)
             self._bos_items.append(txt)
 
     def _clear_delta_items(self) -> None:
@@ -1552,7 +1581,7 @@ class TradeViewerQt(QMainWindow):
             )
             txt.setFont(QFont("Monospace", 8))
             txt.setPos(i, float(row["low"]) * 0.9997)
-            self._plot_c.addItem(txt)
+            self._plot_c.addItem(txt, ignoreBounds=True)
             self._delta_items.append(txt)
 
     def _clear_ema_items(self) -> None:
@@ -1573,7 +1602,7 @@ class TradeViewerQt(QMainWindow):
                 pen=pg.mkPen(color, width=1),
                 name=f"EMA{period}",
             )
-            self._plot_c.addItem(curve)
+            self._plot_c.addItem(curve, ignoreBounds=True)
             self._ema_items.append(curve)
 
             # Label at right end
@@ -1582,13 +1611,14 @@ class TradeViewerQt(QMainWindow):
             )
             lbl.setFont(QFont("Monospace", 6))
             lbl.setPos(len(klines) - 1, float(ema[-1]))
-            self._plot_c.addItem(lbl)
+            self._plot_c.addItem(lbl, ignoreBounds=True)
             self._ema_items.append(lbl)
 
     def _clear_kd_items(self) -> None:
         for item in self._kd_items:
             self._plot_kd.removeItem(item)
         self._kd_items.clear()
+        self._kd_width_arr = None
 
     def _draw_kd(self, klines: pd.DataFrame) -> None:
         """Draw KD channel width (momentum) in the KD subplot.
@@ -1606,6 +1636,9 @@ class TradeViewerQt(QMainWindow):
         n      = len(klines)
         width  = kd["width"].values[-n:]
         x      = np.arange(n)
+
+        # Store for crosshair readout in _on_mouse_move
+        self._kd_width_arr = width
 
         # Split into bull (>0) and bear (<0) segments for colouring
         bull_y = np.where(width >= 0, width, 0.0)
@@ -1707,7 +1740,7 @@ class TradeViewerQt(QMainWindow):
                 pg.PlotCurveItem(x=seg_x, y=seg_mid2),
                 brush=_qc(color, 35),
             )
-            self._plot_c.addItem(fill)
+            self._plot_c.addItem(fill, ignoreBounds=True)
             self._kd_band_items.append(fill)
 
         # Draw the two midlines on top of the fills
@@ -1719,8 +1752,8 @@ class TradeViewerQt(QMainWindow):
             x=x, y=mid2,
             pen=pg.mkPen("#42a5f5", width=1),
         )
-        self._plot_c.addItem(line_mid1)
-        self._plot_c.addItem(line_mid2)
+        self._plot_c.addItem(line_mid1, ignoreBounds=True)
+        self._plot_c.addItem(line_mid2, ignoreBounds=True)
         self._kd_band_items.extend([line_mid1, line_mid2])
 
     # ── Trade Review ─────────────────────────────────────────────────────────
@@ -2160,6 +2193,7 @@ class TradeViewerQt(QMainWindow):
             for line in (self._vline, self._hline,
                          self._vline_v, self._vline_kd,
                          self._price_label, self._ohlcv_label,
+                         self._vol_label, self._kd_label,
                          self._profile_hline, self._tick_profile_hline):
                 line.setVisible(False)
             return
@@ -2229,7 +2263,39 @@ class TradeViewerQt(QMainWindow):
 
             self._show_tick_profile(idx)
 
+            # ── Subplot readout labels ────────────────────────────────────────
+            # MAVOL: show volume of the hovered bar as a floating label on the
+            # left edge of the vol subplot, vertically at the bar's volume level.
+            if self._plot_v.isVisible():
+                vol_str = (f"{vol/1e6:.2f}M" if vol >= 1_000_000 else
+                           f"{vol/1e3:.0f}K"  if vol >= 1_000     else str(vol))
+                xlo_v, xhi_v = self._plot_v.vb.viewRange()[0]
+                lx_v = xlo_v + (xhi_v - xlo_v) * 0.01
+                self._vol_label.setPos(lx_v, float(vol))
+                self._vol_label.setText(vol_str)
+                self._vol_label.setVisible(True)
+            else:
+                self._vol_label.setVisible(False)
+
+            # KDV: show spread-width value of the hovered bar.
+            if self._plot_kd.isVisible() and self._kd_width_arr is not None:
+                kd_idx = max(0, min(idx, len(self._kd_width_arr) - 1))
+                kd_val = float(self._kd_width_arr[kd_idx])
+                kd_str = f"{kd_val:+.4f}"
+                xlo_kd, xhi_kd = self._plot_kd.vb.viewRange()[0]
+                lx_kd = xlo_kd + (xhi_kd - xlo_kd) * 0.01
+                self._kd_label.setPos(lx_kd, kd_val)
+                self._kd_label.setText(kd_str)
+                self._kd_label.setVisible(True)
+            else:
+                self._kd_label.setVisible(False)
+
     # ── X-axis tick labels ────────────────────────────────────────────────────
+
+    def _on_home(self) -> None:
+        """Reset zoom/pan to the initial view (last 150 bars)."""
+        if self._klines is not None and not self._klines.empty:
+            self._reset_view(len(self._klines))
 
     def _reset_view(self, n_bars: int, init_bars: int = 150) -> None:
         """Set the initial view to the last init_bars candles.
@@ -2241,6 +2307,14 @@ class TradeViewerQt(QMainWindow):
         """
         x_end   = n_bars - 1 + 3
         x_start = max(-1, n_bars - init_bars)
+
+        # Constrain scrolling/zoom so the user cannot wander off-data into
+        # empty space — prevents the "all candles squeezed into a sliver" issue
+        # that occurs when PyQtGraph's linked-axis zoom is overdriven.
+        self._plot_c.vb.setLimits(
+            xMin=-5, xMax=n_bars + 5,
+            minXRange=5, maxXRange=n_bars + 10,
+        )
 
         # Derive Y range from the actually visible bars
         if self._klines is not None and not self._klines.empty:
