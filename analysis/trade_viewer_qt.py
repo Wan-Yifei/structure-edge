@@ -433,8 +433,15 @@ class FvgItem(pg.GraphicsObject):
         bear_fill = _qc(_RED,   35)
         bull_pen  = QPen(_qc(_GREEN, 120), 0)
         bear_pen  = QPen(_qc(_RED,   120), 0)
+        # Filled FVGs: faint dashed outline only so the viewer can still show
+        # where they were without the zone dominating the chart.
+        bull_fill_f = _qc(_GREEN, 10)
+        bear_fill_f = _qc(_RED,   10)
 
         for g in self._gaps:
+            if g.get("filled", False):
+                continue   # skip — price already closed inside the zone
+
             x0   = float(g["idx"])
             top  = float(g["top"])
             bot  = float(g["bottom"])
@@ -603,11 +610,22 @@ class DataFetcher(QThread):
 
             fvg_gaps: list[dict] = []
             if ind.get("fvg"):
-                raw_fvgs = detect_fvg(warmup)
-                disp_off = warmup_n - min(warmup_n, len(df))
+                # require_displacement=True keeps only impulse-driven FVGs.
+                raw_fvgs = detect_fvg(warmup, require_displacement=True)
+
+                # Correct bar-index offset: warmup = df[-warmup_n:] (re-indexed
+                # from 0), so warmup index i maps to df index i + disp_off.
+                # The old formula (warmup_n - min(...)) always produced 0 —
+                # fixed to len(df) - warmup_n.
+                disp_off = len(df) - warmup_n   # 0 when all bars fit in warmup
+
+                # Only forward unfilled FVGs; filled zones have already been
+                # closed by price and are not actionable.
                 for g in raw_fvgs:
+                    if g.get("filled", False):
+                        continue
                     r = dict(g)
-                    r["idx"] = max(0, g["idx"] - disp_off)
+                    r["idx"] = max(0, g["idx"] + disp_off)
                     fvg_gaps.append(r)
 
             ob_blocks: list[dict] = []
