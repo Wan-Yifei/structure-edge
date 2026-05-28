@@ -832,11 +832,13 @@ class TradeViewerQt(QMainWindow):
             ("bos_choch", "BOS/CHoCH"),
             ("fvg",       "FVG"),
             ("ob",        "OB"),
-            ("kd",        "KDV"),   # KDV = KD spread-width subplot (not the KD band overlay)
+            ("kd_band",   "KD"),    # KD fast/slow midline ribbon on main chart
+            ("kd",        "KDV"),   # KDV = KD spread-width subplot
             ("ema",       "EMA"),
+            ("vol",       "MAVOL"), # Volume subplot toggle
         ]:
             cb = QCheckBox(label)
-            cb.setChecked(key in ("heatmap", "delta", "bos_choch"))
+            cb.setChecked(key in ("heatmap", "delta", "bos_choch", "vol"))
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
             tb2.addWidget(cb)
@@ -926,7 +928,7 @@ class TradeViewerQt(QMainWindow):
         self._chart_widget.nextRow()
         self._plot_v: pg.PlotItem = self._chart_widget.addPlot(row=1, col=0)
         self._plot_v.showGrid(x=True, y=True, alpha=0.10)
-        self._plot_v.setLabel("left", "Vol", **{"color": _FG})
+        self._plot_v.setLabel("left", "MAVOL", **{"color": _FG})
         self._plot_v.getAxis("left").setTextPen(_qc(_FG))
         self._plot_v.getAxis("bottom").setTextPen(_qc(_FG))
         self._plot_v.setMenuEnabled(False)
@@ -967,6 +969,7 @@ class TradeViewerQt(QMainWindow):
         self._delta_items:   list = []  # TextItem per candle
         self._ema_items:     list = []  # PlotCurveItem per EMA period
         self._kd_items:      list = []  # PlotCurveItem + fill for KD subplot
+        self._kd_band_items: list = []  # PlotCurveItem + fill for KD band on main chart
         self._trade_items:   list = []  # all trade review overlay items
 
         # Volume bars
@@ -1214,6 +1217,12 @@ class TradeViewerQt(QMainWindow):
             self._plot_kd.show()
         else:
             self._plot_kd.hide()
+        # Toggle Vol (MAVOL) subplot visibility
+        if self._ind("vol"):
+            self._plot_v.show()
+        else:
+            self._plot_v.hide()
+            self._vline_v.setVisible(False)
         # Toggle heatmap legend visibility
         show_hm = self._ind("heatmap")
         self._heatmap_legend.setVisible(show_hm)
@@ -1305,6 +1314,7 @@ class TradeViewerQt(QMainWindow):
         show_fvg    = self._ind("fvg")
         show_ob     = self._ind("ob")
         show_kd     = self._ind("kd")
+        show_kd_band = self._ind("kd_band")
         show_ema    = self._ind("ema")
         red_up      = self._ind("red_up")
         bull_col    = _RED   if red_up else _GREEN
@@ -1377,6 +1387,11 @@ class TradeViewerQt(QMainWindow):
         self._clear_ema_items()
         if show_ema:
             self._draw_ema(klines)
+
+        # KD band overlay on main chart (fast/slow midline ribbon)
+        self._clear_kd_band_items()
+        if show_kd_band:
+            self._draw_kd_band(klines)
 
         # KD subplot
         self._clear_kd_items()
@@ -1627,6 +1642,86 @@ class TradeViewerQt(QMainWindow):
         )
         self._plot_kd.addItem(spread_line)
         self._kd_items.append(spread_line)
+
+    def _clear_kd_band_items(self) -> None:
+        for item in self._kd_band_items:
+            self._plot_c.removeItem(item)
+        self._kd_band_items.clear()
+
+    def _draw_kd_band(self, klines: pd.DataFrame) -> None:
+        """Draw KD fast/slow midline ribbon on the main candlestick chart.
+
+        Visual layers (bottom-to-top):
+          1. Filled ribbon between mid1 and mid2 — gold alpha-30 when fast is
+             above slow (bullish spread), blue alpha-30 when fast is below.
+          2. mid1 line (gold, fast channel midpoint).
+          3. mid2 line (blue, slow channel midpoint).
+
+        The fill is split at crossover points so each segment gets the correct
+        directional color without bleed from the opposite side.
+        """
+        if len(klines) < _KD_SLOW + 5:
+            return
+
+        warmup = self._warmup if self._warmup is not None else klines
+        kd     = compute_kd(warmup, fast=_KD_FAST, slow=_KD_SLOW)
+
+        n    = len(klines)
+        x    = np.arange(n, dtype=float)
+        mid1 = kd["mid1"].values[-n:].astype(float)
+        mid2 = kd["mid2"].values[-n:].astype(float)
+
+        # Find zero-crossings of (mid1 - mid2) for directional fill segments.
+        # At each crossover the two lines intersect; interpolate the exact x so
+        # the fill polygon closes cleanly without a gap at the transition.
+        diff = mid1 - mid2
+        crosses: list[float] = []
+        for k in range(1, n):
+            if diff[k - 1] * diff[k] < 0:
+                # Linear interpolation of crossing x-position
+                t = diff[k - 1] / (diff[k - 1] - diff[k])
+                crosses.append(k - 1 + t)
+
+        # Build per-segment fill items between crossover boundaries
+        boundaries = [0.0] + crosses + [float(n - 1)]
+        for seg_idx in range(len(boundaries) - 1):
+            x0_f = boundaries[seg_idx]
+            x1_f = boundaries[seg_idx + 1]
+            i0   = int(np.floor(x0_f))
+            i1   = int(np.ceil(x1_f)) + 1
+            i1   = min(i1, n)
+            if i1 <= i0 + 1:
+                continue
+
+            seg_x    = x[i0:i1]
+            seg_mid1 = mid1[i0:i1]
+            seg_mid2 = mid2[i0:i1]
+
+            # Determine color from midpoint of this segment
+            mid_i   = (i0 + i1) // 2
+            is_bull = diff[min(mid_i, n - 1)] >= 0
+            color   = _UP if is_bull else _DOWN
+
+            fill = pg.FillBetweenItem(
+                pg.PlotCurveItem(x=seg_x, y=seg_mid1),
+                pg.PlotCurveItem(x=seg_x, y=seg_mid2),
+                brush=_qc(color, 35),
+            )
+            self._plot_c.addItem(fill)
+            self._kd_band_items.append(fill)
+
+        # Draw the two midlines on top of the fills
+        line_mid1 = pg.PlotCurveItem(
+            x=x, y=mid1,
+            pen=pg.mkPen(_UP, width=1),
+        )
+        line_mid2 = pg.PlotCurveItem(
+            x=x, y=mid2,
+            pen=pg.mkPen("#42a5f5", width=1),
+        )
+        self._plot_c.addItem(line_mid1)
+        self._plot_c.addItem(line_mid2)
+        self._kd_band_items.extend([line_mid1, line_mid2])
 
     # ── Trade Review ─────────────────────────────────────────────────────────
 
@@ -2055,8 +2150,10 @@ class TradeViewerQt(QMainWindow):
     def _on_mouse_move(self, pos) -> None:
         # pos is QPointF emitted directly by scene.sigMouseMoved
         in_candle = self._plot_c.sceneBoundingRect().contains(pos)
-        in_vol    = self._plot_v.sceneBoundingRect().contains(pos)
-        in_kd     = self._plot_kd.sceneBoundingRect().contains(pos)
+        in_vol    = (self._plot_v.isVisible()
+                     and self._plot_v.sceneBoundingRect().contains(pos))
+        in_kd     = (self._plot_kd.isVisible()
+                     and self._plot_kd.sceneBoundingRect().contains(pos))
         in_any    = in_candle or in_vol or in_kd
 
         if not in_any:
@@ -2087,7 +2184,8 @@ class TradeViewerQt(QMainWindow):
 
         # Update all vertical lines (shared X axis)
         self._vline.setPos(x);    self._vline.setVisible(True)
-        self._vline_v.setPos(x);  self._vline_v.setVisible(True)
+        if self._plot_v.isVisible():
+            self._vline_v.setPos(x);  self._vline_v.setVisible(True)
         if self._plot_kd.isVisible():
             self._vline_kd.setPos(x); self._vline_kd.setVisible(True)
 
@@ -2170,7 +2268,8 @@ class TradeViewerQt(QMainWindow):
             for i in range(0, n, step)
         ]
         self._plot_c.getAxis("bottom").setTicks([ticks])
-        self._plot_v.getAxis("bottom").setTicks([ticks])
+        if self._ind("vol"):
+            self._plot_v.getAxis("bottom").setTicks([ticks])
         if self._ind("kd"):
             self._plot_kd.getAxis("bottom").setTicks([ticks])
 

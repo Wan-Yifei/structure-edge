@@ -221,6 +221,13 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
     # available as future reference points in the new trend context.
     trend_started_at: int = 0
 
+    # SMC-derived trend direction, updated on each CHoCH emission.
+    # When None (no CHoCH seen yet) we fall back to local_t for classification.
+    # Using SMC-derived state rather than local_t avoids the lag problem where
+    # bars shortly after a CHoCH still carry the old trend label, causing
+    # bearish BOS signals to appear immediately after a bullish CHoCH.
+    smc_trend: str | None = None
+
     for i in range(2, len(swings)):
         sw = swings[i]
 
@@ -244,7 +251,14 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
                     break  # crossed a session boundary — stop scanning
                 if closes[j] > ref_high:
                     if j not in processed_break_bars:
-                        sig_type = "BOS" if local_t[j] == "up" else "CHoCH"
+                        # Bull break: BOS if in-trend, CHoCH if counter-trend.
+                        # Prefer smc_trend (updated by prior CHoCH) over local_t
+                        # so that bars immediately after a trend change are
+                        # classified correctly without MA lag.
+                        if smc_trend is not None:
+                            sig_type = "BOS" if smc_trend == "bull" else "CHoCH"
+                        else:
+                            sig_type = "BOS" if local_t[j] == "up" else "CHoCH"
                         emit = True
                         if filter_choch and sig_type == "CHoCH":
                             emit = (
@@ -262,6 +276,7 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
                             processed_break_bars.add(j)
                         if sig_type == "CHoCH":   # always reset context, even if filtered
                             trend_started_at = prev_high["idx"]
+                            smc_trend = "bull"
                     processed_highs.add(prev_high["idx"])
                     break
 
@@ -283,7 +298,11 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
                     break  # crossed a session boundary — stop scanning
                 if closes[j] < ref_low:
                     if j not in processed_break_bars:
-                        sig_type = "BOS" if local_t[j] == "down" else "CHoCH"
+                        # Bear break: BOS if in-trend, CHoCH if counter-trend.
+                        if smc_trend is not None:
+                            sig_type = "BOS" if smc_trend == "bear" else "CHoCH"
+                        else:
+                            sig_type = "BOS" if local_t[j] == "down" else "CHoCH"
                         emit = True
                         if filter_choch and sig_type == "CHoCH":
                             emit = (
@@ -301,6 +320,7 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
                             processed_break_bars.add(j)
                         if sig_type == "CHoCH":   # always reset context, even if filtered
                             trend_started_at = prev_low["idx"]
+                            smc_trend = "bear"
                     processed_lows.add(prev_low["idx"])
                     break
 
