@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sqlite3
 import sys
@@ -2133,14 +2134,30 @@ class TradeViewerQt(QMainWindow):
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
+        """Shut down timers, moomoo connection, and background threads."""
+        # Stop the live refresh timer and unsubscribe tickers.
         self._stop_live()
+
+        # Close the moomoo context BEFORE asking the fetcher thread to stop.
+        # Closing the socket unblocks any in-flight request_history_kline call
+        # inside DataFetcher.run(), allowing the thread to exit on its own.
         with self._ctx_lock:
             if self._ctx:
-                self._ctx.close()
+                try:
+                    self._ctx.close()
+                except Exception:
+                    pass
                 self._ctx = None
-        if self._fetcher:
+
+        # Ask the fetcher thread to exit; give it 2 s, then force-terminate.
+        # DataFetcher.run() has no event loop, so quit() alone is not enough —
+        # we need terminate() as a fallback if the thread is still blocked.
+        if self._fetcher and self._fetcher.isRunning():
             self._fetcher.quit()
-            self._fetcher.wait(1000)
+            if not self._fetcher.wait(2000):
+                self._fetcher.terminate()
+                self._fetcher.wait(500)
+
         event.accept()
 
 
@@ -2176,7 +2193,10 @@ def main() -> None:
     app.setApplicationName("Trade Viewer Qt")
     win  = TradeViewerQt(args)
     win.show()
-    sys.exit(app.exec())
+    ret = app.exec()
+    # os._exit() bypasses Python's thread-join shutdown so the process exits
+    # immediately even if the moomoo SDK left non-daemon threads running.
+    os._exit(ret)
 
 
 if __name__ == "__main__":
