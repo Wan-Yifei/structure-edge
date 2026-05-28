@@ -797,23 +797,24 @@ class TradeViewerQt(QMainWindow):
         self._conn_btn.clicked.connect(self._on_connect_toggle)
         tb1.addWidget(self._conn_btn)
 
-        # ── Row 2: indicators / session / range / trade review ────────────────
+        # ── Row 2: chart indicators │ session │ profile range │ theme ──────────
         self.addToolBarBreak()
         tb2 = QToolBar("Indicators", self)
         tb2.setMovable(False)
         tb2.setFloatable(False)
         self.addToolBar(tb2)
 
-        # Indicators
-        tb2.addWidget(_lbl("Indicators:"))
         self._ind_checks: dict[str, QCheckBox | QRadioButton] = {}
+
+        # Chart overlays / subplots
+        tb2.addWidget(_lbl("Indicators:"))
         for key, label in [
             ("heatmap",   "Heatmap"),
             ("delta",     "Δ Delta"),
             ("bos_choch", "BOS/CHoCH"),
             ("fvg",       "FVG"),
             ("ob",        "OB"),
-            ("kd",        "KD"),
+            ("kd",        "KDV"),   # KDV = KD spread-width subplot (not the KD band overlay)
             ("ema",       "EMA"),
         ]:
             cb = QCheckBox(label)
@@ -838,7 +839,7 @@ class TradeViewerQt(QMainWindow):
 
         tb2.addSeparator()
 
-        # Profile range
+        # Profile date range
         tb2.addWidget(_lbl("Range:"))
         self._range_group = QButtonGroup(self)
         for val, label in [("1d", "1D"), ("3d", "3D"), ("7d", "1W")]:
@@ -853,27 +854,37 @@ class TradeViewerQt(QMainWindow):
 
         # Color scheme toggle
         cb_red_up = QCheckBox("Red Up")
-        cb_red_up.setChecked(False)   # default: Western green-up / red-down
-        cb_red_up.setToolTip("Checked = red rises, green falls (CN convention)\nUnchecked = green rises, red falls (Western convention)")
+        cb_red_up.setChecked(False)
+        cb_red_up.setToolTip(
+            "Checked = red rises, green falls (CN convention)\n"
+            "Unchecked = green rises, red falls (Western convention)")
         cb_red_up.stateChanged.connect(self._on_indicator_toggle)
         self._ind_checks["red_up"] = cb_red_up
         tb2.addWidget(cb_red_up)
 
-        tb2.addSeparator()
+        # ── Row 3: trade review (separated to avoid crowding Row 2) ──────────
+        self.addToolBarBreak()
+        tb3 = QToolBar("Trade Review", self)
+        tb3.setMovable(False)
+        tb3.setFloatable(False)
+        self.addToolBar(tb3)
 
-        # Trade Review input
-        tb2.addWidget(_lbl("Trade ID:"))
+        tb3.addWidget(_lbl("Trade ID:"))
         self._trade_id_edit = QLineEdit()
-        self._trade_id_edit.setPlaceholderText("trade UUID…")
-        self._trade_id_edit.setFixedWidth(200)
+        self._trade_id_edit.setPlaceholderText("trade UUID — enter or paste, then press Enter or Review")
+        self._trade_id_edit.setMinimumWidth(340)
+        self._trade_id_edit.setMaximumWidth(520)
         self._trade_id_edit.returnPressed.connect(self._load_trade_review)
-        tb2.addWidget(self._trade_id_edit)
+        tb3.addWidget(self._trade_id_edit)
+        tb3.addSeparator()
         review_btn = QPushButton("Review")
+        review_btn.setToolTip("Load trade entry/exit markers onto the chart")
         review_btn.clicked.connect(self._load_trade_review)
-        tb2.addWidget(review_btn)
+        tb3.addWidget(review_btn)
         clear_btn = QPushButton("Clear")
+        clear_btn.setToolTip("Remove all trade review markers")
         clear_btn.clicked.connect(self._clear_trade_review)
-        tb2.addWidget(clear_btn)
+        tb3.addWidget(clear_btn)
 
     # ── Central widget: chart + profiles ─────────────────────────────────────
 
@@ -907,7 +918,7 @@ class TradeViewerQt(QMainWindow):
         self._chart_widget.nextRow()
         self._plot_kd: pg.PlotItem = self._chart_widget.addPlot(row=2, col=0)
         self._plot_kd.showGrid(x=True, y=True, alpha=0.10)
-        self._plot_kd.setLabel("left", "KD", **{"color": _FG})
+        self._plot_kd.setLabel("left", "KDV", **{"color": _FG})
         self._plot_kd.getAxis("left").setTextPen(_qc(_FG))
         self._plot_kd.getAxis("bottom").setTextPen(_qc(_FG))
         self._plot_kd.setMenuEnabled(False)
@@ -1943,26 +1954,36 @@ class TradeViewerQt(QMainWindow):
 
         buys_arr  = np.array(buys,  dtype=float)
         sells_arr = np.array(sells, dtype=float)
+
+        # Log-transform volumes: log1p spreads out the range so small bars
+        # remain visible alongside high-volume bins.  Actual delta is still
+        # computed from the raw values and shown as a label.
+        buys_log  = np.log1p(buys_arr)
+        sells_log = np.log1p(sells_arr)
         zeros     = np.zeros(len(prices))
 
-        # Buys extend rightward: x0=0 → x1=buy_volume
+        # Buys extend rightward: x0=0 → x1=log(buy+1)
         buy_bar = pg.BarGraphItem(
-            x0=zeros, x1=buys_arr,
+            x0=zeros, x1=buys_log,
             y=prices, height=bin_h,
             brush=_qc(_GREEN, 180), pen=pg.mkPen(None),
         )
-        # Sells extend leftward: x0=-sell_volume → x1=0
+        # Sells extend leftward: x0=-log(sell+1) → x1=0
         sell_bar = pg.BarGraphItem(
-            x0=-sells_arr, x1=zeros,
+            x0=-sells_log, x1=zeros,
             y=prices, height=bin_h,
             brush=_qc(_RED, 180), pen=pg.mkPen(None),
         )
         pw.addItem(buy_bar)
         pw.addItem(sell_bar)
+
+        # X-axis label makes the log scale explicit
+        pw.getPlotItem().setLabel(
+            "bottom", "log(vol+1)", **{"color": _GREY, "size": "6pt"})
         pw.getPlotItem().setLabel(
             "top", str(row["time_key"])[:16], **{"color": _FG, "size": "7pt"})
 
-        # Delta total as a label
+        # Delta label shows actual (non-log) values
         total_buy  = sum(buys)
         total_sell = sum(sells)
         delta      = total_buy - total_sell
@@ -1975,26 +1996,30 @@ class TradeViewerQt(QMainWindow):
         )
         dlbl.setFont(QFont("Monospace", 7))
         if prices:
-            dlbl.setPos(float(buys_arr.max()) / 2 if buys_arr.size else 0.0,
+            dlbl.setPos(float(buys_log.max()) / 2 if buys_log.size else 0.0,
                         float(max(prices)))
         pw.addItem(dlbl)
 
-        # Sync Y range to main chart so tick profile always shows the same
-        # price range the user is looking at.
-        ylo, yhi = self._plot_c.vb.viewRange()[1]
-        pw.setYRange(ylo, yhi, padding=0)
+        # Y range: fit to the candle's own price range so the bars fill the
+        # panel height.  Main-chart Y-sync (via sigRangeChanged) is intentionally
+        # NOT applied here — the full main-chart range would compress the bars
+        # into an invisible sliver when viewing individual candles.
+        candle_lo = float(row.get("low",  min(prices)))
+        candle_hi = float(row.get("high", max(prices)))
+        pad = max((candle_hi - candle_lo) * 0.08, bin_h * 2)
+        pw.setYRange(candle_lo - pad, candle_hi + pad, padding=0)
 
     # ── Tick profile Y range sync ─────────────────────────────────────────────
 
     def _on_main_range_changed(self, _vb, ranges) -> None:
-        """Keep tick profile Y axis in sync with main chart Y range.
+        """Called by _plot_c.vb.sigRangeChanged(ViewBox, [[xlo,xhi],[ylo,yhi]]).
 
-        Called by _plot_c.vb.sigRangeChanged(ViewBox, [[xlo,xhi],[ylo,yhi]]).
-        Updating the tick profile Y range here means any zoom/pan on the main
-        chart is immediately reflected in the tick profile panel.
+        The tick profile Y range is set per-candle in _show_tick_profile() to
+        fit the candle's own [low, high] range.  We do NOT force-sync it here
+        because the full main-chart view range (hundreds of price points) would
+        compress single-candle bars into an invisible sliver.
+        Keeping this method as a hook for future use.
         """
-        ylo, yhi = ranges[1]
-        self._tick_profile_widget.setYRange(ylo, yhi, padding=0)
 
     def _pin_heatmap_legend(self, *_) -> None:
         """Re-anchor the heatmap legend to the top-left of the candle view."""
