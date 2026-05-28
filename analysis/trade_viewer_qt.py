@@ -339,8 +339,8 @@ class CandlestickItem(pg.GraphicsObject):
         reads clearly over the faint base.
 
         Color convention (independent of red-up toggle):
-            green (_GREEN) = buyer-dominant bin
-            red   (_RED)   = seller-dominant bin
+            gold   (_UP)   = buyer-dominant bin  (#ffa005)
+            purple (_DOWN) = seller-dominant bin (#ab47bc)
         Alpha = f(volume density, directional imbalance): 60 … 230.
         Wick-range bins are skipped entirely for a clean look.
         """
@@ -383,7 +383,7 @@ class CandlestickItem(pg.GraphicsObject):
             total_dir = buys[b] + sells[b]
             if total_dir > 0:
                 ratio = (buys[b] - sells[b]) / total_dir   # -1 (pure sell)..+1 (pure buy)
-                col   = QColor(_GREEN if ratio >= 0 else _RED)
+                col   = QColor(_UP if ratio >= 0 else _DOWN)   # gold / purple
                 # Alpha: baseline 60, up to 230; scales with volume density AND
                 # directional imbalance so pure-direction, high-volume bins are opaque.
                 imbalance = abs(ratio)                      # 0..1
@@ -1031,6 +1031,27 @@ class TradeViewerQt(QMainWindow):
         # Sync tick profile Y range whenever the main candle chart is panned/zoomed
         self._plot_c.vb.sigRangeChanged.connect(self._on_main_range_changed)
 
+        # ── Heatmap legend (top-left of candle chart) ─────────────────────────
+        # Two small colored squares + labels, pinned to the top-left corner.
+        # Visibility is toggled by the Heatmap checkbox.
+        self._heatmap_legend = pg.TextItem(
+            html=(
+                f'<span style="color:{_UP}; font-family:Monospace; font-size:9pt;">'
+                f'&#9632; Buy</span>'
+                f'<span style="color:{_FG}; font-family:Monospace; font-size:9pt;">'
+                f'&nbsp;&nbsp;</span>'
+                f'<span style="color:{_DOWN}; font-family:Monospace; font-size:9pt;">'
+                f'&#9632; Sell</span>'
+            ),
+            anchor=(0.0, 0.0),   # top-left of text at position
+        )
+        self._heatmap_legend.setZValue(60)
+        self._heatmap_legend.setVisible(False)   # shown when heatmap checkbox on
+        self._plot_c.addItem(self._heatmap_legend, ignoreBounds=True)
+
+        # Pin legend to top-left whenever view range changes
+        self._plot_c.vb.sigRangeChanged.connect(self._pin_heatmap_legend)
+
         # Session vol profile (bottom-right)
         self._profile_widget = pg.PlotWidget()
         self._profile_widget.setBackground(_BG)
@@ -1163,6 +1184,11 @@ class TradeViewerQt(QMainWindow):
             self._plot_kd.show()
         else:
             self._plot_kd.hide()
+        # Toggle heatmap legend visibility
+        show_hm = self._ind("heatmap")
+        self._heatmap_legend.setVisible(show_hm)
+        if show_hm:
+            self._pin_heatmap_legend()
         self._render(self._klines, self._ticks)
 
     def _on_session_toggle(self) -> None:
@@ -1275,6 +1301,11 @@ class TradeViewerQt(QMainWindow):
         # _show_tick_profile (which reads self._ticks) also sees live data.
         self._ticks = buckets if buckets else self._ticks
 
+        # Heatmap legend: show only when heatmap is active
+        self._heatmap_legend.setVisible(show_hm)
+        if show_hm:
+            self._pin_heatmap_legend()
+
         # Candlesticks
         self._candle_item.set_data(klines, buckets if show_hm else None,
                                    cm, show_heatmap=show_hm, red_up=red_up)
@@ -1377,43 +1408,63 @@ class TradeViewerQt(QMainWindow):
             from_i  = sig.get("from_idx", max(0, idx - 5))
             is_bull = sig["direction"] == "bull"
 
-            # Candle wick extreme at the break bar
-            if highs is not None and 0 <= idx < n:
-                wick = float(highs[idx]) if is_bull else float(lows[idx])
+            # Wick extremes at both endpoints (clamp to valid range)
+            from_i_c = max(0, min(from_i, n - 1))
+            idx_c    = max(0, min(idx,    n - 1))
+            if highs is not None:
+                wick_from = float(highs[from_i_c] if is_bull else lows[from_i_c])
+                wick_idx  = float(highs[idx_c]    if is_bull else lows[idx_c])
             else:
-                wick = price * (1.003 if is_bull else 0.997)
+                wick_from = price * (1.002 if is_bull else 0.998)
+                wick_idx  = price * (1.003 if is_bull else 0.997)
 
-            # Offset above/below the wick: 0.5 % of price
-            offset    = wick * 0.005
-            label_y   = wick + offset if is_bull else wick - offset
+            # Horizontal line is raised above BOTH candles.
+            # offset = 0.5 % of the higher wick so scaling is price-invariant.
+            extreme   = max(wick_from, wick_idx) if is_bull else min(wick_from, wick_idx)
+            offset    = abs(extreme) * 0.005
+            line_y    = extreme + offset if is_bull else extreme - offset
 
-            # ── 1. Horizontal dotted line: swing level → break bar ──────────
+            # ── 1. Horizontal dotted line at raised level ────────────────────
             h_line = pg.PlotCurveItem(
-                x=[from_i, idx], y=[price, price],
+                x=[from_i, idx], y=[line_y, line_y],
                 pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DotLine),
             )
             self._plot_c.addItem(h_line)
             self._bos_items.append(h_line)
 
-            # ── 2. Vertical dashed line: wick → label ───────────────────────
-            v_line = pg.PlotCurveItem(
-                x=[idx, idx], y=[wick, label_y],
+            # ── 2a. Left vertical: from the left candle wick up to line_y ────
+            # Start slightly beyond the wick so it doesn't overlap the wick tip.
+            gap = offset * 0.4
+            left_start  = wick_from + gap if is_bull else wick_from - gap
+            v_left = pg.PlotCurveItem(
+                x=[from_i, from_i], y=[left_start, line_y],
                 pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
             )
-            self._plot_c.addItem(v_line)
-            self._bos_items.append(v_line)
+            self._plot_c.addItem(v_left)
+            self._bos_items.append(v_left)
 
-            # ── 3. Label: floats above (bull) or below (bear) the wick ──────
-            # anchor y=1.0: bottom of text at label_y → text grows upward (bull)
-            # anchor y=0.0: top of text at label_y   → text grows downward (bear)
+            # ── 2b. Right vertical: from the break candle wick up to line_y ──
+            right_start = wick_idx + gap if is_bull else wick_idx - gap
+            v_right = pg.PlotCurveItem(
+                x=[idx, idx], y=[right_start, line_y],
+                pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
+            )
+            self._plot_c.addItem(v_right)
+            self._bos_items.append(v_right)
+
+            # ── 3. Label at the mid-point of the horizontal line ─────────────
+            # anchor y=1.0: bottom of text at line_y → text grows upward (bull)
+            # anchor y=0.0: top of text at line_y   → text grows downward (bear)
+            # White text on colored background for maximum contrast.
+            mid_x = (from_i + idx) / 2
             txt = pg.TextItem(
-                text=label, color=color,
-                fill=pg.mkBrush(_qc(color, 140)),
+                text=label, color="#ffffff",
+                fill=pg.mkBrush(_qc(color, 160)),
                 anchor=(0.5, 1.0 if is_bull else 0.0),
             )
             txt.setFont(QFont("Monospace", 8))
             txt.setZValue(50)
-            txt.setPos(idx, label_y)
+            txt.setPos(mid_x, line_y)
             self._plot_c.addItem(txt)
             self._bos_items.append(txt)
 
@@ -1943,6 +1994,17 @@ class TradeViewerQt(QMainWindow):
         """
         ylo, yhi = ranges[1]
         self._tick_profile_widget.setYRange(ylo, yhi, padding=0)
+
+    def _pin_heatmap_legend(self, *_) -> None:
+        """Re-anchor the heatmap legend to the top-left of the candle view."""
+        if not self._heatmap_legend.isVisible():
+            return
+        xlo, xhi = self._plot_c.vb.viewRange()[0]
+        _,   yhi = self._plot_c.vb.viewRange()[1]
+        x_pad    = (xhi - xlo) * 0.01   # 1% from left
+        y_pad    = (self._plot_c.vb.viewRange()[1][1]
+                    - self._plot_c.vb.viewRange()[1][0]) * 0.015
+        self._heatmap_legend.setPos(xlo + x_pad, yhi - y_pad)
 
     # ── Crosshair + tooltip ───────────────────────────────────────────────────
 
