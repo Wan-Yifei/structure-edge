@@ -37,3 +37,8 @@ candle.png
 
 # Runtime / scheduler logs in db/
 db/scheduler.log
+
+# Docker — user secrets and local volume dirs (never commit)
+docker/backtest.env
+docker_db/
+backtest_results/

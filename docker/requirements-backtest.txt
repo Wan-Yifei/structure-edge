@@ -1,0 +1,11 @@
+# Backtest-only dependencies — no GUI (PyQt6 / pyqtgraph / pystray / jupyter)
+# Used by the Docker image so headless Linux builds succeed.
+duckdb>=1.5.2
+numpy>=2.4.5
+pandas>=3.0.3
+tqdm>=4.67.3
+plotly>=6.7.0
+matplotlib>=3.10.9
+pillow>=12.2.0
+moomoo-api>=10.5.6508
+ta
