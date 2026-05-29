@@ -259,12 +259,18 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
             # the actual wick, causing a premature BOS before the true structural break.
             ref_high = float(highs_ar[prev_high["idx"]])
             ref_date = _dates[prev_high["idx"]] if _dates else None
-            # Stop scanning once the NEXT swing high forms: that high becomes the
-            # new reference in the outer loop, preventing BOS lines from visually
-            # crossing over intermediate high points that should update the reference.
+            # Include the current swing bar itself in the scan: if sw.close already
+            # exceeds ref_high (the previous swing's wick), the structural level was
+            # broken by this very swing and the BOS should fire here — not at some
+            # later, lower bar that the algorithm would otherwise reach by scanning
+            # forward from sw.idx+1.
+            #
+            # Also stop scanning once the NEXT swing high forms (it will become the
+            # new reference), preventing BOS lines from crossing over intermediate
+            # high points that should update the reference.
             next_high = next((s for s in swings[i + 1:] if s["kind"] == "high"), None)
             scan_end_h = next_high["idx"] if next_high is not None else n
-            for j in range(sw["idx"] + 1, scan_end_h):
+            for j in range(sw["idx"], scan_end_h):
                 if max_span_bars is not None and j - prev_high["idx"] > max_span_bars:
                     break
                 if ref_date is not None and _dates[j] != ref_date:
@@ -311,10 +317,10 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
             # Use wick low as break threshold — symmetric with bull case.
             ref_low = float(lows_ar[prev_low["idx"]])
             ref_date = _dates[prev_low["idx"]] if _dates else None
-            # Symmetric stop: scan only until the next swing low forms.
+            # Symmetric: include the swing bar itself, stop at next swing low.
             next_low = next((s for s in swings[i + 1:] if s["kind"] == "low"), None)
             scan_end_l = next_low["idx"] if next_low is not None else n
-            for j in range(sw["idx"] + 1, scan_end_l):
+            for j in range(sw["idx"], scan_end_l):
                 if max_span_bars is not None and j - prev_low["idx"] > max_span_bars:
                     break
                 if ref_date is not None and _dates[j] != ref_date:
