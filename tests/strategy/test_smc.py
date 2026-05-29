@@ -164,32 +164,61 @@ class TestDetermineTrend:
     def test_none_when_no_signals(self):
         assert determine_trend([]) is None
 
-    def test_bull_after_choch(self):
+    def test_choch_alone_not_enough(self):
+        # CHoCH resets the counter to 0; at least one BOS must follow before
+        # the trend is confirmed (even with min_consecutive=1).
         sigs = [{"type": "CHoCH", "direction": "bull"}]
+        assert determine_trend(sigs, min_consecutive=1) is None
+
+    def test_bull_confirmed_after_choch_plus_bos(self):
+        sigs = [
+            {"type": "CHoCH", "direction": "bull"},
+            {"type": "BOS",   "direction": "bull"},
+        ]
         assert determine_trend(sigs, min_consecutive=1) == "bull"
 
-    def test_bear_after_choch(self):
-        sigs = [{"type": "CHoCH", "direction": "bear"}]
+    def test_bear_confirmed_after_choch_plus_bos(self):
+        sigs = [
+            {"type": "CHoCH", "direction": "bear"},
+            {"type": "BOS",   "direction": "bear"},
+        ]
         assert determine_trend(sigs, min_consecutive=1) == "bear"
 
     def test_none_when_below_min_consecutive(self):
-        sigs = [{"type": "CHoCH", "direction": "bull"}]
+        # CHoCH + 1 BOS → consecutive=1; needs 2 → still None
+        sigs = [
+            {"type": "CHoCH", "direction": "bull"},
+            {"type": "BOS",   "direction": "bull"},
+        ]
         assert determine_trend(sigs, min_consecutive=2) is None
 
     def test_consecutive_bos_counted(self):
+        # CHoCH + 2 BOS → consecutive=2 >= 2 → confirmed
         sigs = [
             {"type": "CHoCH", "direction": "bull"},
+            {"type": "BOS",   "direction": "bull"},
             {"type": "BOS",   "direction": "bull"},
         ]
         assert determine_trend(sigs, min_consecutive=2) == "bull"
 
     def test_choch_resets_direction(self):
+        # Bear CHoCH resets consecutive to 0; bear BOS confirms it → bear trend.
+        sigs = [
+            {"type": "CHoCH", "direction": "bull"},
+            {"type": "BOS",   "direction": "bull"},
+            {"type": "CHoCH", "direction": "bear"},
+            {"type": "BOS",   "direction": "bear"},
+        ]
+        assert determine_trend(sigs, min_consecutive=1) == "bear"
+
+    def test_choch_without_bos_after_stays_unconfirmed(self):
+        # A bear CHoCH at the end without a following BOS should yield None.
         sigs = [
             {"type": "CHoCH", "direction": "bull"},
             {"type": "BOS",   "direction": "bull"},
             {"type": "CHoCH", "direction": "bear"},
         ]
-        assert determine_trend(sigs, min_consecutive=1) == "bear"
+        assert determine_trend(sigs, min_consecutive=1) is None
 
     def test_unanimous_bos_fallback(self):
         sigs = [
@@ -219,14 +248,15 @@ class TestDetectFvg:
         )
 
     def test_detects_bull_fvg(self):
-        gaps = detect_fvg(self._bull_fvg_df(), min_gap_pct=0.0)
+        # require_displacement=False: test pure gap geometry without displacement filter
+        gaps = detect_fvg(self._bull_fvg_df(), min_gap_pct=0.0, require_displacement=False)
         bulls = [g for g in gaps if g["direction"] == "bull"]
         assert len(bulls) == 1
         assert bulls[0]["bottom"] == pytest.approx(10.0)
         assert bulls[0]["top"]    == pytest.approx(12.0)
 
     def test_detects_bear_fvg(self):
-        gaps = detect_fvg(self._bear_fvg_df(), min_gap_pct=0.0)
+        gaps = detect_fvg(self._bear_fvg_df(), min_gap_pct=0.0, require_displacement=False)
         bears = [g for g in gaps if g["direction"] == "bear"]
         assert len(bears) == 1
 
@@ -237,12 +267,12 @@ class TestDetectFvg:
             highs=[10, 11, 13, 12],
             lows=[9,  10, 12, 10],
         )
-        gaps = detect_fvg(df, min_gap_pct=0.0)
+        gaps = detect_fvg(df, min_gap_pct=0.0, require_displacement=False)
         bulls = [g for g in gaps if g["direction"] == "bull"]
         assert bulls[0]["filled"] is True
 
     def test_min_gap_filter(self):
-        gaps = detect_fvg(self._bull_fvg_df(), min_gap_pct=0.99)
+        gaps = detect_fvg(self._bull_fvg_df(), min_gap_pct=0.99, require_displacement=False)
         assert gaps == []
 
     def test_fields_present(self):

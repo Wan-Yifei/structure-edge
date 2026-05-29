@@ -37,9 +37,24 @@ def _session_key(time_key: str) -> str:
 def determine_trend(bos_signals: list[dict], min_consecutive: int = 1) -> str | None:
     """Return current trend direction from a BOS/CHoCH signal list.
 
-    Iterates signals chronologically. Each CHoCH resets the trend and starts
-    a new consecutive count. Returns None when fewer than min_consecutive BOS
-    confirmations have occurred since the last CHoCH (or overall if none).
+    Iterates signals chronologically.  Each CHoCH resets the trend direction
+    and clears the BOS confirmation counter (consecutive = 0).  Only *BOS*
+    signals in the same direction increment the counter; returns a confirmed
+    trend only once consecutive >= min_consecutive.
+
+    This means a CHoCH alone is never sufficient to confirm a trend — at least
+    one BOS in the new direction must follow before the trend is returned.
+    This prevents a single displacement bar in a pullback from immediately
+    flipping the trend label without structural confirmation.
+
+    Args:
+        bos_signals:     Chronologically ordered list of BOS/CHoCH dicts
+                         (as returned by detect_bos_choch).
+        min_consecutive: Minimum number of BOS signals *after* the last CHoCH
+                         required to confirm the trend (default 1).
+
+    Returns:
+        Confirmed trend direction ('bull' | 'bear'), or None when unconfirmed.
     """
     if not bos_signals:
         return None
@@ -50,7 +65,7 @@ def determine_trend(bos_signals: list[dict], min_consecutive: int = 1) -> str | 
     for sig in bos_signals:
         if sig["type"] == "CHoCH":
             current_trend = sig["direction"]
-            consecutive = 1
+            consecutive = 0   # CHoCH resets; BOS confirmation still needed
         elif sig["type"] == "BOS" and sig["direction"] == current_trend:
             consecutive += 1
 
@@ -244,7 +259,12 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
             # the actual wick, causing a premature BOS before the true structural break.
             ref_high = float(highs_ar[prev_high["idx"]])
             ref_date = _dates[prev_high["idx"]] if _dates else None
-            for j in range(sw["idx"] + 1, n):
+            # Stop scanning once the NEXT swing high forms: that high becomes the
+            # new reference in the outer loop, preventing BOS lines from visually
+            # crossing over intermediate high points that should update the reference.
+            next_high = next((s for s in swings[i + 1:] if s["kind"] == "high"), None)
+            scan_end_h = next_high["idx"] if next_high is not None else n
+            for j in range(sw["idx"] + 1, scan_end_h):
                 if max_span_bars is not None and j - prev_high["idx"] > max_span_bars:
                     break
                 if ref_date is not None and _dates[j] != ref_date:
@@ -291,7 +311,10 @@ def detect_bos_choch(klines: pd.DataFrame, lookback: int = 2,
             # Use wick low as break threshold — symmetric with bull case.
             ref_low = float(lows_ar[prev_low["idx"]])
             ref_date = _dates[prev_low["idx"]] if _dates else None
-            for j in range(sw["idx"] + 1, n):
+            # Symmetric stop: scan only until the next swing low forms.
+            next_low = next((s for s in swings[i + 1:] if s["kind"] == "low"), None)
+            scan_end_l = next_low["idx"] if next_low is not None else n
+            for j in range(sw["idx"] + 1, scan_end_l):
                 if max_span_bars is not None and j - prev_low["idx"] > max_span_bars:
                     break
                 if ref_date is not None and _dates[j] != ref_date:
