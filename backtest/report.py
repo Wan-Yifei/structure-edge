@@ -71,9 +71,15 @@ def _to_html(fig: go.Figure) -> str:
 
 # ── 1. KPI cards ──────────────────────────────────────────────────────────────
 
+_MIN_TRADES_REPORT = 10   # minimum trades for a combo to appear in ranking sections
+
 def _kpi_section(df: pd.DataFrame) -> str:
-    active = df[df["n_trades"] > 0]
-    best = active.loc[active["profit_factor"].idxmax()] if not active.empty else None
+    active = df[df["n_trades"] >= _MIN_TRADES_REPORT]
+    if active.empty:
+        active = df[df["n_trades"] > 0]
+    # Cap inf PF so idxmax works correctly
+    pf = active["profit_factor"].replace(float("inf"), -1)   # exclude inf from "best"
+    best = active.loc[pf.idxmax()] if not active.empty else None
 
     def card(label: str, value: str, colour: str = _FG) -> str:
         return (
@@ -121,8 +127,16 @@ def _kpi_section(df: pd.DataFrame) -> str:
 
 _INIT_CAPITAL = 10_000.0
 
-def _top_table(df: pd.DataFrame, top_n: int = 20) -> str:
-    active = df[df["n_trades"] > 0].copy()
+def _top_table(df: pd.DataFrame, top_n: int = 20, min_trades: int = 10) -> str:
+    active = df[df["n_trades"] >= min_trades].copy()
+    if active.empty:
+        active = df[df["n_trades"] > 0].copy()   # fallback if nothing passes threshold
+    # Replace inf PF with a finite cap so nlargest is stable
+    active = active.copy()
+    active["profit_factor"] = active["profit_factor"].replace(
+        [float("inf")], active["profit_factor"][active["profit_factor"] != float("inf")].max() * 1.01
+        if (active["profit_factor"] != float("inf")).any() else 999.0
+    )
     top = active.nlargest(top_n, "profit_factor")
     cols = ["trend_tf", "entry_tf", "n_trades", "win_rate", "total_r", "final_value",
             "avg_r", "profit_factor", "max_drawdown_r", "sharpe", "sortino",
@@ -182,7 +196,10 @@ def _top_table(df: pd.DataFrame, top_n: int = 20) -> str:
 
 def _equity_fig(df: pd.DataFrame, top_n: int = 10) -> go.Figure:
     """Cumulative R bar chart (no trade-level data available from CSV)."""
-    active = df[df["n_trades"] > 0].copy()
+    active = df[df["n_trades"] >= _MIN_TRADES_REPORT].copy()
+    if active.empty:
+        active = df[df["n_trades"] > 0].copy()
+    active["profit_factor"] = active["profit_factor"].replace(float("inf"), -1)
     top = active.nlargest(top_n, "profit_factor").reset_index(drop=True)
 
     fig = go.Figure()
@@ -421,10 +438,13 @@ def _direction_fig(df: pd.DataFrame, top_n: int = 20) -> go.Figure:
     if not need.issubset(df.columns):
         return go.Figure()
 
-    active = df[df["n_trades"] > 0].copy()
+    active = df[df["n_trades"] >= _MIN_TRADES_REPORT].copy()
+    if active.empty:
+        active = df[df["n_trades"] > 0].copy()
     if active.empty:
         return go.Figure()
 
+    active["profit_factor"] = active["profit_factor"].replace(float("inf"), -1)
     top = active.nlargest(top_n, "profit_factor").reset_index(drop=True)
     labels = [
         f"#{i+1} {r['trend_tf']}/{r['entry_tf']} PF={r['profit_factor']:.2f} T={int(r['n_trades'])}"

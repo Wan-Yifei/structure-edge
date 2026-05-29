@@ -15,6 +15,7 @@ import pandas as pd
 def detect_fvg(
     klines: pd.DataFrame,
     min_gap_pct: float = 0.001,
+    require_displacement: bool = True,
 ) -> list[dict]:
     """Return list of Fair Value Gaps.
 
@@ -23,8 +24,16 @@ def detect_fvg(
          idx: int,   # index of the third candle (where gap is confirmed)
          filled: bool}
 
-    *min_gap_pct* filters out noise: gap must be at least this fraction of
-    the middle candle's price.
+    Parameters
+    ----------
+    min_gap_pct:
+        Minimum gap size as a fraction of the middle candle close price.
+        Filters out micro-gaps from spread noise (default 0.1%).
+    require_displacement:
+        When True (default) the middle candle must pass the displacement
+        test (large range + strong body vs. recent ATR).  This eliminates
+        the vast majority of trivial 3-candle gaps and keeps only
+        structurally meaningful FVGs driven by an impulse move.
     """
     highs  = klines["high"].values
     lows   = klines["low"].values
@@ -39,6 +48,8 @@ def detect_fvg(
         if highs[i - 2] < lows[i]:
             gap_size = lows[i] - highs[i - 2]
             if gap_size / mid_price >= min_gap_pct:
+                if require_displacement and not is_displacement_candle(klines, i):
+                    continue
                 gaps.append({
                     "direction": "bull",
                     "top":       float(lows[i]),
@@ -51,6 +62,8 @@ def detect_fvg(
         elif lows[i - 2] > highs[i]:
             gap_size = lows[i - 2] - highs[i]
             if gap_size / mid_price >= min_gap_pct:
+                if require_displacement and not is_displacement_candle(klines, i):
+                    continue
                 gaps.append({
                     "direction": "bear",
                     "top":       float(lows[i - 2]),
@@ -59,7 +72,7 @@ def detect_fvg(
                     "filled":    False,
                 })
 
-    # mark filled: a later candle's close entered the gap zone
+    # Mark filled: a later candle's close entered the gap zone.
     for gap in gaps:
         for j in range(gap["idx"] + 1, n):
             c = closes[j]

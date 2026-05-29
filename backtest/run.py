@@ -25,9 +25,12 @@ Flags:
   --no-viz      Skip the matplotlib chart
   --show-chart  Open chart interactively (blocks until closed)
   --top N       Number of top runs to print / show in equity panel
-  --workers N   Override parallel worker count (default: from config)
-  --no-resume   Ignore existing checkpoint; rerun all combos from scratch
-  --save-every  Save checkpoint every N completions (default: 500)
+  --workers N        Override parallel worker count (default: from config)
+  --parallel-stocks  Run all stock codes simultaneously (one thread per stock,
+                     workers split evenly).  Each stock still uses its own
+                     checkpoint so Ctrl+C / resume works per-stock.
+  --no-resume        Ignore existing checkpoint; rerun all combos from scratch
+  --save-every       Save checkpoint every N completions (default: 500)
 
 Timeframes
 ----------
@@ -46,6 +49,7 @@ import os
 import pathlib
 import pickle
 import sys
+import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -56,6 +60,7 @@ from tqdm import tqdm
 import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # prevent garbled output on Windows cp1252 consoles
 
 from feeds.fetcher import fetch_klines
 from backtest.engine  import ALGO_VERSION, BacktestParams, BacktestResult, run_backtest
@@ -286,23 +291,42 @@ def build_param_list(
 ) -> list[BacktestParams]:
     """Expand a parameter grid into a flat list of BacktestParams via cartesian product.
 
+    Deduplicates combos where htf_trend_params has no effect: when htf_trend_methods
+    contains no "kd" AND kd_sl_fallback is False, KD params are never read by the
+    engine, so all htf_trend_params variants produce identical results.  In that slice
+    the params are normalised to {} so only one combo is emitted instead of N.
+
     Args:
         pairs: List of (trend_tf, entry_tf) timeframe pairs to iterate over.
         grid:  Dict mapping param name → list of candidate values.
 
     Returns:
-        One BacktestParams per (TF pair × param combination).
+        One BacktestParams per (TF pair × unique effective param combination).
     """
     keys   = list(grid.keys())
     values = list(grid.values())
     result: list[BacktestParams] = []
+    seen:   set[str] = set()
+
     for trend_tf, entry_tf in pairs:
         for combo in itertools.product(*values):
-            result.append(BacktestParams(
-                trend_tf=trend_tf,
-                entry_tf=entry_tf,
-                **dict(zip(keys, combo)),
-            ))
+            d = dict(zip(keys, combo))
+
+            # Normalise htf_trend_params when KD is not used — prevents N×
+            # duplication across all htf_trend_params variants in bos_choch runs.
+            methods = d.get("htf_trend_methods", ("bos_choch",))
+            if isinstance(methods, list):
+                methods = tuple(methods)
+            need_kd = "kd" in methods or bool(d.get("kd_sl_fallback", False))
+            if not need_kd and "htf_trend_params" in d:
+                d["htf_trend_params"] = {}
+
+            dedup = f"{trend_tf}|{entry_tf}|{json.dumps(d, sort_keys=True, default=str)}"
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+
+            result.append(BacktestParams(trend_tf=trend_tf, entry_tf=entry_tf, **d))
     return result
 
 
@@ -572,9 +596,140 @@ def run_grid(
     # Final checkpoint save
     if checkpoint_key:
         _save_checkpoint(checkpoint_key, bt_results)
-        print(f"  Checkpoint saved ({len(bt_results)} combos) → {_ckpt_path(checkpoint_key).name}")
+        print(f"  Checkpoint saved ({len(bt_results)} combos) -> {_ckpt_path(checkpoint_key).name}")
 
     return [bt_results[i] for i in sorted(bt_results) if bt_results.get(i) is not None]
+
+
+def _run_one_stock(
+    code: str,
+    cfg,                          # BacktestConfig
+    pairs: list,
+    grid: dict,
+    params: list,
+    results_dir: pathlib.Path,
+    workers_this: int,
+    sorted_tfs: list,
+    args,
+    print_lock: threading.Lock,
+    use_db: bool = True,
+) -> "pd.DataFrame | None":
+    """Fetch klines, run the combo grid, and save per-code artefacts.
+
+    Designed to be called from both the sequential main loop and from a
+    worker thread (--parallel-stocks).
+
+    Args:
+        workers_this: number of ProcessPoolExecutor workers for THIS stock.
+                      In parallel-stocks mode this is total_workers // n_stocks.
+        print_lock:   shared Lock so interleaved output stays readable.
+        use_db:       When False, skip BacktestDB entirely (no write, no reuse).
+                      Required in parallel-stocks mode because DuckDB write mode
+                      only allows one connection at a time per file.
+                      CSV results are still written; DB can be populated later
+                      with a sequential run.
+    """
+
+    def _p(*a, **kw) -> None:
+        with print_lock:
+            print(*a, **kw)
+
+    # ── Fetch klines ──────────────────────────────────────────────────────
+    _p(f"\n-- Fetching klines: {code} -------------------------------------------\n")
+    klines: dict[str, pd.DataFrame] = {}
+    for tf in sorted_tfs:
+        df = fetch_klines(
+            code=code, ktype=tf,
+            start=cfg.start, end=cfg.end,
+            force_refresh=cfg.force_refresh,
+        )
+        bar_range = (
+            f"{df['time_key'].iloc[0]} ... {df['time_key'].iloc[-1]}"
+            if len(df) else "-"
+        )
+        _p(f"  {tf}: {len(df)} bars  ({bar_range})")
+        klines[tf] = df
+
+    # ── Run grid ──────────────────────────────────────────────────────────
+    ck_key = _checkpoint_key(
+        code, cfg.start, cfg.end, pairs, grid,
+        random_n=args.random,
+        random_seed=args.seed if args.random > 0 else None,
+    )
+    _p(f"\n-- Running grid for {code} ({workers_this} workers) -------------------\n")
+    _p(f"  Checkpoint key: {ck_key}")
+
+    # DB is skipped in parallel-stocks mode: DuckDB write mode allows only one
+    # connection per file.  CSV results are complete; DB can be populated via a
+    # subsequent sequential run when needed for trade review.
+    db: BacktestDB | None = BacktestDB() if use_db else None
+    try:
+        bt_results = run_grid(
+            code, klines, params,
+            workers=workers_this,
+            checkpoint_key=ck_key,
+            no_resume=args.no_resume,
+            save_every=args.save_every,
+            log_path=results_dir / f"run_{code.replace('.', '_')}.log",
+            db=db,
+            start_date=cfg.start,
+            end_date=cfg.end,
+            no_reuse=(args.no_reuse or not use_db),  # no reuse when db is absent
+        )
+    finally:
+        if db is not None:
+            db.close()
+
+    if not bt_results:
+        _p(f"No results for {code}.")
+        return None
+
+    # ── Collate results ───────────────────────────────────────────────────
+    df_code = pd.DataFrame([r.summary_dict() for r in bt_results])
+    df_code.insert(0, "code", code)
+
+    code_slug = code.replace(".", "_")
+    code_csv  = results_dir / f"results_{code_slug}.csv"
+    code_viz  = results_dir / f"viz_{code_slug}.png"
+    df_code.to_csv(code_csv, index=False)
+    _p(f"  Saved {len(df_code)} results -> {code_csv}")
+
+    # ── Per-code top N ────────────────────────────────────────────────────
+    min_trades = args.min_trades
+    df_ranked  = (
+        df_code[df_code["n_trades"] >= min_trades]
+        .sort_values(["profit_factor", "total_r"], ascending=[False, False])
+        .head(cfg.top_n)
+    )
+    n_excl = len(df_code) - len(df_code[df_code["n_trades"] >= min_trades])
+    _p(f"\n-- Top {cfg.top_n} [{code}]  (min_trades>={min_trades}, {n_excl} excluded) --\n")
+    for _, row in df_ranked.iterrows():
+        p = BacktestParams.from_dict(row.to_dict())
+        _p(f"  {p.label()}")
+        _p(_fmt_row(row.to_dict()))
+        _p()
+
+    # ── Per-code HTML report ──────────────────────────────────────────────
+    if not cfg.no_viz and not args.no_report:
+        generate_report(
+            code_csv,
+            output_path=code_csv.parent / f"report_{code_slug}.html",
+            top_n=cfg.top_n,
+            open_browser=cfg.show_chart,
+        )
+
+    # ── Per-code matplotlib chart ─────────────────────────────────────────
+    if cfg.show_chart and not cfg.no_viz:
+        ranked = sorted(bt_results, key=lambda r: r.profit_factor, reverse=True)
+        plot_backtest_results(
+            ranked, df_code,
+            top_n=min(cfg.top_n, 5),
+            save_path=code_viz,
+            show=cfg.show_chart,
+        )
+        _p(f"  Chart -> {code_viz}")
+
+    return df_code
 
 
 def main() -> None:
@@ -583,8 +738,11 @@ def main() -> None:
     Parses command-line arguments, fetches klines for each stock code, runs
     the parameter grid (exhaustive, random, or an explicit top-N list), writes
     per-code CSV files and an optional HTML report, and prints a ranked
-    results table.  Multiple codes are processed sequentially; within each
-    code all combos run in parallel worker processes.
+    results table.
+
+    Stock codes are processed sequentially by default.  Pass --parallel-stocks
+    to run all codes simultaneously (one thread per code, workers split evenly).
+    Within each code, combos always run in parallel worker processes.
     """
     ap = argparse.ArgumentParser(description="SMC backtest grid search")
     ap.add_argument("--config",  default=None, metavar="PATH",
@@ -601,6 +759,10 @@ def main() -> None:
                     help="Print top N results ranked by profit factor (overrides config)")
     ap.add_argument("--workers",    type=int, default=None,
                     help="Parallel workers; 0 or negative = auto (overrides config)")
+    ap.add_argument("--parallel-stocks", action="store_true",
+                    help="Run all stock codes in parallel (one thread per code, "
+                         "--workers split evenly).  Checkpoints are per-code so "
+                         "Ctrl+C / resume still works independently for each stock.")
     ap.add_argument("--no-resume",  action="store_true",
                     help="Ignore existing checkpoint; rerun all combos from scratch")
     ap.add_argument("--no-reuse",   action="store_true",
@@ -683,7 +845,7 @@ def main() -> None:
 
     search_mode = f"random(n={args.random}, seed={args.seed})" if args.random > 0 else "exhaustive"
     print(f"Codes:       {cfg.codes}")
-    print(f"Date range:  {cfg.start} → {cfg.end}")
+    print(f"Date range:  {cfg.start} -> {cfg.end}")
     print(f"TF pairs:    {len(pairs)}")
     print(f"Search:      {search_mode}")
     print(f"Combos/code: {len(params)}")
@@ -705,111 +867,78 @@ def main() -> None:
 
     all_frames: list[pd.DataFrame] = []
     results_dir.mkdir(parents=True, exist_ok=True)
+    print_lock = threading.Lock()
 
-    db = BacktestDB()
-    for code in cfg.codes:
-        print(f"\n── Fetching klines: {code} ───────────────────────────────────────────\n")
-        klines: dict[str, pd.DataFrame] = {}
-        for tf in sorted_tfs:
-            df = fetch_klines(
-                code=code, ktype=tf,
-                start=cfg.start, end=cfg.end,
-                force_refresh=cfg.force_refresh,
+    use_parallel = args.parallel_stocks and len(cfg.codes) > 1
+
+    if use_parallel:
+        # ── Parallel-stocks mode ──────────────────────────────────────────
+        # Run each stock in its own thread; within each thread the combo grid
+        # still uses ProcessPoolExecutor (threading + subprocess = safe).
+        # Workers are distributed evenly: at least 1 per stock, remainder
+        # given to the first few stocks so no core is wasted.
+        n_par    = min(len(cfg.codes), cfg.workers)   # can't have more threads than workers
+        w_base   = max(1, cfg.workers // n_par)
+        w_extra  = cfg.workers - w_base * n_par        # leftover cores to spread
+
+        workers_map: dict[str, int] = {}
+        for i, code in enumerate(cfg.codes):
+            workers_map[code] = w_base + (1 if i < w_extra else 0)
+
+        print(f"Parallel-stocks: {n_par} stocks running simultaneously")
+        for code in cfg.codes:
+            print(f"  {code}: {workers_map[code]} workers")
+
+        frames_lock   = threading.Lock()
+        results_order: dict[str, pd.DataFrame | None] = {c: None for c in cfg.codes}
+
+        def _thread_body(code: str) -> None:
+            df = _run_one_stock(
+                code, cfg, pairs, grid, params,
+                results_dir, workers_map[code], sorted_tfs, args, print_lock,
+                use_db=False,   # DuckDB write mode: one connection only
             )
-            bar_range = (
-                f"{df['time_key'].iloc[0]} … {df['time_key'].iloc[-1]}"
-                if len(df) else "—"
+            with frames_lock:
+                results_order[code] = df
+
+        threads = [threading.Thread(target=_thread_body, args=(code,), name=f"stock-{code}")
+                   for code in cfg.codes]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        all_frames = [df for code in cfg.codes
+                      if (df := results_order.get(code)) is not None]
+
+    else:
+        # ── Sequential mode (original behaviour) ─────────────────────────
+        for code in cfg.codes:
+            df = _run_one_stock(
+                code, cfg, pairs, grid, params,
+                results_dir, cfg.workers, sorted_tfs, args, print_lock,
             )
-            print(f"  {tf}: {len(df)} bars  ({bar_range})")
-            klines[tf] = df
-
-        ck_key = _checkpoint_key(
-            code, cfg.start, cfg.end, pairs, grid,
-            random_n=args.random, random_seed=args.seed if args.random > 0 else None,
-        )
-        print(f"\n── Running grid for {code} ({cfg.workers} workers) ─────────────────────\n")
-        print(f"  Checkpoint key: {ck_key}")
-        bt_results = run_grid(
-            code, klines, params,
-            workers=cfg.workers,
-            checkpoint_key=ck_key,
-            no_resume=args.no_resume,
-            save_every=args.save_every,
-            log_path=results_dir / f"run_{code.replace('.','_')}.log",
-            db=db,
-            start_date=cfg.start,
-            end_date=cfg.end,
-            no_reuse=args.no_reuse,
-        )
-
-        if not bt_results:
-            print(f"No results for {code}.")
-            continue
-
-        df_code = pd.DataFrame([r.summary_dict() for r in bt_results])
-        df_code.insert(0, "code", code)
-        all_frames.append(df_code)
-
-        # ── Per-code CSV ──────────────────────────────────────────────────
-        code_slug = code.replace(".", "_")
-        code_csv  = results_dir / f"results_{code_slug}.csv"
-        code_viz  = results_dir / f"viz_{code_slug}.png"
-        df_code.to_csv(code_csv, index=False)
-        print(f"  Saved {len(df_code)} results → {code_csv}")
-
-        # ── Per-code top N ────────────────────────────────────────────────
-        min_trades = args.min_trades
-        df_ranked_code = (
-            df_code[df_code["n_trades"] >= min_trades]
-            .sort_values(["profit_factor", "total_r"], ascending=[False, False])
-            .head(cfg.top_n)
-        )
-        n_filtered = len(df_code) - len(df_code[df_code["n_trades"] >= min_trades])
-        print(f"\n── Top {cfg.top_n} [{code}] by profit factor  (min_trades≥{min_trades}, {n_filtered} excluded) ──\n")
-        for _, row in df_ranked_code.iterrows():
-            p = BacktestParams.from_dict(row.to_dict())
-            print(f"  {p.label()}")
-            print(_fmt_row(row.to_dict()))
-            print()
-
-        # ── Per-code HTML report (default) ───────────────────────────────
-        if not cfg.no_viz and not args.no_report:
-            generate_report(
-                code_csv,
-                output_path=code_csv.parent / f"report_{code_slug}.html",
-                top_n=cfg.top_n,
-                open_browser=cfg.show_chart,
-            )
-
-        # ── Per-code matplotlib PNG (opt-in via --show-chart or legacy) ──
-        if cfg.show_chart and not cfg.no_viz:
-            ranked = sorted(bt_results, key=lambda r: r.profit_factor, reverse=True)
-            plot_backtest_results(
-                ranked, df_code,
-                top_n=min(cfg.top_n, 5),
-                save_path=code_viz,
-                show=cfg.show_chart,
-            )
-            print(f"  Chart → {code_viz}")
-
-    db.close()
+            if df is not None:
+                all_frames.append(df)
 
     if not all_frames:
         print("No results.")
         return
 
+    min_trades = args.min_trades  # used in combined ranking below
+
     # ── Combined CSV (all codes) ──────────────────────────────────────────
     if len(all_frames) > 1:
         df_out = pd.concat(all_frames, ignore_index=True)
         df_out.to_csv(csv_path, index=False)
-        print(f"\nCombined {len(df_out)} results ({len(cfg.codes)} codes) → {csv_path}")
+        print(f"\nCombined {len(df_out)} results ({len(cfg.codes)} codes) -> {csv_path}")
 
         df_ranked = (
             df_out[df_out["n_trades"] >= min_trades]
             .sort_values(["profit_factor", "total_r"], ascending=[False, False])
             .head(cfg.top_n)
         )
-        print(f"\n── Top {cfg.top_n} across all codes  (min_trades≥{min_trades}) ───────────────\n")
+        print(f"\n-- Top {cfg.top_n} across all codes  (min_trades>={min_trades}) ----------------\n")
         for _, row in df_ranked.iterrows():
             p = BacktestParams.from_dict(row.to_dict())
             print(f"[{row['code']}]  {p.label()}")

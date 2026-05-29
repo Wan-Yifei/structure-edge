@@ -30,6 +30,7 @@
     }
   },
   "targets": [
+    "US.AAPL",
     "US.AMD",
     "US.BE",
     "US.CRWV",
@@ -50,12 +51,15 @@
     "US.SOXL",
     "US.STX",
     "US.TSEM",
+    "US.TSLA",
     "US.TSM",
     "US.WDC"
   ],
   "target_categories": {
     "US.OKLO": "nuclear fusion & energy",
     "US.RKLX": "Space X family",
-    "US.RKLB": "Space X family"
+    "US.RKLB": "Space X family",
+    "US.AAPL": "全部",
+    "US.TSLA": "全部"
   }
 }

@@ -31,8 +31,9 @@ backtest/output.png
 # Test output images
 tests/outputs/
 
-# Loose screenshots in root
+# Loose screenshots / debug images in root
 ScreenShot_*.png
+candle.png
 
 # Runtime / scheduler logs in db/
 db/scheduler.log
