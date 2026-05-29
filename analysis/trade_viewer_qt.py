@@ -115,12 +115,17 @@ _DAY_CANDLES: dict[str, int] = {
     "1m": 390, "5m": 78, "15m": 26, "30m": 14, "1h": 7, "4h": 6,
 }
 
+# BOS max span: max bars between a reference swing and its break bar.
+# Viewer uses larger values than the backtest engine so that market structure
+# spanning the full visible window is shown (not just nearby swings).
 _BOS_MAX_SPAN: dict[str, int] = {
-    "1m": 60, "5m": 12, "15m": 26, "30m": 13, "1h": 7, "4h": 8,
+    "1m": 390, "5m": 120, "15m": 100, "30m": 60, "1h": 40, "4h": 30,
 }
 
+# Trend window: backward-looking bar count used to determine local trend direction
+# for BOS/CHoCH classification.  Larger than engine default for broader context.
 _TREND_WINDOW: dict[str, int] = {
-    "1m": 60, "5m": 12, "15m": 26, "30m": 13, "1h": 7, "4h": 8,
+    "1m": 120, "5m": 60, "15m": 50, "30m": 40, "1h": 30, "4h": 20,
 }
 
 _LIVE_LOOKBACK_DAYS: dict[str, int] = {
@@ -644,16 +649,18 @@ class DataFetcher(QThread):
                     max_session_gap=_BOS_SESSION_GAP.get(tf),  # respect chart.json session gap
                 )
 
+            # Index offset: warmup = df[-warmup_n:] re-indexed from 0.
+            # warmup index i maps to full-df index (i + disp_off).
+            # ALL overlay items (FVG, BOS, OB) must add this offset so they
+            # are drawn at the correct x position on the chart.
+            disp_off = len(df) - warmup_n   # 0 when all bars fit in warmup
+
             fvg_gaps: list[dict] = []
             if ind.get("fvg"):
-                # require_displacement=True keeps only impulse-driven FVGs.
-                raw_fvgs = detect_fvg(warmup, require_displacement=True)
-
-                # Correct bar-index offset: warmup = df[-warmup_n:] (re-indexed
-                # from 0), so warmup index i maps to df index i + disp_off.
-                # The old formula (warmup_n - min(...)) always produced 0 —
-                # fixed to len(df) - warmup_n.
-                disp_off = len(df) - warmup_n   # 0 when all bars fit in warmup
+                # require_displacement=False: show all FVGs in the viewer.
+                # The backtest engine applies displacement filtering separately
+                # via params.displacement_required; the viewer shows everything.
+                raw_fvgs = detect_fvg(warmup, require_displacement=False)
 
                 # Only forward unfilled FVGs; filled zones have already been
                 # closed by price and are not actionable.
@@ -664,9 +671,30 @@ class DataFetcher(QThread):
                     r["idx"] = max(0, g["idx"] + disp_off)
                     fvg_gaps.append(r)
 
+            # Apply disp_off to BOS/CHoCH signal indices so they render at
+            # the correct x position relative to the full kline DataFrame.
+            if disp_off > 0:
+                adj_smc: list[dict] = []
+                for s in smc_signals:
+                    r = dict(s)
+                    r["idx"]      = max(0, s["idx"]      + disp_off)
+                    r["from_idx"] = max(0, s.get("from_idx", s["idx"]) + disp_off)
+                    adj_smc.append(r)
+                smc_signals = adj_smc
+
             ob_blocks: list[dict] = []
             if ind.get("ob") and smc_signals:
-                ob_blocks = detect_order_blocks(warmup, smc_signals)
+                # detect_order_blocks uses warmup-relative indices; add disp_off.
+                raw_obs = detect_order_blocks(warmup, [
+                    dict(s, idx=s["idx"] - disp_off,
+                         from_idx=s.get("from_idx", s["idx"]) - disp_off)
+                    for s in smc_signals
+                ] if disp_off > 0 else smc_signals)
+                for b in raw_obs:
+                    r = dict(b)
+                    r["idx"]     = max(0, b["idx"]      + disp_off)
+                    r["bos_idx"] = max(0, b.get("bos_idx", b["idx"]) + disp_off)
+                    ob_blocks.append(r)
 
             # Tick data
             ticks: dict | None = None
@@ -1531,8 +1559,9 @@ class TradeViewerQt(QMainWindow):
         self._bos_items.clear()
 
     def _draw_bos_choch(self, signals: list[dict], red_up: bool = False) -> None:
-        # Show the most recent 8 signals to give context
-        recent   = signals[-8:] if len(signals) > 8 else signals
+        # Show all signals in the warmup window (no artificial cap).
+        # The warmup is already limited to 400 bars so the list is bounded.
+        recent   = signals
         bull_col = _RED   if red_up else _GREEN
         bear_col = _GREEN if red_up else _RED
 
