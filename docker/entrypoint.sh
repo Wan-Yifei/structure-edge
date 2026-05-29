@@ -3,11 +3,13 @@
 # entrypoint.sh — moomoo backtest pipeline
 #
 # Stages:
-#   1. Download database files from S3 / Wasabi
-#   2. Run backtest grid (backtest/run.py)
-#   3. Generate per-stock audit reports (backtest/audit.py)
-#   4. Generate per-stock FVG inspect reports (backtest/fvg_inspect.py)
-#   5. Upload results directory back to S3
+#   1. Download kline cache from S3 (read-only; never uploaded back)
+#   2. Run backtest grid  → writes db/backtest.duckdb + backtest/results/<tag>/
+#   3. Generate per-stock audit reports
+#   4. Generate per-stock FVG inspect reports
+#   5. Upload results dir + run-specific DB to S3
+#      backtest_<run_tag>.duckdb is uploaded separately from the master DB so
+#      it can be safely merged locally with: uv run backtest/merge_db.py --s3 …
 #
 # All configuration comes from environment variables (see backtest.env.example).
 # ──────────────────────────────────────────────────────────────────────────────
@@ -34,24 +36,26 @@ aws_cmd() {
     aws --profile "${AWS_PROFILE}" ${endpoint_flag} "$@"
 }
 
-# ── 1. Download databases ─────────────────────────────────────────────────────
-log "=== Stage 1: Download databases ==="
+# ── 1. Download kline cache ───────────────────────────────────────────────────
+log "=== Stage 1: Download kline cache ==="
 mkdir -p db
 
+# Only klines are downloaded — backtest.duckdb is generated fresh each run
+# and uploaded under a run-specific name so the master DB is never overwritten.
 IFS=' ' read -ra _DB_LIST <<< "${DB_FILES:-backtest_klines.duckdb}"
 for dbfile in "${_DB_LIST[@]}"; do
     local_path="db/${dbfile}"
     remote_path="${S3_BUCKET}/db/${dbfile}"
 
     if [[ "${SKIP_DOWNLOAD_IF_EXISTS:-true}" == "true" && -f "${local_path}" ]]; then
-        log "  Skipping ${dbfile} (already exists locally)"
+        log "  Skipping ${dbfile} (already present on bind-mounted volume)"
         continue
     fi
 
     log "  Downloading ${remote_path} → ${local_path} ..."
     aws_cmd s3 cp "${remote_path}" "${local_path}" \
         || die "Failed to download ${remote_path}. " \
-               "Check S3_BUCKET, AWS_PROFILE, and that the file exists."
+               "Check S3_BUCKET, AWS_PROFILE, and that the file was uploaded."
     log "  Done: $(du -sh "${local_path}" | cut -f1)"
 done
 
@@ -62,11 +66,11 @@ EXTRA_ARGS="${BACKTEST_EXTRA_ARGS:-}"
 WORKERS_ARG=""
 [[ -n "${BACKTEST_WORKERS:-}" ]] && WORKERS_ARG="--workers ${BACKTEST_WORKERS}"
 
-log "  Config: ${BACKTEST_CONFIG}"
-log "  Extra args: ${EXTRA_ARGS:-<none>}"
+log "  Config : ${BACKTEST_CONFIG}"
+[[ -n "${EXTRA_ARGS}" ]] && log "  Extra  : ${EXTRA_ARGS}"
 
-# Record time so we can find the new results dir afterwards
-RUN_START=$(date +%s)
+# Timestamp before run so we can find the newly created results dir
+touch /tmp/_run_start_marker
 
 # shellcheck disable=SC2086
 python -m backtest.run \
@@ -78,23 +82,23 @@ python -m backtest.run \
 
 log "  Backtest finished."
 
-# Find the most recently created results subdirectory
+# Find the results dir created after the run started
 RESULTS_DIR=$(find backtest/results -mindepth 1 -maxdepth 1 -type d \
-    -newer /tmp/backtest_run.log -o -mindepth 1 -maxdepth 1 -type d \
+    -newer /tmp/_run_start_marker 2>/dev/null \
     | xargs ls -dt 2>/dev/null | head -1)
 
-if [[ -z "${RESULTS_DIR}" ]]; then
-    # Fallback: newest by mtime
+# Fallback: newest by mtime
+[[ -z "${RESULTS_DIR}" ]] && \
     RESULTS_DIR=$(ls -td backtest/results/*/ 2>/dev/null | head -1)
-fi
 
 [[ -n "${RESULTS_DIR}" ]] || die "Could not locate results directory after backtest run."
-RESULTS_DIR="${RESULTS_DIR%/}"  # strip trailing slash
-log "  Results dir: ${RESULTS_DIR}"
+RESULTS_DIR="${RESULTS_DIR%/}"
+RUN_TAG=$(basename "${RESULTS_DIR}")
+log "  Results dir : ${RESULTS_DIR}"
+log "  Run tag     : ${RUN_TAG}"
 
 # ── 3. Audit top-N combos per stock ──────────────────────────────────────────
 log "=== Stage 3: Audit ==="
-
 AUDIT_N="${AUDIT_TOP_N:-3}"
 AUDIT_DIR="${RESULTS_DIR}/audit"
 mkdir -p "${AUDIT_DIR}"
@@ -103,7 +107,6 @@ for csv in "${RESULTS_DIR}"/*/results_*.csv; do
     [[ -f "${csv}" ]] || continue
     code_slug=$(basename "$(dirname "${csv}")")
     log "  Auditing ${code_slug} (top ${AUDIT_N} combos) ..."
-
     for rank in $(seq 1 "${AUDIT_N}"); do
         python -m backtest.audit \
             --from-csv "${csv}" \
@@ -116,11 +119,10 @@ done
 
 # ── 4. FVG inspect top combo per stock ───────────────────────────────────────
 log "=== Stage 4: FVG Inspect ==="
-
 INSPECT_DIR="${RESULTS_DIR}/inspect"
 mkdir -p "${INSPECT_DIR}"
 
-# Derive inspect window from config dates if not explicitly set
+# Derive inspect window from config if not set
 if [[ -z "${INSPECT_START:-}" || -z "${INSPECT_END:-}" ]]; then
     CFG_START=$(python -c "
 import json, sys
@@ -137,16 +139,14 @@ print(cfg.get('end') or cfg.get('end_date',''))
 fi
 
 [[ -n "${INSPECT_START}" && -n "${INSPECT_END}" ]] \
-    || die "INSPECT_START / INSPECT_END could not be determined. " \
-           "Set them in backtest.env or ensure the config has 'start'/'end' keys."
+    || die "Cannot determine inspect window. Set INSPECT_START/INSPECT_END in backtest.env."
 
-log "  Inspect window: ${INSPECT_START} → ${INSPECT_END}"
+log "  Window: ${INSPECT_START} → ${INSPECT_END}"
 
 for csv in "${RESULTS_DIR}"/*/results_*.csv; do
     [[ -f "${csv}" ]] || continue
     code_slug=$(basename "$(dirname "${csv}")")
     log "  Inspecting ${code_slug} (rank 1) ..."
-
     python -m backtest.fvg_inspect \
         --from-csv "${csv}" \
         --rank 1 \
@@ -157,19 +157,32 @@ for csv in "${RESULTS_DIR}"/*/results_*.csv; do
         || log "  WARN: inspect failed for ${code_slug}"
 done
 
-# ── 5. Upload results to S3 ───────────────────────────────────────────────────
+# ── 5. Upload results + run-specific DB ──────────────────────────────────────
 if [[ "${UPLOAD_RESULTS:-true}" == "true" ]]; then
-    log "=== Stage 5: Upload results ==="
-    RUN_TAG=$(basename "${RESULTS_DIR}")
-    S3_DEST="${S3_BUCKET}/${RESULTS_S3_PREFIX:-results}/${RUN_TAG}/"
-    log "  Syncing ${RESULTS_DIR}/ → ${S3_DEST}"
-    aws_cmd s3 sync "${RESULTS_DIR}/" "${S3_DEST}" \
+    log "=== Stage 5: Upload ==="
+    S3_RESULTS="${S3_BUCKET}/${RESULTS_S3_PREFIX:-results}/${RUN_TAG}/"
+    S3_DB_DEST="${S3_BUCKET}/db/runs/backtest_${RUN_TAG}.duckdb"
+
+    # 5a. Upload HTML reports, CSVs, logs (exclude checkpoints / pickle files)
+    log "  Reports → ${S3_RESULTS}"
+    aws_cmd s3 sync "${RESULTS_DIR}/" "${S3_RESULTS}" \
         --exclude "*.pkl" \
         --exclude "checkpoints/*"
-    log "  Upload complete: ${S3_DEST}"
+
+    # 5b. Upload run-specific backtest DB (NOT the master — avoids overwriting)
+    #     Local clients merge with: uv run backtest/merge_db.py --s3 <S3_DB_DEST>
+    if [[ -f "db/backtest.duckdb" ]]; then
+        log "  Run DB  → ${S3_DB_DEST}"
+        aws_cmd s3 cp "db/backtest.duckdb" "${S3_DB_DEST}"
+        log "  Merge locally with:"
+        log "    uv run backtest/merge_db.py --s3 ${S3_DB_DEST}"
+    else
+        log "  WARN: db/backtest.duckdb not found — skipping DB upload"
+    fi
 else
     log "=== Stage 5: Upload skipped (UPLOAD_RESULTS != true) ==="
 fi
 
 log "=== Pipeline complete ==="
-log "Results: ${RESULTS_DIR}"
+log "Run tag : ${RUN_TAG}"
+log "Results : ${S3_BUCKET}/${RESULTS_S3_PREFIX:-results}/${RUN_TAG}/"
