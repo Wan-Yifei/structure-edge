@@ -90,14 +90,19 @@ def _row_to_params(row: pd.Series) -> BacktestParams:
 
 
 def _run_one(args: tuple) -> dict:
-    """Worker: re-run one BacktestParams combo and return result dict."""
-    params, klines_dict, start_date, end_date = args
-    result = run_backtest(klines_dict, params, start_date=start_date, end_date=end_date)
-    out = {"n_trades": result.n_trades, "win_rate": result.win_rate,
-           "total_r": result.total_r, "avg_r": result.avg_r,
-           "profit_factor": result.profit_factor, "sharpe": result.sharpe,
-           "sortino": result.sortino, "max_drawdown_r": result.max_drawdown_r}
-    return out
+    """Worker: re-run one BacktestParams combo and return result dict.
+
+    run_backtest expects separate htf/ltf DataFrames, not a klines dict.
+    Extract them here so the worker signature stays pickle-friendly.
+    """
+    params, klines_dict = args
+    htf = klines_dict[params.trend_tf]
+    ltf = klines_dict[params.entry_tf]
+    result = run_backtest(htf, ltf, params)
+    return {"n_trades": result.n_trades, "win_rate": result.win_rate,
+            "total_r": result.total_r, "avg_r": result.avg_r,
+            "profit_factor": result.profit_factor, "sharpe": result.sharpe,
+            "sortino": result.sortino, "max_drawdown_r": result.max_drawdown_r}
 
 
 # ── HTML report ───────────────────────────────────────────────────────────────
@@ -259,6 +264,9 @@ def main() -> None:
                     help="Parallel worker processes (default 4)")
     ap.add_argument("--out",        default=None,
                     help="Output HTML path (default: auto-named in results/)")
+    ap.add_argument("--inspect",    action="store_true",
+                    help="After comparison, run fvg_inspect on the #1 combo "
+                         "to show per-event rejection reasons under the new version")
     args = ap.parse_args()
 
     # ── Load old results ──────────────────────────────────────────────────────
@@ -268,10 +276,13 @@ def main() -> None:
     old_df_all = pd.read_csv(csv_path)
     code = str(old_df_all["code"].iloc[0])
 
-    # Infer old algo version from the run directory name
-    parts = csv_path.parent.name.split("_")
-    old_tag = next((p for p in parts if p.startswith("smc_v") or p.startswith("smc")),
-                   "old")
+    # Infer old algo version from the run directory name.
+    # The directory looks like "20260528_0202_smc_v2.2_cross_stock_grid_v2_grid".
+    # Rejoin all underscore-split tokens and search for the smc_vX.Y pattern.
+    import re as _re
+    dir_name = csv_path.parent.name
+    m = _re.search(r"smc_v[\d.]+", dir_name)
+    old_tag = m.group(0) if m else "old"
 
     # ── Load config for date range ────────────────────────────────────────────
     cfg_path = pathlib.Path(args.config)
@@ -308,7 +319,7 @@ def main() -> None:
 
     # ── Re-run top-N combos under current engine ──────────────────────────────
     work_items = [
-        (_row_to_params(row), klines_dict, start_date, end_date)
+        (_row_to_params(row), klines_dict)
         for _, row in top_df.iterrows()
     ]
 
@@ -362,6 +373,35 @@ def main() -> None:
                           old_metric_df, new_rows, top_df)
     out_path.write_text(html, encoding="utf-8")
     print(f"\n[compare] Report saved → {out_path}")
+
+    # ── Optional: fvg_inspect on the #1 combo under the new version ──────────
+    if args.inspect:
+        _run_inspect(top_df.iloc[0], code, start_date, end_date, out_path)
+
+
+def _run_inspect(best_row: "pd.Series", code: str,
+                 start_date: str, end_date: str,
+                 compare_out: pathlib.Path) -> None:
+    """Run fvg_inspect on the best combo and save alongside the comparison report."""
+    from backtest.fvg_inspect import run_inspect
+
+    params = _row_to_params(best_row)
+    inspect_path = compare_out.parent / (
+        compare_out.stem + f"_inspect_{params.trend_tf}_{params.entry_tf}.html"
+    )
+    print(f"\n[inspect] Running fvg_inspect for best combo "
+          f"({params.trend_tf}/{params.entry_tf} lb={params.swing_lookback} "
+          f"bos={params.bos_count}) …")
+    run_inspect(
+        code=code,
+        params=params,
+        start=start_date,
+        end=end_date,
+        inspect_start=start_date,
+        inspect_end=end_date,
+        out_path=inspect_path,
+    )
+    print(f"[inspect] Saved → {inspect_path}")
 
 
 if __name__ == "__main__":
