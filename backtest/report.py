@@ -39,9 +39,11 @@ _ORANGE  = "#ff8a65"
 _ACCENT  = [_GREEN, _BLUE, _GOLD, _PURPLE, _CYAN, _ORANGE, "#a5d6a7", "#ef9a9a"]
 
 _PARAM_COLS = [
+    "htf_window_bars",
     "swing_lookback", "bos_count", "fvg_min_width_pct",
     "fvg_entry_depth_pct", "require_ltf_confirmation",
     "displacement_required", "sl_buffer_pct", "max_sl_pct", "min_rr",
+    "kd_sl_fallback",
 ]
 _METRIC_COLS = ["n_trades", "win_rate", "total_r", "avg_r",
                 "profit_factor", "max_drawdown_r", "max_loss_r", "sharpe", "sortino"]
@@ -67,6 +69,21 @@ def _apply_layout(fig: go.Figure, title: str = "", **kwargs) -> go.Figure:
 
 def _to_html(fig: go.Figure) -> str:
     return fig.to_html(full_html=False, include_plotlyjs=False, config={"responsive": True})
+
+
+def _plotly_js_tag() -> str:
+    """Return an inline <script> block with the full Plotly JS bundle.
+
+    Embedding Plotly makes the HTML file self-contained — no CDN dependency,
+    no broken charts when the network is unavailable or the CDN is blocked.
+    The file will be ~3 MB larger, which is acceptable for a local report.
+    Falls back to the CDN URL if the offline bundle cannot be retrieved.
+    """
+    try:
+        from plotly.offline import get_plotlyjs
+        return f"<script>{get_plotlyjs()}</script>"
+    except Exception:
+        return '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
 
 
 # ── 1. KPI cards ──────────────────────────────────────────────────────────────
@@ -304,13 +321,33 @@ def _scatter_fig(df: pd.DataFrame) -> go.Figure:
 
 # ── 6. 2D Sensitivity heatmap ─────────────────────────────────────────────────
 
+def _cap_inf_pf(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with inf profit_factor capped to the finite max (or 999)."""
+    pf = df["profit_factor"]
+    finite_max = float(pf[np.isfinite(pf)].max()) if np.isfinite(pf).any() else 999.0
+    out = df.copy()
+    out["profit_factor"] = pf.replace([float("inf"), float("-inf")], finite_max)
+    return out
+
+
 def _pick_axes(df: pd.DataFrame) -> tuple[str, str]:
-    """Pick the two param columns with highest group-mean variance."""
-    candidates = [c for c in _PARAM_COLS if c in df.columns and df[c].nunique() >= 2]
+    """Pick the two param columns with highest group-mean profit_factor variance."""
+    capped = _cap_inf_pf(df)
+    candidates = [c for c in _PARAM_COLS if c in capped.columns and capped[c].nunique() >= 2]
+    if len(candidates) < 2:
+        # Fall back to any numeric columns with enough variance
+        candidates = [
+            c for c in capped.columns
+            if pd.api.types.is_numeric_dtype(capped[c]) and capped[c].nunique() >= 2
+            and c not in ("n_trades", "win_rate", "total_r", "avg_r", "profit_factor",
+                          "max_drawdown_r", "max_loss_r", "sharpe", "sortino", "final_value")
+        ]
+    if len(candidates) < 2:
+        return candidates[0], candidates[0]  # degenerate fallback
     variances = {}
     for col in candidates:
-        gm = df.groupby(col)["profit_factor"].mean()
-        variances[col] = float(gm.var())
+        gm = capped.groupby(col)["profit_factor"].mean()
+        variances[col] = float(gm.var(ddof=0))
     top2 = sorted(variances, key=variances.get, reverse=True)[:2]  # type: ignore[arg-type]
     return (top2[0], top2[1]) if len(top2) >= 2 else (candidates[0], candidates[1])
 
@@ -319,8 +356,9 @@ def _heatmap_fig(df: pd.DataFrame) -> go.Figure:
     if df.empty:
         return go.Figure()
 
-    row_col, col_col = _pick_axes(df)
-    pivot = df.pivot_table(
+    capped = _cap_inf_pf(df)
+    row_col, col_col = _pick_axes(capped)
+    pivot = capped.pivot_table(
         values="profit_factor",
         index=row_col, columns=col_col,
         aggfunc="mean",
@@ -357,11 +395,11 @@ def _surface_fig(df: pd.DataFrame, metric: str = "total_r") -> go.Figure:
     if df.empty:
         return go.Figure()
 
-    x_col, y_col = _pick_axes(df)
-    active = df[df["n_trades"] > 0].copy()
+    active = _cap_inf_pf(df[df["n_trades"] > 0].copy())
     if active.empty:
         return go.Figure()
 
+    x_col, y_col = _pick_axes(active)
     grp = active.groupby([x_col, y_col])[metric].mean().reset_index()
 
     fig = go.Figure(go.Scatter3d(
@@ -405,11 +443,12 @@ def _surface_fig(df: pd.DataFrame, metric: str = "total_r") -> go.Figure:
 
 def _importance_fig(df: pd.DataFrame) -> go.Figure:
     """Variance of group-mean profit_factor for each parameter (higher = more impact)."""
-    candidates = [c for c in _PARAM_COLS if c in df.columns and df[c].nunique() >= 2]
+    capped = _cap_inf_pf(df)
+    candidates = [c for c in _PARAM_COLS if c in capped.columns and capped[c].nunique() >= 2]
     records = []
     for col in candidates:
-        gm = df.groupby(col)["profit_factor"].mean()
-        records.append({"param": col, "variance": float(gm.var()),
+        gm = capped.groupby(col)["profit_factor"].mean()
+        records.append({"param": col, "variance": float(gm.var(ddof=0)),
                         "range": float(gm.max() - gm.min())})
 
     imp = pd.DataFrame(records).sort_values("range", ascending=True)
@@ -653,7 +692,7 @@ def generate_report(
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{title}</title>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+{_plotly_js_tag()}
 {_CSS}
 </head>
 <body>

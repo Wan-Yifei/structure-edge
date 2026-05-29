@@ -656,8 +656,14 @@ def _run_one_stock(
         random_n=args.random,
         random_seed=args.seed if args.random > 0 else None,
     )
+    # Per-stock subdirectory keeps results_dir clean when multiple codes are run.
+    code_slug = code.replace(".", "_")
+    stock_dir = results_dir / code_slug
+    stock_dir.mkdir(parents=True, exist_ok=True)
+
     _p(f"\n-- Running grid for {code} ({workers_this} workers) -------------------\n")
     _p(f"  Checkpoint key: {ck_key}")
+    _p(f"  Output dir:     {stock_dir}")
 
     # DB is skipped in parallel-stocks mode: DuckDB write mode allows only one
     # connection per file.  CSV results are complete; DB can be populated via a
@@ -670,7 +676,7 @@ def _run_one_stock(
             checkpoint_key=ck_key,
             no_resume=args.no_resume,
             save_every=args.save_every,
-            log_path=results_dir / f"run_{code.replace('.', '_')}.log",
+            log_path=stock_dir / f"run_{code_slug}.log",
             db=db,
             start_date=cfg.start,
             end_date=cfg.end,
@@ -688,9 +694,8 @@ def _run_one_stock(
     df_code = pd.DataFrame([r.summary_dict() for r in bt_results])
     df_code.insert(0, "code", code)
 
-    code_slug = code.replace(".", "_")
-    code_csv  = results_dir / f"results_{code_slug}.csv"
-    code_viz  = results_dir / f"viz_{code_slug}.png"
+    code_csv  = stock_dir / f"results_{code_slug}.csv"
+    code_viz  = stock_dir / f"viz_{code_slug}.png"
     df_code.to_csv(code_csv, index=False)
     _p(f"  Saved {len(df_code)} results -> {code_csv}")
 
@@ -713,7 +718,7 @@ def _run_one_stock(
     if not cfg.no_viz and not args.no_report:
         generate_report(
             code_csv,
-            output_path=code_csv.parent / f"report_{code_slug}.html",
+            output_path=stock_dir / f"report_{code_slug}.html",
             top_n=cfg.top_n,
             open_browser=cfg.show_chart,
         )
@@ -728,6 +733,7 @@ def _run_one_stock(
             show=cfg.show_chart,
         )
         _p(f"  Chart -> {code_viz}")
+
 
     return df_code
 
