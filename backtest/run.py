@@ -92,7 +92,7 @@ _DEFAULT_CONFIG = pathlib.Path(__file__).parent.parent / "config" / "backtest" /
 
 
 def _load_json_config(path: pathlib.Path) -> dict:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
