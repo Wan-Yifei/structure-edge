@@ -37,21 +37,22 @@ def _session_key(time_key: str) -> str:
 def determine_trend(bos_signals: list[dict], min_consecutive: int = 1) -> str | None:
     """Return current trend direction from a BOS/CHoCH signal list.
 
-    Iterates signals chronologically.  Each CHoCH resets the trend direction
-    and clears the BOS confirmation counter (consecutive = 0).  Only *BOS*
-    signals in the same direction increment the counter; returns a confirmed
-    trend only once consecutive >= min_consecutive.
+    Iterates signals chronologically.  A CHoCH immediately sets the trend
+    direction (consecutive = 1) — no follow-up BOS is required.  Same-direction
+    BOS signals after the CHoCH increment the confirmation counter.
 
-    This means a CHoCH alone is never sufficient to confirm a trend — at least
-    one BOS in the new direction must follow before the trend is returned.
-    This prevents a single displacement bar in a pullback from immediately
-    flipping the trend label without structural confirmation.
+    Veto rule: if any BOS in the *opposite* direction appears after the last
+    CHoCH, the trend is cancelled and None is returned.  This is less strict
+    than requiring a confirming BOS but still rejects the common false setup
+    where the only visible signal is [CHoCH bear, BOS bull] — the counter-trend
+    BOS proves the market reclaimed the structural level.
 
     Args:
         bos_signals:     Chronologically ordered list of BOS/CHoCH dicts
                          (as returned by detect_bos_choch).
-        min_consecutive: Minimum number of BOS signals *after* the last CHoCH
-                         required to confirm the trend (default 1).
+        min_consecutive: Minimum total count of CHoCH + same-direction BOS
+                         signals required to confirm the trend (default 1,
+                         meaning a CHoCH alone is sufficient).
 
     Returns:
         Confirmed trend direction ('bull' | 'bear'), or None when unconfirmed.
@@ -61,13 +62,23 @@ def determine_trend(bos_signals: list[dict], min_consecutive: int = 1) -> str | 
 
     current_trend: str | None = None
     consecutive: int = 0
+    last_choch_pos: int = -1
 
-    for sig in bos_signals:
+    for i, sig in enumerate(bos_signals):
         if sig["type"] == "CHoCH":
             current_trend = sig["direction"]
-            consecutive = 0   # CHoCH resets; BOS confirmation still needed
+            consecutive = 1          # CHoCH immediately counts as one confirmation
+            last_choch_pos = i
         elif sig["type"] == "BOS" and sig["direction"] == current_trend:
             consecutive += 1
+
+    # Veto: a BOS in the opposite direction after the last CHoCH means the market
+    # reclaimed the broken level — structural uncertainty, no trade.
+    if current_trend is not None and last_choch_pos >= 0:
+        subsequent = bos_signals[last_choch_pos + 1:]
+        if any(s["type"] == "BOS" and s["direction"] != current_trend
+               for s in subsequent):
+            return None
 
     # Fallback: no CHoCH seen — infer from a unanimous BOS cluster
     if current_trend is None and bos_signals:

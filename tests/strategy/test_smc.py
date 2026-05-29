@@ -164,11 +164,11 @@ class TestDetermineTrend:
     def test_none_when_no_signals(self):
         assert determine_trend([]) is None
 
-    def test_choch_alone_not_enough(self):
-        # CHoCH resets the counter to 0; at least one BOS must follow before
-        # the trend is confirmed (even with min_consecutive=1).
+    def test_choch_alone_confirms(self):
+        # CHoCH immediately counts as one confirmation (consecutive=1).
+        # With min_consecutive=1 the trend is returned right away.
         sigs = [{"type": "CHoCH", "direction": "bull"}]
-        assert determine_trend(sigs, min_consecutive=1) is None
+        assert determine_trend(sigs, min_consecutive=1) == "bull"
 
     def test_bull_confirmed_after_choch_plus_bos(self):
         sigs = [
@@ -185,15 +185,12 @@ class TestDetermineTrend:
         assert determine_trend(sigs, min_consecutive=1) == "bear"
 
     def test_none_when_below_min_consecutive(self):
-        # CHoCH + 1 BOS → consecutive=1; needs 2 → still None
-        sigs = [
-            {"type": "CHoCH", "direction": "bull"},
-            {"type": "BOS",   "direction": "bull"},
-        ]
+        # CHoCH alone → consecutive=1; needs 2 → still None.
+        sigs = [{"type": "CHoCH", "direction": "bull"}]
         assert determine_trend(sigs, min_consecutive=2) is None
 
     def test_consecutive_bos_counted(self):
-        # CHoCH + 2 BOS → consecutive=2 >= 2 → confirmed
+        # CHoCH(1) + BOS(2) + BOS(3) → consecutive=3 >= 2 → confirmed.
         sigs = [
             {"type": "CHoCH", "direction": "bull"},
             {"type": "BOS",   "direction": "bull"},
@@ -202,7 +199,8 @@ class TestDetermineTrend:
         assert determine_trend(sigs, min_consecutive=2) == "bull"
 
     def test_choch_resets_direction(self):
-        # Bear CHoCH resets consecutive to 0; bear BOS confirms it → bear trend.
+        # Bear CHoCH immediately sets trend=bear (consecutive=1); bear BOS
+        # increments to 2 → bear trend confirmed.  No reverse BOS veto.
         sigs = [
             {"type": "CHoCH", "direction": "bull"},
             {"type": "BOS",   "direction": "bull"},
@@ -211,12 +209,30 @@ class TestDetermineTrend:
         ]
         assert determine_trend(sigs, min_consecutive=1) == "bear"
 
-    def test_choch_without_bos_after_stays_unconfirmed(self):
-        # A bear CHoCH at the end without a following BOS should yield None.
+    def test_choch_alone_at_end_confirms(self):
+        # Bear CHoCH at the end: consecutive=1 >= 1 and no reverse BOS → "bear".
         sigs = [
             {"type": "CHoCH", "direction": "bull"},
             {"type": "BOS",   "direction": "bull"},
             {"type": "CHoCH", "direction": "bear"},
+        ]
+        assert determine_trend(sigs, min_consecutive=1) == "bear"
+
+    def test_reverse_bos_after_choch_vetoes_trend(self):
+        # Classic false setup: CHoCH bear then BOS bull reclaims the level.
+        # The reverse BOS must cancel the trend → None.
+        sigs = [
+            {"type": "CHoCH", "direction": "bear"},
+            {"type": "BOS",   "direction": "bull"},
+        ]
+        assert determine_trend(sigs, min_consecutive=1) is None
+
+    def test_reverse_bos_after_choch_vetoes_even_with_confirming_bos(self):
+        # CHoCH bear → BOS bear (confirms) → BOS bull (reverse, veto) → None.
+        sigs = [
+            {"type": "CHoCH", "direction": "bear"},
+            {"type": "BOS",   "direction": "bear"},
+            {"type": "BOS",   "direction": "bull"},
         ]
         assert determine_trend(sigs, min_consecutive=1) is None
 
