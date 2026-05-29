@@ -134,6 +134,8 @@ _EMA_PERIODS = [20, 50, 200]
 _KD_FAST = 25
 _KD_SLOW = 90
 
+_VOL_MA = 20  # period for the volume moving-average curve in the MAVOL subplot
+
 # ── chart.json config (BOS/CHoCH session-gap settings) ───────────────────────
 _ROOT_DIR = pathlib.Path(__file__).parent.parent
 _CHART_CFG: dict = {}
@@ -150,7 +152,16 @@ _BOS_SESSION_GAP: dict[str, int | None] = (
 # ── Shared tick-loading helper ────────────────────────────────────────────────
 
 def load_local_ticks(code: str, date_str: str, tf: str) -> dict | None:
-    """Load tick buckets from ticks.db for a given code and date."""
+    """Load tick buckets from ticks.db for a given code and date.
+
+    Each price bin contains:
+        buy / sell / neutral  — totals (used by heatmap)
+        buy_s / buy_m / buy_l — size-stratified buy volume
+        sell_s / sell_m / sell_l — size-stratified sell volume
+
+    S/M/L thresholds are computed from the day's volume distribution
+    (p33 = small/medium boundary, p67 = medium/large boundary).
+    """
     db_path = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
     if not db_path.exists():
         return None
@@ -164,16 +175,41 @@ def load_local_ticks(code: str, date_str: str, tf: str) -> dict | None:
             rows = store.query_ticks(code, tick_start, tick_end)
         if not rows:
             return None
-        buckets: dict = defaultdict(
-            lambda: defaultdict(lambda: {"buy": 0, "sell": 0, "neutral": 0})
-        )
+
+        # Compute per-day volume percentiles for adaptive S/M/L thresholds.
+        vols = np.array([r["volume"] for r in rows if r["volume"] > 0],
+                        dtype=float)
+        if len(vols) >= 6:
+            thresh_m = float(np.percentile(vols, 33))  # small  < p33
+            thresh_l = float(np.percentile(vols, 67))  # medium p33..p67, large > p67
+        else:
+            thresh_m = thresh_l = float("inf")          # too few ticks → all small
+
+        def _size(v: int) -> str:
+            if v <= thresh_m:
+                return "s"
+            if v <= thresh_l:
+                return "m"
+            return "l"
+
+        def _new_bin() -> dict:
+            return {
+                "buy": 0, "sell": 0, "neutral": 0,
+                "buy_s": 0, "buy_m": 0, "buy_l": 0,
+                "sell_s": 0, "sell_m": 0, "sell_l": 0,
+                "neutral_s": 0, "neutral_m": 0, "neutral_l": 0,
+            }
+
+        buckets: dict = defaultdict(lambda: defaultdict(_new_bin))
         for r in rows:
             ts = (r["ts"] if isinstance(r["ts"], datetime)
                   else datetime.fromisoformat(str(r["ts"])))
             bucket = candle_start(ts, candle_mins)
             key = {"BUY": "buy", "SELL": "sell"}.get(
                 r["direction"].upper(), "neutral")
-            buckets[bucket][r["price"]][key] += r["volume"]
+            vol = r["volume"]
+            buckets[bucket][r["price"]][key] += vol
+            buckets[bucket][r["price"]][f"{key}_{_size(vol)}"] += vol
         return dict(buckets)
     except Exception:
         return None
@@ -888,6 +924,22 @@ class TradeViewerQt(QMainWindow):
         self._ind_checks["red_up"] = cb_red_up
         tb2.addWidget(cb_red_up)
 
+        tb2.addSeparator()
+
+        # Tick profile order-size filter: S = small (<p33), M = medium (p33-p67), L = large (>p67)
+        tb2.addWidget(_lbl("Orders:"))
+        for key, label, tip in [
+            ("tick_s", "S", "Small orders  (volume < day p33)"),
+            ("tick_m", "M", "Medium orders (volume p33–p67)"),
+            ("tick_l", "L", "Large orders  (volume > day p67)"),
+        ]:
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.setToolTip(tip)
+            cb.stateChanged.connect(self._on_tick_size_toggle)
+            self._ind_checks[key] = cb
+            tb2.addWidget(cb)
+
         # ── Row 3: trade review (separated to avoid crowding Row 2) ──────────
         self.addToolBarBreak()
         tb3 = QToolBar("Trade Review", self)
@@ -978,12 +1030,17 @@ class TradeViewerQt(QMainWindow):
         self._kd_band_items: list = []  # PlotCurveItem + fill for KD band on main chart
         self._trade_items:   list = []  # all trade review overlay items
 
-        # Volume bars
+        # Volume bars + MA curve
         self._vol_item = pg.BarGraphItem(
             x=[], height=[], width=0.7,
             brush=_qc(_GREEN, 100), pen=pg.mkPen(None),
         )
         self._plot_v.addItem(self._vol_item)
+        self._vol_ma_item = pg.PlotCurveItem(
+            x=[], y=[],
+            pen=pg.mkPen(_qc(_GOLD, 200), width=1.5),
+        )
+        self._plot_v.addItem(self._vol_ma_item)
 
         # Crosshair — one set per subplot so lines extend into every panel
         cross_pen = pg.mkPen(_CROSS, width=1, style=Qt.PenStyle.DashLine)
@@ -1028,6 +1085,10 @@ class TradeViewerQt(QMainWindow):
 
         # Stored KD width array for crosshair readout (populated by _draw_kd)
         self._kd_width_arr: np.ndarray | None = None
+
+        # Last candle index shown in the tick profile (used to re-render on
+        # order-size filter toggle without waiting for the next mouse move).
+        self._last_hover_idx: int | None = None
 
         # Profile panel: horizontal line that follows main chart price (Y)
         self._profile_hline = pg.InfiniteLine(
@@ -1259,6 +1320,11 @@ class TradeViewerQt(QMainWindow):
             self._pin_heatmap_legend()
         self._render(self._klines, self._ticks)
 
+    def _on_tick_size_toggle(self) -> None:
+        """Re-render the tick profile panel when S/M/L filter changes."""
+        if self._last_hover_idx is not None:
+            self._show_tick_profile(self._last_hover_idx)
+
     def _on_session_toggle(self) -> None:
         self._rebuild_session_profile()
 
@@ -1401,6 +1467,9 @@ class TradeViewerQt(QMainWindow):
             x=x, height=vols, width=0.7,
             brushes=vol_colors,
         )
+        # Volume MA curve — rolling mean, NaN for the warm-up period
+        vol_ma = pd.Series(vols).rolling(_VOL_MA, min_periods=1).mean().values
+        self._vol_ma_item.setData(x=x, y=vol_ma.astype(float))
 
         # BOS / CHoCH
         self._clear_bos_items()
@@ -2036,6 +2105,12 @@ class TradeViewerQt(QMainWindow):
                     vb.sigRangeChanged.connect(lambda *_, f=_pin_va: f())
                     _pin_va()
 
+        # Pin x-range with 15 % right margin so the longest bar never touches the
+        # panel edge.  Disable x auto-range so PyQtGraph does not revert on repaint.
+        max_vol = float(volumes.max())
+        vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+        vb.setXRange(0, max_vol * 1.15, padding=0)
+
     def _filter_sessions(self, klines: pd.DataFrame) -> pd.DataFrame:
         """Keep only rows whose time falls in the active session windows."""
         active = self._active_sessions()
@@ -2086,9 +2161,39 @@ class TradeViewerQt(QMainWindow):
         if not pd_:
             return
 
+        self._last_hover_idx = candle_idx
+
+        # Build buy/sell/neutral arrays respecting the S/M/L order-size filter.
+        # When tick data includes size breakdowns (new format), honour the filter;
+        # fall back to totals for legacy data or if all size filters are off.
+        show_s = self._ind("tick_s")
+        show_m = self._ind("tick_m")
+        show_l = self._ind("tick_l")
         prices = sorted(pd_.keys())
-        buys   = [pd_[p]["buy"]  for p in prices]
-        sells  = [pd_[p]["sell"] for p in prices]
+        has_breakdown = "buy_s" in next(iter(pd_.values()), {})
+        if has_breakdown and (show_s or show_m or show_l):
+            buys     = [
+                (pd_[p].get("buy_s", 0) if show_s else 0) +
+                (pd_[p].get("buy_m", 0) if show_m else 0) +
+                (pd_[p].get("buy_l", 0) if show_l else 0)
+                for p in prices
+            ]
+            sells    = [
+                (pd_[p].get("sell_s", 0) if show_s else 0) +
+                (pd_[p].get("sell_m", 0) if show_m else 0) +
+                (pd_[p].get("sell_l", 0) if show_l else 0)
+                for p in prices
+            ]
+            neutrals = [
+                (pd_[p].get("neutral_s", 0) if show_s else 0) +
+                (pd_[p].get("neutral_m", 0) if show_m else 0) +
+                (pd_[p].get("neutral_l", 0) if show_l else 0)
+                for p in prices
+            ]
+        else:
+            buys     = [pd_[p]["buy"]     for p in prices]
+            sells    = [pd_[p]["sell"]    for p in prices]
+            neutrals = [pd_[p].get("neutral", 0) for p in prices]
 
         pw = self._tick_profile_widget
         pw.clear()
@@ -2098,15 +2203,27 @@ class TradeViewerQt(QMainWindow):
         bin_h = (max(prices) - min(prices)) / max(len(prices), 1) * 0.9 if prices else 0.01
         bin_h = max(bin_h, 0.001)
 
-        buys_arr  = np.array(buys,  dtype=float)
-        sells_arr = np.array(sells, dtype=float)
+        buys_arr     = np.array(buys,     dtype=float)
+        sells_arr    = np.array(sells,    dtype=float)
+        neutral_arr  = np.array(neutrals, dtype=float)
 
         # Log-transform volumes: log1p spreads out the range so small bars
         # remain visible alongside high-volume bins.  Actual delta is still
         # computed from the raw values and shown as a label.
-        buys_log  = np.log1p(buys_arr)
-        sells_log = np.log1p(sells_arr)
-        zeros     = np.zeros(len(prices))
+        buys_log    = np.log1p(buys_arr)
+        sells_log   = np.log1p(sells_arr)
+        neutral_log = np.log1p(neutral_arr)
+        zeros       = np.zeros(len(prices))
+
+        # Neutral: symmetric grey bar centred at 0, drawn first (behind buy/sell).
+        # Extends ±half_width on each side so it does not hide buy/sell overlap.
+        half_n = neutral_log / 2
+        neutral_bar = pg.BarGraphItem(
+            x0=-half_n, x1=half_n,
+            y=prices, height=bin_h,
+            brush=_qc(_GREY, 80), pen=pg.mkPen(None),
+        )
+        pw.addItem(neutral_bar)
 
         # Buys extend rightward: x0=0 → x1=log(buy+1)
         buy_bar = pg.BarGraphItem(
