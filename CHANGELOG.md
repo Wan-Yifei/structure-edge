@@ -1,5 +1,47 @@
 # Changelog
 
+## Trade Viewer Qt (2026-05-29)
+
+### New viewer: `analysis/trade_viewer_qt.py`
+
+Full rewrite of the chart tool using **PyQt6 + PyQtGraph**, replacing the
+Matplotlib/Tkinter-based `trade_viewer.py`.  Key improvements: native GPU
+rendering, smooth zoom/pan, and a richer panel layout.
+
+**Launch:**
+```bash
+uv run main.py trade_viewer_qt                              # Live mode
+uv run main.py trade_viewer_qt --code US.NVDA --tf 15m
+uv run main.py trade_viewer_qt --mode Historical --date 2026-05-15
+```
+
+**Panels:**
+- Candlestick with per-bin tick heatmap colouring (gold = buy pressure,
+  purple = sell pressure) and Delta Δ annotations per candle.
+- EMA overlays (20 / 50 / 200), each independently toggleable.
+- BOS / CHoCH structure markers + FVG zone overlays + Order Block overlays
+  (regular / mitigation / breaker subtypes).
+- MAVOL subplot (volume bars + 20-period volume MA).
+- KD channel spread subplot (bull / bear / flat colour-coded).
+- Session Vol Profile panel (right side): POC + Value Area; 1D / 3D / 1W
+  date-range selector anchored to the rightmost visible bar.
+- Single-candle Tick Profile (hover to reveal, S/M/L size filter).
+- Full-panel crosshair sync + non-clipping OHLCV tooltip.
+- Session filter checkboxes: Pre / Regular / Post / Night.
+- Trade Review mode: enter a Trade ID → jump to entry bar, show HTF
+  FVG + BOS context, entry/exit/SL/TP markers.
+- Colour scheme toggle: 🔴涨🟢跌 (CN) / 🟢涨🔴跌 (US).
+
+**`main.py` dispatch fix:** `main()` and `_parse_args()` now accept an
+optional `argv` parameter so the unified `main.py` entry point can forward
+leftover CLI args correctly (`uv run main.py trade_viewer_qt --code US.NVDA`
+no longer raises `TypeError`).
+
+The old `trade_viewer.py` (Matplotlib) is kept as legacy and remains
+accessible via `uv run main.py trade_viewer`.
+
+---
+
 ## smc_v2.3 (2026-05-29)
 
 ### Market Structure — `determine_trend` veto rule
