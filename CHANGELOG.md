@@ -42,6 +42,30 @@ accessible via `uv run main.py trade_viewer`.
 
 ---
 
+## smc_v2.3 (2026-05-29) — patched 2026-05-29
+
+### Bug fixes (post-release, tag moved to HEAD)
+
+- **`detect_fvg` default `require_displacement=True` → `False`**: The parameter
+  was accidentally left as `True`, silently filtering all FVGs unless a
+  displacement candle was present — independent of `params.displacement_required`.
+  Backtest engine now passes `require_displacement=params.displacement_required`
+  explicitly.  Previously all v2.3 backtests produced 0 trades due to this bug.
+
+- **`compare_versions._run_one` used `result.to_summary_dict()`**: Correct
+  method is `result.summary_dict()`.  Caused every worker to fail silently with
+  AttributeError and report 0 for all metrics.
+
+- **`trade_viewer_qt` overlays (FVG / OB / BOS) invisible**: Three separate bugs:
+  (1) BOS/OB signals used warmup-relative indices but the chart x-axis uses
+  full-df indices — items were drawn off-screen to the far left.
+  (2) `detect_fvg` called with `require_displacement=True`, hiding most FVGs.
+  (3) BOS rendering capped at the last 8 signals — increased to show all warmup
+  signals.  Also increased `_BOS_MAX_SPAN` / `_TREND_WINDOW` to viewer-appropriate
+  values so structure spanning the full visible window is detected.
+
+---
+
 ## smc_v2.3 (2026-05-29)
 
 ### Market Structure — `determine_trend` veto rule
