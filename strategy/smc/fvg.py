@@ -15,7 +15,7 @@ import pandas as pd
 def detect_fvg(
     klines: pd.DataFrame,
     min_gap_pct: float = 0.001,
-    require_displacement: bool = True,
+    require_displacement: bool = False,
 ) -> list[dict]:
     """Return list of Fair Value Gaps.
 

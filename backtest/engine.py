@@ -528,7 +528,8 @@ def run_backtest(
             htf_start  = max(0, htf_pos + 1 - params.htf_window_bars)
             htf_view   = htf.iloc[htf_start : htf_pos + 1].reset_index(drop=True)
             htf_swings = find_swings(htf_view, params.swing_lookback)
-            htf_fvgs   = detect_fvg(htf_view, params.fvg_min_width_pct)
+            htf_fvgs   = detect_fvg(htf_view, params.fvg_min_width_pct,
+                                      require_displacement=params.displacement_required)
             vp_edges, vp_vols = compute_volume_profile(htf_view)
 
             htf_bos    = []

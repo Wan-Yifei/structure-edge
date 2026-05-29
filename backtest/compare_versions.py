@@ -24,10 +24,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
 import pathlib
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
+
+import shutil
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -89,20 +93,28 @@ def _row_to_params(row: pd.Series) -> BacktestParams:
     return BacktestParams(**d)
 
 
-def _run_one(args: tuple) -> dict:
-    """Worker: re-run one BacktestParams combo and return result dict.
+# ── Worker-process globals (initialised once per worker, never pickled) ───────
 
-    run_backtest expects separate htf/ltf DataFrames, not a klines dict.
-    Extract them here so the worker signature stays pickle-friendly.
+_W_KLINES: dict = {}   # populated by _worker_init
+
+def _worker_init(parquet_paths: dict) -> None:
+    """Load klines from parquet files into the worker process once at startup.
+
+    The main process writes klines to temp parquet files before spawning workers.
+    Workers read those files (concurrent reads are safe; no DuckDB lock contention).
+    Only the file-path dict (~tiny) is pickled for initargs — not the DataFrames.
     """
-    params, klines_dict = args
-    htf = klines_dict[params.trend_tf]
-    ltf = klines_dict[params.entry_tf]
+    global _W_KLINES
+    _W_KLINES = {tf: pd.read_pickle(p) for tf, p in parquet_paths.items()}
+
+
+def _run_one(params: BacktestParams) -> dict:
+    """Re-run one combo using worker-local klines (no pickle of DataFrames)."""
+    htf = _W_KLINES[params.trend_tf]
+    ltf = _W_KLINES[params.entry_tf]
     result = run_backtest(htf, ltf, params)
-    return {"n_trades": result.n_trades, "win_rate": result.win_rate,
-            "total_r": result.total_r, "avg_r": result.avg_r,
-            "profit_factor": result.profit_factor, "sharpe": result.sharpe,
-            "sortino": result.sortino, "max_drawdown_r": result.max_drawdown_r}
+    s = result.summary_dict()
+    return {m: s.get(m, 0.0) for m in _METRICS}
 
 
 # ── HTML report ───────────────────────────────────────────────────────────────
@@ -260,8 +272,9 @@ def main() -> None:
                     help="Number of top combos to re-run (default 30)")
     ap.add_argument("--min-trades", type=int, default=20,
                     help="Minimum trade count filter (default 20)")
-    ap.add_argument("--workers",    type=int, default=4,
-                    help="Parallel worker processes (default 4)")
+    ap.add_argument("--workers",    type=int, default=6,
+                    help="Worker process count (default 6; each worker loads "
+                         "klines from cache once — no per-task pickle overhead)")
     ap.add_argument("--out",        default=None,
                     help="Output HTML path (default: auto-named in results/)")
     ap.add_argument("--inspect",    action="store_true",
@@ -317,26 +330,40 @@ def main() -> None:
         klines_dict[tf] = fetch_klines(code, tf, start_date, end_date)
         print(f"  {tf}: {len(klines_dict[tf])} bars")
 
+    # ── Serialise klines to temp parquet (avoids DuckDB multi-process locking) ─
+    # DuckDB rejects concurrent read-write opens from multiple processes.
+    # Writing parquet once in the main process lets workers read concurrently
+    # without touching DuckDB at all.  Only file paths (strings) are in initargs.
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="cmp_klines_"))
+    parquet_paths: dict[str, str] = {}
+    for tf, df in klines_dict.items():
+        p = tmpdir / f"{tf}.pkl"
+        df.to_pickle(p)
+        parquet_paths[tf] = str(p)
+    print(f"[compare] Klines cached to {tmpdir}")
+
     # ── Re-run top-N combos under current engine ──────────────────────────────
-    work_items = [
-        (_row_to_params(row), klines_dict)
-        for _, row in top_df.iterrows()
-    ]
+    params_list = [_row_to_params(row) for _, row in top_df.iterrows()]
+    new_rows: list[dict | None] = [None] * len(params_list)
+    n_workers = min(args.workers, len(params_list))
 
-    new_rows: list[dict] = [None] * len(work_items)  # type: ignore[list-item]
-    n_workers = min(args.workers, len(work_items))
-
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        fut_to_idx = {pool.submit(_run_one, item): i
-                      for i, item in enumerate(work_items)}
-        for fut in tqdm(as_completed(fut_to_idx), total=len(work_items),
-                        desc=f"Re-running ({ALGO_VERSION})"):
-            idx = fut_to_idx[fut]
-            try:
-                new_rows[idx] = fut.result()
-            except Exception as e:
-                print(f"  [warn] combo {idx} failed: {e}")
-                new_rows[idx] = {m: 0.0 for m in _METRICS}
+    ctx = mp.get_context("spawn")
+    try:
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx,
+                                 initializer=_worker_init,
+                                 initargs=(parquet_paths,)) as pool:
+            fut_to_idx = {pool.submit(_run_one, p): i
+                          for i, p in enumerate(params_list)}
+            for fut in tqdm(as_completed(fut_to_idx), total=len(params_list),
+                            desc=f"Re-running ({ALGO_VERSION})"):
+                idx = fut_to_idx[fut]
+                try:
+                    new_rows[idx] = fut.result()
+                except Exception as e:
+                    print(f"  [warn] combo {idx} failed: {e}")
+                    new_rows[idx] = {m: 0.0 for m in _METRICS}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     # ── Compare & report ──────────────────────────────────────────────────────
     old_metric_df = top_df[_METRICS].copy()
