@@ -2,7 +2,8 @@
 moomoo project — unified entry point
 
 Usage:
-  uv run main.py trade_viewer [args...]
+  uv run main.py trade_viewer_qt [args...]   # PyQtGraph viewer (current)
+  uv run main.py trade_viewer    [args...]   # Matplotlib viewer (legacy)
   uv run main.py scheduler
 """
 
@@ -10,8 +11,9 @@ import argparse
 import importlib
 
 COMMANDS = {
-    "trade_viewer": ("analysis.trade_viewer", "main"),
-    "scheduler":    ("analysis.scheduler",    "main"),
+    "trade_viewer_qt": ("analysis.trade_viewer_qt", "main"),  # PyQtGraph (current)
+    "trade_viewer":    ("analysis.trade_viewer",    "main"),  # Matplotlib (legacy)
+    "scheduler":       ("analysis.scheduler",       "main"),
 }
 
 

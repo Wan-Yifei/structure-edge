@@ -21,7 +21,8 @@ uv sync
 ```
 moomoo/
 ├── analysis/                    # GUI 工具
-│   ├── trade_viewer.py          #   K 线图表 + Order Flow + Trade Review
+│   ├── trade_viewer_qt.py       #   K 线图表（PyQtGraph，当前版本）— 见下方说明
+│   ├── trade_viewer.py          #   K 线图表（Matplotlib，legacy）
 │   ├── tick_collector.py        #   实时 tick 采集（写入 db/ticks.db）
 │   └── scheduler.py             #   定时任务调度器
 │
@@ -77,7 +78,10 @@ moomoo/
 ## 启动方式
 
 ```bash
-# K 线图表 / Order Flow 分析工具
+# K 线图表（PyQtGraph，推荐）
+uv run main.py trade_viewer_qt
+
+# K 线图表（Matplotlib，legacy）
 uv run main.py trade_viewer
 
 # 回测（快速冒烟测试，内置精简参数空间）
@@ -95,34 +99,89 @@ uv run pytest tests/ -v
 
 ---
 
-## Trade Viewer (`analysis/trade_viewer.py`)
+## Trade Viewer Qt (`analysis/trade_viewer_qt.py`) — 当前版本
 
-K 线图表工具，支持三种使用场景：
+基于 **PyQt6 + PyQtGraph** 重写的 K 线分析工具，渲染速度显著快于旧版（Matplotlib），原生缩放/平移，流畅十字光标。
 
-| 模式 | 说明 |
-|------|------|
-| **Live** | 订阅实时 tick，Order Flow profile 每 N 秒刷新 |
-| **Historical** | 加载历史 OHLCV，叠加 SMC 结构（FVG / BOS / OB）|
-| **Trade Review** | 勾选 checkbox 后输入 Trade ID，自动跳转到该交易的 K 线，只显示入场相关结构（FVG + BOS），隐藏其他 overlay |
+### 启动
 
 ```bash
-# 交互式启动（默认：US.SNDK，15m，Live）
-uv run main.py trade_viewer
+# 默认（US.SNDK，5m，Live 模式）
+uv run main.py trade_viewer_qt
 
-# 直接定位到指定交易
-uv run main.py trade_viewer --trade-id <uuid>
+# 指定股票 + 时间框架
+uv run main.py trade_viewer_qt --code US.NVDA --tf 15m
 
-# 命令行预填参数
-uv run analysis/trade_viewer.py --code US.SNDK --mode Historical --date 2026-05-15
+# 历史模式
+uv run main.py trade_viewer_qt --code US.AAPL --tf 15m --mode Historical --date 2026-05-15
+
+# 直接调用脚本（同参数）
+uv run analysis/trade_viewer_qt.py --code US.SNDK --tf 5m --mode Historical --date 2026-05-20
 ```
 
-**可选 SMC overlay（历史模式）：**
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--code` | `US.SNDK` | 股票代码 |
+| `--tf` | `5m` | 时间框架：`1m 5m 15m 30m 1h 4h` |
+| `--mode` | `Live` | `Live`（实时）或 `Historical`（历史）|
+| `--date` | *(今天)* | Historical 模式的目标日期（`YYYY-MM-DD`）|
+| `--host` | `127.0.0.1` | OpenD 地址 |
+| `--port` | `11111` | OpenD 端口 |
+| `--refresh` | `15` | Live 模式 profile 刷新间隔（秒）|
 
-| Overlay | 说明 |
-|---------|------|
-| FVG | Fair Value Gap 区间（半透明色块）|
-| BOS/CHoCH | 结构突破 / 换手 |
-| OB | Order Block |
+### 面板布局
+
+```
+┌──────────────────────────────────────────────────┬─────────────────┐
+│  Candlestick + EMA + BOS/CHoCH + FVG + OB        │  Session Vol    │
+│  (主 K 线面板)                                    │  Profile        │
+├──────────────────────────────────────────────────│  (右侧，点击     │
+│  Volume + MAVOL                                  │   价位显示筛选) │
+├──────────────────────────────────────────────────│                 │
+│  KD channel spread width                         │                 │
+└──────────────────────────────────────────────────┴─────────────────┘
+      ↑ 悬停时浮出 Single-candle Tick Profile
+```
+
+### 功能概览
+
+**K 线面板**
+- Tick 热力图着色（每蜡烛内买/卖压强度，金色 = 买方主导，紫色 = 卖方）
+- Delta Δ 注释（每根蜡烛的净买卖差）
+- EMA overlay（20 / 50 / 200，工具栏可独立开关）
+- BOS / CHoCH 结构标注（水平线 + 方向标签）
+- FVG 区间半透明色块（bull/bear 颜色区分）
+- Order Block overlay（普通 / Mitigation / Breaker 三种子类型，颜色区分）
+
+**副图**
+- MAVOL：成交量柱 + 20 期均量线
+- KD channel：快/慢 EMA 通道扩散宽度，bull（蓝）/ bear（橙）/ flat（灰）着色
+
+**Order Flow 面板**
+- Session Vol Profile（右侧，POC 红线 + Value Area 半透明带）
+- 时间范围：1D / 3D / 1W 单选（以最右可见 bar 的日期为锚点）
+- Session 过滤：Pre / Regular / Post / Night 复选框
+- Single-candle Tick Profile（悬停时弹出，显示该蜡烛的价格-成交量分布）
+  - S / M / L 成交量档位过滤
+
+**Trade Review 模式**
+- 在工具栏输入 Trade ID（UUID）→ 自动跳转到入场 K 线
+- 叠加 HTF FVG 区间 + BOS/CHoCH 背景结构
+- 显示入场/出场/止损/止盈标记
+
+**外观**
+- 颜色方案切换：🔴涨🟢跌（中式）/ 🟢涨🔴跌（欧美式）
+- 十字光标全面板同步 + OHLCV 工具提示（左侧，不溢出边缘）
+
+---
+
+## Trade Viewer (legacy, `analysis/trade_viewer.py`)
+
+旧版 Matplotlib-based 图表工具，已被 Qt 版取代，保留供参考：
+
+```bash
+uv run main.py trade_viewer --code US.SNDK --mode Historical --date 2026-05-15
+```
 
 ---
 
@@ -152,10 +211,13 @@ uv run backtest/run.py --config config/backtest/default_smc_v2.json --no-reuse
 
 ### 输出
 
+每支股票的结果落在独立子目录 `<时间戳>/<CODE>/`：
+
 | 文件 | 说明 |
 |------|------|
-| `backtest/results/<时间戳>/results_<代码>.csv` | 所有组合的统计指标（含 sharpe / sortino）|
-| `backtest/results/<时间戳>/report_<代码>.html` | 交互式 Plotly 报告（KPI 卡片 / 热力图 / 参数重要性）|
+| `backtest/results/<时间戳>/<CODE>/results_<CODE>.csv` | 所有组合的统计指标（含 sharpe / sortino）|
+| `backtest/results/<时间戳>/<CODE>/report_<CODE>.html` | 交互式 Plotly 报告（自包含，无需联网）|
+| `backtest/results/<时间戳>/<CODE>/viz_<CODE>.png` | 静态 Sharpe 分布 + top-N 净值曲线 |
 | `db/backtest.duckdb` | 每笔模拟交易持久化，支持按 trade_id 回溯 |
 
 ### 断点续跑 & 日期段复用
@@ -252,7 +314,8 @@ uv run backtest/fvg_inspect.py \
 | [`backtest/README.md`](backtest/README.md) | 回测模块各脚本功能说明 + 典型工作流 |
 | [`config/backtest/README.md`](config/backtest/README.md) | 回测 config JSON 字段说明 + 各配置文件用途 |
 | [`strategy/smc/STRATEGY.md`](strategy/smc/STRATEGY.md) | SMC 策略逻辑 & 参数完整说明（Pipeline、过滤器、风控、KD 趋势方法）|
-| [`doc/smc_v2_strategy.md`](doc/smc_v2_strategy.md) | smc_v2 / smc_v2.1 变更说明（KD 趋势、over-refill guard、自适应分段、与 v1 对比）|
+| [`doc/smc_v2_strategy.md`](doc/smc_v2_strategy.md) | smc_v2 … smc_v2.3 完整版本历史与变更对比 |
+| [`doc/smc_v2.3_strategy.md`](doc/smc_v2.3_strategy.md) | smc_v2.3 专项变更说明（determine_trend veto、BOS scan fix）|
 | [`doc/smc_v1_strategy.md`](doc/smc_v1_strategy.md) | smc_v1 策略归档文档 |
 | [`db/README.md`](db/README.md) | 数据库文件说明 + 完整 schema |
 | [`doc/BACKTEST_SYSTEM_GUIDE.md`](doc/BACKTEST_SYSTEM_GUIDE.md) | 回测系统设计指南（架构决策、性能优化、实施状态、参考文献）|
@@ -285,5 +348,5 @@ uv run pytest tests/strategy/  # 只跑策略模块
 | `tests/backtest/test_stats.py` | Sharpe / Sortino / heatmap / parameter importance |
 | `tests/backtest/test_logger.py` | 多进程日志 QueueHandler / QueueListener |
 | `tests/strategy/test_base.py` | BaseStrategy ABC、SMCStrategy zone / signal schema |
-| `tests/strategy/test_smc.py` | FVG 检测、BOS/CHoCH、swing points、volume profile |
+| `tests/strategy/test_smc.py` | find_swings / detect_bos_choch / determine_trend / FVG / confirmation |
 | `tests/analysis/test_orderflow.py` | candle_start() 时间对齐、OHLCV profile |
