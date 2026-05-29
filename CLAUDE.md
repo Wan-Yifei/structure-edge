@@ -13,46 +13,51 @@
 
 ---
 
-## Versioning — `smc_v*` git tags
+## Versioning — two independent schemes
 
-`ALGO_VERSION` in `backtest/engine.py` is derived from the most recent
-`smc_v*` git tag via `git describe --tags --match smc_v*`.  It is embedded in
-every trade ID stored in the database, so tag discipline matters.
+### 1. System version `vX.Y.Z` — application / tooling
 
-### Tag types
+Stored in `VERSION` (root) and git tag `vX.Y.Z`.  Covers the whole codebase:
+viewer, scheduler, backtest tools, infrastructure, scripts.
 
-| Change type | Tag | Rule |
-|-------------|-----|------|
-| New algorithm / new entry logic / structural strategy change | `smc_vX.Y` | Minor bump |
-| Bug fix that changes backtest results (engine / strategy code) | `smc_vX.Y.Z` | Patch bump |
-| Pure tooling / viewer / script fix (no effect on backtest output) | — | No tag; commit only |
+| Change type | Bump | Examples |
+|-------------|------|---------|
+| New major subsystem or breaking change | **minor** `X.Y → X.(Y+1)` | New viewer, new DB schema |
+| Tool / viewer / script fix or new utility | **patch** `X.Y.Z → X.Y.(Z+1)` | FVG overlay fix, new compare_versions.py |
 
-### Rules
+Update `VERSION` file and tag HEAD with `vX.Y.Z`.  Document in `CHANGELOG.md`.
 
-1. **Tags are immutable once pushed** — never move a tag that has produced DB records.
-   Exception: if the tag was placed before any valid backtest records existed (e.g.
-   a bug caused 0 trades throughout the tag's lifetime), moving it is acceptable as
-   a one-time cleanup; document it in CHANGELOG.
+### 2. Algo version `smc_vX.Y.Z` — backtest algorithm
 
-2. **Patch tags (`X.Y.Z`) are for engine/strategy bug fixes** — use them when the
-   fix would change trade outcomes (entry bars, SL/TP, filters) for the same params
-   and data.  Purely additive infrastructure fixes (new CLI flag, new output column)
-   that don't alter existing results do not need a patch tag.
+Derived automatically from the most recent `smc_v*` git tag via
+`git describe --tags --match smc_v*`.  Embedded in every trade ID in the DB.
 
-3. **Minor tags (`X.Y`) mark intentional algorithmic changes** — any time the
-   strategy logic, signal detection, or entry rules change in a way that makes new
-   results incompatible with old results, bump the minor version and update:
-   - `CHANGELOG.md` (what changed, why)
-   - `strategy/smc/STRATEGY.md` (parameter table, method description)
+| Change type | Bump | Rule |
+|-------------|------|------|
+| New algorithm / entry logic / structural strategy change | **minor** `smc_vX.Y` | Backtest results change |
+| Bug fix that changes backtest results (engine / strategy) | **patch** `smc_vX.Y.Z` | Same params → different trades |
+| Pure tooling / viewer fix (no effect on backtest output) | — | No algo tag; only bump system version |
+
+### Rules (both schemes)
+
+1. **Tags are immutable once pushed** and DB records exist for them.
+   Exception: if a tag never produced valid records (e.g. a bug caused
+   0 trades throughout), moving it once is acceptable — document in CHANGELOG.
+
+2. **`smc_v` minor bump checklist** — update all of:
+   - `CHANGELOG.md`, `strategy/smc/STRATEGY.md`
    - `doc/smc_v2_strategy.md` (version timeline table)
    - Create `doc/smc_vX.Y_strategy.md` (dedicated change note)
 
 ### Example sequence
 
 ```
-smc_v2.3      — algorithmic release (determine_trend veto + BOS scan fix)
-smc_v2.3.1    — engine bug fix (detect_fvg default regression)
-smc_v2.4      — next algorithmic change
+v0.3.0        — system: PyQtGraph viewer release
+smc_v2.3      — algo:   determine_trend veto + BOS scan fix
+v0.3.1        — system: viewer overlay fixes + compare_versions tool
+smc_v2.3.1    — algo:   detect_fvg default regression fix
+v0.4.0        — system: next feature (e.g. live trading integration)
+smc_v2.4      — algo:   next algorithmic change
 ```
 
 ---
