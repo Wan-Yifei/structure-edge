@@ -291,23 +291,42 @@ def build_param_list(
 ) -> list[BacktestParams]:
     """Expand a parameter grid into a flat list of BacktestParams via cartesian product.
 
+    Deduplicates combos where htf_trend_params has no effect: when htf_trend_methods
+    contains no "kd" AND kd_sl_fallback is False, KD params are never read by the
+    engine, so all htf_trend_params variants produce identical results.  In that slice
+    the params are normalised to {} so only one combo is emitted instead of N.
+
     Args:
         pairs: List of (trend_tf, entry_tf) timeframe pairs to iterate over.
         grid:  Dict mapping param name → list of candidate values.
 
     Returns:
-        One BacktestParams per (TF pair × param combination).
+        One BacktestParams per (TF pair × unique effective param combination).
     """
     keys   = list(grid.keys())
     values = list(grid.values())
     result: list[BacktestParams] = []
+    seen:   set[str] = set()
+
     for trend_tf, entry_tf in pairs:
         for combo in itertools.product(*values):
-            result.append(BacktestParams(
-                trend_tf=trend_tf,
-                entry_tf=entry_tf,
-                **dict(zip(keys, combo)),
-            ))
+            d = dict(zip(keys, combo))
+
+            # Normalise htf_trend_params when KD is not used — prevents N×
+            # duplication across all htf_trend_params variants in bos_choch runs.
+            methods = d.get("htf_trend_methods", ("bos_choch",))
+            if isinstance(methods, list):
+                methods = tuple(methods)
+            need_kd = "kd" in methods or bool(d.get("kd_sl_fallback", False))
+            if not need_kd and "htf_trend_params" in d:
+                d["htf_trend_params"] = {}
+
+            dedup = f"{trend_tf}|{entry_tf}|{json.dumps(d, sort_keys=True, default=str)}"
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+
+            result.append(BacktestParams(trend_tf=trend_tf, entry_tf=entry_tf, **d))
     return result
 
 
