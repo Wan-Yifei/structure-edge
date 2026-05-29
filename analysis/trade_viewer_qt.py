@@ -2506,7 +2506,7 @@ def _safe_float(v) -> float:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Trade Viewer Qt (PyQtGraph)")
     ap.add_argument("--code",    default="US.SNDK")
     ap.add_argument("--tf",      default="5m",
@@ -2517,11 +2517,12 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--host",    default="127.0.0.1")
     ap.add_argument("--port",    type=int, default=11111)
     ap.add_argument("--refresh", type=int, default=15)
-    return ap.parse_args()
+    return ap.parse_args(argv)
 
 
-def main() -> None:
-    args = _parse_args()
+def main(argv=None) -> None:
+    """Entry point — accepts optional argv list for dispatch from main.py."""
+    args = _parse_args(argv)
     app  = QApplication(sys.argv)
     app.setApplicationName("Trade Viewer Qt")
     win  = TradeViewerQt(args)
