@@ -30,8 +30,16 @@ and the bar is skipped.
 
 #### Method: `bos_choch`
 Uses `determine_trend(bos_signals, bos_count)`.
-Trend flips when `bos_count` consecutive BOS signals in the same direction follow
-a CHoCH. Returns None until enough structure has formed.
+
+A **CHoCH immediately confirms** the trend direction (`consecutive = 1`).
+Same-direction BOS signals that follow increment the counter further.
+The `bos_count` parameter controls the minimum required count (CHoCH alone
+satisfies `bos_count = 1`; CHoCH + 1 BOS satisfies `bos_count = 2`).
+
+**Veto rule**: if any BOS in the *opposite* direction appears after the last CHoCH
+in the rolling window, `determine_trend` returns `None` regardless of the counter.
+This prevents entries when price has already reclaimed the structural level that
+the CHoCH broke through.
 
 #### Method: `kd`
 Uses `kd_trend()` — a KD channel indicator (fast/slow EMA channel midline spread).
@@ -135,7 +143,7 @@ force-closed at the day's last bar close if still open.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `swing_lookback` | `2` | Bars on each side required to confirm a swing high/low. Higher = fewer, larger swings. |
-| `bos_count` | `1` | Consecutive BOS signals in the same direction needed to confirm/maintain trend after CHoCH. |
+| `bos_count` | `1` | Minimum `(CHoCH + same-direction BOS)` count to confirm the trend. `1` = CHoCH alone is enough; `2` = CHoCH + at least one confirming BOS required. A reverse BOS after the CHoCH always vetoes the trend regardless of this value. |
 | `htf_window_bars` | `20` | Rolling HTF window size. Controls how much history is used for swings, BOS, and FVGs. ~5 h at 15 m. |
 
 ### FVG filters

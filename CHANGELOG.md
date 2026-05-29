@@ -1,5 +1,72 @@
 # Changelog
 
+## smc_v2.3 (2026-05-29)
+
+### Market Structure — `determine_trend` veto rule
+
+**Old behaviour** (smc_v2.2): A CHoCH set `consecutive = 0`, requiring at least
+one same-direction BOS in the rolling window before the trend was confirmed.
+This was too strict and suppressed valid entries when no confirming BOS had yet
+appeared.
+
+**New behaviour**: CHoCH immediately confirms the trend (`consecutive = 1`), but
+any BOS in the *opposite* direction that appears **after** the last CHoCH vetoes
+the trend → `determine_trend` returns `None`.  This correctly rejects the
+`[CHoCH bear, BOS bull]` pattern (market reclaimed the structural level) while
+allowing clean CHoCH-only setups.
+
+### Market Structure — BOS scan boundary fix (`detect_bos_choch`)
+
+The inner break-scan now starts at the current swing bar itself (`sw["idx"]`,
+inclusive) and stops before the next swing of the same kind.  Previously the scan
+started at `sw["idx"] + 1`, which caused the scan to skip the swing bar even when
+its close already exceeded the prior-swing wick — resulting in a BOS line drawn to
+a lower, later bar that visually crossed over the obvious structural high.
+
+### Backtest — per-stock output subdirectories
+
+Each stock's log, CSV, PNG and HTML report are now written to a dedicated
+subdirectory `<run_dir>/<CODE_slug>/` (e.g. `results/…/US_NVDA/`) instead of all
+files landing flat in the run root.
+
+### Backtest — self-contained HTML reports
+
+`report.py` now embeds the full Plotly JS bundle inline (`get_plotlyjs()`) instead
+of a CDN `<script>` tag.  Reports open correctly in air-gapped / restricted
+networks and do not require an internet connection.  File size increases by ~3 MB.
+
+### Backtest — UTF-8 config loading on Windows
+
+`_load_json_config` in `run.py` now opens JSON files with `encoding="utf-8"`,
+fixing a `UnicodeDecodeError` on Windows (GBK default locale) when config files
+contain non-ASCII characters.
+
+### Backtest — infinite `profit_factor` guard
+
+`_cap_inf_pf()` in `report.py` replaces `float("inf")` in the
+`profit_factor` column with the largest finite value before passing the DataFrame
+to stats functions, preventing `RuntimeWarning: invalid value encountered in double_scalars`.
+
+---
+
+## smc_v2.2 (2026-05-25)
+
+### Backtest — config refactor
+
+- Backtest configs moved to `config/backtest/` with version-suffix filenames.
+- Per-stock parameter grids extracted from `run.py` into config JSON
+  (`param_grid` field); `--mu` flag removed.
+
+### Strategy — `kd_sl_fallback`, direction-mismatch logging, screener dollar volume
+
+- `kd_sl_fallback`: when `True`, the KD slow-channel `lo2`/`up2` boundary is used
+  as a fallback SL/TP anchor when swing-based levels are missing or exceed `max_sl_pct`.
+- FVG events whose direction differs from the current trend are now logged as
+  `"direction_mismatch"` in `fvg_inspect` rejection output.
+- `screener.py`: dollar volume filter added to surface only liquid symbols.
+
+---
+
 ## v0.2.0 (2026-05-25)
 
 ### SMC Detection Fixes

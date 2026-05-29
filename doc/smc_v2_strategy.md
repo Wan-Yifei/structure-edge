@@ -1,6 +1,6 @@
-# SMC Strategy — Version 2 (`smc_v2` / `smc_v2.1`)
+# SMC Strategy — Version 2 (`smc_v2` … `smc_v2.3`)
 
-**Git tags:** `smc_v2`, `smc_v2.1`  
+**Git tags:** `smc_v2`, `smc_v2.1`, `smc_v2.2`, `smc_v2.3`  
 **Algo version constant:** `ALGO_VERSION` (auto-derived from the most recent `smc_v*` tag)  
 **Engine file:** `backtest/engine.py`  
 **Parameter reference:** [`strategy/smc/STRATEGY.md`](../strategy/smc/STRATEGY.md)  
@@ -32,7 +32,8 @@ filters → SL/TP → trade management) is unchanged from v1.
 | `smc_v1` | Baseline: BOS/CHoCH trend, FVG touch/depth, LTF confirmation, LVN + displacement filters, swing-based SL/TP |
 | `smc_v2` | + KD channel trend detector; `htf_trend_methods` / `htf_trend_params` replace direct fields; consensus mode (bos_choch + kd); full HTF history EMA warmup |
 | `smc_v2.1` | + Over-refill guard; adaptive KD segmentation; ATR-normalised flat filter (`kd_atr_threshold`); `ALGO_VERSION` from git tag; `fvg_inspect` tool; `audit.py` (replaces `review.py`); versioned trade IDs |
-| dev (post-v2.1) | + `kd_sl_fallback`; `direction_mismatch` rejection logging; `screener.py` |
+| `smc_v2.2` | + `kd_sl_fallback`; `direction_mismatch` rejection logging; screener dollar-volume filter; backtest configs moved to `config/backtest/` |
+| `smc_v2.3` | **BOS scan fix** — scan starts at swing bar itself, stops before next same-kind swing (prevents BOS crossing over intermediate highs). **`determine_trend` veto** — CHoCH alone confirms immediately; any subsequent reverse BOS cancels the trend. Per-stock output subdirs; self-contained HTML reports (Plotly JS inline); UTF-8 config loading fix on Windows. |
 
 ---
 
@@ -226,16 +227,19 @@ Same as v1.
 
 ## v1 vs v2 Quick-Reference
 
-| Aspect | v1 | v2 | v2.1 |
-|--------|----|----|------|
-| Trend method | `bos_choch` only | + `kd`; multi-method consensus | Same |
-| KD mode | — | Legacy (fixed window) | + Adaptive (zero-crossing + ATR filter) |
-| EMA warmup | — | Full HTF history | Same |
-| Over-refill guard | None | None | Added (`close` punches far side → reject) |
-| Trade IDs | Time + price hash | Same | + `ALGO_VERSION` prefix |
-| SL/TP fallback | Swing only | Swing only | + `kd_sl_fallback` (post-v2.1) |
-| Direction mismatch | Silent | Silent | Logged in `fvg_inspect` (post-v2.1) |
-| Tooling | `run.py`, `review.py` | + `--kd`, `--combined` flags | + `fvg_inspect.py`, `audit.py`, `screener.py` |
+| Aspect | v1 | v2 | v2.1 | v2.2 | v2.3 |
+|--------|----|----|------|------|------|
+| Trend method | `bos_choch` only | + `kd`; multi-method consensus | Same | Same | Same + veto rule |
+| `determine_trend` | CHoCH → trend | Same | Same | Requires BOS after CHoCH | CHoCH alone confirms; reverse BOS vetoes |
+| BOS scan | Start after swing bar | Same | Same | Same | Starts at swing bar (inclusive); stops at next same-kind swing |
+| KD mode | — | Legacy (fixed window) | + Adaptive (zero-crossing + ATR filter) | Same | Same |
+| EMA warmup | — | Full HTF history | Same | Same | Same |
+| Over-refill guard | None | None | Added | Same | Same |
+| Trade IDs | Time + price hash | Same | + `ALGO_VERSION` prefix | Same | Same |
+| SL/TP fallback | Swing only | Swing only | + `kd_sl_fallback` | Same | Same |
+| Direction mismatch | Silent | Silent | Logged in `fvg_inspect` | Same | Same |
+| Output layout | — | — | — | Flat run dir | Per-stock subdirs; self-contained HTML |
+| Tooling | `run.py`, `review.py` | + flags | + `fvg_inspect.py`, `audit.py`, `screener.py` | + `screener` dollar vol | Same |
 
 ---
 
