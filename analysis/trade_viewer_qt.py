@@ -792,6 +792,7 @@ class TradeViewerQt(QMainWindow):
         self._fvg_gaps:     list[dict]          = []
         self._ob_blocks:    list[dict]          = []
         self._ob_data:      list[dict]          = []    # order book snapshots for liquidity heatmap
+        self._iceberg_line_items: list[pg.PlotCurveItem] = []
         self._trade_record: dict | None         = None  # active trade review
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
         # from resetting the user's manual pan/zoom on every tick.
@@ -1027,6 +1028,28 @@ class TradeViewerQt(QMainWindow):
             "Filters out thin resting orders below this size")
         self._liq_vol_spin.valueChanged.connect(self._on_liq_threshold_changed)
         tb2.addWidget(self._liq_vol_spin)
+
+        cb_ice = QCheckBox("Iceberg")
+        cb_ice.setChecked(False)
+        cb_ice.setToolTip(
+            "Detect iceberg orders — price levels where resting volume\n"
+            "repeatedly drops then refreshes (hidden large orders).\n"
+            "Shown as cyan line segments; brightness = refresh intensity.")
+        cb_ice.stateChanged.connect(self._on_indicator_toggle)
+        self._ind_checks["liq_iceberg"] = cb_ice
+        tb2.addWidget(cb_ice)
+
+        tb2.addWidget(_lbl("Min.Ref:"))
+        self._iceberg_min_ref_spin = QSpinBox()
+        self._iceberg_min_ref_spin.setRange(1, 50)
+        self._iceberg_min_ref_spin.setSingleStep(1)
+        self._iceberg_min_ref_spin.setValue(3)
+        self._iceberg_min_ref_spin.setFixedWidth(50)
+        self._iceberg_min_ref_spin.setToolTip(
+            "Minimum number of volume refreshes required\n"
+            "to classify a price level as an iceberg order")
+        self._iceberg_min_ref_spin.valueChanged.connect(self._on_liq_threshold_changed)
+        tb2.addWidget(self._iceberg_min_ref_spin)
 
         # ── Row 3: trade review (separated to avoid crowding Row 2) ──────────
         self.addToolBarBreak()
@@ -1768,6 +1791,7 @@ class TradeViewerQt(QMainWindow):
                 or self._klines is None or self._klines.empty):
             for item in _all:
                 item.setVisible(False)
+            self._redraw_iceberg_lines([])
             return
 
         show_bid_ask = self._ind("liq_bid_ask")
@@ -1833,6 +1857,13 @@ class TradeViewerQt(QMainWindow):
             self._render_heatmap_hot(self._liq_combined_item, bid_grid + ask_grid, rect)
             self._liq_combined_item.setVisible(True)
 
+        icebergs = self._detect_icebergs(
+            self._ob_data, bucket_to_idx, bin_size, price_min, N_PRICE, cm,
+            min_refreshes=self._iceberg_min_ref_spin.value(),
+            vol_threshold=threshold,
+        )
+        self._redraw_iceberg_lines(icebergs)
+
     def _render_heatmap_hot(self, img: pg.ImageItem,
                              grid: np.ndarray, rect: QRectF) -> None:
         """Black → purple → amber → yellow colormap (combined bid+ask)."""
@@ -1896,6 +1927,114 @@ class TradeViewerQt(QMainWindow):
 
         img.setImage(rgba)
         img.setRect(rect)
+
+    # ── Iceberg order detection ──────────────────────────────────────────────
+
+    @staticmethod
+    def _detect_icebergs(
+        snaps: list[dict],
+        bucket_to_idx: dict,
+        bin_size: float,
+        price_min: float,
+        N_PRICE: int,
+        cm: int,
+        min_refreshes: int,
+        vol_threshold: float,
+    ) -> list[tuple]:
+        """Detect iceberg orders from order book snapshot series.
+
+        A price bin is flagged as an iceberg when its resting volume repeatedly
+        drops (depleted by aggressive orders) then refreshes — the hallmark of
+        a hidden large order refilling at a fixed price.
+
+        Returns list of (first_bar_idx, last_bar_idx, price, refresh_count).
+        """
+        from collections import defaultdict
+
+        DROP_FRAC    = 0.25   # volume considered depleted below this fraction of running peak
+        RECOVER_FRAC = 0.40   # volume considered refreshed above this fraction of running peak
+
+        groups: dict[int, list] = defaultdict(list)
+        for s in snaps:
+            if s["volume"] < vol_threshold:
+                continue
+            bar_idx = bucket_to_idx.get(candle_start(s["ts"], cm), -1)
+            if bar_idx < 0:
+                continue
+            p_bin = int((s["price"] - price_min) / bin_size)
+            if not (0 <= p_bin < N_PRICE):
+                continue
+            groups[p_bin].append((s["ts"], bar_idx, float(s["volume"])))
+
+        icebergs = []
+        for p_bin, entries in groups.items():
+            if len(entries) < max(4, min_refreshes * 2):
+                continue
+            entries.sort()
+            bar_idxs = [e[1] for e in entries]
+            vols     = np.array([e[2] for e in entries], dtype=np.float64)
+
+            running_peak = 0.0
+            depleted     = False
+            refreshes: list[int] = []
+
+            for i, v in enumerate(vols):
+                running_peak = max(running_peak, v)
+                if running_peak <= 0:
+                    continue
+                if not depleted and v < DROP_FRAC * running_peak:
+                    depleted = True
+                elif depleted and v > RECOVER_FRAC * running_peak:
+                    depleted = False
+                    refreshes.append(i)
+
+            if len(refreshes) < min_refreshes:
+                continue
+
+            price     = price_min + (p_bin + 0.5) * bin_size
+            first_bar = bar_idxs[refreshes[0]]
+            last_bar  = bar_idxs[refreshes[-1]]
+            icebergs.append((first_bar, last_bar, price, len(refreshes)))
+
+        return icebergs
+
+    def _redraw_iceberg_lines(self, icebergs: list[tuple]) -> None:
+        """Draw cyan horizontal line segments for detected iceberg orders.
+
+        Each segment: x = [first_refresh_bar .. last_refresh_bar], y = price.
+        Brightness encodes refresh intensity (more refreshes = brighter cyan).
+        """
+        for item in self._iceberg_line_items:
+            self._plot_c.removeItem(item)
+        self._iceberg_line_items.clear()
+
+        if not self._ind("liq_iceberg") or not icebergs:
+            return
+
+        max_ref = max(ice[3] for ice in icebergs)
+        N_TIERS = 5
+
+        # Bucket icebergs by intensity tier
+        tier_xs: dict[int, list] = {t: [] for t in range(N_TIERS)}
+        tier_ys: dict[int, list] = {t: [] for t in range(N_TIERS)}
+        for (bar_start, bar_end, price, n_ref) in icebergs:
+            tier = min(int((n_ref - 1) / max(max_ref, 1) * N_TIERS), N_TIERS - 1)
+            tier_xs[tier] += [float(bar_start), float(bar_end) + 0.9]
+            tier_ys[tier] += [price, price]
+
+        for tier in range(N_TIERS):
+            xs = tier_xs[tier]
+            if not xs:
+                continue
+            alpha = int(70 + 185 * tier / max(N_TIERS - 1, 1))
+            pen   = pg.mkPen(color=(0, 229, 255, alpha), width=2)
+            item  = pg.PlotCurveItem(
+                x=np.array(tier_xs[tier]),
+                y=np.array(tier_ys[tier]),
+                pen=pen, connect="pairs",
+            )
+            self._plot_c.addItem(item)
+            self._iceberg_line_items.append(item)
 
     def _clear_ema_items(self) -> None:
         for item in self._ema_items:
