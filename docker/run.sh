@@ -58,6 +58,8 @@ DB_HOST="${PROJECT_ROOT}/docker_db"
 RESULTS_HOST="${PROJECT_ROOT}/backtest_results"
 
 mkdir -p "${DB_HOST}" "${RESULTS_HOST}"
+# Allow the container's backtest user (uid 1000) to write to bind-mounted dirs
+chmod 777 "${DB_HOST}" "${RESULTS_HOST}"
 
 # ── Build docker run command ──────────────────────────────────────────────────
 DOCKER_CMD=(
