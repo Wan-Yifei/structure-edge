@@ -20,10 +20,16 @@
 Stored in `VERSION` (root) and git tag `vX.Y.Z`.  Covers the whole codebase:
 viewer, scheduler, backtest tools, infrastructure, scripts.
 
+Follows standard semver semantics, with `X=0` reserved for internal / dev builds:
+
 | Change type | Bump | Examples |
 |-------------|------|---------|
-| New major subsystem or breaking change | **minor** `X.Y → X.(Y+1)` | New viewer, new DB schema |
-| Tool / viewer / script fix or new utility | **patch** `X.Y.Z → X.Y.(Z+1)` | FVG overlay fix, new compare_versions.py |
+| Formal release to `main` / major milestone | **major** `X.Y.Z → (X+1).0.0` | First production release |
+| New feature or new subsystem (backward-compatible) | **minor** `X.Y.Z → X.(Y+1).0` | New viewer, new overlay, new DB schema |
+| Bug fix — no new behaviour | **patch** `X.Y.Z → X.Y.(Z+1)` | FVG overlay fix, crash fix |
+
+`X=0` means internal / pre-release; `X≥1` is reserved for the first merge to `main`
+that is considered production-ready.
 
 Update `VERSION` file and tag HEAD with `vX.Y.Z`.  Document in `CHANGELOG.md`.
 
@@ -52,12 +58,13 @@ Derived automatically from the most recent `smc_v*` git tag via
 ### Example sequence
 
 ```
-v0.3.0        — system: PyQtGraph viewer release
+v0.3.0        — system: PyQtGraph viewer release (new feature → minor)
 smc_v2.3      — algo:   determine_trend veto + BOS scan fix
-v0.3.1        — system: viewer overlay fixes + compare_versions tool
+v0.3.1        — system: viewer overlay fixes + compare_versions tool (bug fix → patch)
 smc_v2.3.1    — algo:   detect_fvg default regression fix
-v0.4.0        — system: next feature (e.g. live trading integration)
+v0.4.0        — system: order flow overlays — liquidity HM, iceberg, spoof (new feature → minor)
 smc_v2.4      — algo:   next algorithmic change
+v1.0.0        — system: first formal release merged to main
 ```
 
 ---

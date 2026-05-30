@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.4.0 — Order Flow Overlays (2026-05-30)
+
+### New: Order book data pipeline
+- `feeds/order_book_store.py` — SQLite WAL storage for resting order book snapshots
+- `analysis/order_book_collector.py` — push-based `OrderBookHandlerBase` subscriber;
+  writes every depth change to `order_book.db`; watchdog thread mirrors tick_collector design
+
+### New: Liquidity Heatmap (`analysis/trade_viewer_qt.py`)
+- Resting limit order concentration displayed as background image (z=-10, behind candles)
+- Combined mode: black → purple → amber → yellow colormap
+- Bid/Ask split mode: teal (bids) / red (asks) separately
+- Toolbar controls: `Liq.HM: Show`, `Bid/Ask`, `Min.Vol:` spinbox
+
+### New: Iceberg order detection
+- `analysis/orderflow_detect.py::detect_icebergs()` — detects hidden large orders by
+  scanning for repeated volume drop→recover cycles at the same price level
+- Cyan horizontal line segments on the heatmap; brightness encodes refresh count
+- Toolbar: `Iceberg` checkbox + `Min.Ref:` spinbox (default 3)
+
+### New: Spoofing detection
+- `analysis/orderflow_detect.py::detect_spoofs()` — detects large orders that appear
+  then vanish without execution; cross-references `ticks.db` to confirm non-fill
+- BID spoof → orange ▲ (pushing price up); ASK spoof → orange ▼ (pushing down)
+- Dotted orange duration line from order appearance to cancellation bar
+- Toolbar: `Spoof` checkbox + `Max.Dur:` spinbox (default 30 s)
+
+### Refactor + tests
+- Detection logic extracted to `analysis/orderflow_detect.py` (no Qt dependency)
+- `tests/analysis/test_orderflow_detect.py` — 19 unit tests covering both detectors
+
+---
+
 ## Trade Viewer Qt (2026-05-29)
 
 ### New viewer: `analysis/trade_viewer_qt.py`
