@@ -220,6 +220,26 @@ def load_local_ticks(code: str, date_str: str, tf: str) -> dict | None:
         return None
 
 
+def load_raw_ticks(code: str, date_str: str) -> list[dict]:
+    """Load raw tick records from ticks.db for cross-referencing with order book data.
+
+    Returns list of dicts: {ts, price, volume, direction}.
+    Returns [] when ticks.db does not exist.
+    """
+    db_path = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
+    if not db_path.exists():
+        return []
+    from feeds.tick_store import TickStore
+    try:
+        dt    = datetime.strptime(date_str, "%Y-%m-%d")
+        start = (dt - timedelta(days=1)).replace(hour=20, minute=0, second=0)
+        end   = dt.replace(hour=23, minute=59, second=59)
+        with TickStore(db_path, read_only=True) as store:
+            return store.query_ticks(code, start, end)
+    except Exception:
+        return []
+
+
 def load_order_book_data(code: str, date_str: str) -> list[dict]:
     """Load order book snapshots from order_book.db for the given date.
 
@@ -739,9 +759,10 @@ class DataFetcher(QThread):
                                     ticks[bk][price][k] = (
                                         ticks[bk][price].get(k, 0) + counts[k])
 
-            # Order book snapshots for liquidity heatmap
+            # Order book snapshots + raw ticks for liquidity heatmap / spoof detection
             ob_date  = date_str if historical else datetime.now().strftime("%Y-%m-%d")
             ob_data  = load_order_book_data(code, ob_date)
+            tick_raw = load_raw_ticks(code, ob_date)
 
             self.ready.emit({
                 "klines":      df,
@@ -751,6 +772,7 @@ class DataFetcher(QThread):
                 "ob_blocks":   ob_blocks,
                 "ticks":       ticks,
                 "ob_data":     ob_data,
+                "tick_raw":    tick_raw,
                 "candle_mins": candle_mins,
                 "historical":  historical,
                 "date_str":    date_str,
@@ -793,6 +815,8 @@ class TradeViewerQt(QMainWindow):
         self._ob_blocks:    list[dict]          = []
         self._ob_data:      list[dict]          = []    # order book snapshots for liquidity heatmap
         self._iceberg_line_items: list[pg.PlotCurveItem] = []
+        self._tick_raw:     list[dict]          = []
+        self._spoof_items:  list               = []    # ScatterPlotItems + PlotCurveItem
         self._trade_record: dict | None         = None  # active trade review
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
         # from resetting the user's manual pan/zoom on every tick.
@@ -1050,6 +1074,28 @@ class TradeViewerQt(QMainWindow):
             "to classify a price level as an iceberg order")
         self._iceberg_min_ref_spin.valueChanged.connect(self._on_liq_threshold_changed)
         tb2.addWidget(self._iceberg_min_ref_spin)
+
+        cb_spoof = QCheckBox("Spoof")
+        cb_spoof.setChecked(False)
+        cb_spoof.setToolTip(
+            "Detect spoofing — large orders that appear then vanish\n"
+            "without being executed, used to create false price pressure.\n"
+            "▲ = bid spoof (pushing price up)  ▼ = ask spoof (pushing down)")
+        cb_spoof.stateChanged.connect(self._on_indicator_toggle)
+        self._ind_checks["liq_spoof"] = cb_spoof
+        tb2.addWidget(cb_spoof)
+
+        tb2.addWidget(_lbl("Max.Dur:"))
+        self._spoof_dur_spin = QSpinBox()
+        self._spoof_dur_spin.setRange(3, 300)
+        self._spoof_dur_spin.setSingleStep(5)
+        self._spoof_dur_spin.setValue(30)
+        self._spoof_dur_spin.setFixedWidth(50)
+        self._spoof_dur_spin.setToolTip(
+            "Maximum seconds a large order can live before cancellation\n"
+            "to be classified as a potential spoof (default: 30 s)")
+        self._spoof_dur_spin.valueChanged.connect(self._on_liq_threshold_changed)
+        tb2.addWidget(self._spoof_dur_spin)
 
         # ── Row 3: trade review (separated to avoid crowding Row 2) ──────────
         self.addToolBarBreak()
@@ -1513,6 +1559,7 @@ class TradeViewerQt(QMainWindow):
         self._fvg_gaps    = result["fvg_gaps"]
         self._ob_blocks   = result["ob_blocks"]
         self._ob_data     = result.get("ob_data", [])
+        self._tick_raw    = result.get("tick_raw", [])
         self._render(self._klines, self._ticks)
 
     # ── Chart rendering ───────────────────────────────────────────────────────
@@ -1792,6 +1839,7 @@ class TradeViewerQt(QMainWindow):
             for item in _all:
                 item.setVisible(False)
             self._redraw_iceberg_lines([])
+            self._redraw_spoof_markers([])
             return
 
         show_bid_ask = self._ind("liq_bid_ask")
@@ -1863,6 +1911,14 @@ class TradeViewerQt(QMainWindow):
             vol_threshold=threshold,
         )
         self._redraw_iceberg_lines(icebergs)
+
+        spoofs = self._detect_spoofs(
+            self._ob_data, self._tick_raw,
+            bucket_to_idx, bin_size, price_min, N_PRICE, cm,
+            min_vol=max(threshold, 1.0),
+            max_duration_secs=self._spoof_dur_spin.value(),
+        )
+        self._redraw_spoof_markers(spoofs)
 
     def _render_heatmap_hot(self, img: pg.ImageItem,
                              grid: np.ndarray, rect: QRectF) -> None:
@@ -2035,6 +2091,158 @@ class TradeViewerQt(QMainWindow):
             )
             self._plot_c.addItem(item)
             self._iceberg_line_items.append(item)
+
+    # ── Spoofing detection ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _detect_spoofs(
+        ob_data: list[dict],
+        raw_ticks: list[dict],
+        bucket_to_idx: dict,
+        bin_size: float,
+        price_min: float,
+        N_PRICE: int,
+        cm: int,
+        min_vol: float,
+        max_duration_secs: float,
+    ) -> list[tuple]:
+        """Detect spoofing events from order book snapshots cross-referenced with ticks.
+
+        A spoof is a large order that appears at a price level then vanishes within
+        max_duration_secs with little or no execution — creating false price pressure.
+
+        Returns list of (appear_bar, disappear_bar, price, side) where side is
+        'BID' (pushing price up) or 'ASK' (pushing price down).
+        """
+        from collections import defaultdict
+
+        DISAPPEAR_FRAC = 0.20   # order is "gone" when volume drops below this fraction
+        MAX_EXEC_RATIO = 0.30   # cancel if executed volume > 30% of appeared volume → not a spoof
+
+        groups: dict[tuple, list] = defaultdict(list)
+        for s in ob_data:
+            bar_idx = bucket_to_idx.get(candle_start(s["ts"], cm), -1)
+            if bar_idx < 0:
+                continue
+            p_bin = int((s["price"] - price_min) / bin_size)
+            if not (0 <= p_bin < N_PRICE):
+                continue
+            groups[(s["side"], p_bin)].append((s["ts"], bar_idx, float(s["volume"])))
+
+        # Pre-sort raw ticks by ts for fast windowed lookup
+        sorted_ticks = sorted(raw_ticks, key=lambda t: t["ts"])
+
+        spoofs = []
+        for (side, p_bin), entries in groups.items():
+            if len(entries) < 3:
+                continue
+            entries.sort()
+
+            i = 0
+            while i < len(entries):
+                ts_i, bar_i, vol_i = entries[i]
+
+                # Detect appearance: volume jumps to >= min_vol from a low baseline
+                prev_vol = entries[i - 1][2] if i > 0 else 0.0
+                if vol_i < min_vol or prev_vol >= min_vol * 0.5:
+                    i += 1
+                    continue
+
+                appear_ts  = ts_i
+                appear_vol = vol_i
+                appear_bar = bar_i
+
+                # Scan forward for disappearance within max_duration_secs
+                j = i + 1
+                disappear_ts  = None
+                disappear_bar = None
+                while j < len(entries):
+                    ts_j, bar_j, vol_j = entries[j]
+                    if (ts_j - appear_ts).total_seconds() > max_duration_secs:
+                        break
+                    if vol_j < appear_vol * DISAPPEAR_FRAC:
+                        disappear_ts  = ts_j
+                        disappear_bar = bar_j
+                        break
+                    j += 1
+
+                if disappear_ts is None:
+                    i += 1
+                    continue
+
+                # Cross-check: how much was actually executed at this price?
+                level_price = price_min + (p_bin + 0.5) * bin_size
+                executed = sum(
+                    t["volume"] for t in sorted_ticks
+                    if (appear_ts <= t["ts"] <= disappear_ts
+                        and abs(float(t["price"]) - level_price) < bin_size)
+                )
+                if executed > MAX_EXEC_RATIO * appear_vol:
+                    i = j + 1
+                    continue
+
+                spoofs.append((appear_bar, disappear_bar, level_price, side))
+                i = j + 1
+
+        return spoofs
+
+    def _redraw_spoof_markers(self, spoofs: list[tuple]) -> None:
+        """Draw spoof markers: triangle arrows + duration lines.
+
+        BID spoof → orange ▲ (inducing upward price movement).
+        ASK spoof → orange ▼ (inducing downward price movement).
+        Horizontal orange line from appear_bar to disappear_bar at price level.
+        """
+        for item in self._spoof_items:
+            self._plot_c.removeItem(item)
+        self._spoof_items.clear()
+
+        if not self._ind("liq_spoof") or not spoofs:
+            return
+
+        ORANGE = (255, 140, 0, 210)
+        up_xs,   up_ys   = [], []
+        down_xs, down_ys = [], []
+        line_xs, line_ys = [], []
+
+        for (appear_bar, disappear_bar, price, side) in spoofs:
+            if side == "BID":
+                up_xs.append(float(appear_bar))
+                up_ys.append(price)
+            else:
+                down_xs.append(float(appear_bar))
+                down_ys.append(price)
+            line_xs += [float(appear_bar), float(disappear_bar) + 0.9]
+            line_ys += [price, price]
+
+        if up_xs:
+            scat = pg.ScatterPlotItem(
+                x=up_xs, y=up_ys,
+                symbol="t", size=10,
+                pen=pg.mkPen(None),
+                brush=pg.mkBrush(*ORANGE),
+            )
+            self._plot_c.addItem(scat)
+            self._spoof_items.append(scat)
+
+        if down_xs:
+            scat = pg.ScatterPlotItem(
+                x=down_xs, y=down_ys,
+                symbol="t2", size=10,
+                pen=pg.mkPen(None),
+                brush=pg.mkBrush(*ORANGE),
+            )
+            self._plot_c.addItem(scat)
+            self._spoof_items.append(scat)
+
+        if line_xs:
+            line = pg.PlotCurveItem(
+                x=np.array(line_xs), y=np.array(line_ys),
+                pen=pg.mkPen(color=ORANGE, width=1, style=Qt.PenStyle.DotLine),
+                connect="pairs",
+            )
+            self._plot_c.addItem(line)
+            self._spoof_items.append(line)
 
     def _clear_ema_items(self) -> None:
         for item in self._ema_items:
