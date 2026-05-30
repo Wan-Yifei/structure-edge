@@ -75,8 +75,18 @@ v1.0.0        — system: first formal release merged to main
 - Results land in `backtest/results/<timestamp>_<algo>_<run_name>/`
 - Compare two algo versions: `uv run backtest/compare_versions.py --csv … --config …`
 - Inspect rejection reasons: `uv run backtest/fvg_inspect.py --from-csv … --inspect-start … --inspect-end …`
-- Post-processing chain: `bash backtest/post_backtest.sh <run_dir> <start> <end> <inspect_start> <inspect_end>`
-  Runs report.py → audit.py (rank 1, min 5 trades) → fvg_inspect.py for every stock subdir.
+
+### Default: run post_backtest.sh after every backtest
+
+After every backtest finishes, **always run**:
+
+```bash
+bash backtest/post_backtest.sh <run_dir> <start> <end> <inspect_start> <inspect_end>
+```
+
+This chains report.py → audit.py (rank 1, min 5 trades) → fvg_inspect.py for every stock
+subdir under `<run_dir>`.  Choose `<inspect_start>/<inspect_end>` as a representative
+one-month window from the middle of the backtest period.
 
 ### Default: write REVIEW.md after every backtest run
 
