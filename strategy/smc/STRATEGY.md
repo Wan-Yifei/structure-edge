@@ -94,11 +94,18 @@ three-bar gap) must be a "displacement" (strong momentum) candle:
 - Range > `displacement_atr_mult × mean_range` over the prior `displacement_lookback` bars.
 - Body / Range ratio ≥ `displacement_body_ratio`.
 
-### Step 6 — LTF confirmation *(optional)*
+### Step 6 — LTF structure confirmation *(optional)*
 
 When `require_ltf_confirmation = True`, a CHoCH + BOS sequence in the trend
 direction must appear on the LTF **within the current HTF candle** and **after
 the wick first entered the FVG zone**.
+
+### Step 6b — LTF trend-bar confirmation *(optional)*
+
+When `require_ltf_trend_bar = True`, the entry bar itself must close in the
+trend direction: `close > open` for a bull entry, `close < open` for a bear
+entry.  This is a looser, bar-level momentum check that does not require a
+structural signal.  Steps 6 and 6b are independent and can be combined.
 
 ### Step 7 — SL / TP levels
 
@@ -168,6 +175,7 @@ force-closed at the day's last bar close if still open.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `require_ltf_confirmation` | `False` | Require LTF CHoCH + BOS in trend direction after zone touch. More selective, fewer trades. |
+| `require_ltf_trend_bar`    | `False` | Require the entry bar to close in the trend direction (`close > open` for bull; `close < open` for bear). Looser than `require_ltf_confirmation`; can be used alone or combined with it. |
 
 ### LVN filter
 

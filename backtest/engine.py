@@ -128,7 +128,8 @@ class BacktestParams:
     displacement_atr_mult:    float = 1.5   # middle candle range > mult × baseline mean range
     displacement_body_ratio:  float = 0.5   # body / range of middle candle (0=doji, 1=marubozu)
     displacement_lookback:    int   = 5     # candles used to compute baseline mean range
-    require_ltf_confirmation: bool  = False  # True = CHoCH+BOS; False = depth-only entry
+    require_ltf_confirmation: bool  = False  # CHoCH+BOS sequence on LTF after zone touch
+    require_ltf_trend_bar:    bool  = False  # entry bar close must move in trend direction
     require_lvn_overlap:      bool  = False  # FVG must sit in a Low Volume Node
     lvn_threshold:            float = 0.30   # LVN: zone vol < threshold × max bin vol
     sl_buffer_pct:            float = 0.001  # extra % added beyond the swing level
@@ -160,7 +161,12 @@ class BacktestParams:
                   fvg<min_pct> dp<depth> <disp> <conf> sl<buf> msl<max_sl> rr<min_rr> [flags]'
         """
         d    = f"D{self.displacement_atr_mult:.1f}b{self.displacement_body_ratio:.1f}" if self.displacement_required else "d"
-        conf = "ltf" if self.require_ltf_confirmation else "raw"
+        conf_parts = []
+        if self.require_ltf_confirmation:
+            conf_parts.append("ltf")
+        if self.require_ltf_trend_bar:
+            conf_parts.append("mb")
+        conf = "+".join(conf_parts) if conf_parts else "raw"
         flags = ""
         if not self.allow_short:
             flags += " Lo"
@@ -713,6 +719,22 @@ def run_backtest(
             anchor      = max(0, in_fvg_since - ltf_per_htf)
             rel_anchor  = max(0, anchor - cur_win)
             if not check_ltf_confirmation(ltf_bos_sig, trend, after_idx=rel_anchor):
+                i += 1
+                continue
+
+        # ── 6b. LTF trend-bar confirmation ───────────────────────────────
+        if params.require_ltf_trend_bar:
+            bar_open = ltf_opens[i]
+            if trend == "bull" and bar_cls <= bar_open:
+                if rejection_log is not None:
+                    _rlog_finalize("ltf_trend_bar",
+                                   detail=f"entry bar bearish: cls={bar_cls:.4f} <= open={bar_open:.4f}")
+                i += 1
+                continue
+            if trend == "bear" and bar_cls >= bar_open:
+                if rejection_log is not None:
+                    _rlog_finalize("ltf_trend_bar",
+                                   detail=f"entry bar bullish: cls={bar_cls:.4f} >= open={bar_open:.4f}")
                 i += 1
                 continue
 

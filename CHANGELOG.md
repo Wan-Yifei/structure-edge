@@ -1,5 +1,15 @@
 # Changelog
 
+## smc_v2.4 — LTF trend-bar confirmation (2026-05-30)
+
+- New `require_ltf_trend_bar` parameter (Step 6b): entry bar close must move in
+  trend direction (`close > open` bull; `close < open` bear).  Looser alternative
+  to `require_ltf_confirmation`; independent and combinable with it.
+- `label()` emits `mb` tag when active, `ltf+mb` when combined with CHoCH+BOS filter.
+- Rejection log reason: `ltf_trend_bar`.
+
+---
+
 ## v0.4.0 — Order Flow Overlays (2026-05-30)
 
 ### New: Order book data pipeline

@@ -1,6 +1,6 @@
-# SMC Strategy — Version 2 (`smc_v2` … `smc_v2.3`)
+# SMC Strategy — Version 2 (`smc_v2` … `smc_v2.4`)
 
-**Git tags:** `smc_v2`, `smc_v2.1`, `smc_v2.2`, `smc_v2.3`  
+**Git tags:** `smc_v2`, `smc_v2.1`, `smc_v2.2`, `smc_v2.3`, `smc_v2.4`  
 **Algo version constant:** `ALGO_VERSION` (auto-derived from the most recent `smc_v*` tag)  
 **Engine file:** `backtest/engine.py`  
 **Parameter reference:** [`strategy/smc/STRATEGY.md`](../strategy/smc/STRATEGY.md)  
@@ -34,6 +34,7 @@ filters → SL/TP → trade management) is unchanged from v1.
 | `smc_v2.1` | + Over-refill guard; adaptive KD segmentation; ATR-normalised flat filter (`kd_atr_threshold`); `ALGO_VERSION` from git tag; `fvg_inspect` tool; `audit.py` (replaces `review.py`); versioned trade IDs |
 | `smc_v2.2` | + `kd_sl_fallback`; `direction_mismatch` rejection logging; screener dollar-volume filter; backtest configs moved to `config/backtest/` |
 | `smc_v2.3` | **BOS scan fix** — scan starts at swing bar itself, stops before next same-kind swing (prevents BOS crossing over intermediate highs). **`determine_trend` veto** — CHoCH alone confirms immediately; any subsequent reverse BOS cancels the trend. Per-stock output subdirs; self-contained HTML reports (Plotly JS inline); UTF-8 config loading fix on Windows. |
+| `smc_v2.4` | + `require_ltf_trend_bar` — new optional entry filter (Step 6b): entry bar close must move in trend direction (`close > open` for bull; `close < open` for bear). Looser than `require_ltf_confirmation`; independent and combinable with it. |
 
 ---
 
