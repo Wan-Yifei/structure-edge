@@ -70,6 +70,27 @@ def _resample(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     return r[["time_key", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
 
+def _cache_covers(
+    cached_range: tuple[str, str],
+    req_start: str,
+    req_end: str,
+    tolerance_days: int = 7,
+) -> bool:
+    """Return True if the cached date range adequately covers [req_start, req_end].
+
+    A tolerance of 7 days is applied to each boundary to accommodate weekends
+    and public holidays (the first/last cached bar may fall a few days inside
+    the nominal start/end).
+    """
+    from datetime import date, timedelta
+    tol = timedelta(days=tolerance_days)
+    c_start = date.fromisoformat(cached_range[0][:10])
+    c_end   = date.fromisoformat(cached_range[1][:10])
+    r_start = date.fromisoformat(req_start[:10])
+    r_end   = date.fromisoformat(req_end[:10])
+    return c_start <= r_start + tol and c_end >= r_end - tol
+
+
 def fetch_klines(
     code: str,
     ktype: str,
@@ -99,12 +120,19 @@ def fetch_klines(
 
     store = KlineStore(db_path) if db_path else KlineStore()
 
-    if not force_refresh and store.has_data(code, ktype):
-        cached = store.load(code, ktype, start, end)
-        if not cached.empty:
-            print(f"[fetcher] Cache hit: {code} {ktype}  ({len(cached)} bars)")
-            store.close()
-            return cached
+    if not force_refresh:
+        dr = store.date_range(code, ktype)
+        if dr is not None and _cache_covers(dr, start, end):
+            cached = store.load(code, ktype, start, end)
+            if not cached.empty:
+                print(f"[fetcher] Cache hit: {code} {ktype}  ({len(cached)} bars)")
+                store.close()
+                return cached
+        elif dr is not None:
+            print(
+                f"[fetcher] Cache stale: {code} {ktype}  "
+                f"cached {dr[0][:10]}…{dr[1][:10]}, need {start}…{end} — re-fetching"
+            )
 
     print(f"[fetcher] Fetching {code} {ktype} from {start} to {end} ...")
     frames: list[pd.DataFrame] = []
