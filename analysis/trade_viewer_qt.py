@@ -1984,7 +1984,7 @@ class TradeViewerQt(QMainWindow):
         img.setImage(rgba)
         img.setRect(rect)
 
-    # ── Iceberg order detection ──────────────────────────────────────────────
+    # ── Iceberg / spoof detection (logic lives in analysis/orderflow_detect.py) ─
 
     @staticmethod
     def _detect_icebergs(
@@ -1997,62 +1997,11 @@ class TradeViewerQt(QMainWindow):
         min_refreshes: int,
         vol_threshold: float,
     ) -> list[tuple]:
-        """Detect iceberg orders from order book snapshot series.
-
-        A price bin is flagged as an iceberg when its resting volume repeatedly
-        drops (depleted by aggressive orders) then refreshes — the hallmark of
-        a hidden large order refilling at a fixed price.
-
-        Returns list of (first_bar_idx, last_bar_idx, price, refresh_count).
-        """
-        from collections import defaultdict
-
-        DROP_FRAC    = 0.25   # volume considered depleted below this fraction of running peak
-        RECOVER_FRAC = 0.40   # volume considered refreshed above this fraction of running peak
-
-        groups: dict[int, list] = defaultdict(list)
-        for s in snaps:
-            if s["volume"] < vol_threshold:
-                continue
-            bar_idx = bucket_to_idx.get(candle_start(s["ts"], cm), -1)
-            if bar_idx < 0:
-                continue
-            p_bin = int((s["price"] - price_min) / bin_size)
-            if not (0 <= p_bin < N_PRICE):
-                continue
-            groups[p_bin].append((s["ts"], bar_idx, float(s["volume"])))
-
-        icebergs = []
-        for p_bin, entries in groups.items():
-            if len(entries) < max(4, min_refreshes * 2):
-                continue
-            entries.sort()
-            bar_idxs = [e[1] for e in entries]
-            vols     = np.array([e[2] for e in entries], dtype=np.float64)
-
-            running_peak = 0.0
-            depleted     = False
-            refreshes: list[int] = []
-
-            for i, v in enumerate(vols):
-                running_peak = max(running_peak, v)
-                if running_peak <= 0:
-                    continue
-                if not depleted and v < DROP_FRAC * running_peak:
-                    depleted = True
-                elif depleted and v > RECOVER_FRAC * running_peak:
-                    depleted = False
-                    refreshes.append(i)
-
-            if len(refreshes) < min_refreshes:
-                continue
-
-            price     = price_min + (p_bin + 0.5) * bin_size
-            first_bar = bar_idxs[refreshes[0]]
-            last_bar  = bar_idxs[refreshes[-1]]
-            icebergs.append((first_bar, last_bar, price, len(refreshes)))
-
-        return icebergs
+        from analysis.orderflow_detect import detect_icebergs
+        return detect_icebergs(
+            snaps, bucket_to_idx, bin_size, price_min,
+            N_PRICE, cm, min_refreshes, vol_threshold,
+        )
 
     def _redraw_iceberg_lines(self, icebergs: list[tuple]) -> None:
         """Draw cyan horizontal line segments for detected iceberg orders.
@@ -2092,8 +2041,6 @@ class TradeViewerQt(QMainWindow):
             self._plot_c.addItem(item)
             self._iceberg_line_items.append(item)
 
-    # ── Spoofing detection ───────────────────────────────────────────────────
-
     @staticmethod
     def _detect_spoofs(
         ob_data: list[dict],
@@ -2106,85 +2053,11 @@ class TradeViewerQt(QMainWindow):
         min_vol: float,
         max_duration_secs: float,
     ) -> list[tuple]:
-        """Detect spoofing events from order book snapshots cross-referenced with ticks.
-
-        A spoof is a large order that appears at a price level then vanishes within
-        max_duration_secs with little or no execution — creating false price pressure.
-
-        Returns list of (appear_bar, disappear_bar, price, side) where side is
-        'BID' (pushing price up) or 'ASK' (pushing price down).
-        """
-        from collections import defaultdict
-
-        DISAPPEAR_FRAC = 0.20   # order is "gone" when volume drops below this fraction
-        MAX_EXEC_RATIO = 0.30   # cancel if executed volume > 30% of appeared volume → not a spoof
-
-        groups: dict[tuple, list] = defaultdict(list)
-        for s in ob_data:
-            bar_idx = bucket_to_idx.get(candle_start(s["ts"], cm), -1)
-            if bar_idx < 0:
-                continue
-            p_bin = int((s["price"] - price_min) / bin_size)
-            if not (0 <= p_bin < N_PRICE):
-                continue
-            groups[(s["side"], p_bin)].append((s["ts"], bar_idx, float(s["volume"])))
-
-        # Pre-sort raw ticks by ts for fast windowed lookup
-        sorted_ticks = sorted(raw_ticks, key=lambda t: t["ts"])
-
-        spoofs = []
-        for (side, p_bin), entries in groups.items():
-            if len(entries) < 3:
-                continue
-            entries.sort()
-
-            i = 0
-            while i < len(entries):
-                ts_i, bar_i, vol_i = entries[i]
-
-                # Detect appearance: volume jumps to >= min_vol from a low baseline
-                prev_vol = entries[i - 1][2] if i > 0 else 0.0
-                if vol_i < min_vol or prev_vol >= min_vol * 0.5:
-                    i += 1
-                    continue
-
-                appear_ts  = ts_i
-                appear_vol = vol_i
-                appear_bar = bar_i
-
-                # Scan forward for disappearance within max_duration_secs
-                j = i + 1
-                disappear_ts  = None
-                disappear_bar = None
-                while j < len(entries):
-                    ts_j, bar_j, vol_j = entries[j]
-                    if (ts_j - appear_ts).total_seconds() > max_duration_secs:
-                        break
-                    if vol_j < appear_vol * DISAPPEAR_FRAC:
-                        disappear_ts  = ts_j
-                        disappear_bar = bar_j
-                        break
-                    j += 1
-
-                if disappear_ts is None:
-                    i += 1
-                    continue
-
-                # Cross-check: how much was actually executed at this price?
-                level_price = price_min + (p_bin + 0.5) * bin_size
-                executed = sum(
-                    t["volume"] for t in sorted_ticks
-                    if (appear_ts <= t["ts"] <= disappear_ts
-                        and abs(float(t["price"]) - level_price) < bin_size)
-                )
-                if executed > MAX_EXEC_RATIO * appear_vol:
-                    i = j + 1
-                    continue
-
-                spoofs.append((appear_bar, disappear_bar, level_price, side))
-                i = j + 1
-
-        return spoofs
+        from analysis.orderflow_detect import detect_spoofs
+        return detect_spoofs(
+            ob_data, raw_ticks, bucket_to_idx, bin_size, price_min,
+            N_PRICE, cm, min_vol, max_duration_secs,
+        )
 
     def _redraw_spoof_markers(self, spoofs: list[tuple]) -> None:
         """Draw spoof markers: triangle arrows + duration lines.
