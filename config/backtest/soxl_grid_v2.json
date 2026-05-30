@@ -1,5 +1,5 @@
 {
-    "_note": "SOXL focused grid v2 — derived from soxl_random_300 analysis (REVIEW.md 2026-05-30). New vs v1: add bos_choch-only method, add fvg_min=0.001, expand max_sl to [0.05,0.08,0.12] (0.12 had best PF mean), add sl_buffer=0.005, add two extra kd_params (15/90w5, 25/90w10). Long-only (allow_short=false): leveraged ETF unsuitable for shorting. ~31,104 raw combos after build_param_list dedup (8 kd_params = 4 fast/slow × 2 modes: adaptive smooth=3 / legacy smooth=0).",
+    "_note": "SOXL focused grid v2 — derived from soxl_random_300 analysis (REVIEW.md 2026-05-30). New vs v1: add bos_choch-only method, add fvg_min=0.001, expand max_sl to [0.05,0.08,0.12] (0.12 had best PF mean), add sl_buffer=0.005, add two extra kd_params (15/90w5, 25/90w10). Long-only (allow_short=false): leveraged ETF unsuitable for shorting. ~62,208 raw combos after build_param_list dedup (8 kd_params × 2 modes: adaptive smooth=3 / legacy smooth=0; require_ltf_trend_bar=[true,false]).",
     "codes": ["US.SOXL"],
     "start": "2025-05-22",
     "end": "2026-05-22",
@@ -31,6 +31,7 @@
         "fvg_entry_depth_pct":      [0.05, 0.20],
         "displacement_required":    [true, false],
         "require_ltf_confirmation": [false],
+        "require_ltf_trend_bar":    [true, false],
         "sl_buffer_pct":            [0.003, 0.005],
         "max_sl_pct":               [0.05, 0.08, 0.12],
         "min_rr":                   [1.5, 2.0, 2.5],
