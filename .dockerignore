@@ -1,0 +1,32 @@
+# Python cache
+__pycache__/
+*.py[oc]
+*.egg-info/
+.venv/
+
+# Databases (downloaded at runtime from S3)
+db/
+*.duckdb
+*.duckdb.wal
+
+# Backtest outputs (generated at runtime)
+backtest/results/
+backtest_results/
+docker_db/
+
+# Logs
+logs/
+
+# Dev / CI
+.git/
+.github/
+.claude/
+tests/outputs/
+
+# Docker secrets (never bake into image)
+docker/backtest.env
+
+# Misc
+*.png
+*.jsonl
+github_token.txt
