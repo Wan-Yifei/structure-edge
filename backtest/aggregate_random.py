@@ -34,7 +34,8 @@ _PARAM_COLS = [
     "fvg_min_width_pct", "fvg_entry_depth_pct", "fvg_max_age_bars",
     "displacement_required", "displacement_atr_mult", "displacement_body_ratio",
     "displacement_lookback",
-    "require_ltf_confirmation", "require_lvn_overlap", "lvn_threshold",
+    "require_ltf_confirmation", "require_ltf_trend_bar",
+    "require_lvn_overlap", "lvn_threshold",
     "sl_buffer_pct", "max_sl_pct", "min_rr",
     "allow_short", "intraday_only", "kd_sl_fallback",
     "htf_trend_methods", "htf_trend_params",
@@ -47,7 +48,7 @@ _GRID_PARAMS = [
     "htf_trend_methods",
     "htf_window_bars", "swing_lookback", "bos_count",
     "fvg_min_width_pct", "fvg_entry_depth_pct",
-    "displacement_required", "require_ltf_confirmation",
+    "displacement_required", "require_ltf_confirmation", "require_ltf_trend_bar",
     "sl_buffer_pct", "max_sl_pct", "min_rr", "kd_sl_fallback",
 ]
 
@@ -69,7 +70,10 @@ def load_run_dir(run_dir: pathlib.Path) -> tuple[pd.DataFrame, list[str]]:
     """
     csvs = sorted(run_dir.glob("results_*.csv"))
     if not csvs:
-        raise FileNotFoundError(f"No results_*.csv files found in {run_dir}")
+        # Fall back to per-stock subdirectories (*/results_*.csv)
+        csvs = sorted(run_dir.glob("*/results_*.csv"))
+    if not csvs:
+        raise FileNotFoundError(f"No results_*.csv files found in {run_dir} or its subdirs")
 
     frames, codes = [], []
     for csv in csvs:
@@ -86,6 +90,66 @@ def load_run_dir(run_dir: pathlib.Path) -> tuple[pd.DataFrame, list[str]]:
 
 
 # ── Aggregation ───────────────────────────────────────────────────────────────
+
+def _remove_kd_keys(params_str: str, keys_to_remove: set) -> str:
+    """Remove specified keys from a JSON-encoded htf_trend_params string."""
+    try:
+        d = ast.literal_eval(params_str) if params_str else {}
+        if not isinstance(d, dict):
+            return params_str
+        d = {k: v for k, v in d.items() if k not in keys_to_remove}
+        return json.dumps(d, sort_keys=True)
+    except Exception:
+        return params_str
+
+
+def normalize_params(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove irrelevant parameter variation before groupby aggregation.
+
+    Rules applied (each only when the relevant column exists):
+
+    1. bos_choch-only: htf_trend_params → '{}' (KD params have no effect).
+    2. kd-only in adaptive mode (kd_smooth absent or >0): remove kd_window
+       from htf_trend_params (window is unused in segment-based mode).
+    3. kd-only: bos_count → 1 (BOS counter unused when method has no bos_choch).
+
+    After normalisation, duplicate (code, params) keys are collapsed, keeping
+    the row with the most trades.
+    """
+    if "htf_trend_methods" not in df.columns or "htf_trend_params" not in df.columns:
+        return df
+    df = df.copy()
+    methods = df["htf_trend_methods"].astype(str).str.strip()
+    bos_only = methods == '["bos_choch"]'
+    kd_only  = methods == '["kd"]'
+
+    # Rule 1: bos_choch-only → clear KD params
+    df.loc[bos_only, "htf_trend_params"] = "{}"
+
+    # Rule 2: kd-only adaptive → strip kd_window (unused in adaptive/segment mode)
+    def _is_adaptive(p: str) -> bool:
+        try:
+            d = ast.literal_eval(p) if p else {}
+            return isinstance(d, dict) and int(d.get("kd_smooth", 3)) > 0
+        except Exception:
+            return True  # default kd_smooth=3 is adaptive
+
+    kd_adaptive = kd_only & df["htf_trend_params"].apply(_is_adaptive)
+    df.loc[kd_adaptive, "htf_trend_params"] = df.loc[kd_adaptive, "htf_trend_params"].apply(
+        lambda p: _remove_kd_keys(p, {"kd_window"})
+    )
+
+    # Rule 3: kd-only → bos_count irrelevant, canonicalise to 1
+    if "bos_count" in df.columns:
+        df.loc[kd_only, "bos_count"] = 1
+
+    param_cols = [c for c in _PARAM_COLS if c in df.columns]
+    key_cols = (["_code"] if "_code" in df.columns else []) + param_cols
+    df = (df.sort_values("n_trades", ascending=False)
+            .drop_duplicates(subset=key_cols)
+            .sort_index())
+    return df
+
 
 def aggregate(df: pd.DataFrame, codes: list[str], min_trades: int) -> pd.DataFrame:
     """Join combos across stocks and compute cross-stock aggregate metrics.
@@ -442,6 +506,9 @@ def main() -> None:
 
     # Load
     df, codes = load_run_dir(run_dir)
+
+    # Normalize bos_choch-only rows (htf_trend_params irrelevant → collapse duplicates)
+    df = normalize_params(df)
 
     # Aggregate
     agg_df = aggregate(df, codes, min_trades=args.min_trades)
