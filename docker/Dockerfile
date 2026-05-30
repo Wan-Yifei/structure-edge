@@ -44,7 +44,9 @@ WORKDIR /app
 
 # Non-root user for HPC environments that disallow root containers
 RUN useradd -m -u 1000 backtest \
-    && chown -R backtest:backtest /app
+    && chown -R backtest:backtest /app \
+    && mkdir -p /home/backtest/.aws \
+    && chown backtest:backtest /home/backtest/.aws
 USER backtest
 
 # Runtime dirs (may be bind-mounted from host)

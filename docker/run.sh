@@ -67,7 +67,8 @@ DOCKER_CMD=(
     ${DETACH}
 
     # AWS credentials (read-only mount of host ~/.aws)
-    --volume "${HOME}/.aws:/root/.aws:ro"
+    # Container runs as uid 1000 (backtest), so mount to /home/backtest/.aws
+    --volume "${HOME}/.aws:/home/backtest/.aws:ro"
 
     # Persistent volumes
     --volume "${DB_HOST}:/app/db"
@@ -88,7 +89,7 @@ if [[ "${SHELL_MODE}" == "true" ]]; then
     DOCKER_CMD=(
         docker run
         --rm -it
-        --volume "${HOME}/.aws:/root/.aws:ro"
+        --volume "${HOME}/.aws:/home/backtest/.aws:ro"
         --volume "${DB_HOST}:/app/db"
         --volume "${RESULTS_HOST}:/app/backtest/results"
         --env-file "${ENV_FILE}"
