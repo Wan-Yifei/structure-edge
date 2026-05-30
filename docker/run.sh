@@ -25,7 +25,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-IMAGE_NAME="moomoo-backtest:latest"
+IMAGE_NAME="backtest:latest"
 ENV_FILE="${SCRIPT_DIR}/backtest.env"
 DETACH=""
 DRY_RUN=false
@@ -63,7 +63,7 @@ mkdir -p "${DB_HOST}" "${RESULTS_HOST}"
 DOCKER_CMD=(
     docker run
     --rm
-    --name moomoo-backtest
+    --name backtest
     ${DETACH}
 
     # AWS credentials (read-only mount of host ~/.aws)
