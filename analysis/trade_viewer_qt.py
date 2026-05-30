@@ -220,6 +220,26 @@ def load_local_ticks(code: str, date_str: str, tf: str) -> dict | None:
         return None
 
 
+def load_order_book_data(code: str, date_str: str) -> list[dict]:
+    """Load order book snapshots from order_book.db for the given date.
+
+    Returns list of dicts: {ts, side, price, volume}.
+    Returns [] when the DB does not exist (collector not yet run).
+    """
+    db_path = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
+    if not db_path.exists():
+        return []
+    from feeds.order_book_store import OrderBookStore
+    try:
+        dt    = datetime.strptime(date_str, "%Y-%m-%d")
+        start = (dt - timedelta(days=1)).replace(hour=20, minute=0, second=0)
+        end   = dt.replace(hour=23, minute=59, second=59)
+        with OrderBookStore(db_path, read_only=True) as store:
+            return store.query_snapshots(code, start, end)
+    except Exception:
+        return []
+
+
 def apply_profile_range(klines: pd.DataFrame, range_val: str) -> pd.DataFrame:
     """Trim klines to N trading days ending at the last bar."""
     if klines.empty:
@@ -719,6 +739,10 @@ class DataFetcher(QThread):
                                     ticks[bk][price][k] = (
                                         ticks[bk][price].get(k, 0) + counts[k])
 
+            # Order book snapshots for liquidity heatmap
+            ob_date  = date_str if historical else datetime.now().strftime("%Y-%m-%d")
+            ob_data  = load_order_book_data(code, ob_date)
+
             self.ready.emit({
                 "klines":      df,
                 "warmup":      warmup,
@@ -726,6 +750,7 @@ class DataFetcher(QThread):
                 "fvg_gaps":    fvg_gaps,
                 "ob_blocks":   ob_blocks,
                 "ticks":       ticks,
+                "ob_data":     ob_data,
                 "candle_mins": candle_mins,
                 "historical":  historical,
                 "date_str":    date_str,
@@ -766,6 +791,7 @@ class TradeViewerQt(QMainWindow):
         self._smc_signals:  list[dict]          = []
         self._fvg_gaps:     list[dict]          = []
         self._ob_blocks:    list[dict]          = []
+        self._ob_data:      list[dict]          = []    # order book snapshots for liquidity heatmap
         self._trade_record: dict | None         = None  # active trade review
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
         # from resetting the user's manual pan/zoom on every tick.
@@ -968,6 +994,40 @@ class TradeViewerQt(QMainWindow):
             self._ind_checks[key] = cb
             tb2.addWidget(cb)
 
+        tb2.addSeparator()
+
+        # Liquidity heatmap (resting order book — distinct from tick heatmap)
+        tb2.addWidget(_lbl("Liq.HM:"))
+        cb_lhm = QCheckBox("Show")
+        cb_lhm.setChecked(False)
+        cb_lhm.setToolTip(
+            "Liquidity Heatmap — resting limit order concentration\n"
+            "Requires order_book_collector.py to be running to collect data.")
+        cb_lhm.stateChanged.connect(self._on_indicator_toggle)
+        self._ind_checks["liq_hm"] = cb_lhm
+        tb2.addWidget(cb_lhm)
+
+        cb_ba = QCheckBox("Bid/Ask")
+        cb_ba.setChecked(False)
+        cb_ba.setToolTip(
+            "Checked: bid (teal) and ask (red) shown separately\n"
+            "Unchecked: combined with black → purple → yellow colormap")
+        cb_ba.stateChanged.connect(self._on_indicator_toggle)
+        self._ind_checks["liq_bid_ask"] = cb_ba
+        tb2.addWidget(cb_ba)
+
+        tb2.addWidget(_lbl("Min.Vol:"))
+        self._liq_vol_spin = QSpinBox()
+        self._liq_vol_spin.setRange(0, 1_000_000)
+        self._liq_vol_spin.setSingleStep(100)
+        self._liq_vol_spin.setValue(0)
+        self._liq_vol_spin.setFixedWidth(75)
+        self._liq_vol_spin.setToolTip(
+            "Minimum volume threshold per order book level\n"
+            "Filters out thin resting orders below this size")
+        self._liq_vol_spin.valueChanged.connect(self._on_liq_threshold_changed)
+        tb2.addWidget(self._liq_vol_spin)
+
         # ── Row 3: trade review (separated to avoid crowding Row 2) ──────────
         self.addToolBarBreak()
         tb3 = QToolBar("Trade Review", self)
@@ -1042,6 +1102,15 @@ class TradeViewerQt(QMainWindow):
         self._chart_widget.ci.layout.setRowStretchFactor(2, 1)
 
         # ── Graphics items ────────────────────────────────────────────────────
+        # Liquidity heatmap items — resting order book (behind candles at z=-10)
+        self._liq_combined_item = pg.ImageItem()
+        self._liq_bid_item      = pg.ImageItem()
+        self._liq_ask_item      = pg.ImageItem()
+        for _lhm_img in (self._liq_combined_item, self._liq_bid_item, self._liq_ask_item):
+            _lhm_img.setZValue(-10)
+            _lhm_img.setVisible(False)
+            self._plot_c.addItem(_lhm_img)
+
         self._candle_item = CandlestickItem()
         self._plot_c.addItem(self._candle_item)
 
@@ -1420,6 +1489,7 @@ class TradeViewerQt(QMainWindow):
         self._smc_signals = result["smc_signals"]
         self._fvg_gaps    = result["fvg_gaps"]
         self._ob_blocks   = result["ob_blocks"]
+        self._ob_data     = result.get("ob_data", [])
         self._render(self._klines, self._ticks)
 
     # ── Chart rendering ───────────────────────────────────────────────────────
@@ -1542,6 +1612,9 @@ class TradeViewerQt(QMainWindow):
 
         # Session vol profile
         self._rebuild_session_profile()
+
+        # Liquidity heatmap (resting order book)
+        self._redraw_liq_heatmap()
 
         mode = self._mode_combo.currentText()
         self.setWindowTitle(
@@ -1681,6 +1754,148 @@ class TradeViewerQt(QMainWindow):
             txt.setPos(i, float(row["low"]) * 0.9997)
             self._plot_c.addItem(txt, ignoreBounds=True)
             self._delta_items.append(txt)
+
+    # ── Liquidity heatmap (resting order book) ───────────────────────────────
+
+    def _on_liq_threshold_changed(self) -> None:
+        if self._klines is not None:
+            self._redraw_liq_heatmap()
+
+    def _redraw_liq_heatmap(self) -> None:
+        """Build and display the liquidity heatmap from stored order book snapshots."""
+        _all = (self._liq_combined_item, self._liq_bid_item, self._liq_ask_item)
+        if (not self._ind("liq_hm") or not self._ob_data
+                or self._klines is None or self._klines.empty):
+            for item in _all:
+                item.setVisible(False)
+            return
+
+        show_bid_ask = self._ind("liq_bid_ask")
+        threshold    = self._liq_vol_spin.value()
+        tf           = self._tf_combo.currentText()
+        _, cm        = TIMEFRAME_MAP[tf]
+        klines       = self._klines
+        n            = len(klines)
+        price_min    = float(klines["low"].min())
+        price_max    = float(klines["high"].max())
+        if price_max <= price_min:
+            return
+
+        N_PRICE = 100
+
+        # Map each kline bar-start datetime to its column index
+        bucket_to_idx: dict[datetime, int] = {}
+        for i, (_, row) in enumerate(klines.iterrows()):
+            try:
+                bar_end = datetime.strptime(str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
+                bucket_to_idx[bk] = i
+            except ValueError:
+                pass
+
+        # Vectorised accumulation: convert snapshot list to numpy arrays once
+        snaps    = self._ob_data
+        ts_list  = [s["ts"] for s in snaps]
+        price_np = np.array([s["price"]        for s in snaps], dtype=np.float64)
+        vol_np   = np.array([s["volume"]        for s in snaps], dtype=np.float64)
+        is_bid   = np.array([s["side"] == "BID" for s in snaps], dtype=bool)
+
+        t_np = np.array(
+            [bucket_to_idx.get(candle_start(ts, cm), -1) for ts in ts_list],
+            dtype=np.int32,
+        )
+        bin_size = (price_max - price_min) / N_PRICE
+        p_np = ((price_np - price_min) / bin_size).astype(np.int32)
+
+        valid = (t_np >= 0) & (p_np >= 0) & (p_np < N_PRICE) & (vol_np >= threshold)
+        t_v   = t_np[valid]
+        p_v   = p_np[valid]
+        v_v   = vol_np[valid]
+        bid_v = is_bid[valid]
+
+        bid_grid = np.zeros((n, N_PRICE), dtype=np.float64)
+        ask_grid = np.zeros((n, N_PRICE), dtype=np.float64)
+        np.add.at(bid_grid, (t_v[bid_v],  p_v[bid_v]),  v_v[bid_v])
+        np.add.at(ask_grid, (t_v[~bid_v], p_v[~bid_v]), v_v[~bid_v])
+
+        # rect: image spans full candle range in x, full price range in y
+        rect = QRectF(-0.5, price_min, float(n), price_max - price_min)
+
+        if show_bid_ask:
+            self._liq_combined_item.setVisible(False)
+            self._render_heatmap_single(self._liq_bid_item, bid_grid, "#26a69a", rect)
+            self._render_heatmap_single(self._liq_ask_item, ask_grid, "#ef5350", rect)
+            self._liq_bid_item.setVisible(True)
+            self._liq_ask_item.setVisible(True)
+        else:
+            self._liq_bid_item.setVisible(False)
+            self._liq_ask_item.setVisible(False)
+            self._render_heatmap_hot(self._liq_combined_item, bid_grid + ask_grid, rect)
+            self._liq_combined_item.setVisible(True)
+
+    def _render_heatmap_hot(self, img: pg.ImageItem,
+                             grid: np.ndarray, rect: QRectF) -> None:
+        """Black → purple → amber → yellow colormap (combined bid+ask)."""
+        if grid.max() <= 0:
+            img.clear()
+            return
+        log_g = np.log1p(grid)
+        norm  = (log_g / log_g.max()).astype(np.float32)  # (n_time, N_PRICE)
+
+        rgba = np.zeros((*norm.shape, 4), dtype=np.uint8)
+
+        # 0.0..0.25: near-black → dark purple
+        m = norm < 0.25
+        t = norm[m] / 0.25
+        rgba[m, 0] = (t * 60).astype(np.uint8)
+        rgba[m, 2] = (t * 140).astype(np.uint8)
+
+        # 0.25..0.5: dark purple → bright purple
+        m = (norm >= 0.25) & (norm < 0.5)
+        t = (norm[m] - 0.25) / 0.25
+        rgba[m, 0] = (60 + t * 100).astype(np.uint8)
+        rgba[m, 2] = (140 + t * 60).astype(np.uint8)
+
+        # 0.5..0.75: bright purple → amber
+        m = (norm >= 0.5) & (norm < 0.75)
+        t = (norm[m] - 0.5) / 0.25
+        rgba[m, 0] = (160 + t * 95).astype(np.uint8)
+        rgba[m, 1] = (t * 80).astype(np.uint8)
+        rgba[m, 2] = (200 - t * 200).astype(np.uint8)
+
+        # 0.75..1.0: amber → yellow
+        m = norm >= 0.75
+        t = (norm[m] - 0.75) / 0.25
+        rgba[m, 0] = 255
+        rgba[m, 1] = (80 + t * 155).astype(np.uint8)
+        rgba[m, 2] = 0
+
+        # Alpha: low-intensity cells are nearly transparent
+        rgba[..., 3] = np.clip((norm * 200 + 20).astype(np.uint8), 0, 220)
+        rgba[norm < 0.02, 3] = 0
+
+        img.setImage(rgba)
+        img.setRect(rect)
+
+    def _render_heatmap_single(self, img: pg.ImageItem, grid: np.ndarray,
+                                color_hex: str, rect: QRectF) -> None:
+        """Single-color intensity heatmap for bid or ask volumes separately."""
+        if grid.max() <= 0:
+            img.clear()
+            return
+        log_g = np.log1p(grid)
+        norm  = (log_g / log_g.max()).astype(np.float32)
+
+        c = QColor(color_hex)
+        rgba = np.zeros((*norm.shape, 4), dtype=np.uint8)
+        rgba[..., 0] = c.red()
+        rgba[..., 1] = c.green()
+        rgba[..., 2] = c.blue()
+        rgba[..., 3] = np.clip((norm * 180).astype(np.uint8), 0, 180)
+        rgba[norm < 0.02, 3] = 0
+
+        img.setImage(rgba)
+        img.setRect(rect)
 
     def _clear_ema_items(self) -> None:
         for item in self._ema_items:
