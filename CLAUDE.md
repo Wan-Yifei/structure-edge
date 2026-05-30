@@ -72,6 +72,8 @@ v1.0.0        — system: first formal release merged to main
 ## Backtest workflow
 
 - Grid / random search configs live in `config/backtest/`
+- **Do NOT commit auto-generated configs** (e.g. output of `aggregate_random.py --out-config`).
+  Only manually authored configs belong in git.
 - Results land in `backtest/results/<timestamp>_<algo>_<run_name>/`
 - Compare two algo versions: `uv run backtest/compare_versions.py --csv … --config …`
 - Inspect rejection reasons: `uv run backtest/fvg_inspect.py --from-csv … --inspect-start … --inspect-end …`
