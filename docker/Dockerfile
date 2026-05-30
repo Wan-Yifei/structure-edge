@@ -52,4 +52,5 @@ USER backtest
 # Runtime dirs (may be bind-mounted from host)
 RUN mkdir -p /app/db /app/backtest/results
 
+RUN chmod +x /app/docker/entrypoint.sh
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
