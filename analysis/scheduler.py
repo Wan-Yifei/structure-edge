@@ -968,17 +968,36 @@ class SchedulerApp(tk.Tk):
                 cmd += ["--profile", profile]
             if endpoint:
                 cmd += ["--endpoint-url", endpoint]
-            self.after(0, self._log, f"[backup] {src.name} → {dst}")
+            sz_mb = src.stat().st_size / 1_048_576
+            self.after(0, self._log,
+                       f"[backup] Uploading {src.name} ({sz_mb:.1f} MB) → {dst}")
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-                if res.returncode == 0:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+                # Kill after 600 s
+                def _kill(p=proc, n=src.name):
+                    if p.poll() is None:
+                        p.kill()
+                        self.after(0, self._log, f"[backup] ✗ {n}: timeout (>600 s)")
+                timer = threading.Timer(600, _kill)
+                timer.start()
+                try:
+                    for line in proc.stdout:
+                        line = line.rstrip()
+                        if line:
+                            self.after(0, self._log, f"[backup]   {line}")
+                    proc.wait()
+                finally:
+                    timer.cancel()
+                if proc.returncode == 0:
                     self.after(0, self._log, f"[backup] ✓ {src.name}")
                     any_ok = True
-                else:
+                elif proc.returncode is not None:
                     self.after(0, self._log,
-                               f"[backup] ✗ {src.name}: {(res.stderr or res.stdout).strip()}")
-            except subprocess.TimeoutExpired:
-                self.after(0, self._log, f"[backup] ✗ {src.name}: timeout (>600 s)")
+                               f"[backup] ✗ {src.name}: exit code {proc.returncode}")
             except FileNotFoundError:
                 self.after(0, self._log,
                            "[backup] ✗ 'aws' CLI not found — install AWS CLI to enable backups")
