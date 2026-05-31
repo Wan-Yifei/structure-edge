@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.6.0 — Scheduler: order book collector + remote backup (2026-05-31)
+
+### New: Order Book Collector integration
+
+- `analysis/scheduler.py`: new **Collectors** panel with an Order Book Collector
+  toggle (default enabled). When the scheduler is running, `order_book_collector.py`
+  starts and stops alongside `tick_collector.py` at session boundaries.
+- Setting persisted to `config/schedule.json` as `order_book_enabled`.
+
+### New: Remote Backup panel
+
+- Cron-based upload of `ticks.db` and `order_book.db` to S3/Wasabi.
+- UI fields: enable toggle, cron expression (default `0 20 * * 1-5`), S3 path,
+  AWS profile, endpoint URL (blank = standard AWS S3).
+- **Backup Now** button for immediate manual trigger.
+- Uses `aws s3 sync` — skips files unchanged since last upload.
+- Streams `aws s3 cp/sync` output to the log panel in real time; shows file size
+  before upload starts.
+- Profile `"default"` or blank omits `--profile` flag, allowing env-var auth.
+- 600 s per-file timeout with background kill timer.
+- Settings persisted to `config/schedule.json` under `remote_backup` key.
+
+---
+
 ## v0.5.0 — Gap-fill filter (smc_v2.5) (2026-05-31)
 
 ### smc_v2.5 — Gap-fill filter (Step 5c)
