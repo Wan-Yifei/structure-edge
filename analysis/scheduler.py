@@ -915,7 +915,9 @@ class SchedulerApp(tk.Tk):
 
     def _check_backup_cron(self, et: datetime):
         """Fire a backup if the current ET time matches the configured cron."""
-        cron = self.cfg.get("remote_backup", {}).get("cron", "").strip()
+        if not self.backup_enabled_var.get():
+            return
+        cron = self.backup_cron_var.get().strip()
         if not cron:
             return
         parts = cron.split()
@@ -940,14 +942,15 @@ class SchedulerApp(tk.Tk):
 
     def _run_backup(self):
         """Upload tick and order-book DBs to S3 via aws s3 cp."""
-        rb = self.cfg.get("remote_backup", {})
-        s3_dest = rb.get("s3_bucket", "").rstrip("/")
+        # Read directly from UI vars so Backup Now works without Save Config first
+        s3_dest  = self.backup_s3_var.get().strip().rstrip("/")
+        profile  = self.backup_profile_var.get().strip()
+        endpoint = self.backup_endpoint_var.get().strip()
         if not s3_dest:
             self.after(0, self._log, "[backup] No S3 path configured — skip")
             return
-        profile  = rb.get("aws_profile", "default") or "default"
-        endpoint = rb.get("aws_endpoint_url", "").strip()
-        root     = pathlib.Path(__file__).parent.parent
+        rb   = self.cfg.get("remote_backup", {})
+        root = pathlib.Path(__file__).parent.parent
 
         files = [
             ("tick_db",       rb.get("tick_db",       "db/ticks.db")),
