@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.1 — Docker HPC pipeline fixes (2026-05-31)
+
+- `docker/entrypoint.sh`: results-dir detection now filters on `YYYYMMDD_*` pattern,
+  preventing `backtest/results/checkpoints/` from being mistaken as the run output dir
+  (caused uploads to go to `s3://.../results/checkpoints/` and DB named `backtest_checkpoints.duckdb`)
+- `docker/entrypoint.sh`: always create a run-tagged local copy
+  `db/backtest_<run_tag>.duckdb` on the bind-mounted volume after each run
+- `backtest/engine.py`: `_algo_version()` checks `ALGO_VERSION` env var before
+  `git describe`; fixes `smc_unknown` stamping in Docker where `.git/` is absent
+- `docker/backtest.env.example`: document `ALGO_VERSION` setting
+
+---
+
 ## smc_v2.4 — LTF trend-bar confirmation (2026-05-30)
 
 - New `require_ltf_trend_bar` parameter (Step 6b): entry bar close must move in

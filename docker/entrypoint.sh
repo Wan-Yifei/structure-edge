@@ -82,14 +82,18 @@ python -m backtest.run \
 
 log "  Backtest finished."
 
-# Find the results dir created after the run started
+# Find the results dir created after the run started.
+# Match only timestamp-prefixed dirs (YYYYMMDD_HHMM_*) to avoid picking up
+# the checkpoints/ subdirectory whose mtime is also updated during the run.
 RESULTS_DIR=$(find backtest/results -mindepth 1 -maxdepth 1 -type d \
-    -newer /tmp/_run_start_marker 2>/dev/null \
+    -newer /tmp/_run_start_marker \
+    -name "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*" \
+    2>/dev/null \
     | xargs ls -dt 2>/dev/null | head -1)
 
-# Fallback: newest by mtime
+# Fallback: newest timestamp-prefixed dir by mtime
 [[ -z "${RESULTS_DIR}" ]] && \
-    RESULTS_DIR=$(ls -td backtest/results/*/ 2>/dev/null | head -1)
+    RESULTS_DIR=$(ls -td backtest/results/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*/ 2>/dev/null | head -1)
 
 [[ -n "${RESULTS_DIR}" ]] || die "Could not locate results directory after backtest run."
 RESULTS_DIR="${RESULTS_DIR%/}"
@@ -158,6 +162,17 @@ for csv in "${RESULTS_DIR}"/*/results_*.csv; do
 done
 
 # ── 5. Upload results + run-specific DB ──────────────────────────────────────
+
+# Always create a run-tagged local copy on the bind-mounted volume so the file
+# is identifiable even when S3 upload is disabled or when inspecting docker_db/.
+LOCAL_RUN_DB="db/backtest_${RUN_TAG}.duckdb"
+if [[ -f "db/backtest.duckdb" ]]; then
+    cp "db/backtest.duckdb" "${LOCAL_RUN_DB}"
+    log "  Run-tagged local DB : ${LOCAL_RUN_DB}"
+else
+    log "  WARN: db/backtest.duckdb not found — skipping local run-tag copy"
+fi
+
 if [[ "${UPLOAD_RESULTS:-true}" == "true" ]]; then
     log "=== Stage 5: Upload ==="
     S3_RESULTS="${S3_BUCKET}/${RESULTS_S3_PREFIX:-results}/${RUN_TAG}/"
@@ -171,13 +186,13 @@ if [[ "${UPLOAD_RESULTS:-true}" == "true" ]]; then
 
     # 5b. Upload run-specific backtest DB (NOT the master — avoids overwriting)
     #     Local clients merge with: uv run backtest/merge_db.py --s3 <S3_DB_DEST>
-    if [[ -f "db/backtest.duckdb" ]]; then
+    if [[ -f "${LOCAL_RUN_DB}" ]]; then
         log "  Run DB  → ${S3_DB_DEST}"
-        aws_cmd s3 cp "db/backtest.duckdb" "${S3_DB_DEST}"
+        aws_cmd s3 cp "${LOCAL_RUN_DB}" "${S3_DB_DEST}"
         log "  Merge locally with:"
         log "    uv run backtest/merge_db.py --s3 ${S3_DB_DEST}"
     else
-        log "  WARN: db/backtest.duckdb not found — skipping DB upload"
+        log "  WARN: ${LOCAL_RUN_DB} not found — skipping DB upload"
     fi
 else
     log "=== Stage 5: Upload skipped (UPLOAD_RESULTS != true) ==="

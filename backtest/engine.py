@@ -47,8 +47,15 @@ def _algo_version() -> str:
     different algo version produces a distinct ID, preventing cross-version
     DB collisions.  Falls back to 'smc_unknown' when not in a git repo or
     when no matching tag exists.
+
+    The ALGO_VERSION environment variable overrides git-describe.  This is
+    required inside Docker because .git/ is excluded by .dockerignore; set
+    ALGO_VERSION in docker/backtest.env to stamp runs correctly.
     """
-    import subprocess, pathlib
+    import os, subprocess, pathlib
+    env_ver = os.environ.get("ALGO_VERSION", "").strip()
+    if env_ver:
+        return env_ver
     try:
         return subprocess.check_output(
             ["git", "describe", "--tags", "--match", "smc_v*", "--abbrev=0"],
