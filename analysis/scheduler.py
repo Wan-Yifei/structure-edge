@@ -963,14 +963,16 @@ class SchedulerApp(tk.Tk):
                 self.after(0, self._log, f"[backup] Skip {rel} — not found")
                 continue
             dst = f"{s3_dest}/{src.name}"
-            cmd = ["aws", "s3", "cp", str(src), dst]
+            # sync: skip if S3 already has the same size+mtime
+            cmd = ["aws", "s3", "sync", str(src.parent), f"{s3_dest}/",
+                   "--exclude", "*", "--include", src.name]
             if profile and profile.lower() != "default":
                 cmd += ["--profile", profile]
             if endpoint:
                 cmd += ["--endpoint-url", endpoint]
             sz_mb = src.stat().st_size / 1_048_576
             self.after(0, self._log,
-                       f"[backup] Uploading {src.name} ({sz_mb:.1f} MB) → {dst}")
+                       f"[backup] Syncing {src.name} ({sz_mb:.1f} MB) → {dst}")
             try:
                 proc = subprocess.Popen(
                     cmd,
