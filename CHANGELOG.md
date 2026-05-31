@@ -25,7 +25,35 @@
 - New **DOM** toggle button in the indicators toolbar (tb2, after Spoof controls).
 - Clicking DOM opens/closes `DomWindow` as a separate floating window.
 - Closing the DOM window unchecks the toolbar button automatically.
-- Code and live/historical mode stay in sync with the main viewer on each data load.
+- Code, live/historical mode, and candle timeframe stay in sync with the main viewer
+  on each data load (`set_code`, `set_live`, `set_timeframe`).
+
+### New: Absorption detection (`analysis/orderflow_detect.py` + DOM window)
+
+Detects price levels where large passive orders held against significant aggressive
+flow within a single bar window.  Three conditions must all pass:
+
+1. **Passive wall** ≥ `avg_tick_vol × Pass` (resting order large enough to matter)
+2. **Aggressive volume** ≥ `avg_tick_vol × Act` (real pressure applied — split orders
+   accumulate naturally, so fragmented aggression is captured equally)
+3. **Hit ratio** = `agg_vol / pass_vol` ≥ `Hit%` (meaningful fraction was attempted)
+4. Resting volume at window end > 0 (level still present = not broken through)
+
+Window is bar-aligned: `[candle_start(now, tf), now]` in live mode;
+`[time_key − tf, time_key]` in historical mode (moomoo time_key = bar end).
+
+`avg_tick_vol` = session average volume per trade — adaptive to instrument
+liquidity without manual calibration.
+
+DOM toolbar controls: `[✓ Absorb]  Pass:[3.0]×  Act:[1.0]×  Hit:[30]%`
+
+Display: gold outline = ASK absorption (sell wall held); blue outline = BID
+absorption (buy wall held).  Hover tooltip shows aggressive vol, passive vol,
+and hit ratio for flagged levels.
+
+`tests/analysis/test_orderflow_detect.py`: 17 new tests for `detect_absorption`
+covering edge cases, each threshold condition, split-order accumulation,
+direction filtering, and simultaneous bid/ask detection (36 total, all pass).
 
 ---
 
