@@ -817,6 +817,7 @@ class TradeViewerQt(QMainWindow):
         self._iceberg_line_items: list[pg.PlotCurveItem] = []
         self._tick_raw:     list[dict]          = []
         self._spoof_items:  list               = []    # ScatterPlotItems + PlotCurveItem
+        self._dom_window:  QWidget | None      = None  # DOM depth-of-market window
         self._trade_record: dict | None         = None  # active trade review
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
         # from resetting the user's manual pan/zoom on every tick.
@@ -1096,6 +1097,19 @@ class TradeViewerQt(QMainWindow):
             "to be classified as a potential spoof (default: 30 s)")
         self._spoof_dur_spin.valueChanged.connect(self._on_liq_threshold_changed)
         tb2.addWidget(self._spoof_dur_spin)
+
+        tb2.addSeparator()
+
+        # DOM (Depth of Market) window toggle
+        self._dom_btn = QPushButton("DOM")
+        self._dom_btn.setCheckable(True)
+        self._dom_btn.setChecked(False)
+        self._dom_btn.setToolTip(
+            "Open Depth of Market window\n"
+            "Shows resting order book bid/ask depth for the current symbol.\n"
+            "Requires order_book_collector.py to be running.")
+        self._dom_btn.clicked.connect(self._on_dom_toggle)
+        tb2.addWidget(self._dom_btn)
 
         # ── Row 3: trade review (separated to avoid crowding Row 2) ──────────
         self.addToolBarBreak()
@@ -1561,6 +1575,12 @@ class TradeViewerQt(QMainWindow):
         self._ob_data     = result.get("ob_data", [])
         self._tick_raw    = result.get("tick_raw", [])
         self._render(self._klines, self._ticks)
+        # Keep DOM window in sync with active code and mode
+        if self._dom_window is not None:
+            code = self._code_edit.text().strip()
+            live = self._mode_combo.currentText() == "Live"
+            self._dom_window.set_code(code)
+            self._dom_window.set_live(live)
 
     # ── Chart rendering ───────────────────────────────────────────────────────
 
@@ -1830,6 +1850,31 @@ class TradeViewerQt(QMainWindow):
     def _on_liq_threshold_changed(self) -> None:
         if self._klines is not None:
             self._redraw_liq_heatmap()
+
+    # ── DOM window ────────────────────────────────────────────────────────────
+
+    def _on_dom_toggle(self, checked: bool) -> None:
+        if checked:
+            from analysis.dom_window import DomWindow
+            code = self._code_edit.text().strip()
+            live = self._mode_combo.currentText() == "Live"
+            self._dom_window = DomWindow(code=code, live=live)
+            self._dom_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            self._dom_window.destroyed.connect(self._on_dom_closed)
+            self._dom_window.show()
+        else:
+            if self._dom_window is not None:
+                self._dom_window.close()
+                self._dom_window = None
+
+    def _on_dom_closed(self) -> None:
+        self._dom_window = None
+        self._dom_btn.setChecked(False)
+
+    def _dom_sync(self, ts: datetime) -> None:
+        """Push crosshair bar time to the DOM window (historical mode)."""
+        if self._dom_window is not None and not self._dom_window._live:
+            self._dom_window.pin_timestamp(ts)
 
     def _redraw_liq_heatmap(self) -> None:
         """Build and display the liquidity heatmap from stored order book snapshots."""
@@ -2843,6 +2888,15 @@ class TradeViewerQt(QMainWindow):
             self._ohlcv_label.setVisible(True)
 
             self._show_tick_profile(idx)
+
+            # DOM crosshair sync (historical mode only)
+            if (self._dom_window is not None
+                    and self._mode_combo.currentText() == "Historical"):
+                try:
+                    bar_ts = datetime.strptime(str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                    self._dom_sync(bar_ts)
+                except Exception:
+                    pass
 
             # ── Subplot readout labels ────────────────────────────────────────
             # MAVOL: show volume of the hovered bar as a floating label on the

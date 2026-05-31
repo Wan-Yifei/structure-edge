@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.7.0 — DOM (Depth of Market) window (2026-05-31)
+
+### New: Depth of Market window (`analysis/dom_window.py`)
+
+- `DomWindow(QWidget)` — independent floating window showing resting order book
+  bid/ask depth as vertical bar chart (price on X, volume on Y).
+- Teal bars = bids (resting buy orders); red bars = asks (resting sell orders).
+- Dashed vertical lines mark the best bid and best ask prices.
+- **Depth selector**: 10 / 20 / 30 / 50 levels per side (combo box).
+- **Live mode**: refreshes every 1 s from `db/order_book.db` (latest snapshot).
+- **Historical mode**: crosshair-synced — moving the cursor in the main chart
+  updates the DOM window to the order book snapshot closest to that bar's time.
+- **Hover tooltip**: hover over any bar to see:
+  - Side (BID / ASK) and price
+  - Volume at that level
+  - Cumulative volume from the best price to this level ("how much to eat through")
+  - Number of levels from best to hovered price
+- Status bar: live best bid/ask, total depth, and spread.
+- Standalone usage: `uv run analysis/dom_window.py --code US.SNDK`
+
+### Integration with `analysis/trade_viewer_qt.py`
+
+- New **DOM** toggle button in the indicators toolbar (tb2, after Spoof controls).
+- Clicking DOM opens/closes `DomWindow` as a separate floating window.
+- Closing the DOM window unchecks the toolbar button automatically.
+- Code and live/historical mode stay in sync with the main viewer on each data load.
+
+---
+
 ## v0.6.0 — Scheduler: order book collector + remote backup (2026-05-31)
 
 ### New: Order Book Collector integration
