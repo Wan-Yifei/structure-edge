@@ -960,7 +960,9 @@ class SchedulerApp(tk.Tk):
                 self.after(0, self._log, f"[backup] Skip {rel} — not found")
                 continue
             dst = f"{s3_dest}/{src.name}"
-            cmd = ["aws", "s3", "cp", str(src), dst, "--profile", profile]
+            cmd = ["aws", "s3", "cp", str(src), dst]
+            if profile and profile.lower() != "default":
+                cmd += ["--profile", profile]
             if endpoint:
                 cmd += ["--endpoint-url", endpoint]
             self.after(0, self._log, f"[backup] {src.name} → {dst}")
