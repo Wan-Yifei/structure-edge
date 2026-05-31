@@ -44,7 +44,10 @@ from backtest.engine import ALGO_VERSION, BacktestParams, run_backtest
 _OUTCOME_META = {
     "entered":             {"label": "Entered",              "color": "#2ecc71"},
     "depth_never_reached": {"label": "Depth not reached",    "color": "#95a5a6"},
+    "over_refill":         {"label": "Over-refill",          "color": "#e74c3c"},
     "ltf_confirmation":    {"label": "LTF confirm failed",   "color": "#e67e22"},
+    "ltf_trend_bar":       {"label": "LTF trend bar failed", "color": "#f39c12"},
+    "gap_fill_filter":     {"label": "Gap-fill filter",      "color": "#1abc9c"},
     "lvn_filter":          {"label": "LVN filter",           "color": "#9b59b6"},
     "displacement_filter": {"label": "Displacement filter",  "color": "#8e44ad"},
     "no_sl_tp":            {"label": "No SL/TP swing",       "color": "#e74c3c"},
@@ -84,6 +87,8 @@ def _build_params_from_args(args: argparse.Namespace) -> BacktestParams:
         min_rr                  = args.min_rr,
         htf_trend_methods       = methods,
         htf_trend_params        = trend_params,
+        gap_fill_lookback       = args.gap_fill_lookback,
+        gap_fill_min_pct        = args.gap_fill_min_pct,
     )
 
 
@@ -265,6 +270,10 @@ if __name__ == "__main__":
     ap.add_argument("--kd-slow",                  type=int,   default=60)
     ap.add_argument("--kd-window",                type=int,   default=10)
     ap.add_argument("--kd-flat-threshold",        type=float, default=0.0)
+    ap.add_argument("--gap-fill-lookback",        type=int,   default=0,
+                    help="Bars before FVG touch to scan for fill-direction gap (0 = off)")
+    ap.add_argument("--gap-fill-min-pct",         type=float, default=0.001,
+                    help="Minimum gap size as fraction of prev close")
 
     args = ap.parse_args()
 

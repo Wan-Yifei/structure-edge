@@ -1,6 +1,6 @@
 # SMC Strategy — Version 2 (`smc_v2` … `smc_v2.4`)
 
-**Git tags:** `smc_v2`, `smc_v2.1`, `smc_v2.2`, `smc_v2.3`, `smc_v2.4`  
+**Git tags:** `smc_v2`, `smc_v2.1`, `smc_v2.2`, `smc_v2.3`, `smc_v2.4`, `smc_v2.5`  
 **Algo version constant:** `ALGO_VERSION` (auto-derived from the most recent `smc_v*` tag)  
 **Engine file:** `backtest/engine.py`  
 **Parameter reference:** [`strategy/smc/STRATEGY.md`](../strategy/smc/STRATEGY.md)  
@@ -35,6 +35,7 @@ filters → SL/TP → trade management) is unchanged from v1.
 | `smc_v2.2` | + `kd_sl_fallback`; `direction_mismatch` rejection logging; screener dollar-volume filter; backtest configs moved to `config/backtest/` |
 | `smc_v2.3` | **BOS scan fix** — scan starts at swing bar itself, stops before next same-kind swing (prevents BOS crossing over intermediate highs). **`determine_trend` veto** — CHoCH alone confirms immediately; any subsequent reverse BOS cancels the trend. Per-stock output subdirs; self-contained HTML reports (Plotly JS inline); UTF-8 config loading fix on Windows. |
 | `smc_v2.4` | + `require_ltf_trend_bar` — new optional entry filter (Step 6b): entry bar close must move in trend direction (`close > open` for bull; `close < open` for bear). Looser than `require_ltf_confirmation`; independent and combinable with it. |
+| `smc_v2.5` | + Gap-fill filter (Step 5c): rejects FVG touches preceded by an opening gap in the fill direction within a configurable lookback window. Params: `gap_fill_lookback` (bars, default 0 = off), `gap_fill_min_pct` (min gap size, default 0.001). Supports both bull and bear setups. Window is inclusive of the first touch bar. |
 
 ---
 
@@ -228,19 +229,21 @@ Same as v1.
 
 ## v1 vs v2 Quick-Reference
 
-| Aspect | v1 | v2 | v2.1 | v2.2 | v2.3 |
-|--------|----|----|------|------|------|
-| Trend method | `bos_choch` only | + `kd`; multi-method consensus | Same | Same | Same + veto rule |
-| `determine_trend` | CHoCH → trend | Same | Same | Requires BOS after CHoCH | CHoCH alone confirms; reverse BOS vetoes |
-| BOS scan | Start after swing bar | Same | Same | Same | Starts at swing bar (inclusive); stops at next same-kind swing |
-| KD mode | — | Legacy (fixed window) | + Adaptive (zero-crossing + ATR filter) | Same | Same |
-| EMA warmup | — | Full HTF history | Same | Same | Same |
-| Over-refill guard | None | None | Added | Same | Same |
-| Trade IDs | Time + price hash | Same | + `ALGO_VERSION` prefix | Same | Same |
-| SL/TP fallback | Swing only | Swing only | + `kd_sl_fallback` | Same | Same |
-| Direction mismatch | Silent | Silent | Logged in `fvg_inspect` | Same | Same |
-| Output layout | — | — | — | Flat run dir | Per-stock subdirs; self-contained HTML |
-| Tooling | `run.py`, `review.py` | + flags | + `fvg_inspect.py`, `audit.py`, `screener.py` | + `screener` dollar vol | Same |
+| Aspect | v1 | v2 | v2.1 | v2.2 | v2.3 | v2.4 | v2.5 |
+|--------|----|----|------|------|------|------|------|
+| Trend method | `bos_choch` only | + `kd`; multi-method consensus | Same | Same | Same + veto rule | Same | Same |
+| `determine_trend` | CHoCH → trend | Same | Same | Requires BOS after CHoCH | CHoCH alone confirms; reverse BOS vetoes | Same | Same |
+| BOS scan | Start after swing bar | Same | Same | Same | Starts at swing bar (inclusive); stops at next same-kind swing | Same | Same |
+| KD mode | — | Legacy (fixed window) | + Adaptive (zero-crossing + ATR filter) | Same | Same | Same | Same |
+| EMA warmup | — | Full HTF history | Same | Same | Same | Same | Same |
+| Over-refill guard | None | None | Added | Same | Same | Same | Same |
+| Trade IDs | Time + price hash | Same | + `ALGO_VERSION` prefix | Same | Same | Same | Same |
+| SL/TP fallback | Swing only | Swing only | + `kd_sl_fallback` | Same | Same | Same | Same |
+| Direction mismatch | Silent | Silent | Logged in `fvg_inspect` | Same | Same | Same | Same |
+| LTF trend-bar filter | None | None | None | None | None | Added (Step 6b) | Same |
+| Gap-fill filter | None | None | None | None | None | None | Added (Step 5c) |
+| Output layout | — | — | — | Flat run dir | Per-stock subdirs; self-contained HTML | Same | Same |
+| Tooling | `run.py`, `review.py` | + flags | + `fvg_inspect.py`, `audit.py`, `screener.py` | + `screener` dollar vol | Same | Same | Same |
 
 ---
 

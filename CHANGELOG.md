@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.5.0 — Gap-fill filter (smc_v2.5) (2026-05-31)
+
+### smc_v2.5 — Gap-fill filter (Step 5c)
+
+- New `gap_fill_lookback` parameter (default 0 = off): scans the N LTF bars ending
+  at (and including) the first FVG touch for an opening gap in the fill direction.
+  Bear FVG: rejects if `open > prev_close × (1 + gap_fill_min_pct)`.
+  Bull FVG: rejects if `open < prev_close × (1 - gap_fill_min_pct)`.
+- New `gap_fill_min_pct` parameter (default 0.001): minimum gap size threshold.
+- `label()` emits `gf{N}` tag when active.
+- Rejection log reason: `gap_fill_filter` (added to `fvg_inspect._OUTCOME_META`).
+- Validated against two NVDA losses (`e186dbcc` 2025-06-16, `8227aabd` 2025-09-18)
+  — both bear FVGs opened with upward session gaps (+0.97% / +2.16%) and were losses.
+- `fvg_inspect.py`: added `--gap-fill-lookback` and `--gap-fill-min-pct` CLI args.
+- `config/backtest/cross_stock_grid_v3.json` + `soxl_grid_v2.json`: added
+  `gap_fill_lookback: [0, 3, 5]` and `gap_fill_min_pct: [0.001]` to `param_grid`.
+
+### Docs
+
+- `doc/smc_v2.5_strategy.md`: new change note.
+- `doc/smc_v2_strategy.md`: version timeline and quick-reference table updated.
+- `strategy/smc/STRATEGY.md`: Step 5c and parameter reference added.
+- `doc/FILE_INDEX.md`: new — index of all important files and update checklist.
+
+---
+
 ## v0.4.1 — Docker HPC pipeline fixes (2026-05-31)
 
 - `docker/entrypoint.sh`: results-dir detection now filters on `YYYYMMDD_*` pattern,

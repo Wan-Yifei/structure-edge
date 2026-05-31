@@ -35,6 +35,8 @@
         "sl_buffer_pct":            [0.003, 0.005],
         "max_sl_pct":               [0.05, 0.08, 0.12],
         "min_rr":                   [1.5, 2.0, 2.5],
+        "gap_fill_lookback":        [0, 3, 5],
+        "gap_fill_min_pct":         [0.001],
         "kd_sl_fallback":           [true],
         "allow_short":              [false]
     }

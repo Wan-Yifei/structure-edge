@@ -94,6 +94,19 @@ three-bar gap) must be a "displacement" (strong momentum) candle:
 - Range > `displacement_atr_mult × mean_range` over the prior `displacement_lookback` bars.
 - Body / Range ratio ≥ `displacement_body_ratio`.
 
+### Step 5c — Gap-fill filter *(optional)*
+
+When `gap_fill_lookback > 0`, the engine scans the `gap_fill_lookback` LTF bars
+ending at (and including) the first FVG touch bar.  If any bar opens with a gap
+in the fill direction, the touch is rejected:
+- Bear FVG (fill direction = up): `open > prev_close × (1 + gap_fill_min_pct)`
+- Bull FVG (fill direction = down): `open < prev_close × (1 − gap_fill_min_pct)`
+
+The intent is to catch sessions where the market opened aggressively toward the
+FVG zone (e.g. a large overnight gap-up before a bear FVG touch), indicating that
+momentum may have shifted and the FVG is more likely to be blown through than to
+act as a reversal point.
+
 ### Step 6 — LTF structure confirmation *(optional)*
 
 When `require_ltf_confirmation = True`, a CHoCH + BOS sequence in the trend
@@ -176,6 +189,13 @@ force-closed at the day's last bar close if still open.
 |-----------|---------|-------------|
 | `require_ltf_confirmation` | `False` | Require LTF CHoCH + BOS in trend direction after zone touch. More selective, fewer trades. |
 | `require_ltf_trend_bar`    | `False` | Require the entry bar to close in the trend direction (`close > open` for bull; `close < open` for bear). Looser than `require_ltf_confirmation`; can be used alone or combined with it. |
+
+### Gap-fill filter
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `gap_fill_lookback` | `0` | Bars in the window ending at the first FVG touch to scan for a fill-direction gap. `0` = filter disabled. Typical values: 3–5. |
+| `gap_fill_min_pct`  | `0.001` | Minimum gap size to trigger the filter (fraction of prev close, e.g. `0.001` = 0.1%). Prevents noise from micro-gaps. |
 
 ### LVN filter
 

@@ -71,6 +71,14 @@
             1.5,
             2
         ],
+        "gap_fill_lookback": [
+            0,
+            3,
+            5
+        ],
+        "gap_fill_min_pct": [
+            0.001
+        ],
         "kd_sl_fallback": [
             true
         ],

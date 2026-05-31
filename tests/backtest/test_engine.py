@@ -173,3 +173,95 @@ class TestRunBacktest:
         d = p.to_dict()
         assert d["min_rr"]    == 3.0
         assert d["bos_count"] == 2
+
+
+# ── Gap-fill filter ───────────────────────────────────────────────────────────
+
+def _make_ltf_with_gap(n_pre: int, gap_direction: str, trend: str) -> pd.DataFrame:
+    """Build a synthetic 3m LTF kline series with one opening gap.
+
+    gap_direction: "up" (open > prev_close) or "down" (open < prev_close).
+    The gap is placed at bar n_pre (0-indexed), preceded by n_pre quiet bars.
+    """
+    rows = []
+    base_price = 100.0
+    for i in range(n_pre):
+        rows.append({
+            "time_key": f"2025-01-02 09:{30 + i * 3:02d}:00",
+            "open": base_price, "high": base_price + 0.1,
+            "low": base_price - 0.1, "close": base_price, "volume": 1000,
+        })
+    # Gap bar
+    gap_open = base_price * 1.01 if gap_direction == "up" else base_price * 0.99
+    rows.append({
+        "time_key": f"2025-01-02 09:{30 + n_pre * 3:02d}:00",
+        "open": gap_open, "high": gap_open + 0.1,
+        "low": gap_open - 0.1, "close": gap_open, "volume": 1000,
+    })
+    # A few more bars
+    for i in range(1, 6):
+        p = gap_open + i * 0.05
+        rows.append({
+            "time_key": f"2025-01-02 09:{30 + (n_pre + i) * 3:02d}:00",
+            "open": p, "high": p + 0.1, "low": p - 0.1, "close": p, "volume": 1000,
+        })
+    return pd.DataFrame(rows)
+
+
+class TestGapFillFilter:
+    """Tests for Step 5c gap-fill filter in run_backtest."""
+
+    def test_default_gap_fill_lookback_is_zero(self):
+        p = BacktestParams()
+        assert p.gap_fill_lookback == 0
+        assert p.gap_fill_min_pct == pytest.approx(0.001)
+
+    def test_gap_fill_params_in_label(self):
+        p = BacktestParams(gap_fill_lookback=5)
+        assert "gf5" in p.label()
+
+    def test_gap_fill_off_does_not_affect_label(self):
+        p = BacktestParams(gap_fill_lookback=0)
+        assert "gf" not in p.label()
+
+    def test_gap_fill_params_roundtrip(self):
+        p = BacktestParams(gap_fill_lookback=3, gap_fill_min_pct=0.002)
+        d = p.to_dict()
+        p2 = BacktestParams.from_dict(d)
+        assert p2.gap_fill_lookback == 3
+        assert p2.gap_fill_min_pct == pytest.approx(0.002)
+
+    def _rejection_log_outcomes(self, htf, ltf, gap_fill_lookback=5) -> list[str]:
+        params = BacktestParams(
+            min_rr=1.0, max_sl_pct=0.05,
+            fvg_min_width_pct=0.001,
+            fvg_entry_depth_pct=0.01,
+            gap_fill_lookback=gap_fill_lookback,
+            gap_fill_min_pct=0.005,
+        )
+        log: list[dict] = []
+        run_backtest(htf, ltf, params, rejection_log=log)
+        return [e["outcome"] for e in log]
+
+    def test_gap_fill_filter_disabled_when_lookback_zero(self):
+        htf = _trending_klines(200, start=50.0, step=0.15)
+        ltf = _trending_klines(800, start=50.0, step=0.04)
+        params_no_gf = BacktestParams(
+            min_rr=1.0, max_sl_pct=0.05,
+            fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.01,
+            gap_fill_lookback=0,
+        )
+        params_gf = BacktestParams(
+            min_rr=1.0, max_sl_pct=0.05,
+            fvg_min_width_pct=0.001, fvg_entry_depth_pct=0.01,
+            gap_fill_lookback=5,
+        )
+        log_no: list[dict] = []
+        log_gf: list[dict] = []
+        run_backtest(htf, ltf, params_no_gf, rejection_log=log_no)
+        run_backtest(htf, ltf, params_gf, rejection_log=log_gf)
+        outcomes_no = [e["outcome"] for e in log_no]
+        outcomes_gf = [e["outcome"] for e in log_gf]
+        assert "gap_fill_filter" not in outcomes_no
+        # With filter enabled and monotonic data (no real gaps), also no gap_fill events
+        assert "gap_fill_filter" not in outcomes_gf

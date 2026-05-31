@@ -137,6 +137,8 @@ class BacktestParams:
     displacement_lookback:    int   = 5     # candles used to compute baseline mean range
     require_ltf_confirmation: bool  = False  # CHoCH+BOS sequence on LTF after zone touch
     require_ltf_trend_bar:    bool  = False  # entry bar close must move in trend direction
+    gap_fill_lookback:        int   = 0      # bars before first FVG touch to scan for fill-direction gap (0 = off)
+    gap_fill_min_pct:         float = 0.001  # minimum gap size as fraction of prev_close
     require_lvn_overlap:      bool  = False  # FVG must sit in a Low Volume Node
     lvn_threshold:            float = 0.30   # LVN: zone vol < threshold × max bin vol
     sl_buffer_pct:            float = 0.001  # extra % added beyond the swing level
@@ -181,6 +183,8 @@ class BacktestParams:
             flags += " ID"
         if self.kd_sl_fallback:
             flags += " kF"
+        if self.gap_fill_lookback > 0:
+            flags += f" gf{self.gap_fill_lookback}"
         methods = "+".join(self.htf_trend_methods)
         tp = self.htf_trend_params
         kd_tag = ""
@@ -713,6 +717,41 @@ def run_backtest(
                                    detail=f"middle candle not displacement "
                                           f"(atr_mult={params.displacement_atr_mult}, "
                                           f"body_ratio={params.displacement_body_ratio})")
+                i += 1
+                continue
+
+        # ── 5c. Gap-fill filter ───────────────────────────────────────────
+        # Reject when any bar in the N-bar window ending at (and including)
+        # the first FVG touch opened with a fill-direction gap, signalling
+        # that momentum shifted aggressively toward the zone.
+        # Bear FVG (fill = up):   skip if open > prev_close × (1 + pct)
+        # Bull FVG (fill = down): skip if open < prev_close × (1 - pct)
+        if params.gap_fill_lookback > 0:
+            win_start = max(1, in_fvg_since - params.gap_fill_lookback + 1)
+            win_end   = in_fvg_since + 1      # inclusive of the touch bar
+            _gap_found = False
+            _gap_bar   = -1
+            for _j in range(win_start, win_end):
+                _prev_cls  = ltf_cls[_j - 1]
+                _this_open = ltf_opens[_j]
+                if trend == "bear":
+                    if _this_open > _prev_cls * (1.0 + params.gap_fill_min_pct):
+                        _gap_found = True
+                        _gap_bar   = _j
+                        break
+                else:  # bull
+                    if _this_open < _prev_cls * (1.0 - params.gap_fill_min_pct):
+                        _gap_found = True
+                        _gap_bar   = _j
+                        break
+            if _gap_found:
+                if rejection_log is not None:
+                    _rlog_finalize(
+                        "gap_fill_filter",
+                        detail=(f"fill-direction gap at bar {_gap_bar} "
+                                f"(open={ltf_opens[_gap_bar]:.4f} "
+                                f"prev_close={ltf_cls[_gap_bar-1]:.4f})"),
+                    )
                 i += 1
                 continue
 
