@@ -1575,12 +1575,13 @@ class TradeViewerQt(QMainWindow):
         self._ob_data     = result.get("ob_data", [])
         self._tick_raw    = result.get("tick_raw", [])
         self._render(self._klines, self._ticks)
-        # Keep DOM window in sync with active code and mode
+        # Keep DOM window in sync with active code, mode, and timeframe
         if self._dom_window is not None:
             code = self._code_edit.text().strip()
             live = self._mode_combo.currentText() == "Live"
             self._dom_window.set_code(code)
             self._dom_window.set_live(live)
+            self._dom_window.set_timeframe(self._candle_mins)
 
     # ── Chart rendering ───────────────────────────────────────────────────────
 
