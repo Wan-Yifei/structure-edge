@@ -19,6 +19,8 @@ from tkinter import ttk, messagebox
 from datetime import datetime, time, timedelta, timezone
 import threading
 
+import os
+
 import pystray
 from PIL import Image, ImageDraw
 
@@ -468,19 +470,23 @@ class SchedulerApp(tk.Tk):
         super().__init__()
         self.title("Market Session Scheduler")
         self.configure(bg=BG_DARK)
-        self.geometry("740x640")
+        self.geometry("740x800")
         self.resizable(False, False)
 
         self.cfg = self._load_config()
         self._collector_running = False
         self._tick_job = None
         self._row_widgets: dict[str, dict] = {}
-        self._proc: subprocess.Popen | None = None
-        self._tray: pystray.Icon | None = None
+        self._proc:    subprocess.Popen | None = None
+        self._ob_proc: subprocess.Popen | None = None
+        self._tray:    pystray.Icon | None = None
+        self._last_backup_minute: tuple | None = None
 
         self._build_clock()
         self._build_sessions()
+        self._build_collectors()
         self._build_stocks()
+        self._build_backup()
         self._build_controls()
         self._build_log()
 
@@ -490,11 +496,25 @@ class SchedulerApp(tk.Tk):
 
     # ── Config I/O ───────────────────────────────────────────────────────────
 
+    _DEFAULT_BACKUP = {
+        "enabled":          True,
+        "cron":             "0 20 * * 1-5",
+        "s3_bucket":        "",
+        "aws_profile":      "default",
+        "aws_endpoint_url": "",
+        "tick_db":          "db/ticks.db",
+        "order_book_db":    "db/order_book.db",
+    }
+
     def _load_config(self) -> dict:
         if CONFIG_PATH.exists():
             with open(CONFIG_PATH, encoding="utf-8") as f:
                 cfg = json.load(f)
             cfg.setdefault("target_categories", {})
+            cfg.setdefault("order_book_enabled", True)
+            rb = cfg.setdefault("remote_backup", {})
+            for k, v in self._DEFAULT_BACKUP.items():
+                rb.setdefault(k, v)
             return cfg
         return {
             "prestart_minutes": 5,
@@ -511,6 +531,8 @@ class SchedulerApp(tk.Tk):
             },
             "targets": ["US.SNDK"],
             "target_categories": {},
+            "order_book_enabled": True,
+            "remote_backup": dict(self._DEFAULT_BACKUP),
         }
 
     def _save_config(self):
@@ -519,13 +541,21 @@ class SchedulerApp(tk.Tk):
         self.cfg["prestart_minutes"]     = int(self.prestart_var.get())
         self.cfg["data_timeout_minutes"] = int(self.timeout_var.get())
         new_codes = [t.strip() for t in self.stocks_var.get().split(",") if t.strip()]
-        # Auto-add codes typed directly into the stocks entry that aren't in targets yet
         existing = set(self.cfg.get("targets", []))
         for code in new_codes:
             if code not in existing:
                 self._log(f"Auto-added new target: {code}")
         self.cfg["targets"] = sorted(set(new_codes))
         self.cfg.setdefault("target_categories", {})
+        # Collectors
+        self.cfg["order_book_enabled"] = bool(self.ob_var.get())
+        # Remote backup
+        rb = self.cfg.setdefault("remote_backup", {})
+        rb["enabled"]          = bool(self.backup_enabled_var.get())
+        rb["cron"]             = self.backup_cron_var.get().strip()
+        rb["s3_bucket"]        = self.backup_s3_var.get().strip()
+        rb["aws_profile"]      = self.backup_profile_var.get().strip()
+        rb["aws_endpoint_url"] = self.backup_endpoint_var.get().strip()
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(self.cfg, f, indent=2, ensure_ascii=False)
@@ -593,6 +623,19 @@ class SchedulerApp(tk.Tk):
 
             self._row_widgets[name] = widgets
 
+    def _build_collectors(self):
+        frame = tk.LabelFrame(self, text=" Collectors ", bg=BG_DARK, fg=FG,
+                              font=("Helvetica", 10, "bold"))
+        frame.pack(fill=tk.X, padx=12, pady=(2, 4))
+
+        self.ob_var = tk.BooleanVar(value=self.cfg.get("order_book_enabled", True))
+        tk.Checkbutton(
+            frame, text="Order Book Collector  (bid/ask depth → order_book.db)",
+            variable=self.ob_var, bg=BG_DARK, fg=FG, selectcolor=BG_EDIT,
+            activebackground=BG_DARK, activeforeground=FG,
+            font=("Helvetica", 9), command=self._save_config,
+        ).pack(side=tk.LEFT, padx=8, pady=4)
+
     def _build_stocks(self):
         frame = tk.Frame(self, bg=BG_DARK)
         frame.pack(fill=tk.X, padx=12, pady=4)
@@ -618,6 +661,68 @@ class SchedulerApp(tk.Tk):
                    width=3, bg=BG_EDIT, fg=FG, buttonbackground=BG_BAR).pack(side=tk.LEFT)
         tk.Label(frame, text="min", bg=BG_DARK, fg=FG,
                  font=("Helvetica", 9)).pack(side=tk.LEFT, padx=(4, 0))
+
+    def _build_backup(self):
+        rb  = self.cfg.get("remote_backup", {})
+        outer = tk.LabelFrame(self, text=" Remote Backup ", bg=BG_DARK, fg=FG,
+                              font=("Helvetica", 10, "bold"))
+        outer.pack(fill=tk.X, padx=12, pady=(2, 4))
+
+        # Row 1: enable + cron + backup-now button
+        row1 = tk.Frame(outer, bg=BG_DARK)
+        row1.pack(fill=tk.X, padx=8, pady=(4, 2))
+
+        self.backup_enabled_var = tk.BooleanVar(value=rb.get("enabled", True))
+        tk.Checkbutton(
+            row1, text="Enable", variable=self.backup_enabled_var,
+            bg=BG_DARK, fg=FG, selectcolor=BG_EDIT,
+            activebackground=BG_DARK, activeforeground=FG,
+            font=("Helvetica", 9), command=self._save_config,
+        ).pack(side=tk.LEFT)
+
+        tk.Label(row1, text="Cron (ET):", bg=BG_DARK, fg=GREY,
+                 font=("Helvetica", 9)).pack(side=tk.LEFT, padx=(12, 4))
+        self.backup_cron_var = tk.StringVar(value=rb.get("cron", "0 20 * * 1-5"))
+        tk.Entry(row1, textvariable=self.backup_cron_var, width=16,
+                 bg=BG_EDIT, fg=FG, insertbackground=FG,
+                 font=("Courier", 9)).pack(side=tk.LEFT)
+        tk.Label(row1, text="(min hr * * dow)", bg=BG_DARK, fg=DIM,
+                 font=("Helvetica", 8)).pack(side=tk.LEFT, padx=(4, 0))
+
+        tk.Button(row1, text="Backup Now", bg=BG_BAR, fg=FG,
+                  relief=tk.FLAT, width=12,
+                  command=lambda: threading.Thread(target=self._run_backup, daemon=True).start()
+                  ).pack(side=tk.RIGHT)
+
+        # Row 2: S3 bucket path
+        row2 = tk.Frame(outer, bg=BG_DARK)
+        row2.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(row2, text="S3 Path:", bg=BG_DARK, fg=GREY, width=9, anchor="w",
+                 font=("Helvetica", 9)).pack(side=tk.LEFT)
+        self.backup_s3_var = tk.StringVar(value=rb.get("s3_bucket", ""))
+        tk.Entry(row2, textvariable=self.backup_s3_var, width=46,
+                 bg=BG_EDIT, fg=FG, insertbackground=FG,
+                 font=("Courier", 9)).pack(side=tk.LEFT)
+        tk.Label(row2, text="e.g. s3://bucket/data", bg=BG_DARK, fg=DIM,
+                 font=("Helvetica", 8)).pack(side=tk.LEFT, padx=(6, 0))
+
+        # Row 3: profile + endpoint
+        row3 = tk.Frame(outer, bg=BG_DARK)
+        row3.pack(fill=tk.X, padx=8, pady=(2, 6))
+        tk.Label(row3, text="Profile:", bg=BG_DARK, fg=GREY, width=9, anchor="w",
+                 font=("Helvetica", 9)).pack(side=tk.LEFT)
+        self.backup_profile_var = tk.StringVar(value=rb.get("aws_profile", "default"))
+        tk.Entry(row3, textvariable=self.backup_profile_var, width=14,
+                 bg=BG_EDIT, fg=FG, insertbackground=FG,
+                 font=("Courier", 9)).pack(side=tk.LEFT)
+        tk.Label(row3, text="Endpoint:", bg=BG_DARK, fg=GREY,
+                 font=("Helvetica", 9)).pack(side=tk.LEFT, padx=(12, 4))
+        self.backup_endpoint_var = tk.StringVar(value=rb.get("aws_endpoint_url", ""))
+        tk.Entry(row3, textvariable=self.backup_endpoint_var, width=30,
+                 bg=BG_EDIT, fg=FG, insertbackground=FG,
+                 font=("Courier", 9)).pack(side=tk.LEFT)
+        tk.Label(row3, text="(blank = AWS)", bg=BG_DARK, fg=DIM,
+                 font=("Helvetica", 8)).pack(side=tk.LEFT, padx=(6, 0))
 
     def _build_controls(self):
         frame = tk.Frame(self, bg=BG_DARK, pady=6)
@@ -688,6 +793,10 @@ class SchedulerApp(tk.Tk):
         if self._collector_running:
             self._check_session_transitions(et)
 
+        # check remote backup cron (independent of collector state)
+        if self.cfg.get("remote_backup", {}).get("enabled"):
+            self._check_backup_cron(et)
+
         self._tick_job = self.after(1000, self._tick)
 
     def _check_session_transitions(self, et: datetime):
@@ -720,43 +829,56 @@ class SchedulerApp(tk.Tk):
     # ── Collector subprocess ──────────────────────────────────────────────────
 
     def _launch_collector(self):
-        """Start tick_collector.py as a subprocess if not already running."""
-        if self._proc is not None and self._proc.poll() is None:
-            return  # already running
-        collector = pathlib.Path(__file__).parent / "tick_collector.py"
-        timeout   = int(self.timeout_var.get())
-        cmd = [
-            sys.executable, str(collector),
-            "--config",  str(CONFIG_PATH),
-            "--timeout", str(timeout),
-        ]
-        import os
-        env = {**os.environ, "PYTHONUNBUFFERED": "1"}   # force line-flush in child
-        try:
-            self._proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=env,
-            )
-            self._log(f"Collector PID {self._proc.pid} started  (no-data warn: {timeout} min)")
-            threading.Thread(target=self._tail_proc, daemon=True).start()
-        except Exception as exc:
-            self._log(f"Failed to start collector: {exc}")
+        """Start tick_collector.py (and optionally order_book_collector.py) as subprocesses."""
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        timeout = int(self.timeout_var.get())
+
+        # Tick collector
+        if self._proc is None or self._proc.poll() is not None:
+            collector = pathlib.Path(__file__).parent / "tick_collector.py"
+            cmd = [sys.executable, str(collector),
+                   "--config", str(CONFIG_PATH), "--timeout", str(timeout)]
+            try:
+                self._proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1, env=env,
+                )
+                self._log(f"Collector PID {self._proc.pid} started  (no-data warn: {timeout} min)")
+                threading.Thread(target=self._tail_proc, daemon=True).start()
+            except Exception as exc:
+                self._log(f"Failed to start tick collector: {exc}")
+
+        # Order book collector (optional)
+        if self.cfg.get("order_book_enabled", True):
+            if self._ob_proc is None or self._ob_proc.poll() is not None:
+                ob = pathlib.Path(__file__).parent / "order_book_collector.py"
+                if ob.exists():
+                    cmd_ob = [sys.executable, str(ob), "--config", str(CONFIG_PATH)]
+                    try:
+                        self._ob_proc = subprocess.Popen(
+                            cmd_ob, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, env=env,
+                        )
+                        self._log(f"OB collector PID {self._ob_proc.pid} started")
+                        threading.Thread(
+                            target=self._tail_ob_proc, daemon=True
+                        ).start()
+                    except Exception as exc:
+                        self._log(f"Failed to start OB collector: {exc}")
 
     def _kill_collector(self):
-        if self._proc is None:
-            return
-        if self._proc.poll() is None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-            self._log(f"Collector PID {self._proc.pid} stopped")
-        self._proc = None
+        for attr, label in [("_proc", "Collector"), ("_ob_proc", "OB collector")]:
+            proc = getattr(self, attr)
+            if proc is None:
+                continue
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                self._log(f"{label} PID {proc.pid} stopped")
+            setattr(self, attr, None)
 
     def _tail_proc(self):
         """Read collector stdout in a background thread and forward to the log."""
@@ -766,6 +888,101 @@ class SchedulerApp(tk.Tk):
             if line:
                 self.after(0, self._log, f"  [collector] {line}")
         self.after(0, self._log, "  [collector] process exited")
+
+    def _tail_ob_proc(self):
+        proc = self._ob_proc
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                self.after(0, self._log, f"  [ob_collector] {line}")
+        self.after(0, self._log, "  [ob_collector] process exited")
+
+    # ── Remote backup ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _cron_field_match(field: str, value: int) -> bool:
+        """Check if a single cron field (e.g. '1-5', '20', '*') matches *value*."""
+        if field == "*":
+            return True
+        for part in field.split(","):
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                if int(lo) <= value <= int(hi):
+                    return True
+            elif int(part) == value:
+                return True
+        return False
+
+    def _check_backup_cron(self, et: datetime):
+        """Fire a backup if the current ET time matches the configured cron."""
+        cron = self.cfg.get("remote_backup", {}).get("cron", "").strip()
+        if not cron:
+            return
+        parts = cron.split()
+        if len(parts) != 5:
+            return
+        try:
+            m_f, h_f, _, _, dow_f = parts
+            # isoweekday: Mon=1..Sun=7; cron dow: 0=Sun..6=Sat
+            cron_dow = et.isoweekday() % 7  # Mon=1..Sat=6, Sun=0
+            if not (self._cron_field_match(m_f, et.minute) and
+                    self._cron_field_match(h_f, et.hour) and
+                    self._cron_field_match(dow_f, cron_dow)):
+                return
+            cur_min = (et.year, et.month, et.day, et.hour, et.minute)
+            if cur_min == self._last_backup_minute:
+                return
+            self._last_backup_minute = cur_min
+            self._log(f"[backup] Cron matched ({cron}) — starting backup")
+            threading.Thread(target=self._run_backup, daemon=True).start()
+        except Exception as exc:
+            self._log(f"[backup] Cron parse error: {exc}")
+
+    def _run_backup(self):
+        """Upload tick and order-book DBs to S3 via aws s3 cp."""
+        rb = self.cfg.get("remote_backup", {})
+        s3_dest = rb.get("s3_bucket", "").rstrip("/")
+        if not s3_dest:
+            self.after(0, self._log, "[backup] No S3 path configured — skip")
+            return
+        profile  = rb.get("aws_profile", "default") or "default"
+        endpoint = rb.get("aws_endpoint_url", "").strip()
+        root     = pathlib.Path(__file__).parent.parent
+
+        files = [
+            ("tick_db",       rb.get("tick_db",       "db/ticks.db")),
+            ("order_book_db", rb.get("order_book_db", "db/order_book.db")),
+        ]
+        any_ok = False
+        for _key, rel in files:
+            src = (root / rel).resolve()
+            if not src.exists():
+                self.after(0, self._log, f"[backup] Skip {rel} — not found")
+                continue
+            dst = f"{s3_dest}/{src.name}"
+            cmd = ["aws", "s3", "cp", str(src), dst, "--profile", profile]
+            if endpoint:
+                cmd += ["--endpoint-url", endpoint]
+            self.after(0, self._log, f"[backup] {src.name} → {dst}")
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if res.returncode == 0:
+                    self.after(0, self._log, f"[backup] ✓ {src.name}")
+                    any_ok = True
+                else:
+                    self.after(0, self._log,
+                               f"[backup] ✗ {src.name}: {(res.stderr or res.stdout).strip()}")
+            except subprocess.TimeoutExpired:
+                self.after(0, self._log, f"[backup] ✗ {src.name}: timeout (>120 s)")
+            except FileNotFoundError:
+                self.after(0, self._log,
+                           "[backup] ✗ 'aws' CLI not found — install AWS CLI to enable backups")
+                return
+            except Exception as exc:
+                self.after(0, self._log, f"[backup] ✗ {src.name}: {exc}")
+
+        if any_ok:
+            self.after(0, self._log, "[backup] Done.")
 
     # ── Scheduler control ─────────────────────────────────────────────────────
 
