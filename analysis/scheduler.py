@@ -970,7 +970,7 @@ class SchedulerApp(tk.Tk):
                 cmd += ["--endpoint-url", endpoint]
             self.after(0, self._log, f"[backup] {src.name} → {dst}")
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
                 if res.returncode == 0:
                     self.after(0, self._log, f"[backup] ✓ {src.name}")
                     any_ok = True
@@ -978,7 +978,7 @@ class SchedulerApp(tk.Tk):
                     self.after(0, self._log,
                                f"[backup] ✗ {src.name}: {(res.stderr or res.stdout).strip()}")
             except subprocess.TimeoutExpired:
-                self.after(0, self._log, f"[backup] ✗ {src.name}: timeout (>120 s)")
+                self.after(0, self._log, f"[backup] ✗ {src.name}: timeout (>600 s)")
             except FileNotFoundError:
                 self.after(0, self._log,
                            "[backup] ✗ 'aws' CLI not found — install AWS CLI to enable backups")
