@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.8.1 — Iceberg & spoof detection fixes (2026-06-01)
+
+### Fix: Iceberg segment reset on level disappearance (`orderflow_detect.py`)
+
+- A time gap > 1.5 × col_secs between consecutive snapshots at a price level
+  now splits the history into independent segments; each segment runs a fresh
+  state machine (running_peak / depleted reset).
+- Breakthrough → reappearance correctly starts a new iceberg search rather than
+  continuing the previous one.  Multiple segments at the same level each produce
+  their own `(first_bar, last_bar, price, n_ref)` tuple → separate cyan segments.
+- `col_secs` added as a parameter to `detect_icebergs`; passed from
+  `_col_secs_spin` in `LiqHmWindow`.
+
+### Fix: Spoof detection — execution proxy replaces missing tick data (`orderflow_detect.py`)
+
+- Removed `raw_ticks` parameter (was always `[]` in the HM context, making the
+  execution filter completely ineffective).
+- Execution is now inferred from **spread movement**: if the best bid (BID order)
+  fell below the price level, or the best ask (ASK order) rose above it, between
+  appearance and disappearance, the order was consumed — not a spoof.
+- `min_vol=0` auto-computes the threshold as the **median volume** of the most
+  recent OB snapshot, adapting to each ticker's liquidity automatically.
+- Each reappearance of a large order after a prior spoof/disappearance is treated
+  as an independent new event with its own ▲/▼ marker.
+
 ## v0.8.0 — Liquidity Heatmap floating window (2026-06-01)
 
 ### New: Standalone Liquidity Heatmap window (`analysis/liq_hm_window.py`)

@@ -257,7 +257,10 @@ class LiqHmWindow(QWidget):
         self._min_vol_spin.setSingleStep(100)
         self._min_vol_spin.setValue(0)
         self._min_vol_spin.setFixedWidth(75)
-        self._min_vol_spin.setToolTip("Ignore OB levels with volume below this")
+        self._min_vol_spin.setToolTip(
+            "Minimum volume to include in heatmap and detection.\n"
+            "Spoof detection: 0 = auto (median of latest snapshot levels)"
+        )
         self._min_vol_spin.valueChanged.connect(self._on_controls_changed)
         tb.addWidget(self._min_vol_spin)
 
@@ -674,6 +677,7 @@ class LiqHmWindow(QWidget):
                 vol_threshold=min_vol,
                 best_bid=self._best_bid,
                 best_ask=self._best_ask,
+                col_secs=self._col_secs_spin.value(),
             )
             self._draw_iceberg_markers(icebergs)
 
@@ -681,10 +685,9 @@ class LiqHmWindow(QWidget):
             from analysis.orderflow_detect import detect_spoofs
             spoofs = detect_spoofs(
                 self._raw_snaps,
-                [],          # no raw tick cross-reference in HM window
                 bucket_to_idx, self._bin_size, self._price_min,
                 N_PRICE, cm,
-                min_vol=max(min_vol, 1.0),
+                min_vol=float(min_vol),   # 0 → auto median of latest snapshot
                 max_duration_secs=self._spoof_dur_spin.value(),
             )
             self._draw_spoof_markers(spoofs)
