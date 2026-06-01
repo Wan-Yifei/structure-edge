@@ -23,6 +23,9 @@ moomoo/
 ├── analysis/                    # GUI 工具
 │   ├── trade_viewer_qt.py       #   K 线图表（PyQtGraph，当前版本）— 见下方说明
 │   ├── trade_viewer.py          #   K 线图表（Matplotlib，legacy）
+│   ├── dom_window.py            #   浮动 Depth of Market 窗口（盘口深度柱图）
+│   ├── liq_hm_window.py         #   浮动流动性热力图（价格×时间，冰山/Spoof叠加）
+│   ├── orderflow_detect.py      #   订单流检测：冰山 / Spoof / Absorption 算法
 │   ├── tick_collector.py        #   实时 tick 采集（写入 db/ticks.db）
 │   └── scheduler.py             #   定时任务调度器
 │
@@ -64,11 +67,12 @@ moomoo/
 │
 ├── db/                          # 本地数据库文件（见 db/README.md）
 │   ├── ticks.db                 #   实时 tick（~770 万行，SQLite）
+│   ├── order_book.db            #   实时委托簿快照（SQLite，流动性热力图使用）
 │   ├── backtest_klines.duckdb   #   K 线缓存（DuckDB）
 │   ├── backtest.duckdb          #   回测结果 + 交易记录（DuckDB）
 │   └── review_trades.duckdb     #   交易索引（DuckDB，trade_viewer 查询用，独立文件避免锁冲突）
 │
-├── tests/                       # 单元测试（163 tests）
+├── tests/                       # 单元测试（257 tests）
 ├── main.py                      # 统一入口
 └── pyproject.toml
 ```
@@ -163,6 +167,13 @@ uv run analysis/trade_viewer_qt.py --code US.SNDK --tf 5m --mode Historical --da
 - Session 过滤：Pre / Regular / Post / Night 复选框
 - Single-candle Tick Profile（悬停时弹出，显示该蜡烛的价格-成交量分布）
   - S / M / L 成交量档位过滤
+
+**浮动辅助窗口**
+- **DOM**（Depth of Market）：开关按钮弹出独立窗口，显示盘口多档买卖量柱图；
+  历史模式下随十字光标同步到对应时刻的快照
+- **Liquidity Heatmap**：浮动热力图，X 轴 = 时间，Y 轴 = 价格，颜色编码盘口深度；
+  支持冰山（顶档量反复刷新）和 Spoof（大单秒消失且非成交）检测覆盖层；
+  盘口最优买卖价虚线标注；历史模式下随主图十字线同步纵轴
 
 **Trade Review 模式**
 - 在工具栏输入 Trade ID（UUID）→ 自动跳转到入场 K 线
@@ -327,6 +338,7 @@ uv run backtest/fvg_inspect.py \
 | 数据库 | 格式 | 内容 |
 |--------|------|------|
 | `ticks.db` | SQLite | 实时逐笔成交（~770 万行）|
+| `order_book.db` | SQLite | 实时委托簿快照（价格×量，流动性热力图使用）|
 | `backtest_klines.duckdb` | DuckDB | K 线缓存，供回测离线使用 |
 | `backtest.duckdb` | DuckDB | 回测结果 + 实盘 / 模拟盘交易记录 |
 | `review_trades.duckdb` | DuckDB | 交易索引（run.py + audit.py 写入，trade_viewer 读取）|

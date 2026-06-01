@@ -42,7 +42,10 @@ def _tick(ts: datetime, price: float, volume: int,
 
 class TestDetectIcebergs(unittest.TestCase):
 
-    def _run(self, snaps, min_refreshes=2, vol_threshold=0.0, n_bars=20):
+    def _run(self, snaps, min_refreshes=2, vol_threshold=0.0, n_bars=20,
+             col_secs=300):
+        # col_secs=300 keeps gap threshold large so tests with sparse snapshots
+        # do not get falsely split into separate segments.
         return detect_icebergs(
             snaps,
             bucket_to_idx=_bucket_to_idx(n_bars),
@@ -52,6 +55,7 @@ class TestDetectIcebergs(unittest.TestCase):
             cm=CM,
             min_refreshes=min_refreshes,
             vol_threshold=vol_threshold,
+            col_secs=col_secs,
         )
 
     def test_empty_returns_empty(self):
@@ -159,11 +163,9 @@ class TestDetectIcebergs(unittest.TestCase):
 
 class TestDetectSpoofs(unittest.TestCase):
 
-    def _run(self, ob_data, raw_ticks=None, min_vol=100.0,
-             max_duration_secs=30.0, n_bars=20):
+    def _run(self, ob_data, min_vol=100.0, max_duration_secs=30.0, n_bars=20):
         return detect_spoofs(
             ob_data,
-            raw_ticks or [],
             bucket_to_idx=_bucket_to_idx(n_bars),
             bin_size=BIN_SIZE,
             price_min=PRICE_MIN,
@@ -177,13 +179,13 @@ class TestDetectSpoofs(unittest.TestCase):
         self.assertEqual(self._run([]), [])
 
     def test_clean_spoof_detected(self):
-        # Large ASK appears at t=0, vanishes at t=10s, no execution
+        # Large ASK appears at t=0, vanishes at t=10s; spread stays below level → spoof
         ob = [
             _snap(T0,                          110.0, 5000, "ASK"),
             _snap(T0 + timedelta(seconds=10),  110.0,   50, "ASK"),
             _snap(T0 + timedelta(seconds=20),  110.0,   40, "ASK"),
         ]
-        result = self._run(ob, raw_ticks=[], min_vol=100)
+        result = self._run(ob, min_vol=100)
         self.assertEqual(len(result), 1)
         appear_bar, disappear_bar, price, side = result[0]
         self.assertEqual(side, "ASK")
@@ -201,23 +203,24 @@ class TestDetectSpoofs(unittest.TestCase):
         self.assertEqual(result[0][3], "BID")
 
     def test_no_spoof_when_fully_executed(self):
-        # Order appears then vanishes, but 80% was executed → NOT a spoof
+        # Large ASK at 110 vanishes; during the window best ask rises to 112
+        # (buyers consumed it) → spread moved through level → NOT a spoof
         ob = [
             _snap(T0,                          110.0, 5000, "ASK"),
+            _snap(T0 + timedelta(seconds=5),   112.0,  100, "ASK"),  # best ask rose
             _snap(T0 + timedelta(seconds=10),  110.0,   50, "ASK"),
         ]
-        ticks = [_tick(T0 + timedelta(seconds=5), 110.0, 4500)]
-        result = self._run(ob, raw_ticks=ticks, min_vol=100)
+        result = self._run(ob, min_vol=100)
         self.assertEqual(result, [])
 
     def test_partial_execution_still_flagged(self):
-        # Only 10% executed → still qualifies as spoof
+        # Large ASK at 110 vanishes; best ask stays at 110 throughout →
+        # spread did not move through the level → qualifies as spoof
         ob = [
             _snap(T0,                          110.0, 5000, "ASK"),
             _snap(T0 + timedelta(seconds=10),  110.0,   50, "ASK"),
         ]
-        ticks = [_tick(T0 + timedelta(seconds=5), 110.0, 400)]
-        result = self._run(ob, raw_ticks=ticks, min_vol=100)
+        result = self._run(ob, min_vol=100)
         self.assertEqual(len(result), 1)
 
     def test_order_lives_too_long_not_flagged(self):
