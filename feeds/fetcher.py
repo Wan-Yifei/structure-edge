@@ -150,6 +150,8 @@ def fetch_klines(
                     ktype=_ktype_obj(ktype),
                     autype=AuType.QFQ,
                     max_count=_MAX_PER_CALL,
+                    extended_time=True,
+                    session="ALL",
                 )
             else:
                 ret, data, next_key = ctx.request_history_kline(
@@ -158,6 +160,8 @@ def fetch_klines(
                     autype=AuType.QFQ,
                     max_count=_MAX_PER_CALL,
                     page_req_key=page_req_key,
+                    extended_time=True,
+                    session="ALL",
                 )
 
             if ret != RET_OK:
