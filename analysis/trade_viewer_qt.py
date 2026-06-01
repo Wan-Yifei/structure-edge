@@ -260,6 +260,24 @@ def load_order_book_data(code: str, date_str: str) -> list[dict]:
         return []
 
 
+def load_order_book_window(code: str, start: datetime, end: datetime) -> list[dict]:
+    """Load order book snapshots for an explicit time window.
+
+    Used in Live mode so that after-hours / overnight / weekend snapshots
+    (which fall outside any K-line bar) are included and can be mapped to the
+    last visible bar on the chart.
+    """
+    db_path = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
+    if not db_path.exists():
+        return []
+    from feeds.order_book_store import OrderBookStore
+    try:
+        with OrderBookStore(db_path, read_only=True) as store:
+            return store.query_snapshots(code, start, end)
+    except Exception:
+        return []
+
+
 def apply_profile_range(klines: pd.DataFrame, range_val: str) -> pd.DataFrame:
     """Trim klines to N trading days ending at the last bar."""
     if klines.empty:
@@ -661,7 +679,11 @@ class DataFetcher(QThread):
                 start    = (dt - timedelta(days=8)).strftime("%Y-%m-%d 20:00:00")
                 end      = f"{end_dt.strftime('%Y-%m-%d')} 23:59:59"
             else:
-                end   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # Use a future end date so that bars whose time_key is in a
+                # different calendar date than local time (e.g. US ET bars on
+                # Monday morning showing as 06-01 while local clock is still
+                # 05-31 Beijing) are never excluded by the end boundary.
+                end   = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d 23:59:59")
                 lb    = _LIVE_LOOKBACK_DAYS.get(tf, 10)
                 start = (datetime.now() - timedelta(days=lb)).strftime(
                     "%Y-%m-%d %H:%M:%S")
@@ -759,11 +781,6 @@ class DataFetcher(QThread):
                                     ticks[bk][price][k] = (
                                         ticks[bk][price].get(k, 0) + counts[k])
 
-            # Order book snapshots + raw ticks for liquidity heatmap / spoof detection
-            ob_date  = date_str if historical else datetime.now().strftime("%Y-%m-%d")
-            ob_data  = load_order_book_data(code, ob_date)
-            tick_raw = load_raw_ticks(code, ob_date)
-
             self.ready.emit({
                 "klines":      df,
                 "warmup":      warmup,
@@ -771,8 +788,6 @@ class DataFetcher(QThread):
                 "fvg_gaps":    fvg_gaps,
                 "ob_blocks":   ob_blocks,
                 "ticks":       ticks,
-                "ob_data":     ob_data,
-                "tick_raw":    tick_raw,
                 "candle_mins": candle_mins,
                 "historical":  historical,
                 "date_str":    date_str,
@@ -813,10 +828,7 @@ class TradeViewerQt(QMainWindow):
         self._smc_signals:  list[dict]          = []
         self._fvg_gaps:     list[dict]          = []
         self._ob_blocks:    list[dict]          = []
-        self._ob_data:      list[dict]          = []    # order book snapshots for liquidity heatmap
-        self._iceberg_line_items: list[pg.PlotCurveItem] = []
-        self._tick_raw:     list[dict]          = []
-        self._spoof_items:  list               = []    # ScatterPlotItems + PlotCurveItem
+        self._liq_hm_window: "LiqHmWindow | None" = None
         self._dom_window:  QWidget | None      = None  # DOM depth-of-market window
         self._trade_record: dict | None         = None  # active trade review
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
@@ -996,7 +1008,7 @@ class TradeViewerQt(QMainWindow):
 
         # Color scheme toggle
         cb_red_up = QCheckBox("Red Up")
-        cb_red_up.setChecked(False)
+        cb_red_up.setChecked(True)
         cb_red_up.setToolTip(
             "Checked = red rises, green falls (CN convention)\n"
             "Unchecked = green rises, red falls (Western convention)")
@@ -1004,10 +1016,15 @@ class TradeViewerQt(QMainWindow):
         self._ind_checks["red_up"] = cb_red_up
         tb2.addWidget(cb_red_up)
 
-        tb2.addSeparator()
+        # ── Row 3: order flow controls ────────────────────────────────────────
+        self.addToolBarBreak()
+        tb3 = QToolBar("Order Flow", self)
+        tb3.setMovable(False)
+        tb3.setFloatable(False)
+        self.addToolBar(tb3)
 
-        # Tick profile order-size filter: S = small (<p33), M = medium (p33-p67), L = large (>p67)
-        tb2.addWidget(_lbl("Orders:"))
+        # Tick profile order-size filter
+        tb3.addWidget(_lbl("Orders:"))
         for key, label, tip in [
             ("tick_s", "S", "Small orders  (volume < day p33)"),
             ("tick_m", "M", "Medium orders (volume p33–p67)"),
@@ -1018,89 +1035,24 @@ class TradeViewerQt(QMainWindow):
             cb.setToolTip(tip)
             cb.stateChanged.connect(self._on_tick_size_toggle)
             self._ind_checks[key] = cb
-            tb2.addWidget(cb)
+            tb3.addWidget(cb)
 
-        tb2.addSeparator()
+        tb3.addSeparator()
 
-        # Liquidity heatmap (resting order book — distinct from tick heatmap)
-        tb2.addWidget(_lbl("Liq.HM:"))
-        cb_lhm = QCheckBox("Show")
-        cb_lhm.setChecked(False)
-        cb_lhm.setToolTip(
-            "Liquidity Heatmap — resting limit order concentration\n"
-            "Requires order_book_collector.py to be running to collect data.")
-        cb_lhm.stateChanged.connect(self._on_indicator_toggle)
-        self._ind_checks["liq_hm"] = cb_lhm
-        tb2.addWidget(cb_lhm)
+        # Liquidity Heatmap floating window
+        self._liq_hm_btn = QPushButton("Liquidity Heatmap")
+        self._liq_hm_btn.setCheckable(True)
+        self._liq_hm_btn.setChecked(False)
+        self._liq_hm_btn.setToolTip(
+            "Open Liquidity Heatmap window\n"
+            "Real-time resting order book depth as price × time heatmap.\n"
+            "Requires order_book_collector.py to be running.")
+        self._liq_hm_btn.clicked.connect(self._on_liq_hm_toggle)
+        tb3.addWidget(self._liq_hm_btn)
 
-        cb_ba = QCheckBox("Bid/Ask")
-        cb_ba.setChecked(False)
-        cb_ba.setToolTip(
-            "Checked: bid (teal) and ask (red) shown separately\n"
-            "Unchecked: combined with black → purple → yellow colormap")
-        cb_ba.stateChanged.connect(self._on_indicator_toggle)
-        self._ind_checks["liq_bid_ask"] = cb_ba
-        tb2.addWidget(cb_ba)
+        tb3.addSeparator()
 
-        tb2.addWidget(_lbl("Min.Vol:"))
-        self._liq_vol_spin = QSpinBox()
-        self._liq_vol_spin.setRange(0, 1_000_000)
-        self._liq_vol_spin.setSingleStep(100)
-        self._liq_vol_spin.setValue(0)
-        self._liq_vol_spin.setFixedWidth(75)
-        self._liq_vol_spin.setToolTip(
-            "Minimum volume threshold per order book level\n"
-            "Filters out thin resting orders below this size")
-        self._liq_vol_spin.valueChanged.connect(self._on_liq_threshold_changed)
-        tb2.addWidget(self._liq_vol_spin)
-
-        cb_ice = QCheckBox("Iceberg")
-        cb_ice.setChecked(False)
-        cb_ice.setToolTip(
-            "Detect iceberg orders — price levels where resting volume\n"
-            "repeatedly drops then refreshes (hidden large orders).\n"
-            "Shown as cyan line segments; brightness = refresh intensity.")
-        cb_ice.stateChanged.connect(self._on_indicator_toggle)
-        self._ind_checks["liq_iceberg"] = cb_ice
-        tb2.addWidget(cb_ice)
-
-        tb2.addWidget(_lbl("Min.Ref:"))
-        self._iceberg_min_ref_spin = QSpinBox()
-        self._iceberg_min_ref_spin.setRange(1, 50)
-        self._iceberg_min_ref_spin.setSingleStep(1)
-        self._iceberg_min_ref_spin.setValue(3)
-        self._iceberg_min_ref_spin.setFixedWidth(50)
-        self._iceberg_min_ref_spin.setToolTip(
-            "Minimum number of volume refreshes required\n"
-            "to classify a price level as an iceberg order")
-        self._iceberg_min_ref_spin.valueChanged.connect(self._on_liq_threshold_changed)
-        tb2.addWidget(self._iceberg_min_ref_spin)
-
-        cb_spoof = QCheckBox("Spoof")
-        cb_spoof.setChecked(False)
-        cb_spoof.setToolTip(
-            "Detect spoofing — large orders that appear then vanish\n"
-            "without being executed, used to create false price pressure.\n"
-            "▲ = bid spoof (pushing price up)  ▼ = ask spoof (pushing down)")
-        cb_spoof.stateChanged.connect(self._on_indicator_toggle)
-        self._ind_checks["liq_spoof"] = cb_spoof
-        tb2.addWidget(cb_spoof)
-
-        tb2.addWidget(_lbl("Max.Dur:"))
-        self._spoof_dur_spin = QSpinBox()
-        self._spoof_dur_spin.setRange(3, 300)
-        self._spoof_dur_spin.setSingleStep(5)
-        self._spoof_dur_spin.setValue(30)
-        self._spoof_dur_spin.setFixedWidth(50)
-        self._spoof_dur_spin.setToolTip(
-            "Maximum seconds a large order can live before cancellation\n"
-            "to be classified as a potential spoof (default: 30 s)")
-        self._spoof_dur_spin.valueChanged.connect(self._on_liq_threshold_changed)
-        tb2.addWidget(self._spoof_dur_spin)
-
-        tb2.addSeparator()
-
-        # DOM (Depth of Market) window toggle
+        # DOM window toggle
         self._dom_btn = QPushButton("DOM")
         self._dom_btn.setCheckable(True)
         self._dom_btn.setChecked(False)
@@ -1109,9 +1061,9 @@ class TradeViewerQt(QMainWindow):
             "Shows resting order book bid/ask depth for the current symbol.\n"
             "Requires order_book_collector.py to be running.")
         self._dom_btn.clicked.connect(self._on_dom_toggle)
-        tb2.addWidget(self._dom_btn)
+        tb3.addWidget(self._dom_btn)
 
-        # ── Row 3: trade review (separated to avoid crowding Row 2) ──────────
+        # ── Row 4: trade review ───────────────────────────────────────────────
         self.addToolBarBreak()
         tb3 = QToolBar("Trade Review", self)
         tb3.setMovable(False)
@@ -1185,15 +1137,6 @@ class TradeViewerQt(QMainWindow):
         self._chart_widget.ci.layout.setRowStretchFactor(2, 1)
 
         # ── Graphics items ────────────────────────────────────────────────────
-        # Liquidity heatmap items — resting order book (behind candles at z=-10)
-        self._liq_combined_item = pg.ImageItem()
-        self._liq_bid_item      = pg.ImageItem()
-        self._liq_ask_item      = pg.ImageItem()
-        for _lhm_img in (self._liq_combined_item, self._liq_bid_item, self._liq_ask_item):
-            _lhm_img.setZValue(-10)
-            _lhm_img.setVisible(False)
-            self._plot_c.addItem(_lhm_img)
-
         self._candle_item = CandlestickItem()
         self._plot_c.addItem(self._candle_item)
 
@@ -1572,8 +1515,6 @@ class TradeViewerQt(QMainWindow):
         self._smc_signals = result["smc_signals"]
         self._fvg_gaps    = result["fvg_gaps"]
         self._ob_blocks   = result["ob_blocks"]
-        self._ob_data     = result.get("ob_data", [])
-        self._tick_raw    = result.get("tick_raw", [])
         self._render(self._klines, self._ticks)
         # Keep DOM window in sync with active code, mode, and timeframe
         if self._dom_window is not None:
@@ -1582,6 +1523,12 @@ class TradeViewerQt(QMainWindow):
             self._dom_window.set_code(code)
             self._dom_window.set_live(live)
             self._dom_window.set_timeframe(self._candle_mins)
+        # Keep Liq HM window in sync
+        if self._liq_hm_window is not None:
+            code = self._code_edit.text().strip()
+            live = self._mode_combo.currentText() == "Live"
+            self._liq_hm_window.set_code(code)
+            self._liq_hm_window.set_live(live)
 
     # ── Chart rendering ───────────────────────────────────────────────────────
 
@@ -1704,8 +1651,6 @@ class TradeViewerQt(QMainWindow):
         # Session vol profile
         self._rebuild_session_profile()
 
-        # Liquidity heatmap (resting order book)
-        self._redraw_liq_heatmap()
 
         mode = self._mode_combo.currentText()
         self.setWindowTitle(
@@ -1846,12 +1791,6 @@ class TradeViewerQt(QMainWindow):
             self._plot_c.addItem(txt, ignoreBounds=True)
             self._delta_items.append(txt)
 
-    # ── Liquidity heatmap (resting order book) ───────────────────────────────
-
-    def _on_liq_threshold_changed(self) -> None:
-        if self._klines is not None:
-            self._redraw_liq_heatmap()
-
     # ── DOM window ────────────────────────────────────────────────────────────
 
     def _on_dom_toggle(self, checked: bool) -> None:
@@ -1877,291 +1816,27 @@ class TradeViewerQt(QMainWindow):
         if self._dom_window is not None and not self._dom_window._live:
             self._dom_window.pin_timestamp(ts)
 
-    def _redraw_liq_heatmap(self) -> None:
-        """Build and display the liquidity heatmap from stored order book snapshots."""
-        _all = (self._liq_combined_item, self._liq_bid_item, self._liq_ask_item)
-        if (not self._ind("liq_hm") or not self._ob_data
-                or self._klines is None or self._klines.empty):
-            for item in _all:
-                item.setVisible(False)
-            self._redraw_iceberg_lines([])
-            self._redraw_spoof_markers([])
-            return
+    # ── Liquidity Heatmap floating window ─────────────────────────────────────
 
-        show_bid_ask = self._ind("liq_bid_ask")
-        threshold    = self._liq_vol_spin.value()
-        tf           = self._tf_combo.currentText()
-        _, cm        = TIMEFRAME_MAP[tf]
-        klines       = self._klines
-        n            = len(klines)
-        price_min    = float(klines["low"].min())
-        price_max    = float(klines["high"].max())
-        if price_max <= price_min:
-            return
-
-        N_PRICE = 100
-
-        # Map each kline bar-start datetime to its column index
-        bucket_to_idx: dict[datetime, int] = {}
-        for i, (_, row) in enumerate(klines.iterrows()):
-            try:
-                bar_end = datetime.strptime(str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
-                bucket_to_idx[bk] = i
-            except ValueError:
-                pass
-
-        # Vectorised accumulation: convert snapshot list to numpy arrays once
-        snaps    = self._ob_data
-        ts_list  = [s["ts"] for s in snaps]
-        price_np = np.array([s["price"]        for s in snaps], dtype=np.float64)
-        vol_np   = np.array([s["volume"]        for s in snaps], dtype=np.float64)
-        is_bid   = np.array([s["side"] == "BID" for s in snaps], dtype=bool)
-
-        t_np = np.array(
-            [bucket_to_idx.get(candle_start(ts, cm), -1) for ts in ts_list],
-            dtype=np.int32,
-        )
-        bin_size = (price_max - price_min) / N_PRICE
-        p_np = ((price_np - price_min) / bin_size).astype(np.int32)
-
-        valid = (t_np >= 0) & (p_np >= 0) & (p_np < N_PRICE) & (vol_np >= threshold)
-        t_v   = t_np[valid]
-        p_v   = p_np[valid]
-        v_v   = vol_np[valid]
-        bid_v = is_bid[valid]
-
-        bid_grid = np.zeros((n, N_PRICE), dtype=np.float64)
-        ask_grid = np.zeros((n, N_PRICE), dtype=np.float64)
-        np.add.at(bid_grid, (t_v[bid_v],  p_v[bid_v]),  v_v[bid_v])
-        np.add.at(ask_grid, (t_v[~bid_v], p_v[~bid_v]), v_v[~bid_v])
-
-        # rect: image spans full candle range in x, full price range in y
-        rect = QRectF(-0.5, price_min, float(n), price_max - price_min)
-
-        if show_bid_ask:
-            self._liq_combined_item.setVisible(False)
-            self._render_heatmap_single(self._liq_bid_item, bid_grid, "#26a69a", rect)
-            self._render_heatmap_single(self._liq_ask_item, ask_grid, "#ef5350", rect)
-            self._liq_bid_item.setVisible(True)
-            self._liq_ask_item.setVisible(True)
+    def _on_liq_hm_toggle(self, checked: bool) -> None:
+        if checked:
+            from analysis.liq_hm_window import LiqHmWindow
+            code = self._code_edit.text().strip()
+            live = self._mode_combo.currentText() == "Live"
+            self._liq_hm_window = LiqHmWindow()
+            self._liq_hm_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            self._liq_hm_window.destroyed.connect(self._on_liq_hm_closed)
+            self._liq_hm_window.set_code(code)
+            self._liq_hm_window.set_live(live)
+            self._liq_hm_window.show()
         else:
-            self._liq_bid_item.setVisible(False)
-            self._liq_ask_item.setVisible(False)
-            self._render_heatmap_hot(self._liq_combined_item, bid_grid + ask_grid, rect)
-            self._liq_combined_item.setVisible(True)
+            if self._liq_hm_window is not None:
+                self._liq_hm_window.close()
+                self._liq_hm_window = None
 
-        icebergs = self._detect_icebergs(
-            self._ob_data, bucket_to_idx, bin_size, price_min, N_PRICE, cm,
-            min_refreshes=self._iceberg_min_ref_spin.value(),
-            vol_threshold=threshold,
-        )
-        self._redraw_iceberg_lines(icebergs)
-
-        spoofs = self._detect_spoofs(
-            self._ob_data, self._tick_raw,
-            bucket_to_idx, bin_size, price_min, N_PRICE, cm,
-            min_vol=max(threshold, 1.0),
-            max_duration_secs=self._spoof_dur_spin.value(),
-        )
-        self._redraw_spoof_markers(spoofs)
-
-    def _render_heatmap_hot(self, img: pg.ImageItem,
-                             grid: np.ndarray, rect: QRectF) -> None:
-        """Black → purple → amber → yellow colormap (combined bid+ask)."""
-        if grid.max() <= 0:
-            img.clear()
-            return
-        log_g = np.log1p(grid)
-        norm  = (log_g / log_g.max()).astype(np.float32)  # (n_time, N_PRICE)
-
-        rgba = np.zeros((*norm.shape, 4), dtype=np.uint8)
-
-        # 0.0..0.25: near-black → dark purple
-        m = norm < 0.25
-        t = norm[m] / 0.25
-        rgba[m, 0] = (t * 60).astype(np.uint8)
-        rgba[m, 2] = (t * 140).astype(np.uint8)
-
-        # 0.25..0.5: dark purple → bright purple
-        m = (norm >= 0.25) & (norm < 0.5)
-        t = (norm[m] - 0.25) / 0.25
-        rgba[m, 0] = (60 + t * 100).astype(np.uint8)
-        rgba[m, 2] = (140 + t * 60).astype(np.uint8)
-
-        # 0.5..0.75: bright purple → amber
-        m = (norm >= 0.5) & (norm < 0.75)
-        t = (norm[m] - 0.5) / 0.25
-        rgba[m, 0] = (160 + t * 95).astype(np.uint8)
-        rgba[m, 1] = (t * 80).astype(np.uint8)
-        rgba[m, 2] = (200 - t * 200).astype(np.uint8)
-
-        # 0.75..1.0: amber → yellow
-        m = norm >= 0.75
-        t = (norm[m] - 0.75) / 0.25
-        rgba[m, 0] = 255
-        rgba[m, 1] = (80 + t * 155).astype(np.uint8)
-        rgba[m, 2] = 0
-
-        # Alpha: low-intensity cells are nearly transparent
-        rgba[..., 3] = np.clip((norm * 200 + 20).astype(np.uint8), 0, 220)
-        rgba[norm < 0.02, 3] = 0
-
-        img.setImage(rgba)
-        img.setRect(rect)
-
-    def _render_heatmap_single(self, img: pg.ImageItem, grid: np.ndarray,
-                                color_hex: str, rect: QRectF) -> None:
-        """Single-color intensity heatmap for bid or ask volumes separately."""
-        if grid.max() <= 0:
-            img.clear()
-            return
-        log_g = np.log1p(grid)
-        norm  = (log_g / log_g.max()).astype(np.float32)
-
-        c = QColor(color_hex)
-        rgba = np.zeros((*norm.shape, 4), dtype=np.uint8)
-        rgba[..., 0] = c.red()
-        rgba[..., 1] = c.green()
-        rgba[..., 2] = c.blue()
-        rgba[..., 3] = np.clip((norm * 180).astype(np.uint8), 0, 180)
-        rgba[norm < 0.02, 3] = 0
-
-        img.setImage(rgba)
-        img.setRect(rect)
-
-    # ── Iceberg / spoof detection (logic lives in analysis/orderflow_detect.py) ─
-
-    @staticmethod
-    def _detect_icebergs(
-        snaps: list[dict],
-        bucket_to_idx: dict,
-        bin_size: float,
-        price_min: float,
-        N_PRICE: int,
-        cm: int,
-        min_refreshes: int,
-        vol_threshold: float,
-    ) -> list[tuple]:
-        from analysis.orderflow_detect import detect_icebergs
-        return detect_icebergs(
-            snaps, bucket_to_idx, bin_size, price_min,
-            N_PRICE, cm, min_refreshes, vol_threshold,
-        )
-
-    def _redraw_iceberg_lines(self, icebergs: list[tuple]) -> None:
-        """Draw cyan horizontal line segments for detected iceberg orders.
-
-        Each segment: x = [first_refresh_bar .. last_refresh_bar], y = price.
-        Brightness encodes refresh intensity (more refreshes = brighter cyan).
-        """
-        for item in self._iceberg_line_items:
-            self._plot_c.removeItem(item)
-        self._iceberg_line_items.clear()
-
-        if not self._ind("liq_iceberg") or not icebergs:
-            return
-
-        max_ref = max(ice[3] for ice in icebergs)
-        N_TIERS = 5
-
-        # Bucket icebergs by intensity tier
-        tier_xs: dict[int, list] = {t: [] for t in range(N_TIERS)}
-        tier_ys: dict[int, list] = {t: [] for t in range(N_TIERS)}
-        for (bar_start, bar_end, price, n_ref) in icebergs:
-            tier = min(int((n_ref - 1) / max(max_ref, 1) * N_TIERS), N_TIERS - 1)
-            tier_xs[tier] += [float(bar_start), float(bar_end) + 0.9]
-            tier_ys[tier] += [price, price]
-
-        for tier in range(N_TIERS):
-            xs = tier_xs[tier]
-            if not xs:
-                continue
-            alpha = int(70 + 185 * tier / max(N_TIERS - 1, 1))
-            pen   = pg.mkPen(color=(0, 229, 255, alpha), width=2)
-            item  = pg.PlotCurveItem(
-                x=np.array(tier_xs[tier]),
-                y=np.array(tier_ys[tier]),
-                pen=pen, connect="pairs",
-            )
-            self._plot_c.addItem(item)
-            self._iceberg_line_items.append(item)
-
-    @staticmethod
-    def _detect_spoofs(
-        ob_data: list[dict],
-        raw_ticks: list[dict],
-        bucket_to_idx: dict,
-        bin_size: float,
-        price_min: float,
-        N_PRICE: int,
-        cm: int,
-        min_vol: float,
-        max_duration_secs: float,
-    ) -> list[tuple]:
-        from analysis.orderflow_detect import detect_spoofs
-        return detect_spoofs(
-            ob_data, raw_ticks, bucket_to_idx, bin_size, price_min,
-            N_PRICE, cm, min_vol, max_duration_secs,
-        )
-
-    def _redraw_spoof_markers(self, spoofs: list[tuple]) -> None:
-        """Draw spoof markers: triangle arrows + duration lines.
-
-        BID spoof → orange ▲ (inducing upward price movement).
-        ASK spoof → orange ▼ (inducing downward price movement).
-        Horizontal orange line from appear_bar to disappear_bar at price level.
-        """
-        for item in self._spoof_items:
-            self._plot_c.removeItem(item)
-        self._spoof_items.clear()
-
-        if not self._ind("liq_spoof") or not spoofs:
-            return
-
-        ORANGE = (255, 140, 0, 210)
-        up_xs,   up_ys   = [], []
-        down_xs, down_ys = [], []
-        line_xs, line_ys = [], []
-
-        for (appear_bar, disappear_bar, price, side) in spoofs:
-            if side == "BID":
-                up_xs.append(float(appear_bar))
-                up_ys.append(price)
-            else:
-                down_xs.append(float(appear_bar))
-                down_ys.append(price)
-            line_xs += [float(appear_bar), float(disappear_bar) + 0.9]
-            line_ys += [price, price]
-
-        if up_xs:
-            scat = pg.ScatterPlotItem(
-                x=up_xs, y=up_ys,
-                symbol="t", size=10,
-                pen=pg.mkPen(None),
-                brush=pg.mkBrush(*ORANGE),
-            )
-            self._plot_c.addItem(scat)
-            self._spoof_items.append(scat)
-
-        if down_xs:
-            scat = pg.ScatterPlotItem(
-                x=down_xs, y=down_ys,
-                symbol="t2", size=10,
-                pen=pg.mkPen(None),
-                brush=pg.mkBrush(*ORANGE),
-            )
-            self._plot_c.addItem(scat)
-            self._spoof_items.append(scat)
-
-        if line_xs:
-            line = pg.PlotCurveItem(
-                x=np.array(line_xs), y=np.array(line_ys),
-                pen=pg.mkPen(color=ORANGE, width=1, style=Qt.PenStyle.DotLine),
-                connect="pairs",
-            )
-            self._plot_c.addItem(line)
-            self._spoof_items.append(line)
+    def _on_liq_hm_closed(self) -> None:
+        self._liq_hm_window = None
+        self._liq_hm_btn.setChecked(False)
 
     def _clear_ema_items(self) -> None:
         for item in self._ema_items:
@@ -2890,14 +2565,16 @@ class TradeViewerQt(QMainWindow):
 
             self._show_tick_profile(idx)
 
-            # DOM crosshair sync (historical mode only)
-            if (self._dom_window is not None
-                    and self._mode_combo.currentText() == "Historical"):
-                try:
-                    bar_ts = datetime.strptime(str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-                    self._dom_sync(bar_ts)
-                except Exception:
-                    pass
+            # DOM / Liq HM crosshair sync (historical mode only)
+            if self._dom_window is not None or self._liq_hm_window is not None:
+                if self._mode_combo.currentText() == "Historical":
+                    try:
+                        bar_ts = datetime.strptime(str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                        self._dom_sync(bar_ts)
+                        if self._liq_hm_window is not None:
+                            self._liq_hm_window.pin_timestamp(bar_ts)
+                    except Exception:
+                        pass
 
             # ── Subplot readout labels ────────────────────────────────────────
             # MAVOL: show volume of the hovered bar as a floating label on the

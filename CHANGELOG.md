@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.8.0 — Liquidity Heatmap floating window (2026-06-01)
+
+### New: Standalone Liquidity Heatmap window (`analysis/liq_hm_window.py`)
+
+- `LiqHmWindow(QWidget)` — independent floating window showing resting order book
+  depth as a price × time heatmap (X = wall-clock time, Y = price).
+- Each column = one OB snapshot; columns scroll left as new data arrives.
+- **Combined mode** (default): black → purple → amber → yellow hot colormap
+  encodes total (bid + ask) resting volume per price level.
+- **Bid/Ask mode**: teal = bid depth, red = ask depth, shown separately.
+- **Best bid / ask lines**: teal and red dashed horizontal lines mark the current
+  top-of-book spread (盘口) and update every tick.
+- **Iceberg overlay**: cyan `--` segments mark price levels where resting volume
+  repeatedly drops then refreshes — now correctly restricted to within 2 price
+  bins of the best bid (bid side) or best ask (ask side).
+- **Spoof overlay**: orange ▲/▼ triangles (size 15, white outline) mark large
+  orders that appear and vanish without execution.
+- **Crosshair**: local mouse hline + vline with price and time labels; vline also
+  synced from main chart crosshair via `pin_timestamp()` in historical mode.
+- **Legend bar**: dedicated row below toolbar showing colormap stages, best
+  bid/ask line colors, and active overlay indicators.
+- **⟲ Reset button**: restores zoom to full data range; double-click also resets.
+- **Background polling**: `_SnapshotWorker(QThread)` fetches latest snapshot
+  asynchronously — never blocks the UI thread.
+- Immediate first tick on `set_live(True)` — heatmap populates within seconds.
+- Standalone usage: `uv run analysis/liq_hm_window.py`
+
+### Integration with `analysis/trade_viewer_qt.py`
+
+- Replaced embedded heatmap ImageItems + iceberg/spoof overlays on the main chart
+  with a single **Liquidity Heatmap** toggle button that opens/closes `LiqHmWindow`.
+- Removed OB data loading from `DataFetcher.run()` — the 55 M-row DB query was
+  blocking the fetcher thread and preventing chart rendering and stock switching.
+- Crosshair sync: in historical mode, moving the cursor pins the heatmap vline
+  to the matching column via `liq_hm_window.pin_timestamp(bar_ts)`.
+
+### Fix: Iceberg detection proximity filter (`analysis/orderflow_detect.py`)
+
+- **Bug**: previously detected icebergs at any depth in the book, including levels
+  far from the spread where no executions occur — producing many false positives.
+- **Fix 1**: group snapshots by `(side, price_bin)` instead of `price_bin` alone;
+  mixing BID and ASK volumes at the same level was generating phantom drop/recover
+  signals.
+- **Fix 2**: only flag levels within `max_spread_bins=2` bins of the best bid
+  (BID side) or best ask (ASK side) — passive orders deep in the book are never
+  consumed and cannot produce genuine iceberg signals.
+
+### Other
+
+- `config/schedule.json`: added `order_book_enabled` flag and `remote_backup`
+  config block (S3/Wasabi weekly snapshot).
+- `scripts/check_db.py`: quick DB diagnostic (row count, codes, latest ts per code).
+
 ## v0.7.0 — DOM (Depth of Market) window (2026-05-31)
 
 ### New: Depth of Market window (`analysis/dom_window.py`)

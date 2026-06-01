@@ -61,5 +61,15 @@
     "US.RKLB": "Space X family",
     "US.AAPL": "全部",
     "US.TSLA": "全部"
+  },
+  "order_book_enabled": true,
+  "remote_backup": {
+    "enabled": true,
+    "cron": "0 20 * * 1",
+    "s3_bucket": "s3://dnanexus-nextflow-dev/db/",
+    "aws_profile": "default",
+    "aws_endpoint_url": "https://s3.wasabisys.com",
+    "tick_db": "db/ticks.db",
+    "order_book_db": "db/order_book.db"
   }
 }

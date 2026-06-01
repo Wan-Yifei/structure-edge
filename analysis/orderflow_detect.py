@@ -23,22 +23,32 @@ def detect_icebergs(
     cm: int,
     min_refreshes: int,
     vol_threshold: float,
+    best_bid: float | None = None,
+    best_ask: float | None = None,
+    max_spread_bins: int = 2,
 ) -> list[tuple]:
     """Detect iceberg orders from order book snapshot series.
 
-    A price bin is flagged as an iceberg when its resting volume repeatedly
-    drops (depleted by aggressive orders) then refreshes — the hallmark of a
-    hidden large order refilling at a fixed price.
+    A price level is flagged as an iceberg when resting volume at the TOP OF
+    BOOK repeatedly drops (depleted by aggressive executions) then refreshes —
+    the hallmark of a hidden order refilling at a fixed price.
+
+    Only price levels within max_spread_bins bins of the best bid (BID side)
+    or best ask (ASK side) are considered, because a passive order deep in the
+    book is never consumed and cannot produce a genuine iceberg signal.
 
     Args:
-        snaps:          List of order book snapshots {ts, side, price, volume}.
-        bucket_to_idx:  Mapping of bar-start datetime -> bar index.
-        bin_size:       Price bin width in dollars.
-        price_min:      Bottom of the price range.
-        N_PRICE:        Number of price bins.
-        cm:             Candle duration in minutes.
-        min_refreshes:  Minimum refresh count to classify as iceberg.
-        vol_threshold:  Minimum volume per snapshot to include.
+        snaps:           List of order book snapshots {ts, side, price, volume}.
+        bucket_to_idx:   Mapping of bar-start datetime -> bar index.
+        bin_size:        Price bin width in dollars.
+        price_min:       Bottom of the price range.
+        N_PRICE:         Number of price bins.
+        cm:              Candle duration in minutes.
+        min_refreshes:   Minimum refresh count to classify as iceberg.
+        vol_threshold:   Minimum volume per snapshot to include.
+        best_bid:        Current best bid price (top of bid book).
+        best_ask:        Current best ask price (top of ask book).
+        max_spread_bins: How many bins away from best bid/ask to allow.
 
     Returns:
         List of (first_bar_idx, last_bar_idx, price, refresh_count).
@@ -46,7 +56,8 @@ def detect_icebergs(
     DROP_FRAC    = 0.25
     RECOVER_FRAC = 0.40
 
-    groups: dict[int, list] = defaultdict(list)
+    # Group by (side, price_bin) — mixing sides at the same level is wrong
+    groups: dict[tuple, list] = defaultdict(list)
     for s in snaps:
         if s["volume"] < vol_threshold:
             continue
@@ -56,10 +67,22 @@ def detect_icebergs(
         p_bin = int((s["price"] - price_min) / bin_size)
         if not (0 <= p_bin < N_PRICE):
             continue
-        groups[p_bin].append((s["ts"], bar_idx, float(s["volume"])))
+        groups[(s["side"], p_bin)].append((s["ts"], bar_idx, float(s["volume"])))
+
+    # Pre-compute proximity limits in bin units
+    bid_bin = int((best_bid - price_min) / bin_size) if best_bid is not None else None
+    ask_bin = int((best_ask - price_min) / bin_size) if best_ask is not None else None
 
     icebergs = []
-    for p_bin, entries in groups.items():
+    for (side, p_bin), entries in groups.items():
+        # Only top-of-book levels can be icebergs — executions only happen there
+        if side == "BID" and bid_bin is not None:
+            if p_bin < bid_bin - max_spread_bins or p_bin > bid_bin + max_spread_bins:
+                continue
+        elif side == "ASK" and ask_bin is not None:
+            if p_bin < ask_bin - max_spread_bins or p_bin > ask_bin + max_spread_bins:
+                continue
+
         if len(entries) < min_refreshes * 2 + 1:
             continue
         entries.sort()
