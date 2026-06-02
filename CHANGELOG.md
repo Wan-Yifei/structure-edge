@@ -1,5 +1,81 @@
 # Changelog
 
+## v0.9.0 — Heatmap pre-fill, profile Y-sync, OB stability fixes (2026-06-01)
+
+### New: Heatmap historical pre-fill (`analysis/liq_hm_window.py`)
+
+- On startup (or code switch), `LiqHmWindow` fetches the **last 5 distinct OB
+  snapshots** from SQLite in a background `_BulkSnapshotWorker` thread before
+  starting the normal per-tick timer.  Heatmap is no longer blank at open.
+- Historical columns use the actual DB timestamps so the time axis is accurate.
+- `_push_column()` accepts an optional `ts` parameter for pre-fill vs live use.
+- `_reset_grid()` cancels any in-flight bulk worker and stops the timer; the
+  `_needs_init` flag gates bulk-vs-single fetch in `set_live()`.
+- `_on_max_cols_changed()` re-triggers `set_live(True)` after the grid reset so
+  the new wider/narrower grid is also pre-filled.
+
+### Fix: Spoof marker triangle orientation (`analysis/liq_hm_window.py`)
+
+- Replaced PyQtGraph string symbols (`"t"`, `"t2"`) with explicit `QPainterPath`
+  triangles — unambiguous across all PyQtGraph versions.
+- **Bid spoof ▲** (apex at y = −0.5 = screen top): false buy pressure lures
+  longs → marker points up.
+- **Ask spoof ▼** (apex at y = +0.5 = screen bottom): false sell pressure lures
+  shorts → marker points down.
+
+### Enhancement: Crosshair labels brighter (`analysis/liq_hm_window.py`)
+
+- Price and time labels changed from muted `#b0bec5` to white (`#ffffff`) with a
+  semi-transparent dark fill so they read clearly over the heatmap image.
+- Crosshair lines also brightened to white.
+
+### Fix: Session volume profile Y-range drift (`analysis/trade_viewer_qt.py`)
+
+- `_on_main_range_changed` now syncs `_profile_widget` Y range to the main
+  chart's visible Y range on every pan/zoom — profile never drifts out of view.
+- `_rebuild_session_profile()` also sets the profile Y range immediately from the
+  main chart's current range (covers the first render before `_reset_view` fires).
+- `poc_line` and `va_line` (`InfiniteLine` decorators) marked `ignoreBounds=True`
+  so they no longer skew PyQtGraph's auto-range calculation.
+
+### Fix: Chart view drift after code switch (`analysis/trade_viewer_qt.py`)
+
+- `_reset_view` deferred via `QTimer.singleShot(0, ...)` so it fires after
+  PyQtGraph's own deferred `updateAutoRange` calls (triggered by
+  `prepareGeometryChange()` in each `set_data()`), guaranteeing our explicit
+  range overrides auto-range instead of the reverse.
+- `_reset_view` moved after `_rebuild_session_profile()` in `_render`.
+
+### Fix: Live code switch / Stop→Connect reliability (`analysis/trade_viewer_qt.py`)
+
+- `_live_code` tracks the actually subscribed code; `_stop_live` unsubscribes
+  the correct code instead of the new (already updated) code field value.
+- `_connect_opend` and the disconnect branch of `_on_connect_toggle` both discard
+  any stuck `DataFetcher` (disconnect its signals, set to `None`) so
+  `isRunning()` never blocks a fresh fetch after reconnect.
+- `_last_chart_key` cleared on reconnect to force a view reset on next render.
+- Code-change branch of `_trigger_fetch` returns after `_start_live()` to avoid
+  concurrent `ctx.subscribe()` + `ctx.request_history_kline()` deadlock.
+
+### Fix: OB collector WAL runaway & no-data recovery (`analysis/order_book_collector.py`, `feeds/order_book_store.py`)
+
+- **Write rate-limit**: minimum 2 s gap per code (`_MIN_WRITE_INTERVAL`) prevents
+  high-frequency pushes from growing the WAL unboundedly.
+- **Prune**: `OrderBookStore.prune(keep=1000)` deletes old rows, keeping the most
+  recent 1 000 rows per code; called every watchdog tick.
+- **WAL checkpoint**: `PRAGMA wal_checkpoint(PASSIVE)` run every 10 watchdog
+  ticks (`_CHECKPOINT_INTERVAL`) to keep the WAL file small.
+- **Re-subscribe**: watchdog automatically calls `ctx.subscribe()` with
+  `subscribe_push=True` after `timeout_minutes` of no data, then resets the
+  `warned` flag so the next timeout triggers another retry.
+
+### Minor: Logging cleanup & read_only support
+
+- `tick_collector.py`: removed verbose total-row-count log at startup and exit.
+- `tick_store.py`: `TickStore(read_only=True)` skips DDL to avoid RESERVED lock
+  contention with the writer process.
+- `config/schedule.json`: added `US.SOXS` to targets.
+
 ## v0.8.1 — Iceberg & spoof detection fixes (2026-06-01)
 
 ### Fix: Iceberg segment reset on level disappearance (`orderflow_detect.py`)

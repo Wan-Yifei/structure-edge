@@ -187,7 +187,6 @@ def main(argv=None):
         sys.exit(1)
 
     log.info("Subscribed — collecting ticks. Press Ctrl-C to stop.")
-    log.info("DB total at start: %d ticks", store.row_count())
 
     # ── watchdog thread ────────────────────────────────────────────────────
     stop_event = threading.Event()
@@ -212,8 +211,7 @@ def main(argv=None):
             time.sleep(1)
     finally:
         ctx.close()
-        n = store.row_count()
-        log.info("Session ended — total ticks in DB: %d", n)
+        log.info("Session ended.")
         store.close()
 
 

@@ -831,6 +831,7 @@ class TradeViewerQt(QMainWindow):
         self._liq_hm_window: "LiqHmWindow | None" = None
         self._dom_window:  QWidget | None      = None  # DOM depth-of-market window
         self._trade_record: dict | None         = None  # active trade review
+        self._live_code: str = ""  # code currently subscribed for tick push
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
         # from resetting the user's manual pan/zoom on every tick.
         self._last_chart_key: tuple             = ("", "")
@@ -1182,11 +1183,11 @@ class TradeViewerQt(QMainWindow):
         self._plot_v.addItem(self._vline_v, ignoreBounds=True)
 
         self._vol_label = pg.TextItem(
-            text="", color=_GOLD,
-            fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+            text="", color=_FG,
+            fill=pg.mkBrush(_qc(_BG_TIP, 200)),
             anchor=(0.0, 0.5),
         )
-        self._vol_label.setFont(QFont("Monospace", 7))
+        self._vol_label.setFont(QFont("Monospace", 8))
         self._vol_label.setZValue(100)
         self._vol_label.setVisible(False)
         self._plot_v.addItem(self._vol_label, ignoreBounds=True)
@@ -1197,11 +1198,11 @@ class TradeViewerQt(QMainWindow):
         self._plot_kd.addItem(self._vline_kd, ignoreBounds=True)
 
         self._kd_label = pg.TextItem(
-            text="", color=_GOLD,
-            fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+            text="", color=_FG,
+            fill=pg.mkBrush(_qc(_BG_TIP, 200)),
             anchor=(0.0, 0.5),
         )
-        self._kd_label.setFont(QFont("Monospace", 7))
+        self._kd_label.setFont(QFont("Monospace", 8))
         self._kd_label.setZValue(100)
         self._kd_label.setVisible(False)
         self._plot_kd.addItem(self._kd_label, ignoreBounds=True)
@@ -1335,6 +1336,16 @@ class TradeViewerQt(QMainWindow):
                 if self._ctx:
                     self._ctx.close()
                 self._ctx = OpenQuoteContext(host=host, port=port)
+            self._last_chart_key = ("", "")  # force view reset on next render
+            # Discard any stuck DataFetcher from the previous session so the
+            # isRunning() guard in _trigger_fetch doesn't block new fetches.
+            if self._fetcher is not None:
+                try:
+                    self._fetcher.ready.disconnect()
+                    self._fetcher.error.disconnect()
+                except Exception:
+                    pass
+                self._fetcher = None
             self._conn_btn.setText("Stop")
             self._conn_btn.setChecked(True)
             self._log(f"Connected to OpenD {host}:{port}")
@@ -1354,6 +1365,13 @@ class TradeViewerQt(QMainWindow):
                 if self._ctx:
                     self._ctx.close()
                     self._ctx = None
+            if self._fetcher is not None:
+                try:
+                    self._fetcher.ready.disconnect()
+                    self._fetcher.error.disconnect()
+                except Exception:
+                    pass
+                self._fetcher = None
             self._conn_btn.setText("Connect")
             self._log("Disconnected.")
 
@@ -1390,6 +1408,7 @@ class TradeViewerQt(QMainWindow):
                             viewer._live_ticks[bucket][price][key] += vol
 
             self._ctx.set_handler(_Handler())
+            self._live_code = code
             interval = self._refresh_spin.value() * 1000
             self._refresh_timer.start(interval)
             self._log(f"Live: subscribed {code}, refreshing every "
@@ -1399,12 +1418,12 @@ class TradeViewerQt(QMainWindow):
 
     def _stop_live(self) -> None:
         self._refresh_timer.stop()
-        code = self._code_edit.text().strip()
         try:
-            if self._ctx and code:
-                self._ctx.unsubscribe(code, [SubType.TICKER])
+            if self._ctx and self._live_code:
+                self._ctx.unsubscribe(self._live_code, [SubType.TICKER])
         except Exception:
             pass
+        self._live_code = ""
 
     # ── Toolbar callbacks ─────────────────────────────────────────────────────
 
@@ -1489,6 +1508,20 @@ class TradeViewerQt(QMainWindow):
         historical   = self._mode_combo.currentText() == "Historical"
         date_str     = self._date_edit.text().strip()
         ind          = {k: self._ind(k) for k in self._ind_checks}
+        new_code     = self._code_edit.text().strip()
+
+        if not historical and new_code != self._live_code and self._live_code:
+            # Code changed while in Live mode — resubscribe and discard stale ticks.
+            try:
+                if self._ctx:
+                    self._ctx.unsubscribe(self._live_code, [SubType.TICKER])
+            except Exception:
+                pass
+            with self._tick_lock:
+                self._live_ticks.clear()
+            self._live_code = ""
+            self._start_live()
+            return  # let the refresh timer drive the first fetch for the new code
 
         with self._tick_lock:
             live_snap = {k: dict(v) for k, v in self._live_ticks.items()}
@@ -1640,16 +1673,18 @@ class TradeViewerQt(QMainWindow):
         # X-axis time labels
         self._set_xaxis_ticks(klines)
 
+        # Session vol profile
+        self._rebuild_session_profile()
+
         # Set view range only when Code or TF changes (i.e. a genuinely new
-        # chart).  On live refreshes we preserve the user's pan/zoom state.
+        # chart).  Deferred via singleShot so profile / overlay drawing cannot
+        # override the range we set here.
         code = self._code_edit.text().strip()
         chart_key = (code, tf)
         if chart_key != self._last_chart_key:
             self._last_chart_key = chart_key
-            self._reset_view(n)
-
-        # Session vol profile
-        self._rebuild_session_profile()
+            n_snap = n
+            QTimer.singleShot(0, lambda: self._reset_view(n_snap))
 
 
         mode = self._mode_combo.currentText()
@@ -2241,7 +2276,7 @@ class TradeViewerQt(QMainWindow):
             anchor=(0.0, 1.0),   # top-left: text grows right and upward from anchor
         )
         poc_label.setFont(QFont("Monospace", 7))
-        pw.addItem(poc_line)
+        pw.addItem(poc_line,  ignoreBounds=True)
         pw.addItem(poc_label, ignoreBounds=True)
 
         vb = pw.getViewBox()
@@ -2280,7 +2315,7 @@ class TradeViewerQt(QMainWindow):
                         anchor=(0.0, 0.0),   # top-left; text grows right and downward
                     )
                     va_label.setFont(QFont("Monospace", 7))
-                    pw.addItem(va_line)
+                    pw.addItem(va_line,  ignoreBounds=True)
                     pw.addItem(va_label, ignoreBounds=True)
 
                     def _pin_va(lbl_item=va_label, p=price) -> None:
@@ -2290,11 +2325,16 @@ class TradeViewerQt(QMainWindow):
                     vb.sigRangeChanged.connect(lambda *_, f=_pin_va: f())
                     _pin_va()
 
-        # Pin x-range with 15 % right margin so the longest bar never touches the
-        # panel edge.  Disable x auto-range so PyQtGraph does not revert on repaint.
+        # X: pin with 15 % right margin; disable auto-range so it doesn't revert.
         max_vol = float(volumes.max())
         vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         vb.setXRange(0, max_vol * 1.15, padding=0)
+
+        # Y: mirror the main chart's current visible price range so the profile
+        # stays in sync with whatever the user is looking at.
+        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+        vb.setYRange(ylo, yhi, padding=0)
 
     def _filter_sessions(self, klines: pd.DataFrame) -> pd.DataFrame:
         """Keep only rows whose time falls in the active session windows."""
@@ -2462,12 +2502,13 @@ class TradeViewerQt(QMainWindow):
     def _on_main_range_changed(self, _vb, ranges) -> None:
         """Called by _plot_c.vb.sigRangeChanged(ViewBox, [[xlo,xhi],[ylo,yhi]]).
 
-        The tick profile Y range is set per-candle in _show_tick_profile() to
-        fit the candle's own [low, high] range.  We do NOT force-sync it here
-        because the full main-chart view range (hundreds of price points) would
-        compress single-candle bars into an invisible sliver.
-        Keeping this method as a hook for future use.
+        Keeps the session volume profile Y range locked to the main chart's
+        visible price range so the profile never drifts out of view when the
+        user pans/zooms.  The tick profile Y is NOT synced here — it is set
+        per-candle in _show_tick_profile() to fit the candle's own price range.
         """
+        _, (ylo, yhi) = ranges
+        self._profile_widget.getViewBox().setYRange(ylo, yhi, padding=0)
 
     def _pin_heatmap_legend(self, *_) -> None:
         """Re-anchor the heatmap legend to the top-left of the candle view."""
@@ -2647,7 +2688,11 @@ class TradeViewerQt(QMainWindow):
             self._plot_v.setYRange(0, max_v * 1.15, padding=0)
 
     def _set_xaxis_ticks(self, klines: pd.DataFrame) -> None:
-        """Map integer bar indices to time_key strings on x-axis."""
+        """Map integer bar indices to time_key strings on x-axis.
+
+        Only the main candle plot shows text labels; subplots suppress labels
+        to prevent crowding — they are X-linked so positions already align.
+        """
         n    = len(klines)
         step = max(1, n // 10)
         ticks = [
@@ -2655,10 +2700,12 @@ class TradeViewerQt(QMainWindow):
             for i in range(0, n, step)
         ]
         self._plot_c.getAxis("bottom").setTicks([ticks])
+        # Subplots: pass tick positions so grid lines align, but hide text.
+        pos_only = [(i, "") for i, _ in ticks]
         if self._ind("vol"):
-            self._plot_v.getAxis("bottom").setTicks([ticks])
+            self._plot_v.getAxis("bottom").setTicks([pos_only])
         if self._ind("kd"):
-            self._plot_kd.getAxis("bottom").setTicks([ticks])
+            self._plot_kd.getAxis("bottom").setTicks([pos_only])
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
 

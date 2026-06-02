@@ -20,7 +20,7 @@ import numpy as np
 from datetime import datetime
 
 from PyQt6.QtCore    import Qt, QRectF, QTimer, QThread, pyqtSignal
-from PyQt6.QtGui     import QColor
+from PyQt6.QtGui     import QColor, QPainterPath
 from PyQt6.QtWidgets import (
     QCheckBox, QLabel, QPushButton, QSpinBox, QToolBar, QVBoxLayout, QWidget,
 )
@@ -36,6 +36,24 @@ _TEAL = "#26a69a"   # bid
 _RED  = "#ef5350"   # ask
 
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
+
+# Spoof marker symbols — explicit QPainterPath so orientation is version-agnostic.
+# Qt painter Y increases downward: y=-0.5 is visually top, y=+0.5 is visually bottom.
+def _make_triangle(up: bool) -> QPainterPath:
+    path = QPainterPath()
+    if up:   # ▲  apex at top
+        path.moveTo( 0.0, -0.5)
+        path.lineTo( 0.5,  0.5)
+        path.lineTo(-0.5,  0.5)
+    else:    # ▼  apex at bottom
+        path.moveTo( 0.0,  0.5)
+        path.lineTo( 0.5, -0.5)
+        path.lineTo(-0.5, -0.5)
+    path.closeSubpath()
+    return path
+
+_SYM_UP   = _make_triangle(True)   # bid spoof  ▲
+_SYM_DOWN = _make_triangle(False)  # ask spoof  ▼
 
 N_PRICE      = 100   # price bins (y-resolution)
 COL_SECS_DEF = 30    # seconds per column
@@ -76,7 +94,42 @@ def _query_latest_snapshot(code: str) -> list[dict]:
         return []
 
 
-# ── background query worker ───────────────────────────────────────────────────
+def _query_n_snapshots(code: str, n: int) -> list[list[dict]]:
+    """Return the last *n* distinct OB snapshots for *code*, oldest first.
+
+    Each inner list contains all rows for one timestamp (one full book state).
+    """
+    if not _DB_PATH.exists():
+        return []
+    try:
+        con = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+        cur = con.execute(
+            "SELECT DISTINCT ts FROM order_book_snapshots "
+            "WHERE code = ? ORDER BY ts DESC LIMIT ?",
+            [code, n],
+        )
+        ts_list = [r[0] for r in cur.fetchall()][::-1]  # reverse: oldest first
+        snapshots: list[list[dict]] = []
+        for ts_str in ts_list:
+            cur2 = con.execute(
+                "SELECT ts, side, price, volume FROM order_book_snapshots "
+                "WHERE code = ? AND ts = ?",
+                [code, ts_str],
+            )
+            rows = [
+                {"ts": datetime.fromisoformat(r[0]), "side": r[1],
+                 "price": float(r[2]), "volume": float(r[3])}
+                for r in cur2.fetchall()
+            ]
+            if rows:
+                snapshots.append(rows)
+        con.close()
+        return snapshots
+    except Exception:
+        return []
+
+
+# ── background query workers ──────────────────────────────────────────────────
 
 class _SnapshotWorker(QThread):
     """Fetch the latest OB snapshot in a background thread to avoid UI stalls."""
@@ -88,6 +141,19 @@ class _SnapshotWorker(QThread):
 
     def run(self) -> None:
         self.done.emit(_query_latest_snapshot(self._code))
+
+
+class _BulkSnapshotWorker(QThread):
+    """Fetch the last N distinct OB snapshots in a background thread."""
+    done = pyqtSignal(list)   # emits list[list[dict]]
+
+    def __init__(self, code: str, n: int) -> None:
+        super().__init__()
+        self._code = code
+        self._n    = n
+
+    def run(self) -> None:
+        self.done.emit(_query_n_snapshots(self._code, self._n))
 
 
 # ── color renderers ────────────────────────────────────────────────────────────
@@ -215,8 +281,11 @@ class LiqHmWindow(QWidget):
         self._iceberg_items: list = []
         self._spoof_items:   list = []
 
-        # Background query worker (one at a time)
-        self._worker: _SnapshotWorker | None = None
+        # Background query workers (one at a time each)
+        self._worker:      _SnapshotWorker | None      = None
+        self._bulk_worker: _BulkSnapshotWorker | None  = None
+        # True after _reset_grid(); cleared after initial bulk pre-fill completes
+        self._needs_init:  bool                        = False
 
         self._build_toolbar()
         self._build_chart()
@@ -292,7 +361,7 @@ class LiqHmWindow(QWidget):
         self._ice_cb = QCheckBox("Iceberg")
         self._ice_cb.setChecked(False)
         self._ice_cb.setToolTip(
-            "Cyan line: price level where resting volume repeatedly drops then\n"
+            "Purple line: price level where resting volume repeatedly drops then\n"
             "refreshes — hallmark of a hidden large order refilling at a fixed price.")
         self._ice_cb.stateChanged.connect(self._on_controls_changed)
         tb.addWidget(self._ice_cb)
@@ -364,7 +433,7 @@ class LiqHmWindow(QWidget):
             img.setZValue(-10)
             self._plot_widget.addItem(img)
 
-        _cross_pen = pg.mkPen(_FG, width=1, style=Qt.PenStyle.DashLine)
+        _cross_pen = pg.mkPen("#ffffff", width=1, style=Qt.PenStyle.DashLine)
 
         # Vertical line — set by pin_timestamp() from main chart OR local mouse
         self._vline = pg.InfiniteLine(angle=90, movable=False, pen=_cross_pen)
@@ -376,14 +445,18 @@ class LiqHmWindow(QWidget):
         self._hline.setVisible(False)
         self._plot_widget.addItem(self._hline)
 
+        _lbl_fill = pg.mkBrush(QColor(13, 17, 23, 200))  # semi-transparent _BG
+
         # Price label anchored to left edge at cursor Y
-        self._price_lbl = pg.TextItem(anchor=(0.0, 0.5), color=_FG)
+        self._price_lbl = pg.TextItem(anchor=(0.0, 0.5),
+                                      color="#ffffff", fill=_lbl_fill)
         self._price_lbl.setZValue(50)
         self._price_lbl.setVisible(False)
         self._plot_widget.addItem(self._price_lbl, ignoreBounds=True)
 
         # Time label anchored just above the bottom axis at cursor X
-        self._time_lbl = pg.TextItem(anchor=(0.5, 1.0), color=_FG)
+        self._time_lbl = pg.TextItem(anchor=(0.5, 1.0),
+                                     color="#ffffff", fill=_lbl_fill)
         self._time_lbl.setZValue(50)
         self._time_lbl.setVisible(False)
         self._plot_widget.addItem(self._time_lbl, ignoreBounds=True)
@@ -419,8 +492,14 @@ class LiqHmWindow(QWidget):
     def set_live(self, live: bool) -> None:
         self._live = live
         if live and self._code:
-            self._timer.start(self._col_secs_spin.value() * 1000)
-            self._on_tick()   # fetch immediately without waiting for first interval
+            if self._needs_init:
+                # Pre-fill with the last 5 historical snapshots, then start timer
+                self._bulk_worker = _BulkSnapshotWorker(self._code, 5)
+                self._bulk_worker.done.connect(self._on_bulk_ready)
+                self._bulk_worker.start()
+            else:
+                self._timer.start(self._col_secs_spin.value() * 1000)
+                self._on_tick()
         else:
             self._timer.stop()
 
@@ -445,6 +524,16 @@ class LiqHmWindow(QWidget):
     # ── internals ──────────────────────────────────────────────────────────────
 
     def _reset_grid(self) -> None:
+        # Discard any in-flight bulk fetch for the old code
+        if self._bulk_worker is not None:
+            try:
+                self._bulk_worker.done.disconnect()
+            except Exception:
+                pass
+            self._bulk_worker = None
+        self._needs_init = True
+
+        self._timer.stop()
         max_cols = self._max_cols_spin.value()
         self._bid_grid  = np.zeros((max_cols, N_PRICE), dtype=np.float64)
         self._ask_grid  = np.zeros((max_cols, N_PRICE), dtype=np.float64)
@@ -545,8 +634,13 @@ class LiqHmWindow(QWidget):
                 self._col_ts    = []
                 self._raw_snaps = []
 
-    def _push_column(self, snap: list[dict]) -> None:
-        """Append one OB snapshot as the rightmost column, rolling if full."""
+    def _push_column(self, snap: list[dict],
+                     ts: datetime | None = None) -> None:
+        """Append one OB snapshot as the rightmost column, rolling if full.
+
+        *ts*: use for historical pre-fill (DB timestamp); omit for live updates
+        (wall-clock time is used).
+        """
         min_vol  = self._min_vol_spin.value()
         max_cols = self._max_cols_spin.value()
 
@@ -561,9 +655,9 @@ class LiqHmWindow(QWidget):
                 cutoff = self._col_ts[0]
                 self._raw_snaps = [s for s in self._raw_snaps if s["ts"] >= cutoff]
 
-        col = len(self._col_ts)
-        now = datetime.now()
-        self._col_ts.append(now)
+        col    = len(self._col_ts)
+        col_ts = ts if ts is not None else datetime.now()
+        self._col_ts.append(col_ts)
 
         for row in snap:
             if row["volume"] < min_vol:
@@ -582,14 +676,29 @@ class LiqHmWindow(QWidget):
         self._best_bid = max(bid_prices) if bid_prices else self._best_bid
         self._best_ask = min(ask_prices) if ask_prices else self._best_ask
 
-        # Append raw snaps (with wall-clock ts, not DB ts) for detection
         for row in snap:
             self._raw_snaps.append({
-                "ts":     now,
+                "ts":     col_ts,
                 "side":   row["side"],
                 "price":  row["price"],
                 "volume": row["volume"],
             })
+
+    def _on_bulk_ready(self, snapshots: list) -> None:
+        """Push historical pre-fill columns then switch to the normal timer."""
+        self._needs_init  = False
+        self._bulk_worker = None
+        for snap in snapshots:
+            if snap:
+                self._maybe_init_price_range(snap)
+                self._push_column(snap, ts=snap[0]["ts"])
+        if self._col_ts:
+            self._render()
+            self._redraw_orderflow_markers()
+        # Start normal one-by-one updates
+        if self._live and self._code:
+            self._timer.start(self._col_secs_spin.value() * 1000)
+            self._on_tick()
 
     def _render(self) -> None:
         n = len(self._col_ts)
@@ -626,13 +735,16 @@ class LiqHmWindow(QWidget):
                 self._img_combined.setVisible(False)
 
         self._time_axis.update_timestamps(self._col_ts)
-        step = max(1, n // 10)
+        max_cols = self._max_cols_spin.value()
+        # Minimum tick gap = max_cols // 10 so labels are never crowded even
+        # when only a few columns of data exist in the full-width view.
+        step = max(max_cols // 10, 1)
         self._plot_widget.getPlotItem().getAxis("bottom").setTicks(
             [[(i, self._col_ts[i].strftime("%H:%M")) for i in range(0, n, step)]]
         )
 
-        if n == 1:
-            self._plot_widget.setXRange(0, self._max_cols_spin.value(), padding=0)
+        if n <= 1:
+            self._plot_widget.setXRange(0, max_cols, padding=0)
             self._plot_widget.setYRange(self._price_min, self._price_max, padding=0.02)
 
         # Update best bid/ask spread lines
@@ -693,7 +805,7 @@ class LiqHmWindow(QWidget):
             self._draw_spoof_markers(spoofs)
 
     def _draw_iceberg_markers(self, icebergs: list[tuple]) -> None:
-        """Cyan horizontal line segments at detected iceberg price levels.
+        """Bright-purple horizontal line segments at detected iceberg price levels.
 
         Brightness encodes refresh intensity (more refreshes = brighter).
         """
@@ -712,7 +824,7 @@ class LiqHmWindow(QWidget):
             if not tier_xs[tier]:
                 continue
             alpha = int(70 + 185 * tier / max(N_TIERS - 1, 1))
-            pen   = pg.mkPen(color=(0, 229, 255, alpha), width=2)
+            pen   = pg.mkPen(color=(224, 64, 251, alpha), width=2)
             item  = pg.PlotCurveItem(
                 x=np.array(tier_xs[tier]),
                 y=np.array(tier_ys[tier]),
@@ -745,7 +857,7 @@ class LiqHmWindow(QWidget):
         if up_xs:
             scat = pg.ScatterPlotItem(
                 x=up_xs, y=up_ys,
-                symbol="t", size=15,
+                symbol=_SYM_UP, size=15,
                 pen=outline,
                 brush=pg.mkBrush(*ORANGE),
             )
@@ -756,7 +868,7 @@ class LiqHmWindow(QWidget):
         if down_xs:
             scat = pg.ScatterPlotItem(
                 x=down_xs, y=down_ys,
-                symbol="t2", size=15,
+                symbol=_SYM_DOWN, size=15,
                 pen=outline,
                 brush=pg.mkBrush(*ORANGE),
             )
@@ -817,7 +929,7 @@ class LiqHmWindow(QWidget):
         )
 
         if self._ice_cb.isChecked():
-            parts.append(f'&nbsp;&nbsp;<font color="#00e5ff">-- Iceberg</font>')
+            parts.append(f'&nbsp;&nbsp;<font color="#e040fb">-- Iceberg</font>')
 
         if self._spoof_cb.isChecked():
             parts.append(
@@ -839,6 +951,8 @@ class LiqHmWindow(QWidget):
 
     def _on_max_cols_changed(self) -> None:
         self._reset_grid()
+        if self._live and self._code:
+            self.set_live(True)
 
     def _reset_view(self) -> None:
         """Restore X/Y ranges to the full data bounds (undo any zoom/pan)."""

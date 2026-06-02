@@ -44,8 +44,11 @@ class OrderBookStore:
                  read_only: bool = False):
         self._path = pathlib.Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._con = sqlite3.connect(str(self._path), check_same_thread=False)
-        self._con.executescript(_SETUP_SQL)
+        if read_only:
+            self._con = sqlite3.connect(str(self._path), check_same_thread=False)
+        else:
+            self._con = sqlite3.connect(str(self._path), check_same_thread=False)
+            self._con.executescript(_SETUP_SQL)
 
     # ── write ──────────────────────────────────────────────────────────────────
 
@@ -109,6 +112,28 @@ class OrderBookStore:
         return self._con.execute(
             "SELECT COUNT(*) FROM order_book_snapshots"
         ).fetchone()[0]
+
+    def prune(self, keep: int = 1000) -> int:
+        """Delete old rows keeping only the most recent *keep* rows per code.
+
+        Returns total rows deleted.
+        """
+        codes = [r[0] for r in self._con.execute(
+            "SELECT DISTINCT code FROM order_book_snapshots"
+        ).fetchall()]
+        deleted = 0
+        for code in codes:
+            cur = self._con.execute(
+                "DELETE FROM order_book_snapshots WHERE code = ? AND id NOT IN ("
+                "  SELECT id FROM order_book_snapshots WHERE code = ?"
+                "  ORDER BY id DESC LIMIT ?"
+                ")",
+                [code, code, keep],
+            )
+            deleted += cur.rowcount
+        if deleted:
+            self._con.commit()
+        return deleted
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
 

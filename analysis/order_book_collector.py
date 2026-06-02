@@ -53,6 +53,9 @@ def _parse_side(items) -> list[tuple[float, int]]:
 
 # ── Order book handler ─────────────────────────────────────────────────────────
 
+_MIN_WRITE_INTERVAL = 2.0  # seconds — minimum gap between DB writes per code
+
+
 def _make_handler(store, state: dict):
     """Return an OrderBookHandlerBase subclass that writes snapshots to *store*.
 
@@ -60,8 +63,12 @@ def _make_handler(store, state: dict):
         last_update_time  float | None   — time.time() of most recent snapshot
         first_update_done bool           — whether first-update log was emitted
         session_count     int            — total rows inserted this session
+    Writes are rate-limited to _MIN_WRITE_INTERVAL seconds per code to prevent
+    WAL runaway growth on high-frequency ORDER_BOOK pushes.
     """
     from moomoo import OrderBookHandlerBase, RET_OK
+
+    last_write: dict[str, float] = {}  # code -> time.time() of last DB write
 
     class _Handler(OrderBookHandlerBase):
         def on_recv_rsp(self, rsp_pb):
@@ -75,10 +82,15 @@ def _make_handler(store, state: dict):
             if not bids and not asks:
                 return ret, data
 
+            now = time.time()
+            if now - last_write.get(code, 0.0) < _MIN_WRITE_INTERVAL:
+                return ret, data  # skip — too soon since last write for this code
+
             ts = datetime.now()
             n  = store.insert_snapshot(code, ts, bids, asks)
             if n:
-                state["last_update_time"] = time.time()
+                last_write[code] = now
+                state["last_update_time"] = now
                 state["session_count"]    = state.get("session_count", 0) + n
                 if not state["first_update_done"]:
                     state["first_update_done"] = True
@@ -96,13 +108,40 @@ def _make_handler(store, state: dict):
     return _Handler
 
 
-def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event):
-    """Warn when no update received for *timeout_minutes*; log counts at same interval."""
-    timeout_sec = timeout_minutes * 60
-    warned      = False
+_CHECKPOINT_INTERVAL = 10  # run PASSIVE checkpoint every N watchdog ticks
+
+
+def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
+              ctx=None, codes: list[str] | None = None, store=None):
+    """Warn when no update received for *timeout_minutes*; re-subscribe if possible.
+
+    Also runs a PASSIVE WAL checkpoint every _CHECKPOINT_INTERVAL ticks to keep
+    the WAL file from growing unboundedly under high write rates.
+    """
+    from moomoo import SubType
+    timeout_sec   = timeout_minutes * 60
+    warned        = False
+    tick_count    = 0
     while not stop_event.wait(timeout_sec):
+        tick_count += 1
         session = state.get("session_count", 0)
         log.info("This session: %d rows", session)
+
+        if store is not None:
+            try:
+                deleted = store.prune(keep=1000)
+                if deleted:
+                    log.info("Pruned %d old rows (keeping ≤1000 per code)", deleted)
+            except Exception as exc:
+                log.warning("Prune failed: %s", exc)
+
+        if store is not None and tick_count % _CHECKPOINT_INTERVAL == 0:
+            try:
+                store._con.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                log.info("WAL checkpoint (PASSIVE) done")
+            except Exception as exc:
+                log.warning("WAL checkpoint failed: %s", exc)
+
         last = state["last_update_time"]
         if last is None:
             continue
@@ -110,10 +149,21 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event):
         if elapsed > timeout_sec:
             if not warned:
                 log.warning(
-                    "NO DATA  %.0f min since last order book update — check OpenD and market hours",
+                    "NO DATA  %.0f min since last order book update — attempting re-subscribe",
                     elapsed / 60,
                 )
                 warned = True
+                if ctx is not None and codes:
+                    try:
+                        ret, msg = ctx.subscribe(codes, [SubType.ORDER_BOOK],
+                                                 subscribe_push=True)
+                        if ret == 0:
+                            log.info("Re-subscribed OK: %s", ", ".join(codes))
+                            warned = False  # reset so next timeout triggers another warning+retry
+                        else:
+                            log.error("Re-subscribe failed: %s", msg)
+                    except Exception as exc:
+                        log.error("Re-subscribe error: %s", exc)
         else:
             warned = False
 
@@ -170,7 +220,7 @@ def main(argv=None):
 
     from feeds.order_book_store import OrderBookStore
     store = OrderBookStore(args.db)
-    log.info("DB rows at start: %d", store.row_count())
+    log.info("DB ready: %s", args.db)
 
     state = {"last_update_time": None, "first_update_done": False, "session_count": 0}
 
@@ -191,7 +241,9 @@ def main(argv=None):
 
     stop_event = threading.Event()
     threading.Thread(
-        target=_watchdog, args=(state, timeout_minutes, stop_event), daemon=True
+        target=_watchdog,
+        args=(state, timeout_minutes, stop_event, ctx, codes, store),
+        daemon=True,
     ).start()
 
     stop = False
@@ -210,8 +262,7 @@ def main(argv=None):
             time.sleep(1)
     finally:
         ctx.close()
-        n = store.row_count()
-        log.info("Session ended — total rows in DB: %d", n)
+        log.info("Session ended.")
         store.close()
 
 

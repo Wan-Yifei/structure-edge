@@ -42,9 +42,12 @@ class TickStore:
                  read_only: bool = False):
         self._path = pathlib.Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        # SQLite WAL allows concurrent readers without any special flag
-        self._con = sqlite3.connect(str(self._path), check_same_thread=False)
-        self._con.executescript(_SETUP_SQL)
+        if read_only:
+            # Open without DDL so we never contend with the writer's RESERVED lock.
+            self._con = sqlite3.connect(str(self._path), check_same_thread=False)
+        else:
+            self._con = sqlite3.connect(str(self._path), check_same_thread=False)
+            self._con.executescript(_SETUP_SQL)
 
     # ── write ──────────────────────────────────────────────────────────────
 
