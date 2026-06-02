@@ -10,6 +10,7 @@ Run:  uv run analysis/scheduler.py
 
 import json
 import pathlib
+import sqlite3
 import subprocess
 import sys
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -494,6 +495,13 @@ class SchedulerApp(tk.Tk):
         self._setup_tray()
         self._tick()    # start clock + status loop
 
+        # Auto-start if configured and a session is currently active/starting
+        if self.cfg.get("autostart", False):
+            et = et_now()
+            if any(session_status(self.cfg, s, et) in ("ACTIVE", "STARTING SOON")
+                   for s in SESSION_ORDER):
+                self.after(200, self._start_scheduler)
+
     # ── Config I/O ───────────────────────────────────────────────────────────
 
     _DEFAULT_BACKUP = {
@@ -512,6 +520,7 @@ class SchedulerApp(tk.Tk):
                 cfg = json.load(f)
             cfg.setdefault("target_categories", {})
             cfg.setdefault("order_book_enabled", True)
+            cfg.setdefault("autostart", False)
             rb = cfg.setdefault("remote_backup", {})
             for k, v in self._DEFAULT_BACKUP.items():
                 rb.setdefault(k, v)
@@ -519,6 +528,7 @@ class SchedulerApp(tk.Tk):
         return {
             "prestart_minutes": 5,
             "data_timeout_minutes": 5,
+            "autostart": False,
             "sessions": {
                 "overnight":  {"enabled": False, "start": "20:00", "end": "04:00",
                                "label": "Overnight  20:00–04:00 ET"},
@@ -549,6 +559,7 @@ class SchedulerApp(tk.Tk):
         self.cfg.setdefault("target_categories", {})
         # Collectors
         self.cfg["order_book_enabled"] = bool(self.ob_var.get())
+        self.cfg["autostart"]          = bool(self.autostart_var.get())
         # Remote backup
         rb = self.cfg.setdefault("remote_backup", {})
         rb["enabled"]          = bool(self.backup_enabled_var.get())
@@ -635,6 +646,14 @@ class SchedulerApp(tk.Tk):
             activebackground=BG_DARK, activeforeground=FG,
             font=("Helvetica", 9), command=self._save_config,
         ).pack(side=tk.LEFT, padx=8, pady=4)
+
+        self.autostart_var = tk.BooleanVar(value=self.cfg.get("autostart", False))
+        tk.Checkbutton(
+            frame, text="Auto-start on launch (when session active)",
+            variable=self.autostart_var, bg=BG_DARK, fg=FG, selectcolor=BG_EDIT,
+            activebackground=BG_DARK, activeforeground=FG,
+            font=("Helvetica", 9), command=self._save_config,
+        ).pack(side=tk.LEFT, padx=(24, 8), pady=4)
 
     def _build_stocks(self):
         frame = tk.Frame(self, bg=BG_DARK)
@@ -741,6 +760,13 @@ class SchedulerApp(tk.Tk):
                                   state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT)
 
+        self._win_startup_btn = tk.Button(
+            frame, text=self._win_startup_label(),
+            bg=BG_BAR, fg=FG, width=20, relief=tk.FLAT,
+            command=self._toggle_win_startup,
+        )
+        self._win_startup_btn.pack(side=tk.RIGHT, padx=(0, 4))
+
     def _build_log(self):
         frame = tk.LabelFrame(self, text=" Log ", bg=BG_DARK, fg=FG,
                               font=("Helvetica", 10, "bold"))
@@ -792,6 +818,9 @@ class SchedulerApp(tk.Tk):
         # check if scheduler is running → fire callbacks
         if self._collector_running:
             self._check_session_transitions(et)
+            # Watchdog: restart crashed collectors mid-session without waiting
+            # for the next session boundary transition.
+            self._watchdog_collectors(et)
 
         # check remote backup cron (independent of collector state)
         if self.cfg.get("remote_backup", {}).get("enabled"):
@@ -825,6 +854,56 @@ class SchedulerApp(tk.Tk):
                         self._log(f"[{name.upper()}]  Session ended — stopping collector")
                         self._kill_collector()
             setattr(self, f"_prev_{name}", st)
+
+    def _watchdog_collectors(self, et: datetime) -> None:
+        """Restart any collector that exited unexpectedly while a session is active."""
+        any_active = any(
+            session_status(self.cfg, s, et) in ("ACTIVE", "STARTING SOON")
+            for s in SESSION_ORDER
+        )
+        if not any_active:
+            return
+        if self._proc is not None and self._proc.poll() is not None:
+            self._log("Tick collector exited unexpectedly — restarting")
+            self._proc = None
+            self._launch_collector()
+        if self.cfg.get("order_book_enabled", True):
+            if self._ob_proc is not None and self._ob_proc.poll() is not None:
+                self._log("OB collector exited unexpectedly — restarting")
+                self._ob_proc = None
+                self._launch_collector()
+            elif self._ob_proc is not None:
+                # Process is alive but may have a dead moomoo connection — check
+                # the DB for recent writes.  If no new row for >15 min, force-restart.
+                self._ob_stale_ticks = getattr(self, "_ob_stale_ticks", 0) + 1
+                if self._ob_stale_ticks % 15 == 0:   # check every ~15 scheduler ticks
+                    stale = self._ob_db_stale_minutes()
+                    if stale is not None and stale > 15:
+                        self._log(
+                            f"OB collector zombie (no DB writes for {stale:.0f} min) — restarting"
+                        )
+                        self._ob_proc.terminate()
+                        self._ob_proc = None
+                        self._ob_stale_ticks = 0
+                        self._launch_collector()
+
+    def _ob_db_stale_minutes(self) -> float | None:
+        """Return minutes since the last OB DB write, or None if DB unreachable."""
+        db_path = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
+        if not db_path.exists():
+            return None
+        try:
+            con = sqlite3.connect(str(db_path), timeout=2)
+            row = con.execute(
+                "SELECT MAX(ts) FROM order_book_snapshots"
+            ).fetchone()
+            con.close()
+            if row and row[0]:
+                last_ts = datetime.fromisoformat(row[0])
+                return (datetime.now() - last_ts).total_seconds() / 60
+        except Exception:
+            pass
+        return None
 
     # ── Collector subprocess ──────────────────────────────────────────────────
 
@@ -1033,6 +1112,48 @@ class SchedulerApp(tk.Tk):
         self._log("Scheduler stopped.")
         if self._tray:
             self._tray.icon = self._make_tray_image(active=False)
+
+    # ── Windows startup registration ──────────────────────────────────────────
+
+    _WIN_REG_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    _WIN_REG_NAME = "MoomooScheduler"
+
+    def _win_startup_registered(self) -> bool:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._WIN_REG_KEY) as k:
+                winreg.QueryValueEx(k, self._WIN_REG_NAME)
+            return True
+        except Exception:
+            return False
+
+    def _win_startup_label(self) -> str:
+        return ("☑ Remove from Windows Startup"
+                if self._win_startup_registered()
+                else "☐ Add to Windows Startup")
+
+    def _toggle_win_startup(self) -> None:
+        try:
+            import winreg
+            if self._win_startup_registered():
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._WIN_REG_KEY,
+                                    access=winreg.KEY_SET_VALUE) as k:
+                    winreg.DeleteValue(k, self._WIN_REG_NAME)
+                self._log("Removed from Windows startup.")
+            else:
+                # Use pythonw.exe (no console) from the current venv
+                pythonw = pathlib.Path(sys.executable).parent / "pythonw.exe"
+                if not pythonw.exists():
+                    pythonw = pathlib.Path(sys.executable)
+                script = pathlib.Path(__file__).resolve()
+                cmd = f'"{pythonw}" "{script}"'
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._WIN_REG_KEY,
+                                    access=winreg.KEY_SET_VALUE) as k:
+                    winreg.SetValueEx(k, self._WIN_REG_NAME, 0, winreg.REG_SZ, cmd)
+                self._log(f"Registered Windows startup: {cmd}")
+        except Exception as exc:
+            self._log(f"Windows startup toggle failed: {exc}")
+        self._win_startup_btn.config(text=self._win_startup_label())
 
     def _open_stock_picker(self):
         StockPickerDialog(self)

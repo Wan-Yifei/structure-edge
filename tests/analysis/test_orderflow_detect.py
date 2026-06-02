@@ -7,7 +7,12 @@ Run: uv run pytest tests/ -v
 import unittest
 from datetime import datetime, timedelta
 
-from analysis.orderflow_detect import detect_icebergs, detect_spoofs, detect_absorption
+from analysis.orderflow_detect import (
+    detect_icebergs,
+    detect_spoofs,
+    detect_absorption,
+    detect_stacked_imbalance,
+)
 from core.time_utils import candle_start
 
 # ---------------------------------------------------------------------------
@@ -467,6 +472,219 @@ class TestDetectAbsorption(unittest.TestCase):
         ticks = [_tick(T0 + timedelta(seconds=i * 5), 110.0, 100) for i in range(5)]
         # avg=100; passive_threshold=300; pass_vol=200 < 300 → not flagged
         self.assertEqual(self._run(ob, ticks), [])
+
+
+# ---------------------------------------------------------------------------
+# detect_stacked_imbalance
+# ---------------------------------------------------------------------------
+
+class TestDetectStackedImbalance(unittest.TestCase):
+
+    def _run(self, snaps, min_levels=3, imbalance_ratio=3.0,
+             min_vol=0.0, max_depth=10, n_bars=20):
+        return detect_stacked_imbalance(
+            snaps,
+            bucket_to_idx=_bucket_to_idx(n_bars),
+            bin_size=BIN_SIZE,
+            price_min=PRICE_MIN,
+            N_PRICE=N_PRICE,
+            cm=CM,
+            min_levels=min_levels,
+            imbalance_ratio=imbalance_ratio,
+            min_vol=min_vol,
+            max_depth=max_depth,
+        )
+
+    def _ob(self, ts, levels):
+        """Build snapshot rows from [(side, price, volume), ...]."""
+        return [{"ts": ts, "side": s, "price": p, "volume": v}
+                for s, p, v in levels]
+
+    # ── edge cases ────────────────────────────────────────────────────────────
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(self._run([]), [])
+
+    def test_balanced_book_not_flagged(self):
+        snaps = self._ob(T0, [
+            ("BID", 115.0, 100), ("BID", 114.0, 100), ("BID", 113.0, 100),
+            ("ASK", 116.0, 100), ("ASK", 117.0, 100), ("ASK", 118.0, 100),
+        ])
+        self.assertEqual(self._run(snaps, imbalance_ratio=3.0), [])
+
+    def test_unknown_bar_idx_skipped(self):
+        ts = T0 + timedelta(hours=2)   # outside the 20-bar window
+        snaps = self._ob(ts, [
+            ("BID", 115.0, 600), ("BID", 114.0, 500), ("BID", 113.0, 400),
+            ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
+        ])
+        self.assertEqual(self._run(snaps), [])
+
+    # ── bullish detection ─────────────────────────────────────────────────────
+
+    def test_bullish_basic(self):
+        # 3 bid ranks all ~6× their paired ask ranks
+        snaps = self._ob(T0, [
+            ("BID", 115.0, 600), ("BID", 114.0, 500), ("BID", 113.0, 400),
+            ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
+        ])
+        result = self._run(snaps)
+        self.assertEqual(len(result), 1)
+        bar_idx, price_lo, price_hi, direction, mean_ratio = result[0]
+        self.assertEqual(direction, "BID")
+        self.assertEqual(bar_idx, 0)
+        self.assertGreater(mean_ratio, 3.0)
+
+    def test_bullish_price_range(self):
+        # Zone must span the bid-side prices (113–115)
+        snaps = self._ob(T0, [
+            ("BID", 115.0, 600), ("BID", 114.0, 500), ("BID", 113.0, 400),
+            ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
+        ])
+        _, price_lo, price_hi, direction, _ = self._run(snaps)[0]
+        self.assertEqual(direction, "BID")
+        self.assertAlmostEqual(price_lo, 113.0)
+        self.assertAlmostEqual(price_hi, 115.0)
+
+    # ── bearish detection ─────────────────────────────────────────────────────
+
+    def test_bearish_basic(self):
+        snaps = self._ob(T0, [
+            ("ASK", 116.0, 600), ("ASK", 117.0, 500), ("ASK", 118.0, 400),
+            ("BID", 115.0, 100), ("BID", 114.0,  80), ("BID", 113.0,  60),
+        ])
+        result = self._run(snaps)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][3], "ASK")
+
+    def test_bearish_price_range(self):
+        snaps = self._ob(T0, [
+            ("ASK", 116.0, 600), ("ASK", 117.0, 500), ("ASK", 118.0, 400),
+            ("BID", 115.0, 100), ("BID", 114.0,  80), ("BID", 113.0,  60),
+        ])
+        _, price_lo, price_hi, direction, _ = self._run(snaps)[0]
+        self.assertEqual(direction, "ASK")
+        self.assertAlmostEqual(price_lo, 116.0)
+        self.assertAlmostEqual(price_hi, 118.0)
+
+    # ── min_levels threshold ──────────────────────────────────────────────────
+
+    def test_insufficient_levels_not_flagged(self):
+        # Only 2 BID-dominant ranks; min_levels=3 → skip
+        snaps = self._ob(T0, [
+            ("BID", 115.0, 600), ("BID", 114.0, 500),
+            ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0, 60),
+        ])
+        self.assertEqual(self._run(snaps, min_levels=3), [])
+
+    def test_exactly_min_levels_fires(self):
+        snaps = self._ob(T0, [
+            ("BID", 115.0, 600), ("BID", 114.0, 500), ("BID", 113.0, 400),
+            ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
+        ])
+        self.assertEqual(len(self._run(snaps, min_levels=3)), 1)
+
+    # ── missing-level = 0 ────────────────────────────────────────────────────
+
+    def test_missing_ask_levels_treated_as_zero(self):
+        # 4 bid ranks, only 2 ask ranks → ranks 2–3 have ask=0 (∞ ratio) → BID
+        snaps = self._ob(T0, [
+            ("BID", 115.0, 600), ("BID", 114.0, 500),
+            ("BID", 113.0, 400), ("BID", 112.0, 350),
+            ("ASK", 116.0, 100), ("ASK", 117.0,  80),
+        ])
+        result = self._run(snaps, min_levels=3)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][3], "BID")
+
+    def test_missing_bid_levels_treated_as_zero(self):
+        snaps = self._ob(T0, [
+            ("ASK", 116.0, 600), ("ASK", 117.0, 500),
+            ("ASK", 118.0, 400), ("ASK", 119.0, 350),
+            ("BID", 115.0, 100), ("BID", 114.0,  80),
+        ])
+        result = self._run(snaps, min_levels=3)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][3], "ASK")
+
+    # ── run scanning ─────────────────────────────────────────────────────────
+
+    def test_neutral_rank_breaks_run(self):
+        # ranks 0–1: BID (run=2, <3 → skip); rank 2: neutral; ranks 3–5: BID (run=3 → fires)
+        snaps = self._ob(T0, [
+            ("BID", 115.0, 600), ("BID", 114.0, 500),
+            ("BID", 113.0, 200),                         # rank 2: ~equal → neutral
+            ("BID", 112.0, 600), ("BID", 111.0, 500), ("BID", 110.0, 400),
+            ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0, 200),
+            ("ASK", 119.0, 100), ("ASK", 120.0,  80), ("ASK", 121.0,  60),
+        ])
+        result = self._run(snaps, min_levels=3)
+        bid_results = [r for r in result if r[3] == "BID"]
+        self.assertEqual(len(bid_results), 1)
+        self.assertAlmostEqual(bid_results[0][2], 112.0)   # top of detected zone
+
+    # ── min_vol ───────────────────────────────────────────────────────────────
+
+    def test_min_vol_filters_bid_levels(self):
+        # All bid levels below min_vol → absent (0); ask levels kept → ASK dominant
+        snaps = self._ob(T0, [
+            ("BID", 115.0, 50), ("BID", 114.0, 40), ("BID", 113.0, 30),
+            ("ASK", 116.0, 200), ("ASK", 117.0, 180), ("ASK", 118.0, 160),
+        ])
+        result = self._run(snaps, min_vol=100, imbalance_ratio=3.0)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][3], "ASK")
+
+    # ── bar_idx assignment ────────────────────────────────────────────────────
+
+    def test_bar_idx_assigned_from_timestamp(self):
+        ts = T0 + timedelta(minutes=3)
+        snaps = self._ob(ts, [
+            ("BID", 115.0, 600), ("BID", 114.0, 500), ("BID", 113.0, 400),
+            ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
+        ])
+        self.assertEqual(self._run(snaps)[0][0], 3)
+
+    # ── multiple snapshots ────────────────────────────────────────────────────
+
+    def test_max_depth_truncates_deep_levels(self):
+        # 5 bid ranks all dominate, but max_depth=2 → only ranks 0-1 visible,
+        # run length 2 < min_levels 3 → no result
+        snaps = self._ob(T0, [
+            ("BID", 115.0, 600), ("BID", 114.0, 500), ("BID", 113.0, 400),
+            ("BID", 112.0, 350), ("BID", 111.0, 300),
+            ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
+            ("ASK", 119.0,  50), ("ASK", 120.0,  40),
+        ])
+        self.assertEqual(self._run(snaps, min_levels=3, max_depth=2), [])
+
+    def test_max_depth_allows_run_within_limit(self):
+        # max_depth=5 → ranks 0-4 checked; full run of 5 → detected
+        snaps = self._ob(T0, [
+            ("BID", 115.0, 600), ("BID", 114.0, 500), ("BID", 113.0, 400),
+            ("BID", 112.0, 350), ("BID", 111.0, 300),
+            ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
+            ("ASK", 119.0,  50), ("ASK", 120.0,  40),
+        ])
+        result = self._run(snaps, min_levels=3, max_depth=5)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][3], "BID")
+
+    def test_multiple_snapshots_independent(self):
+        # Two timestamps both bullish → two separate events
+        snaps = (
+            self._ob(T0, [
+                ("BID", 115.0, 600), ("BID", 114.0, 500), ("BID", 113.0, 400),
+                ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
+            ])
+            + self._ob(T0 + timedelta(minutes=1), [
+                ("BID", 115.0, 650), ("BID", 114.0, 550), ("BID", 113.0, 450),
+                ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
+            ])
+        )
+        result = self._run(snaps)
+        self.assertEqual(len(result), 2)
+        self.assertEqual({r[0] for r in result}, {0, 1})
 
 
 if __name__ == "__main__":

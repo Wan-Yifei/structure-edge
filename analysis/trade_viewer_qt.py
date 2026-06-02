@@ -104,6 +104,7 @@ def _qc(hex_str: str, alpha: int = 255) -> QColor:
 
 TIMEFRAME_MAP: dict[str, tuple[KLType, int]] = {
     "1m":  (KLType.K_1M,    1),
+    "3m":  (KLType.K_3M,    3),
     "5m":  (KLType.K_5M,    5),
     "15m": (KLType.K_15M,  15),
     "30m": (KLType.K_30M,  30),
@@ -1541,6 +1542,21 @@ class TradeViewerQt(QMainWindow):
         self._fetcher.error.connect(self._log)
         self._fetcher.start()
 
+        # Push real-time NBBO to the heatmap so its spread lines reflect the
+        # true best bid/ask rather than values derived from ORDER_BOOK depth
+        # (which on LITE accounts does not start at the actual NBBO).
+        if self._liq_hm_window is not None and not historical and self._live_code:
+            try:
+                ret, df = ctx.get_market_snapshot([self._live_code])
+                if ret == RET_OK and not df.empty:
+                    row = df.iloc[0]
+                    bid = float(row.get("bid_price", 0) or 0)
+                    ask = float(row.get("ask_price", 0) or 0)
+                    if bid > 0 and ask > 0:
+                        self._liq_hm_window.update_quote(bid, ask)
+            except Exception:
+                pass
+
     def _on_data_ready(self, result: dict) -> None:
         self._klines      = result["klines"]
         self._ticks       = result["ticks"]
@@ -2711,6 +2727,16 @@ class TradeViewerQt(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Shut down timers, moomoo connection, and background threads."""
+        # Close child floating windows first so their timers/workers stop before
+        # the moomoo context is torn down.  Without this the app event loop keeps
+        # running (quitOnLastWindowClosed won't fire while they're still open).
+        if self._liq_hm_window is not None:
+            self._liq_hm_window.close()
+            self._liq_hm_window = None
+        if self._dom_window is not None:
+            self._dom_window.close()
+            self._dom_window = None
+
         # Stop the live refresh timer and unsubscribe tickers.
         self._stop_live()
 

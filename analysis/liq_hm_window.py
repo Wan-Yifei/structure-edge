@@ -22,7 +22,8 @@ from datetime import datetime
 from PyQt6.QtCore    import Qt, QRectF, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui     import QColor, QPainterPath
 from PyQt6.QtWidgets import (
-    QCheckBox, QLabel, QPushButton, QSpinBox, QToolBar, QVBoxLayout, QWidget,
+    QCheckBox, QDoubleSpinBox, QLabel, QPushButton,
+    QSpinBox, QToolBar, QVBoxLayout, QWidget,
 )
 import pyqtgraph as pg
 
@@ -280,6 +281,7 @@ class LiqHmWindow(QWidget):
         # Overlay items managed on _plot_widget
         self._iceberg_items: list = []
         self._spoof_items:   list = []
+        self._simb_items:    list = []
 
         # Background query workers (one at a time each)
         self._worker:      _SnapshotWorker | None      = None
@@ -396,6 +398,51 @@ class LiqHmWindow(QWidget):
         self._spoof_dur_spin.setToolTip("Max seconds a large order can live before being flagged")
         self._spoof_dur_spin.valueChanged.connect(self._on_controls_changed)
         tb.addWidget(self._spoof_dur_spin)
+
+        tb.addSeparator()
+
+        # Stacked imbalance detection
+        self._simb_cb = QCheckBox("Imbalance")
+        self._simb_cb.setChecked(False)
+        self._simb_cb.setToolTip(
+            "Blue bar = bullish stacked imbalance (bid dominates N consecutive depth levels)\n"
+            "Red bar  = bearish stacked imbalance (ask dominates N consecutive depth levels)\n"
+            "Bid/ask levels paired by depth rank; missing side counts as 0.")
+        self._simb_cb.stateChanged.connect(self._on_controls_changed)
+        tb.addWidget(self._simb_cb)
+
+        tb.addWidget(_lbl("Lvl:"))
+        self._simb_levels_spin = QSpinBox()
+        self._simb_levels_spin.setRange(2, 10)
+        self._simb_levels_spin.setSingleStep(1)
+        self._simb_levels_spin.setValue(3)
+        self._simb_levels_spin.setFixedWidth(45)
+        self._simb_levels_spin.setToolTip("Minimum consecutive imbalanced depth levels")
+        self._simb_levels_spin.valueChanged.connect(self._on_controls_changed)
+        tb.addWidget(self._simb_levels_spin)
+
+        tb.addWidget(_lbl("Ratio:"))
+        self._simb_ratio_spin = QDoubleSpinBox()
+        self._simb_ratio_spin.setRange(1.5, 20.0)
+        self._simb_ratio_spin.setSingleStep(0.5)
+        self._simb_ratio_spin.setValue(3.0)
+        self._simb_ratio_spin.setDecimals(1)
+        self._simb_ratio_spin.setFixedWidth(52)
+        self._simb_ratio_spin.setToolTip("bid/ask (or ask/bid) volume ratio threshold per level")
+        self._simb_ratio_spin.valueChanged.connect(self._on_controls_changed)
+        tb.addWidget(self._simb_ratio_spin)
+
+        tb.addWidget(_lbl("Depth:"))
+        self._simb_depth_spin = QSpinBox()
+        self._simb_depth_spin.setRange(3, 50)
+        self._simb_depth_spin.setSingleStep(1)
+        self._simb_depth_spin.setValue(10)
+        self._simb_depth_spin.setFixedWidth(45)
+        self._simb_depth_spin.setToolTip(
+            "Max depth ranks to analyse (top-of-book only).\n"
+            "Deep orders far from the spread are noise — keep this at 5–15.")
+        self._simb_depth_spin.valueChanged.connect(self._on_controls_changed)
+        tb.addWidget(self._simb_depth_spin)
 
         tb.addSeparator()
 
@@ -755,6 +802,22 @@ class LiqHmWindow(QWidget):
             self._ask_line.setValue(self._best_ask)
             self._ask_line.setVisible(True)
 
+    def update_quote(self, bid: float, ask: float) -> None:
+        """Update the best bid/ask spread lines from an external live quote.
+
+        Overrides the values derived from ORDER_BOOK snapshots, which on LITE
+        accounts do not reflect the true NBBO.  Must be called from the main
+        thread (e.g. from the viewer's refresh timer).
+        """
+        if bid > 0:
+            self._best_bid = bid
+            self._bid_line.setValue(bid)
+            self._bid_line.setVisible(True)
+        if ask > 0:
+            self._best_ask = ask
+            self._ask_line.setValue(ask)
+            self._ask_line.setVisible(True)
+
     # ── iceberg / spoof detection and drawing ──────────────────────────────────
 
     def _build_bucket_to_idx(self) -> tuple[dict, int]:
@@ -803,6 +866,19 @@ class LiqHmWindow(QWidget):
                 max_duration_secs=self._spoof_dur_spin.value(),
             )
             self._draw_spoof_markers(spoofs)
+
+        if self._simb_cb.isChecked():
+            from analysis.orderflow_detect import detect_stacked_imbalance
+            simbs = detect_stacked_imbalance(
+                self._raw_snaps,
+                bucket_to_idx, self._bin_size, self._price_min,
+                N_PRICE, cm,
+                min_levels=self._simb_levels_spin.value(),
+                imbalance_ratio=self._simb_ratio_spin.value(),
+                min_vol=float(min_vol),
+                max_depth=self._simb_depth_spin.value(),
+            )
+            self._draw_simb_markers(simbs)
 
     def _draw_iceberg_markers(self, icebergs: list[tuple]) -> None:
         """Bright-purple horizontal line segments at detected iceberg price levels.
@@ -887,11 +963,55 @@ class LiqHmWindow(QWidget):
             self._plot_widget.addItem(line)
             self._spoof_items.append(line)
 
+    def _draw_simb_markers(self, simbs: list[tuple]) -> None:
+        """Vertical bars at stacked-imbalance zones.
+
+        Blue = bullish (BID dominates); red-orange = bearish (ASK dominates).
+        Each bar spans [price_lo, price_hi] at the snapshot's column.
+        Opacity encodes mean_ratio strength (capped at 5×).
+        """
+        if not simbs:
+            return
+
+        _BID_COL = (100, 181, 246)   # Material Blue 300
+        _ASK_COL = (255, 112,  67)   # Material Deep-Orange 400
+
+        bid_xs: list[float] = []
+        bid_ys: list[float] = []
+        ask_xs: list[float] = []
+        ask_ys: list[float] = []
+
+        for bar_idx, price_lo, price_hi, direction, mean_ratio in simbs:
+            cx = float(bar_idx) + 0.45   # centre of the column
+            if direction == "BID":
+                bid_xs += [cx, cx, np.nan]
+                bid_ys += [price_lo, price_hi, np.nan]
+            else:
+                ask_xs += [cx, cx, np.nan]
+                ask_ys += [price_lo, price_hi, np.nan]
+
+        for xs, ys, col in (
+            (bid_xs, bid_ys, _BID_COL),
+            (ask_xs, ask_ys, _ASK_COL),
+        ):
+            if not xs:
+                continue
+            item = pg.PlotCurveItem(
+                x=np.array(xs, dtype=np.float64),
+                y=np.array(ys, dtype=np.float64),
+                pen=pg.mkPen(color=(*col, 200), width=4),
+                connect="finite",
+            )
+            item.setZValue(12)
+            self._plot_widget.addItem(item)
+            self._simb_items.append(item)
+
     def _clear_overlay_items(self) -> None:
-        for item in self._iceberg_items + self._spoof_items:
+        for item in self._iceberg_items + self._spoof_items + self._simb_items:
             self._plot_widget.removeItem(item)
         self._iceberg_items.clear()
         self._spoof_items.clear()
+        self._simb_items.clear()
 
     def _update_legend(self) -> None:
         n = 5
@@ -966,6 +1086,22 @@ class LiqHmWindow(QWidget):
         """Double-click anywhere on the window resets the zoom."""
         self._reset_view()
         super().mouseDoubleClickEvent(event)
+
+    # ── lifecycle ──────────────────────────────────────────────────────────────
+
+    def closeEvent(self, event) -> None:
+        self._timer.stop()
+        for worker in (self._worker, self._bulk_worker):
+            if worker is not None and worker.isRunning():
+                try:
+                    worker.done.disconnect()
+                except Exception:
+                    pass
+                worker.quit()
+                if not worker.wait(500):
+                    worker.terminate()
+                    worker.wait(200)
+        super().closeEvent(event)
 
 
 # ── standalone test ────────────────────────────────────────────────────────────

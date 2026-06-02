@@ -483,7 +483,19 @@ class DomWindow(QWidget):
             self._status_lbl.setText("Snapshot contains no bid/ask levels.")
             return
 
-        self._ts_lbl.setText(str(rows[0]["ts"])[:19])
+        data_ts  = rows[0]["ts"]
+        ts_str   = str(data_ts)[:19]
+        if self._live:
+            age_s = (datetime.now() - data_ts).total_seconds()
+            if age_s > 60:
+                self._ts_lbl.setStyleSheet("font-size: 10px; color: #ef5350;")
+                self._ts_lbl.setText(f"{ts_str}  ⚠ STALE ({int(age_s // 60)}m)")
+            else:
+                self._ts_lbl.setStyleSheet("font-size: 10px;")
+                self._ts_lbl.setText(ts_str)
+        else:
+            self._ts_lbl.setStyleSheet("font-size: 10px;")
+            self._ts_lbl.setText(ts_str)
 
         self._bid_prices = [b[0] for b in bids]
         self._bid_vols   = [b[1] for b in bids]

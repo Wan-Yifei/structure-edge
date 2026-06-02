@@ -38,9 +38,12 @@
     "US.LITE",
     "US.MRVL",
     "US.MU",
+    "US.NNE",
     "US.NVDA",
     "US.NVTS",
     "US.OKLO",
+    "US.ORCL",
+    "US.PLTR",
     "US.Q",
     "US.QCOM",
     "US.RKLB",
@@ -54,6 +57,7 @@
     "US.TSEM",
     "US.TSLA",
     "US.TSM",
+    "US.UUUU",
     "US.WDC"
   ],
   "target_categories": {
@@ -61,7 +65,11 @@
     "US.RKLX": "Space X family",
     "US.RKLB": "Space X family",
     "US.AAPL": "全部",
-    "US.TSLA": "全部"
+    "US.TSLA": "全部",
+    "US.ORCL": "AI family",
+    "US.PLTR": "AI family",
+    "US.UUUU": "nuclear fusion & energy",
+    "US.NNE": "nuclear fusion & energy"
   },
   "order_book_enabled": true,
   "remote_backup": {
@@ -72,5 +80,6 @@
     "aws_endpoint_url": "https://s3.wasabisys.com",
     "tick_db": "db/ticks.db",
     "order_book_db": "db/order_book.db"
-  }
+  },
+  "autostart": false
 }

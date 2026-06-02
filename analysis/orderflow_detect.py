@@ -376,3 +376,119 @@ def detect_absorption(
         results.append((price, "BID", agg, pass_vol, ratio))
 
     return results
+
+
+def detect_stacked_imbalance(
+    snaps: list[dict],
+    bucket_to_idx: dict,
+    bin_size: float,
+    price_min: float,
+    N_PRICE: int,
+    cm: int,
+    min_levels: int = 3,
+    imbalance_ratio: float = 3.0,
+    min_vol: float = 0.0,
+    max_depth: int = 10,
+) -> list[tuple]:
+    """Detect stacked imbalance from order book snapshots.
+
+    Bid and ask levels in each snapshot are paired by depth rank (rank 0 =
+    best bid / best ask, rank 1 = second-best, etc.).  A run of min_levels
+    consecutive ranks where bid_vol / ask_vol >= imbalance_ratio is a bullish
+    stacked imbalance; ask_vol / bid_vol >= imbalance_ratio is bearish.
+
+    Only the top max_depth ranks are considered.  Levels beyond max_depth are
+    ignored because deep-book orders are far from the current price and do not
+    reflect near-term market pressure.
+
+    Missing levels on either side within max_depth are treated as 0 volume
+    rather than truncating the rank list — an unpaired level registers as an
+    infinite ratio and counts as fully imbalanced.
+
+    Each snapshot is evaluated independently; persistence across snapshots is
+    a viewer-layer concern.
+
+    Args:
+        snaps:            Order book snapshots {ts, side, price, volume}.
+        bucket_to_idx:    Bar-start datetime -> column index.
+        bin_size:         Price bin width.
+        price_min:        Bottom of price range.
+        N_PRICE:          Number of price bins.
+        cm:               Candle duration in minutes.
+        min_levels:       Minimum consecutive imbalanced depth levels.
+        imbalance_ratio:  bid/ask (or ask/bid) threshold per level.
+        min_vol:          Levels below this volume are treated as absent (0).
+        max_depth:        Maximum depth ranks to analyse (top-of-book only).
+
+    Returns:
+        List of (bar_idx, price_lo, price_hi, direction, mean_ratio).
+        direction='BID': buyers dominating — zone spans bid-side prices.
+        direction='ASK': sellers dominating — zone spans ask-side prices.
+    """
+    if not snaps:
+        return []
+
+    EPS = 1e-9
+
+    by_ts: dict = defaultdict(lambda: {"BID": [], "ASK": []})
+    for s in snaps:
+        vol = float(s["volume"])
+        if vol < min_vol:
+            continue
+        by_ts[s["ts"]][s["side"]].append((float(s["price"]), vol))
+
+    results = []
+    for ts, sides in by_ts.items():
+        bar_idx = bucket_to_idx.get(candle_start(ts, cm), -1)
+        if bar_idx < 0:
+            continue
+
+        bids = sorted(sides["BID"], key=lambda x: -x[0])   # best bid first
+        asks = sorted(sides["ASK"], key=lambda x:  x[0])   # best ask first
+
+        n_ranks = min(max(len(bids), len(asks)), max_depth)
+        if n_ranks == 0:
+            continue
+
+        bid_vols   = [bids[i][1] if i < len(bids) else 0.0 for i in range(n_ranks)]
+        ask_vols   = [asks[i][1] if i < len(asks) else 0.0 for i in range(n_ranks)]
+        bid_prices = [bids[i][0] if i < len(bids) else None for i in range(n_ranks)]
+        ask_prices = [asks[i][0] if i < len(asks) else None for i in range(n_ranks)]
+
+        rank_dir: list[str | None] = []
+        rank_ratio: list[float]    = []
+        for bv, av in zip(bid_vols, ask_vols):
+            if bv >= av * imbalance_ratio and bv > EPS:
+                rank_dir.append("BID")
+                rank_ratio.append(bv / (av + EPS))
+            elif av >= bv * imbalance_ratio and av > EPS:
+                rank_dir.append("ASK")
+                rank_ratio.append(av / (bv + EPS))
+            else:
+                rank_dir.append(None)
+                rank_ratio.append(1.0)
+
+        i = 0
+        while i < n_ranks:
+            d = rank_dir[i]
+            if d is None:
+                i += 1
+                continue
+
+            j = i + 1
+            while j < n_ranks and rank_dir[j] == d:
+                j += 1
+
+            if j - i >= min_levels:
+                mean_ratio = float(np.mean(rank_ratio[i:j]))
+                prices = (
+                    [bid_prices[k] for k in range(i, j) if bid_prices[k] is not None]
+                    if d == "BID"
+                    else [ask_prices[k] for k in range(i, j) if ask_prices[k] is not None]
+                )
+                if prices:
+                    results.append((bar_idx, min(prices), max(prices), d, mean_ratio))
+
+            i = j
+
+    return results
