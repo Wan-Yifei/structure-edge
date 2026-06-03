@@ -159,12 +159,18 @@ class _BulkSnapshotWorker(QThread):
 
 # ── color renderers ────────────────────────────────────────────────────────────
 
-def _hot_rgba(grid: np.ndarray) -> np.ndarray | None:
-    """Combined bid+ask: black → purple → amber → yellow."""
+def _hot_rgba(grid: np.ndarray, gamma: float = 1.0) -> np.ndarray | None:
+    """Combined bid+ask: black → purple → amber → yellow.
+
+    gamma > 1 suppresses midtones — only the densest zones remain bright.
+    gamma < 1 boosts midtones — weaker zones become more visible.
+    """
     if grid.max() <= 0:
         return None
     log_g = np.log1p(grid)
     norm  = (log_g / log_g.max()).astype(np.float32)
+    if gamma != 1.0:
+        np.power(norm, gamma, out=norm)
     rgba  = np.zeros((*norm.shape, 4), dtype=np.uint8)
 
     m = norm < 0.25
@@ -194,12 +200,15 @@ def _hot_rgba(grid: np.ndarray) -> np.ndarray | None:
     return rgba
 
 
-def _single_rgba(grid: np.ndarray, hex_color: str) -> np.ndarray | None:
+def _single_rgba(grid: np.ndarray, hex_color: str,
+                 gamma: float = 1.0) -> np.ndarray | None:
     """Single-hue intensity map for bid or ask separately."""
     if grid.max() <= 0:
         return None
     log_g = np.log1p(grid)
     norm  = (log_g / log_g.max()).astype(np.float32)
+    if gamma != 1.0:
+        np.power(norm, gamma, out=norm)
     c     = QColor(hex_color)
     rgba  = np.zeros((*norm.shape, 4), dtype=np.uint8)
     rgba[..., 0] = c.red()
@@ -320,6 +329,20 @@ class LiqHmWindow(QWidget):
             "Unchecked: combined with black → purple → yellow colormap")
         self._bid_ask_cb.stateChanged.connect(self._on_controls_changed)
         tb.addWidget(self._bid_ask_cb)
+
+        tb.addWidget(_lbl("Gamma:"))
+        self._gamma_spin = QDoubleSpinBox()
+        self._gamma_spin.setRange(0.2, 5.0)
+        self._gamma_spin.setSingleStep(0.1)
+        self._gamma_spin.setDecimals(1)
+        self._gamma_spin.setValue(1.0)
+        self._gamma_spin.setFixedWidth(52)
+        self._gamma_spin.setToolTip(
+            "Colour gamma correction.\n"
+            ">1: suppresses sparse zones — only the densest orders stay bright.\n"
+            "<1: boosts dim zones — reveals weaker order clusters.")
+        self._gamma_spin.valueChanged.connect(self._on_gamma_changed)
+        tb.addWidget(self._gamma_spin)
 
         tb.addSeparator()
         tb.addWidget(_lbl("Min.Vol:"))
@@ -757,13 +780,14 @@ class LiqHmWindow(QWidget):
         bid_view = self._bid_grid[:n]
         ask_view = self._ask_grid[:n]
 
+        gamma = self._gamma_spin.value()
         if self._bid_ask_cb.isChecked():
             self._img_combined.setVisible(False)
             for img, grid, color in (
                 (self._img_bid, bid_view, _TEAL),
                 (self._img_ask, ask_view, _RED),
             ):
-                rgba = _single_rgba(grid, color)
+                rgba = _single_rgba(grid, color, gamma)
                 if rgba is not None:
                     img.setImage(rgba)
                     img.setRect(rect)
@@ -773,7 +797,7 @@ class LiqHmWindow(QWidget):
         else:
             self._img_bid.setVisible(False)
             self._img_ask.setVisible(False)
-            rgba = _hot_rgba(bid_view + ask_view)
+            rgba = _hot_rgba(bid_view + ask_view, gamma)
             if rgba is not None:
                 self._img_combined.setImage(rgba)
                 self._img_combined.setRect(rect)
@@ -1059,6 +1083,9 @@ class LiqHmWindow(QWidget):
         self._legend_lbl.setText("".join(parts))
 
     # ── control callbacks ──────────────────────────────────────────────────────
+
+    def _on_gamma_changed(self) -> None:
+        self._render()   # pure visual change — no overlay recalculation needed
 
     def _on_controls_changed(self) -> None:
         self._update_legend()
