@@ -285,6 +285,9 @@ class LiqHmWindow(QWidget):
         # Per-column mid-price for the price path line (None = no data that column)
         self._mid_prices: list[float | None] = []
 
+        # Latest OB snapshot — cached for fast depth-to-cursor calculation
+        self._latest_snap: list[dict] = []
+
         # Price range (auto-detected from first snapshot)
         self._price_min: float = 0.0
         self._price_max: float = 0.0
@@ -624,9 +627,10 @@ class LiqHmWindow(QWidget):
         max_cols = self._max_cols_spin.value()
         self._bid_grid  = np.zeros((max_cols, N_PRICE), dtype=np.float64)
         self._ask_grid  = np.zeros((max_cols, N_PRICE), dtype=np.float64)
-        self._col_ts    = []
-        self._raw_snaps = []
-        self._mid_prices = []
+        self._col_ts      = []
+        self._raw_snaps   = []
+        self._mid_prices  = []
+        self._latest_snap = []
         self._price_min = 0.0
         self._price_max = 0.0
         self._bin_size  = 0.0
@@ -643,6 +647,31 @@ class LiqHmWindow(QWidget):
         self._ask_line.setVisible(False)
         self._clear_overlay_items()
 
+    def _depth_to_cursor(self, target: float) -> str:
+        """Return a label describing how much volume sits between the spread and target.
+
+        Returns '' when data is unavailable (no snapshot yet).
+        Returns '[spread]' when target is inside the bid-ask spread.
+        Otherwise returns 'eat↑ N' (ask side) or 'eat↓ N' (bid side).
+        """
+        if not self._latest_snap or self._best_bid is None or self._best_ask is None:
+            return ""
+        bid, ask = self._best_bid, self._best_ask
+        if bid < target < ask:
+            return "[spread]"
+        if target >= ask:
+            vol = sum(
+                r["volume"] for r in self._latest_snap
+                if r["side"] == "ASK" and ask <= r["price"] <= target
+            )
+            return f"eat↑ {vol:,.0f}"
+        # target <= bid
+        vol = sum(
+            r["volume"] for r in self._latest_snap
+            if r["side"] == "BID" and target <= r["price"] <= bid
+        )
+        return f"eat↓ {vol:,.0f}"
+
     def _on_mouse_move(self, pos) -> None:
         """Update local crosshair when cursor is inside the plot."""
         if not self._plot_widget.sceneBoundingRect().contains(pos):
@@ -654,10 +683,12 @@ class LiqHmWindow(QWidget):
         pt = self._plot_widget.getPlotItem().vb.mapSceneToView(pos)
         x, y = pt.x(), pt.y()
 
-        # Horizontal line + price label
+        # Horizontal line + price label (with depth-to-cursor annotation)
         self._hline.setPos(y)
         self._hline.setVisible(True)
-        self._price_lbl.setText(f"{y:.2f}")
+        depth_str = self._depth_to_cursor(y)
+        lbl_text  = f"{y:.2f}  {depth_str}" if depth_str else f"{y:.2f}"
+        self._price_lbl.setText(lbl_text)
         xlo, xhi = self._plot_widget.getPlotItem().vb.viewRange()[0]
         ylo, yhi = self._plot_widget.getPlotItem().vb.viewRange()[1]
         self._price_lbl.setPos(xlo + (xhi - xlo) * 0.005, y)
@@ -786,6 +817,8 @@ class LiqHmWindow(QWidget):
                 "price":  row["price"],
                 "volume": row["volume"],
             })
+
+        self._latest_snap = snap   # cache for depth-to-cursor calculation
 
     def _on_bulk_ready(self, snapshots: list) -> None:
         """Push historical pre-fill columns then switch to the normal timer."""
