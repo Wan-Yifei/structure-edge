@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.10.0 — Liquidity Heatmap enhancements: contrast, price path, depth tooltip, absorption bubbles (2026-06-03)
+
+### New: Gamma contrast spinbox (`analysis/liq_hm_window.py`)
+
+- `Gamma:` spinbox (range 0.2–5.0, default 1.0) added to toolbar next to the `Bid/Ask` toggle.
+- Applied after log-normalisation in `_hot_rgba()` and `_single_rgba()` via `norm^gamma`.
+- gamma > 1 suppresses sparse zones — only the densest order clusters remain bright.
+- gamma < 1 boosts dim zones — reveals weaker order concentration.
+- `_on_gamma_changed` only calls `_render()`, skipping the heavier overlay recalculation.
+
+### New: Mid-price path line (`analysis/liq_hm_window.py`)
+
+- `Price` checkbox (default on) draws a white `PlotCurveItem` connecting `(bid+ask)/2`
+  for every column (ZValue=8 — above heatmap, below detection markers).
+- Per-column mid-price stored in `_mid_prices` list; synced with grid rolling and price
+  range resets.  `None` entries render as `np.nan` (line breaks at missing data).
+- `_calc_col_mid(snap)` extracted as a module-level pure function for testability.
+
+### New: Depth-to-cursor annotation (`analysis/liq_hm_window.py`)
+
+- Price label now shows the cumulative resting volume between the current spread and
+  the cursor position:
+  - `eat↑ N` — N shares of ask liquidity to consume to push price to cursor.
+  - `eat↓ N` — N shares of bid liquidity to consume to push price to cursor.
+  - `[spread]` — cursor is inside the bid-ask spread.
+- Uses the most recent OB snapshot cached in `_latest_snap` (updated every tick).
+- `_calc_depth_label(snap, best_bid, best_ask, target)` extracted as a pure function.
+
+### New: Absorption bubble overlay (`analysis/liq_hm_window.py`, `analysis/orderflow_detect.py`)
+
+- `Absorb` checkbox + `MinΔ:` spinbox (default 500) added to toolbar.
+- `detect_absorption_bubbles(ticks, col_ts, mid_prices, col_secs, min_delta_vol)`:
+  for each column, computes `delta = buy_vol − sell_vol` from tick data and compares
+  the delta direction against the mid-price movement:
+  - **Gold bubble** — aggressive buyers absorbed (delta > 0, price flat/down).
+  - **Purple bubble** — aggressive sellers absorbed (delta < 0, price flat/up).
+  - Bubble size (8–30 px) encodes the absorbed delta volume.
+- `_AbsorbTickWorker(QThread)` loads `ticks.db` in the background; triggered every
+  time a new column arrives.  Main thread is never blocked.
+
+### Tests
+
+- `tests/analysis/test_liq_hm.py` (new, 23 tests): gamma correction, mid-price
+  calculation, and depth-to-cursor annotation — no Qt dependency.
+- `tests/analysis/test_orderflow_detect.py` (13 new tests): `detect_absorption_bubbles`
+  covering absorption/non-absorption cases, threshold filtering, None mid-price, multiple columns.
+- Total: 92 tests, all passing.
+
+---
+
 ## v0.9.1 — Stacked imbalance detection + overlay; scheduler/viewer reliability fixes (2026-06-02)
 
 ### New: Stacked imbalance detection (`analysis/orderflow_detect.py`)
