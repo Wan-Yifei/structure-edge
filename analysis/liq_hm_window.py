@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PyQt6.QtCore    import Qt, QRectF, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui     import QColor, QPainterPath
@@ -130,7 +130,46 @@ def _query_n_snapshots(code: str, n: int) -> list[list[dict]]:
         return []
 
 
+_TICK_DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
+
+
+def _query_ticks(code: str, start: datetime, end: datetime) -> list[dict]:
+    """Return tick records for *code* in [start, end) from ticks.db."""
+    if not _TICK_DB_PATH.exists():
+        return []
+    try:
+        con = sqlite3.connect(str(_TICK_DB_PATH), check_same_thread=False)
+        cur = con.execute(
+            "SELECT ts, price, volume, direction FROM ticks "
+            "WHERE code = ? AND ts >= ? AND ts < ? ORDER BY ts",
+            [code, start.isoformat(sep=" "), end.isoformat(sep=" ")],
+        )
+        rows = [
+            {"ts": datetime.fromisoformat(r[0]),
+             "price": float(r[1]), "volume": int(r[2]), "direction": r[3]}
+            for r in cur.fetchall()
+        ]
+        con.close()
+        return rows
+    except Exception:
+        return []
+
+
 # ── background query workers ──────────────────────────────────────────────────
+
+class _AbsorbTickWorker(QThread):
+    """Load ticks for the current display window in a background thread."""
+    done = pyqtSignal(list)   # emits list[dict]
+
+    def __init__(self, code: str, start: datetime, end: datetime) -> None:
+        super().__init__()
+        self._code  = code
+        self._start = start
+        self._end   = end
+
+    def run(self) -> None:
+        self.done.emit(_query_ticks(self._code, self._start, self._end))
+
 
 class _SnapshotWorker(QThread):
     """Fetch the latest OB snapshot in a background thread to avoid UI stalls."""
@@ -219,6 +258,41 @@ def _single_rgba(grid: np.ndarray, hex_color: str,
     return rgba
 
 
+def _calc_col_mid(snap: list[dict]) -> float | None:
+    """Compute mid-price from one OB snapshot.  Returns None when snap is empty."""
+    bid_prices = [r["price"] for r in snap if r["side"] == "BID"]
+    ask_prices = [r["price"] for r in snap if r["side"] == "ASK"]
+    col_bid = max(bid_prices) if bid_prices else None
+    col_ask = min(ask_prices) if ask_prices else None
+    if col_bid is not None and col_ask is not None:
+        return (col_bid + col_ask) / 2.0
+    return col_bid if col_bid is not None else col_ask
+
+
+def _calc_depth_label(snap: list[dict],
+                      best_bid: float, best_ask: float,
+                      target: float) -> str:
+    """Return depth-to-cursor annotation string.
+
+    '[spread]' when target is inside the spread.
+    'eat↑ N'  when target is above best_ask (N = ask volume to consume).
+    'eat↓ N'  when target is below best_bid (N = bid volume to consume).
+    """
+    if best_bid < target < best_ask:
+        return "[spread]"
+    if target >= best_ask:
+        vol = sum(
+            r["volume"] for r in snap
+            if r["side"] == "ASK" and best_ask <= r["price"] <= target
+        )
+        return f"eat↑ {vol:,.0f}"
+    vol = sum(
+        r["volume"] for r in snap
+        if r["side"] == "BID" and target <= r["price"] <= best_bid
+    )
+    return f"eat↓ {vol:,.0f}"
+
+
 def _blend(color_rgb: tuple, alpha: float) -> str:
     """Blend color onto chart background at given alpha; return hex string."""
     bg = (13, 17, 23)  # _BG = "#0d1117"
@@ -297,6 +371,11 @@ class LiqHmWindow(QWidget):
         self._iceberg_items: list = []
         self._spoof_items:   list = []
         self._simb_items:    list = []
+        self._absorb_items:  list = []
+
+        # Tick cache + worker for absorption bubble overlay
+        self._absorb_ticks:  list[dict]               = []
+        self._absorb_worker: _AbsorbTickWorker | None = None
 
         # Background query workers (one at a time each)
         self._worker:      _SnapshotWorker | None      = None
@@ -482,6 +561,29 @@ class LiqHmWindow(QWidget):
 
         tb.addSeparator()
 
+        # Absorption bubble overlay
+        self._absorb_cb = QCheckBox("Absorb")
+        self._absorb_cb.setChecked(False)
+        self._absorb_cb.setToolTip(
+            "Gold bubble  = aggressive buyers absorbed by passive sell wall (bearish).\n"
+            "Purple bubble = aggressive sellers absorbed by passive buy wall (bullish).\n"
+            "Bubble size encodes absorbed delta volume.  Reads ticks.db.")
+        self._absorb_cb.stateChanged.connect(self._on_absorb_changed)
+        tb.addWidget(self._absorb_cb)
+
+        tb.addWidget(_lbl("MinΔ:"))
+        self._absorb_min_vol_spin = QSpinBox()
+        self._absorb_min_vol_spin.setRange(100, 100_000)
+        self._absorb_min_vol_spin.setSingleStep(100)
+        self._absorb_min_vol_spin.setValue(500)
+        self._absorb_min_vol_spin.setFixedWidth(70)
+        self._absorb_min_vol_spin.setToolTip(
+            "Minimum |buy_vol − sell_vol| per column to show a bubble.")
+        self._absorb_min_vol_spin.valueChanged.connect(self._on_absorb_changed)
+        tb.addWidget(self._absorb_min_vol_spin)
+
+        tb.addSeparator()
+
         # Reset zoom button
         reset_btn = QPushButton("⟲ Reset")
         reset_btn.setToolTip("Reset zoom to full view (double-click chart also resets)")
@@ -648,29 +750,12 @@ class LiqHmWindow(QWidget):
         self._clear_overlay_items()
 
     def _depth_to_cursor(self, target: float) -> str:
-        """Return a label describing how much volume sits between the spread and target.
-
-        Returns '' when data is unavailable (no snapshot yet).
-        Returns '[spread]' when target is inside the bid-ask spread.
-        Otherwise returns 'eat↑ N' (ask side) or 'eat↓ N' (bid side).
-        """
+        """Return depth-to-cursor annotation, or '' when data is unavailable."""
         if not self._latest_snap or self._best_bid is None or self._best_ask is None:
             return ""
-        bid, ask = self._best_bid, self._best_ask
-        if bid < target < ask:
-            return "[spread]"
-        if target >= ask:
-            vol = sum(
-                r["volume"] for r in self._latest_snap
-                if r["side"] == "ASK" and ask <= r["price"] <= target
-            )
-            return f"eat↑ {vol:,.0f}"
-        # target <= bid
-        vol = sum(
-            r["volume"] for r in self._latest_snap
-            if r["side"] == "BID" and target <= r["price"] <= bid
+        return _calc_depth_label(
+            self._latest_snap, self._best_bid, self._best_ask, target
         )
-        return f"eat↓ {vol:,.0f}"
 
     def _on_mouse_move(self, pos) -> None:
         """Update local crosshair when cursor is inside the plot."""
@@ -724,6 +809,7 @@ class LiqHmWindow(QWidget):
         self._push_column(snap)
         self._render()
         self._redraw_orderflow_markers()
+        self._load_absorb_ticks()   # refresh tick window when a new column arrives
 
     def _maybe_init_price_range(self, snap: list[dict]) -> None:
         prices = [r["price"] for r in snap]
@@ -793,22 +879,15 @@ class LiqHmWindow(QWidget):
             else:
                 self._ask_grid[col, p_bin] = row["volume"]
 
-        # Track best bid / ask (盘口) from this snapshot
+        # Track best bid / ask and mid-price from this snapshot
+        mid = _calc_col_mid(snap)
         bid_prices = [r["price"] for r in snap if r["side"] == "BID"]
         ask_prices = [r["price"] for r in snap if r["side"] == "ASK"]
         col_bid = max(bid_prices) if bid_prices else None
         col_ask = min(ask_prices) if ask_prices else None
         self._best_bid = col_bid if col_bid is not None else self._best_bid
         self._best_ask = col_ask if col_ask is not None else self._best_ask
-
-        if col_bid is not None and col_ask is not None:
-            self._mid_prices.append((col_bid + col_ask) / 2.0)
-        elif col_bid is not None:
-            self._mid_prices.append(col_bid)
-        elif col_ask is not None:
-            self._mid_prices.append(col_ask)
-        else:
-            self._mid_prices.append(None)
+        self._mid_prices.append(mid)
 
         for row in snap:
             self._raw_snaps.append({
@@ -982,6 +1061,17 @@ class LiqHmWindow(QWidget):
             )
             self._draw_simb_markers(simbs)
 
+        if self._absorb_cb.isChecked() and self._absorb_ticks:
+            from analysis.orderflow_detect import detect_absorption_bubbles
+            bubbles = detect_absorption_bubbles(
+                self._absorb_ticks,
+                self._col_ts,
+                self._mid_prices,
+                col_secs=self._col_secs_spin.value(),
+                min_delta_vol=float(self._absorb_min_vol_spin.value()),
+            )
+            self._draw_absorb_bubbles(bubbles)
+
     def _draw_iceberg_markers(self, icebergs: list[tuple]) -> None:
         """Bright-purple horizontal line segments at detected iceberg price levels.
 
@@ -1108,12 +1198,81 @@ class LiqHmWindow(QWidget):
             self._plot_widget.addItem(item)
             self._simb_items.append(item)
 
+    def _draw_absorb_bubbles(self, bubbles: list[tuple]) -> None:
+        """Draw ScatterPlotItem bubbles at absorption events on the price path.
+
+        Gold   = aggressive buyers absorbed (BUY direction, passive sellers won).
+        Purple = aggressive sellers absorbed (SELL direction, passive buyers won).
+        Bubble size scales with absorbed delta volume (8–30 px range).
+        """
+        if not bubbles:
+            return
+        _GOLD   = (255, 160,   0, 200)
+        _PURPLE = (171,  71, 188, 200)
+
+        max_vol = max(b[3] for b in bubbles)
+        buy_xs, buy_ys, buy_sz  = [], [], []
+        sell_xs, sell_ys, sell_sz = [], [], []
+
+        for col_idx, price, direction, vol in bubbles:
+            size = 8.0 + 22.0 * (vol / max_vol)
+            x = float(col_idx) + 0.5
+            if direction == "BUY":
+                buy_xs.append(x); buy_ys.append(price); buy_sz.append(size)
+            else:
+                sell_xs.append(x); sell_ys.append(price); sell_sz.append(size)
+
+        outline = pg.mkPen("white", width=0.5)
+        for xs, ys, szs, color in (
+            (buy_xs,  buy_ys,  buy_sz,  _GOLD),
+            (sell_xs, sell_ys, sell_sz, _PURPLE),
+        ):
+            if not xs:
+                continue
+            scat = pg.ScatterPlotItem(
+                x=xs, y=ys, size=szs,
+                pen=outline, brush=pg.mkBrush(*color),
+            )
+            scat.setZValue(12)
+            self._plot_widget.addItem(scat)
+            self._absorb_items.append(scat)
+
+    def _load_absorb_ticks(self) -> None:
+        """Trigger background tick load for the current display window."""
+        if not self._absorb_cb.isChecked() or not self._code or not self._col_ts:
+            return
+        if self._absorb_worker is not None and self._absorb_worker.isRunning():
+            return
+        col_secs = self._col_secs_spin.value()
+        start = self._col_ts[0]
+        end   = self._col_ts[-1] + timedelta(seconds=col_secs)
+        self._absorb_worker = _AbsorbTickWorker(self._code, start, end)
+        self._absorb_worker.done.connect(self._on_absorb_ready)
+        self._absorb_worker.start()
+
+    def _on_absorb_ready(self, ticks: list) -> None:
+        """Receive ticks from background worker and redraw absorption bubbles."""
+        self._absorb_ticks = ticks
+        self._redraw_orderflow_markers()
+
+    def _on_absorb_changed(self) -> None:
+        """Checkbox or MinΔ changed: reload ticks then redraw."""
+        if self._absorb_cb.isChecked():
+            self._load_absorb_ticks()
+        else:
+            # Just hide existing bubbles without a full redraw
+            for item in self._absorb_items:
+                self._plot_widget.removeItem(item)
+            self._absorb_items.clear()
+
     def _clear_overlay_items(self) -> None:
-        for item in self._iceberg_items + self._spoof_items + self._simb_items:
+        for item in (self._iceberg_items + self._spoof_items
+                     + self._simb_items + self._absorb_items):
             self._plot_widget.removeItem(item)
         self._iceberg_items.clear()
         self._spoof_items.clear()
         self._simb_items.clear()
+        self._absorb_items.clear()
 
     def _update_legend(self) -> None:
         n = 5
