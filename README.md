@@ -126,7 +126,7 @@ uv run analysis/trade_viewer_qt.py --code US.SNDK --tf 5m --mode Historical --da
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--code` | `US.SNDK` | 股票代码 |
-| `--tf` | `5m` | 时间框架：`1m 5m 15m 30m 1h 4h` |
+| `--tf` | `5m` | 时间框架：`1m 3m 5m 15m 30m 1h 4h` |
 | `--mode` | `Live` | `Live`（实时）或 `Historical`（历史）|
 | `--date` | *(今天)* | Historical 模式的目标日期（`YYYY-MM-DD`）|
 | `--host` | `127.0.0.1` | OpenD 地址 |
@@ -173,6 +173,7 @@ uv run analysis/trade_viewer_qt.py --code US.SNDK --tf 5m --mode Historical --da
   历史模式下随十字光标同步到对应时刻的快照
 - **Liquidity Heatmap**：浮动热力图，X 轴 = 时间，Y 轴 = 价格，颜色编码盘口深度；
   支持冰山（顶档量反复刷新）和 Spoof（大单秒消失且非成交）检测覆盖层；
+  **Stacked Imbalance 覆盖层**：蓝色竖条 = 多档 bid 持续碾压 ask（看涨）；橙色竖条 = 多档 ask 持续碾压 bid（看跌）；
   盘口最优买卖价虚线标注；历史模式下随主图十字线同步纵轴
 
 **Trade Review 模式**

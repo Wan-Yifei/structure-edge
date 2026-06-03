@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.9.1 — Stacked imbalance detection + overlay; scheduler/viewer reliability fixes (2026-06-02)
+
+### New: Stacked imbalance detection (`analysis/orderflow_detect.py`)
+
+- `detect_stacked_imbalance()`: flags N consecutive depth ranks where bid/ask volume ratio ≥
+  threshold as a bullish zone, or ask/bid ≥ threshold as a bearish zone.
+- Bid/ask levels are paired by depth rank (rank 0 = best bid vs best ask).  Missing side
+  within `max_depth` ranks counts as 0 (infinite ratio), not truncated.
+- `max_depth` parameter restricts analysis to top-of-book levels (default 10); deep-book
+  orders beyond this rank are ignored as noise.
+- 53 unit tests total (17 new covering stacked imbalance edge cases).
+
+### New: Stacked imbalance overlay (`analysis/liq_hm_window.py`)
+
+- **Blue vertical bar** = bullish stacked imbalance (bid dominates N consecutive depth levels).
+- **Orange vertical bar** = bearish stacked imbalance (ask dominates N consecutive depth levels).
+- Toolbar controls: **Imbalance** checkbox + **Lvl** (min consecutive levels, default 3) /
+  **Ratio** (bid/ask threshold, default 3.0) / **Depth** (max ranks analysed, default 10) spinboxes.
+
+### Enhancement: 3 m timeframe (`analysis/trade_viewer_qt.py`)
+
+- `3m` added to `TIMEFRAME_MAP` and the TF combo; now available alongside 1m / 5m / 15m / 30m / 1h / 4h.
+
+### Fix: LITE account spread lines (`analysis/trade_viewer_qt.py`)
+
+- `_trigger_fetch` now polls `get_market_snapshot()` for real NBBO bid/ask prices; previously
+  relied on OB snapshot data which is unavailable on LITE accounts.
+
+### Fix: Viewer close hang (`analysis/trade_viewer_qt.py`, `analysis/liq_hm_window.py`)
+
+- `closeEvent` now explicitly closes `_liq_hm_window` and `_dom_window` before the main
+  window exits, preventing Qt from destroying widgets while their threads are still running.
+- `LiqHmWindow.closeEvent` stops the per-tick timer and drains both `_SnapshotWorker` and
+  `_BulkSnapshotWorker` QThreads before returning.
+
+### Fix: Scheduler watchdog OB restart (`analysis/scheduler.py`)
+
+- `elif → if` fix: OB collector restart was silently skipped whenever the tick collector
+  was alive, because both checks shared the same `elif` chain.
+- **Zombie OB detection**: if the OB process is alive but the DB has received no new writes
+  for > 15 min, the watchdog force-restarts it.
+
+### New: Scheduler autostart & Windows startup toggle (`analysis/scheduler.py`)
+
+- On launch, if the market session is ACTIVE or STARTING SOON, collectors auto-start after a
+  200 ms delay — no manual click needed.
+- Windows startup toggle: registers / removes a `pythonw.exe` entry in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  so the scheduler starts with Windows.
+
+### Fix: DOM staleness indicator (`analysis/dom_window.py`)
+
+- `_ts_lbl` turns red with `"STALE (Xm)"` when live data is > 60 s old, making stale feeds
+  immediately visible.
+
+---
+
 ## v0.9.0 — Heatmap pre-fill, profile Y-sync, OB stability fixes (2026-06-01)
 
 ### New: Heatmap historical pre-fill (`analysis/liq_hm_window.py`)
