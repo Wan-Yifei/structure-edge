@@ -282,6 +282,9 @@ class LiqHmWindow(QWidget):
         self._best_bid: float | None = None
         self._best_ask: float | None = None
 
+        # Per-column mid-price for the price path line (None = no data that column)
+        self._mid_prices: list[float | None] = []
+
         # Price range (auto-detected from first snapshot)
         self._price_min: float = 0.0
         self._price_max: float = 0.0
@@ -343,6 +346,13 @@ class LiqHmWindow(QWidget):
             "<1: boosts dim zones — reveals weaker order clusters.")
         self._gamma_spin.valueChanged.connect(self._on_gamma_changed)
         tb.addWidget(self._gamma_spin)
+
+        self._price_path_cb = QCheckBox("Price")
+        self._price_path_cb.setChecked(True)
+        self._price_path_cb.setToolTip(
+            "Overlay the mid-price path ((bid+ask)/2) per column as a white line.")
+        self._price_path_cb.stateChanged.connect(self._on_price_path_changed)
+        tb.addWidget(self._price_path_cb)
 
         tb.addSeparator()
         tb.addWidget(_lbl("Min.Vol:"))
@@ -531,6 +541,13 @@ class LiqHmWindow(QWidget):
         self._time_lbl.setVisible(False)
         self._plot_widget.addItem(self._time_lbl, ignoreBounds=True)
 
+        # Mid-price path line — connects (bid+ask)/2 per column
+        self._price_path_item = pg.PlotCurveItem(
+            pen=pg.mkPen(color=(255, 255, 255, 180), width=1.5),
+        )
+        self._price_path_item.setZValue(8)
+        self._plot_widget.addItem(self._price_path_item)
+
         # Best bid / ask horizontal lines (盘口)
         self._bid_line = pg.InfiniteLine(
             angle=0, movable=False,
@@ -609,6 +626,7 @@ class LiqHmWindow(QWidget):
         self._ask_grid  = np.zeros((max_cols, N_PRICE), dtype=np.float64)
         self._col_ts    = []
         self._raw_snaps = []
+        self._mid_prices = []
         self._price_min = 0.0
         self._price_max = 0.0
         self._bin_size  = 0.0
@@ -616,6 +634,7 @@ class LiqHmWindow(QWidget):
         self._best_ask  = None
         for img in (self._img_combined, self._img_bid, self._img_ask):
             img.clear()
+        self._price_path_item.setData([], [])
         self._vline.setVisible(False)
         self._hline.setVisible(False)
         self._price_lbl.setVisible(False)
@@ -699,10 +718,11 @@ class LiqHmWindow(QWidget):
                 self._price_max = new_max
                 self._bin_size  = (new_max - new_min) / N_PRICE
                 max_cols = self._max_cols_spin.value()
-                self._bid_grid  = np.zeros((max_cols, N_PRICE), dtype=np.float64)
-                self._ask_grid  = np.zeros((max_cols, N_PRICE), dtype=np.float64)
-                self._col_ts    = []
-                self._raw_snaps = []
+                self._bid_grid   = np.zeros((max_cols, N_PRICE), dtype=np.float64)
+                self._ask_grid   = np.zeros((max_cols, N_PRICE), dtype=np.float64)
+                self._col_ts     = []
+                self._raw_snaps  = []
+                self._mid_prices = []
 
     def _push_column(self, snap: list[dict],
                      ts: datetime | None = None) -> None:
@@ -720,6 +740,8 @@ class LiqHmWindow(QWidget):
             self._bid_grid[-1] = 0.0
             self._ask_grid[-1] = 0.0
             self._col_ts.pop(0)
+            if self._mid_prices:
+                self._mid_prices.pop(0)
             # Trim raw_snaps to match the new oldest column time
             if self._col_ts:
                 cutoff = self._col_ts[0]
@@ -743,8 +765,19 @@ class LiqHmWindow(QWidget):
         # Track best bid / ask (盘口) from this snapshot
         bid_prices = [r["price"] for r in snap if r["side"] == "BID"]
         ask_prices = [r["price"] for r in snap if r["side"] == "ASK"]
-        self._best_bid = max(bid_prices) if bid_prices else self._best_bid
-        self._best_ask = min(ask_prices) if ask_prices else self._best_ask
+        col_bid = max(bid_prices) if bid_prices else None
+        col_ask = min(ask_prices) if ask_prices else None
+        self._best_bid = col_bid if col_bid is not None else self._best_bid
+        self._best_ask = col_ask if col_ask is not None else self._best_ask
+
+        if col_bid is not None and col_ask is not None:
+            self._mid_prices.append((col_bid + col_ask) / 2.0)
+        elif col_bid is not None:
+            self._mid_prices.append(col_bid)
+        elif col_ask is not None:
+            self._mid_prices.append(col_ask)
+        else:
+            self._mid_prices.append(None)
 
         for row in snap:
             self._raw_snaps.append({
@@ -817,6 +850,18 @@ class LiqHmWindow(QWidget):
         if n <= 1:
             self._plot_widget.setXRange(0, max_cols, padding=0)
             self._plot_widget.setYRange(self._price_min, self._price_max, padding=0.02)
+
+        # Mid-price path line
+        if self._price_path_cb.isChecked() and self._mid_prices:
+            xs = np.arange(n, dtype=np.float64) + 0.5
+            ys = np.array(
+                [m if m is not None else np.nan for m in self._mid_prices[:n]],
+                dtype=np.float64,
+            )
+            self._price_path_item.setData(xs, ys)
+            self._price_path_item.setVisible(True)
+        else:
+            self._price_path_item.setVisible(False)
 
         # Update best bid/ask spread lines
         if self._best_bid is not None:
@@ -1086,6 +1131,9 @@ class LiqHmWindow(QWidget):
 
     def _on_gamma_changed(self) -> None:
         self._render()   # pure visual change — no overlay recalculation needed
+
+    def _on_price_path_changed(self) -> None:
+        self._render()   # toggle visibility only
 
     def _on_controls_changed(self) -> None:
         self._update_legend()
