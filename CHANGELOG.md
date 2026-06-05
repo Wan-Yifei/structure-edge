@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.11.0 — Absorption bubble fixes + hover tooltip + scheduler zombie watchdog (2026-06-05)
+
+### Fix: Absorption bubble tick bucketing (`analysis/orderflow_detect.py`)
+
+- Replaced half-window bisect logic with direct `bisect_right - 1` bucketing.
+  Each column owns `[col_ts[i], col_ts[i+1])`; no half-window clipping needed.
+  Fixes tick drops on column boundaries that caused bubbles to disappear.
+
+### Fix: MinΔ spinbox response latency (`analysis/liq_hm_window.py`)
+
+- MinΔ change now redraws immediately from cached ticks instead of re-querying `ticks.db`.
+  DB reload only occurs when ticks are not yet cached or the display window shifts.
+- MinΔ range lowered to 10–100 000 (was 100), step 10 (was 100).
+
+### New: Absorption bubble hover tooltip (`analysis/liq_hm_window.py`)
+
+- Hovering a bubble shows a `QToolTip` with direction and absorbed Δvol:
+  `Buyers absorbed by sellers (bearish) / Δvol: N`
+- Uses `pg.ScatterPlotItem(spots=…, hoverable=True)` + `sigHovered`.
+
+### New: Absorption bubble legend entry (`analysis/liq_hm_window.py`)
+
+- Legend bar now shows gold/purple colour swatches with passive-voice labels
+  when the `Absorb` checkbox is checked; hidden when unchecked.
+
+### New: Tick collector zombie watchdog (`analysis/scheduler.py`)
+
+- `_tick_db_stale_minutes()`: checks WAL file mtime (O(1)) to detect DB write stalls.
+- If the collector process is alive but no DB write for > 30 min, the scheduler
+  terminates and restarts it automatically.
+
+### Config
+
+- `config/schedule.json`: added `US.AVGO` to monitored targets.
+
+---
+
 ## v0.10.0 — Liquidity Heatmap enhancements: contrast, price path, depth tooltip, absorption bubbles (2026-06-03)
 
 ### New: Gamma contrast spinbox (`analysis/liq_hm_window.py`)
