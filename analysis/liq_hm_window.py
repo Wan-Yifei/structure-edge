@@ -573,8 +573,8 @@ class LiqHmWindow(QWidget):
 
         tb.addWidget(_lbl("MinΔ:"))
         self._absorb_min_vol_spin = QSpinBox()
-        self._absorb_min_vol_spin.setRange(100, 100_000)
-        self._absorb_min_vol_spin.setSingleStep(100)
+        self._absorb_min_vol_spin.setRange(10, 100_000)
+        self._absorb_min_vol_spin.setSingleStep(10)
         self._absorb_min_vol_spin.setValue(500)
         self._absorb_min_vol_spin.setFixedWidth(70)
         self._absorb_min_vol_spin.setToolTip(
@@ -1204,6 +1204,7 @@ class LiqHmWindow(QWidget):
         Gold   = aggressive buyers absorbed (BUY direction, passive sellers won).
         Purple = aggressive sellers absorbed (SELL direction, passive buyers won).
         Bubble size scales with absorbed delta volume (8–30 px range).
+        Hovering a bubble shows a tooltip with direction and absorbed delta volume.
         """
         if not bubbles:
             return
@@ -1211,31 +1212,34 @@ class LiqHmWindow(QWidget):
         _PURPLE = (171,  71, 188, 200)
 
         max_vol = max(b[3] for b in bubbles)
-        buy_xs, buy_ys, buy_sz  = [], [], []
-        sell_xs, sell_ys, sell_sz = [], [], []
-
-        for col_idx, price, direction, vol in bubbles:
-            size = 8.0 + 22.0 * (vol / max_vol)
-            x = float(col_idx) + 0.5
-            if direction == "BUY":
-                buy_xs.append(x); buy_ys.append(price); buy_sz.append(size)
-            else:
-                sell_xs.append(x); sell_ys.append(price); sell_sz.append(size)
-
         outline = pg.mkPen("white", width=0.5)
-        for xs, ys, szs, color in (
-            (buy_xs,  buy_ys,  buy_sz,  _GOLD),
-            (sell_xs, sell_ys, sell_sz, _PURPLE),
-        ):
-            if not xs:
-                continue
-            scat = pg.ScatterPlotItem(
-                x=xs, y=ys, size=szs,
-                pen=outline, brush=pg.mkBrush(*color),
-            )
-            scat.setZValue(12)
-            self._plot_widget.addItem(scat)
-            self._absorb_items.append(scat)
+        spots = []
+        for col_idx, price, direction, vol in bubbles:
+            size  = 8.0 + 22.0 * (vol / max_vol)
+            color = _GOLD if direction == "BUY" else _PURPLE
+            spots.append({
+                "pos":   (float(col_idx) + 0.5, price),
+                "size":  size,
+                "pen":   outline,
+                "brush": pg.mkBrush(*color),
+                "data":  {"direction": direction, "vol": vol},
+            })
+
+        scat = pg.ScatterPlotItem(spots=spots, hoverable=True)
+        scat.setZValue(12)
+        scat.sigHovered.connect(self._on_absorb_hovered)
+        self._plot_widget.addItem(scat)
+        self._absorb_items.append(scat)
+
+    def _on_absorb_hovered(self, scatter, points, ev) -> None:
+        from PyQt5.QtWidgets import QToolTip
+        from PyQt5.QtGui import QCursor
+        if not points:
+            QToolTip.hideText()
+            return
+        d = points[0].data()
+        label = "Buyers absorbed by sellers (bearish)" if d["direction"] == "BUY" else "Sellers absorbed by buyers (bullish)"
+        QToolTip.showText(QCursor.pos(), f"{label}\nΔvol: {d['vol']:,.0f}")
 
     def _load_absorb_ticks(self) -> None:
         """Trigger background tick load for the current display window."""
@@ -1256,11 +1260,15 @@ class LiqHmWindow(QWidget):
         self._redraw_orderflow_markers()
 
     def _on_absorb_changed(self) -> None:
-        """Checkbox or MinΔ changed: reload ticks then redraw."""
+        """Checkbox or MinΔ changed: redraw if ticks are cached, else load from DB."""
+        self._update_legend()
         if self._absorb_cb.isChecked():
-            self._load_absorb_ticks()
+            if self._absorb_ticks:
+                # Ticks already cached — threshold change only, redraw immediately.
+                self._redraw_orderflow_markers()
+            else:
+                self._load_absorb_ticks()
         else:
-            # Just hide existing bubbles without a full redraw
             for item in self._absorb_items:
                 self._plot_widget.removeItem(item)
             self._absorb_items.clear()
@@ -1315,6 +1323,14 @@ class LiqHmWindow(QWidget):
         if self._spoof_cb.isChecked():
             parts.append(
                 f'&nbsp;&nbsp;<font color="orange">▲ Bid spoof&nbsp;▼ Ask spoof</font>'
+            )
+
+        if self._absorb_cb.isChecked():
+            parts.append(
+                f'&nbsp;&nbsp;<font color="#ffa000">●</font>'
+                f'&nbsp;<font color="{_FG}">Buyers absorbed by sellers (bearish)</font>'
+                f'&nbsp;&nbsp;<font color="#ab47bc">●</font>'
+                f'&nbsp;<font color="{_FG}">Sellers absorbed by buyers (bullish)</font>'
             )
 
         self._legend_lbl.setText("".join(parts))

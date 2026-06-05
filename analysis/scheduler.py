@@ -867,6 +867,19 @@ class SchedulerApp(tk.Tk):
             self._log("Tick collector exited unexpectedly — restarting")
             self._proc = None
             self._launch_collector()
+        elif self._proc is not None:
+            # Process alive but moomoo connection may be dead — check ticks.db
+            self._tick_stale_ticks = getattr(self, "_tick_stale_ticks", 0) + 1
+            if self._tick_stale_ticks % 15 == 0:   # check every ~15 scheduler ticks
+                stale = self._tick_db_stale_minutes()
+                if stale is not None and stale > 30:
+                    self._log(
+                        f"Tick collector zombie (no DB writes for {stale:.0f} min) — restarting"
+                    )
+                    self._proc.terminate()
+                    self._proc = None
+                    self._tick_stale_ticks = 0
+                    self._launch_collector()
         if self.cfg.get("order_book_enabled", True):
             if self._ob_proc is not None and self._ob_proc.poll() is not None:
                 self._log("OB collector exited unexpectedly — restarting")
@@ -904,6 +917,23 @@ class SchedulerApp(tk.Tk):
         except Exception:
             pass
         return None
+
+    def _tick_db_stale_minutes(self) -> float | None:
+        """Return minutes since the last tick DB write, using WAL file mtime.
+
+        Checking the WAL file modification time is O(1) and avoids slow queries
+        on the large ticks.db.  Falls back to the main DB file when WAL is absent.
+        """
+        db_path = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
+        if not db_path.exists():
+            return None
+        try:
+            wal = db_path.parent / (db_path.name + "-wal")
+            check = wal if (wal.exists() and wal.stat().st_size > 0) else db_path
+            import time as _time
+            return (_time.time() - check.stat().st_mtime) / 60
+        except Exception:
+            return None
 
     # ── Collector subprocess ──────────────────────────────────────────────────
 

@@ -6,6 +6,7 @@ directly testable without a display.
 
 from __future__ import annotations
 
+import bisect as _bisect
 from collections import defaultdict
 from datetime import datetime
 
@@ -530,33 +531,20 @@ def detect_absorption_bubbles(
     # Build a sorted list of col_ts for binary search
     ts_list = list(col_ts)
 
-    # Bucket each tick into the nearest column (bisect_right gives col after tick;
-    # subtract 1 to get the column whose ts <= tick.ts)
+    # Bucket each tick into the column whose start timestamp <= tick.ts.
+    # Each column i owns [col_ts[i], col_ts[i+1]); the last column owns
+    # [col_ts[-1], col_ts[-1] + col_secs). bisect_right - 1 gives the correct
+    # column index directly — no half-window clipping needed.
     col_buy: dict[int, float] = defaultdict(float)
     col_sell: dict[int, float] = defaultdict(float)
-    half = col_secs / 2.0
 
     for tk in ticks:
         direction = tk.get("direction", "NEUTRAL")
         if direction not in ("BUY", "SELL"):
             continue
         tt = tk["ts"]
-        # Find the column whose window contains this tick
-        # Window for column i: [col_ts[i] - half, col_ts[i] + half)
-        import bisect as _bisect
         idx = _bisect.bisect_right(ts_list, tt) - 1
         if idx < 0:
-            # Tick predates all columns — try column 0 if within half-window
-            if (ts_list[0] - tt).total_seconds() <= half:
-                idx = 0
-            else:
-                continue
-        elif idx >= len(ts_list):
-            idx = len(ts_list) - 1
-
-        # Verify tick falls within the half-window of that column
-        dt = abs((tt - ts_list[idx]).total_seconds())
-        if dt > half:
             continue
 
         vol = float(tk["volume"])
