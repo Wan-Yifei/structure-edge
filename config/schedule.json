@@ -32,6 +32,7 @@
   "targets": [
     "US.AAPL",
     "US.AMD",
+    "US.AVGO",
     "US.BE",
     "US.CRWV",
     "US.CSCO",
@@ -69,7 +70,8 @@
     "US.ORCL": "AI family",
     "US.PLTR": "AI family",
     "US.UUUU": "nuclear fusion & energy",
-    "US.NNE": "nuclear fusion & energy"
+    "US.NNE": "nuclear fusion & energy",
+    "US.AVGO": "半导体"
   },
   "order_book_enabled": true,
   "remote_backup": {

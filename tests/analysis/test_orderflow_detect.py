@@ -12,6 +12,7 @@ from analysis.orderflow_detect import (
     detect_spoofs,
     detect_absorption,
     detect_stacked_imbalance,
+    detect_absorption_bubbles,
 )
 from core.time_utils import candle_start
 
@@ -685,6 +686,150 @@ class TestDetectStackedImbalance(unittest.TestCase):
         result = self._run(snaps)
         self.assertEqual(len(result), 2)
         self.assertEqual({r[0] for r in result}, {0, 1})
+
+
+# ---------------------------------------------------------------------------
+# detect_absorption_bubbles
+# ---------------------------------------------------------------------------
+
+class TestDetectAbsorptionBubbles(unittest.TestCase):
+    """Tests for ④ absorption bubble detection."""
+
+    COL_SECS = 30
+
+    def _col_ts(self, n: int):
+        return [T0 + timedelta(seconds=i * self.COL_SECS) for i in range(n)]
+
+    def _tick(self, col: int, direction: str, volume: int) -> dict:
+        ts = T0 + timedelta(seconds=col * self.COL_SECS + 5)
+        return {"ts": ts, "price": 100.0, "volume": volume, "direction": direction}
+
+    def _mid(self, *prices):
+        return list(prices)
+
+    # -- basic cases --
+
+    def test_empty_ticks_returns_empty(self):
+        col_ts = self._col_ts(5)
+        result = detect_absorption_bubbles([], col_ts, self._mid(*[100.0] * 5),
+                                           self.COL_SECS)
+        self.assertEqual(result, [])
+
+    def test_empty_col_ts_returns_empty(self):
+        ticks = [self._tick(0, "BUY", 1000)]
+        result = detect_absorption_bubbles(ticks, [], [], self.COL_SECS)
+        self.assertEqual(result, [])
+
+    def test_buy_absorbed_when_price_flat(self):
+        # Strong BUY delta, price does not rise → BUY absorbed
+        col_ts   = self._col_ts(3)
+        mid      = self._mid(100.0, 100.0, 100.0)  # price flat
+        ticks    = [self._tick(1, "BUY", 800), self._tick(1, "SELL", 100)]
+        result   = detect_absorption_bubbles(ticks, col_ts, mid,
+                                             self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(len(result), 1)
+        col_idx, price, direction, vol = result[0]
+        self.assertEqual(col_idx, 1)
+        self.assertEqual(direction, "BUY")
+        self.assertAlmostEqual(vol, 700.0)
+
+    def test_buy_absorbed_when_price_falls(self):
+        col_ts = self._col_ts(3)
+        mid    = self._mid(100.0, 99.5, 99.0)   # price falling despite buying
+        ticks  = [self._tick(1, "BUY", 1000)]
+        result = detect_absorption_bubbles(ticks, col_ts, mid,
+                                           self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][2], "BUY")
+
+    def test_sell_absorbed_when_price_flat(self):
+        col_ts = self._col_ts(3)
+        mid    = self._mid(100.0, 100.0, 100.0)
+        ticks  = [self._tick(1, "SELL", 900), self._tick(1, "BUY", 100)]
+        result = detect_absorption_bubbles(ticks, col_ts, mid,
+                                           self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][2], "SELL")
+
+    def test_sell_absorbed_when_price_rises(self):
+        col_ts = self._col_ts(3)
+        mid    = self._mid(100.0, 100.5, 101.0)  # price rising despite selling
+        ticks  = [self._tick(1, "SELL", 1000)]
+        result = detect_absorption_bubbles(ticks, col_ts, mid,
+                                           self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][2], "SELL")
+
+    # -- no absorption --
+
+    def test_buy_not_absorbed_when_price_rises(self):
+        col_ts = self._col_ts(3)
+        mid    = self._mid(100.0, 100.5, 101.0)  # price cooperates with buyers
+        ticks  = [self._tick(1, "BUY", 1000)]
+        result = detect_absorption_bubbles(ticks, col_ts, mid,
+                                           self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(result, [])
+
+    def test_sell_not_absorbed_when_price_falls(self):
+        col_ts = self._col_ts(3)
+        mid    = self._mid(100.0, 99.5, 99.0)   # price cooperates with sellers
+        ticks  = [self._tick(1, "SELL", 1000)]
+        result = detect_absorption_bubbles(ticks, col_ts, mid,
+                                           self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(result, [])
+
+    def test_below_min_delta_vol_ignored(self):
+        col_ts = self._col_ts(3)
+        mid    = self._mid(100.0, 100.0, 100.0)
+        ticks  = [self._tick(1, "BUY", 300), self._tick(1, "SELL", 100)]
+        result = detect_absorption_bubbles(ticks, col_ts, mid,
+                                           self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(result, [])
+
+    def test_neutral_ticks_excluded(self):
+        col_ts = self._col_ts(3)
+        mid    = self._mid(100.0, 100.0, 100.0)
+        ticks  = [self._tick(1, "NEUTRAL", 5000)]  # direction irrelevant
+        result = detect_absorption_bubbles(ticks, col_ts, mid,
+                                           self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(result, [])
+
+    # -- output fields --
+
+    def test_result_fields(self):
+        col_ts = self._col_ts(3)
+        mid    = self._mid(100.0, 100.0, 100.0)
+        ticks  = [self._tick(1, "BUY", 800)]
+        result = detect_absorption_bubbles(ticks, col_ts, mid,
+                                           self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(len(result), 1)
+        col_idx, price, direction, vol = result[0]
+        self.assertIsInstance(col_idx, int)
+        self.assertIsInstance(price,   float)
+        self.assertIn(direction, ("BUY", "SELL"))
+        self.assertGreater(vol, 0)
+
+    def test_multiple_columns_detected(self):
+        col_ts = self._col_ts(5)
+        mid    = self._mid(100.0, 100.0, 100.0, 100.0, 100.0)
+        ticks  = [
+            self._tick(1, "BUY",  700),
+            self._tick(3, "SELL", 900),
+        ]
+        result = detect_absorption_bubbles(ticks, col_ts, mid,
+                                           self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(len(result), 2)
+        directions = {r[2] for r in result}
+        self.assertIn("BUY",  directions)
+        self.assertIn("SELL", directions)
+
+    def test_none_mid_price_skipped(self):
+        col_ts = self._col_ts(3)
+        mid    = [100.0, None, 100.0]   # column 1 has no mid price
+        ticks  = [self._tick(1, "BUY", 1000)]
+        result = detect_absorption_bubbles(ticks, col_ts, mid,
+                                           self.COL_SECS, min_delta_vol=500)
+        self.assertEqual(result, [])
 
 
 if __name__ == "__main__":

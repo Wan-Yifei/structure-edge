@@ -6,6 +6,7 @@ directly testable without a display.
 
 from __future__ import annotations
 
+import bisect as _bisect
 from collections import defaultdict
 from datetime import datetime
 
@@ -490,5 +491,94 @@ def detect_stacked_imbalance(
                     results.append((bar_idx, min(prices), max(prices), d, mean_ratio))
 
             i = j
+
+    return results
+
+
+def detect_absorption_bubbles(
+    ticks: list[dict],
+    col_ts: list[datetime],
+    mid_prices: list[float | None],
+    col_secs: int,
+    min_delta_vol: float = 500.0,
+) -> list[tuple]:
+    """Detect columns where aggressive order flow is absorbed by passive orders.
+
+    For each column time window the net delta (buy_vol − sell_vol) is compared
+    against the mid-price movement to that column:
+
+    - delta >= +min_delta_vol AND price_change <= 0  →  'BUY' absorbed
+      (aggressive buyers absorbed by passive sell wall — bearish)
+    - delta <= -min_delta_vol AND price_change >= 0  →  'SELL' absorbed
+      (aggressive sellers absorbed by passive buy wall — bullish)
+
+    Args:
+        ticks:          Tick records {ts, price, volume, direction}.
+                        direction must be 'BUY', 'SELL', or 'NEUTRAL'.
+        col_ts:         Per-column timestamps (col_ts[i] = snapshot time of column i).
+        mid_prices:     Per-column mid-price (None if unavailable for that column).
+        col_secs:       Column duration in seconds; determines bucket half-width.
+        min_delta_vol:  Minimum |delta| required to flag as absorption.
+
+    Returns:
+        List of (col_idx, mid_price, direction, delta_vol).
+        direction: 'BUY'  = aggressive buyers absorbed (passive sellers won).
+                   'SELL' = aggressive sellers absorbed (passive buyers won).
+    """
+    if not ticks or not col_ts:
+        return []
+
+    # Build a sorted list of col_ts for binary search
+    ts_list = list(col_ts)
+
+    # Bucket each tick into the column whose start timestamp <= tick.ts.
+    # Each column i owns [col_ts[i], col_ts[i+1]); the last column owns
+    # [col_ts[-1], col_ts[-1] + col_secs). bisect_right - 1 gives the correct
+    # column index directly — no half-window clipping needed.
+    col_buy: dict[int, float] = defaultdict(float)
+    col_sell: dict[int, float] = defaultdict(float)
+
+    for tk in ticks:
+        direction = tk.get("direction", "NEUTRAL")
+        if direction not in ("BUY", "SELL"):
+            continue
+        tt = tk["ts"]
+        idx = _bisect.bisect_right(ts_list, tt) - 1
+        if idx < 0:
+            continue
+
+        vol = float(tk["volume"])
+        if direction == "BUY":
+            col_buy[idx] += vol
+        else:
+            col_sell[idx] += vol
+
+    results = []
+    all_cols = set(col_buy) | set(col_sell)
+    for i in sorted(all_cols):
+        if i >= len(col_ts) or i >= len(mid_prices):
+            continue
+        mid = mid_prices[i]
+        if mid is None:
+            continue
+
+        buy_vol  = col_buy.get(i, 0.0)
+        sell_vol = col_sell.get(i, 0.0)
+        delta    = buy_vol - sell_vol
+
+        # Price change vs previous column with valid mid
+        price_change: float | None = None
+        for j in range(i - 1, -1, -1):
+            if mid_prices[j] is not None:
+                price_change = mid - mid_prices[j]
+                break
+
+        if abs(delta) < min_delta_vol:
+            continue
+
+        if delta > 0 and (price_change is None or price_change <= 0):
+            results.append((i, mid, "BUY", delta))
+        elif delta < 0 and (price_change is None or price_change >= 0):
+            results.append((i, mid, "SELL", abs(delta)))
 
     return results

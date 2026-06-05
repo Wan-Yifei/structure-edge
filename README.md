@@ -171,10 +171,13 @@ uv run analysis/trade_viewer_qt.py --code US.SNDK --tf 5m --mode Historical --da
 **浮动辅助窗口**
 - **DOM**（Depth of Market）：开关按钮弹出独立窗口，显示盘口多档买卖量柱图；
   历史模式下随十字光标同步到对应时刻的快照
-- **Liquidity Heatmap**：浮动热力图，X 轴 = 时间，Y 轴 = 价格，颜色编码盘口深度；
-  支持冰山（顶档量反复刷新）和 Spoof（大单秒消失且非成交）检测覆盖层；
-  **Stacked Imbalance 覆盖层**：蓝色竖条 = 多档 bid 持续碾压 ask（看涨）；橙色竖条 = 多档 ask 持续碾压 bid（看跌）；
-  盘口最优买卖价虚线标注；历史模式下随主图十字线同步纵轴
+- **Liquidity Heatmap**：浮动热力图，X 轴 = 时间，Y 轴 = 价格，颜色编码盘口深度。工具栏功能：
+  - `Gamma` 滑条：调整颜色对比度（> 1 突出密集区，< 1 显示弱信号）
+  - `Price` 开关：白色折线标注分时 mid-price 路径（(bid+ask)/2 per column）
+  - 悬停标注：价格标签实时显示吃穿到光标所需委托量（`eat↑ N` / `eat↓ N` / `[spread]`）
+  - **Stacked Imbalance**：蓝色竖条 = 多档 bid 持续碾压 ask（看涨）；橙色竖条反之（看跌）
+  - **Absorption Bubbles**：金色气泡 = 主买被吸收（看跌信号）；紫色气泡 = 主卖被吸收（看涨信号）；气泡大小编码吸收量
+  - 冰山 / Spoof 检测覆盖层；盘口最优买卖价虚线；历史模式下随主图十字线同步纵轴
 
 **Trade Review 模式**
 - 在工具栏输入 Trade ID（UUID）→ 自动跳转到入场 K 线
