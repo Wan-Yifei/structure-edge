@@ -427,6 +427,49 @@ class BacktestDB:
         cols = [d[0] for d in self._conn.description]
         return dict(zip(cols, row))
 
+    def get_best_params(
+        self,
+        symbol: str,
+        lookback_months: int = 3,
+        min_n_trades: int = 5,
+        min_pf: float = 1.5,
+    ) -> Optional[dict]:
+        """Return the highest-PF BacktestParams config for symbol within the lookback window.
+
+        Queries runs completed in the last lookback_months × 30 days, filtered by
+        min_n_trades and min_pf.  Returns a dict with keys 'config_json', 'trend_tf',
+        'entry_tf', and '_meta' (pf, n_trades).  Returns None when no match is found.
+        """
+        from datetime import datetime, timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=lookback_months * 30)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        row = self._conn.execute(
+            """
+            SELECT r.config_json, r.trend_tf, r.entry_tf,
+                   s.profit_factor, s.n_trades
+            FROM runs r
+            JOIN run_stats s ON r.run_id = s.run_id
+            WHERE r.symbol    = ?
+              AND r.status    = 'done'
+              AND r.created_at >= ?
+              AND s.n_trades  >= ?
+              AND s.profit_factor >= ?
+            ORDER BY s.profit_factor DESC
+            LIMIT 1
+            """,
+            [symbol, cutoff, min_n_trades, min_pf],
+        ).fetchone()
+        if row is None:
+            return None
+        cols = [d[0] for d in self._conn.description]
+        result = dict(zip(cols, row))
+        result["_meta"] = {
+            "pf":       result.pop("profit_factor"),
+            "n_trades": result.pop("n_trades"),
+        }
+        return result
+
     # ── live_trades ───────────────────────────────────────────────────────────
 
     def insert_live_trade(self, trade: dict) -> str:

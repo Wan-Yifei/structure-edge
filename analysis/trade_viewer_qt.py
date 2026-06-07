@@ -1207,6 +1207,17 @@ class TradeViewerQt(QMainWindow):
         self._range_profile_btn.clicked.connect(self._toggle_range_profile)
         tb3.addWidget(self._range_profile_btn)
 
+        tb3.addSeparator()
+        self._scanner_signals_btn = QPushButton("Scanner Signals")
+        self._scanner_signals_btn.setCheckable(True)
+        self._scanner_signals_btn.setChecked(False)
+        self._scanner_signals_btn.setToolTip(
+            "Overlay open scanner signals (entry zone, SL, TP) from db/signals.db.\n"
+            "Signals are read from the local SQLite database written by the scanner."
+        )
+        self._scanner_signals_btn.clicked.connect(self._toggle_scanner_signals)
+        tb3.addWidget(self._scanner_signals_btn)
+
         # ── Row 4: trade review ───────────────────────────────────────────────
         self.addToolBarBreak()
         tb3 = QToolBar("Trade Review", self)
@@ -1295,7 +1306,8 @@ class TradeViewerQt(QMainWindow):
         self._ema_items:     list = []  # PlotCurveItem per EMA period
         self._kd_items:      list = []  # PlotCurveItem + fill for KD subplot
         self._kd_band_items: list = []  # PlotCurveItem + fill for KD band on main chart
-        self._trade_items:   list = []  # all trade review overlay items
+        self._trade_items:          list = []  # all trade review overlay items
+        self._scanner_signal_items: list = []  # scanner signals overlay items
 
         # Volume bars + MA curve
         self._vol_item = pg.BarGraphItem(
@@ -1827,6 +1839,11 @@ class TradeViewerQt(QMainWindow):
         self._clear_trade_items()
         if self._trade_record is not None:
             self._draw_trade_review(klines)
+
+        # Scanner Signals overlay
+        self._clear_scanner_signal_items()
+        if self._scanner_signals_btn.isChecked():
+            self._load_scanner_signals(klines)
 
         # X-axis time labels
         self._set_xaxis_ticks(klines)
@@ -2385,6 +2402,104 @@ class TradeViewerQt(QMainWindow):
             )
             self._plot_c.addItem(region)
             self._trade_items.append(region)
+
+    # ── Scanner Signals overlay ───────────────────────────────────────────────
+
+    def _toggle_scanner_signals(self, checked: bool) -> None:
+        if checked:
+            if self._klines is not None:
+                self._load_scanner_signals(self._klines)
+        else:
+            self._clear_scanner_signal_items()
+
+    def _clear_scanner_signal_items(self) -> None:
+        for item in self._scanner_signal_items:
+            self._plot_c.removeItem(item)
+        self._scanner_signal_items.clear()
+
+    def _load_scanner_signals(self, klines: pd.DataFrame) -> None:
+        """Read open signals for the current symbol from db/signals.db and render them."""
+        import pathlib as _pl
+        db_path = _pl.Path(__file__).parent.parent / "db" / "signals.db"
+        if not db_path.exists():
+            return
+        code = self._code_edit.text().strip()
+        if not code:
+            return
+        try:
+            from db.signals import SignalsDB
+            with SignalsDB(db_path, read_only=False) as db:
+                sigs = db.get_open_signals(code)
+        except Exception as exc:
+            self._log(f"Scanner signals load error: {exc}")
+            return
+
+        for sig in sigs:
+            self._render_scanner_signal(sig, klines)
+
+    def _render_scanner_signal(self, sig: dict, klines: pd.DataFrame) -> None:
+        """Draw one scanner signal's entry zone, SL, TP, and label on the chart."""
+        is_bull = sig.get("direction", "") == "bull"
+        col     = _GREEN if is_bull else _RED
+        qcol    = _qc(col)
+
+        top    = _safe_float(sig.get("entry_zone_top"))
+        bottom = _safe_float(sig.get("entry_zone_bottom"))
+        sl     = _safe_float(sig.get("sl_price"))
+        tp     = _safe_float(sig.get("tp_price"))
+        rr     = sig.get("rr_ratio", 0)
+
+        # Entry zone band (horizontal LinearRegionItem spanning full chart width)
+        if top and bottom:
+            zone = pg.LinearRegionItem(
+                values=[bottom, top],
+                orientation="horizontal",
+                brush=_qc(col, 35),
+                pen=pg.mkPen(col, width=0.5, style=Qt.PenStyle.DotLine),
+                movable=False,
+            )
+            self._plot_c.addItem(zone)
+            self._scanner_signal_items.append(zone)
+
+        # SL line
+        if sl:
+            sl_line = pg.InfiniteLine(
+                pos=sl, angle=0, movable=False,
+                pen=pg.mkPen(_RED, width=1, style=Qt.PenStyle.DashLine),
+                label=f"SL {sl:.2f}",
+                labelOpts={"color": _RED, "position": 0.02},
+            )
+            self._plot_c.addItem(sl_line)
+            self._scanner_signal_items.append(sl_line)
+
+        # TP line
+        if tp:
+            tp_line = pg.InfiniteLine(
+                pos=tp, angle=0, movable=False,
+                pen=pg.mkPen(_GREEN, width=1, style=Qt.PenStyle.DashLine),
+                label=f"TP {tp:.2f}",
+                labelOpts={"color": _GREEN, "position": 0.02},
+            )
+            self._plot_c.addItem(tp_line)
+            self._scanner_signal_items.append(tp_line)
+
+        # Label near the right edge of the entry zone
+        if top and bottom:
+            times    = klines["time_key"].astype(str).values
+            sig_time = str(sig.get("signal_time", ""))[:16]
+            x_idx    = int(np.searchsorted(times, sig_time, side="left")) if sig_time else len(klines) - 1
+            x_idx    = min(x_idx, len(klines) - 1)
+            mid      = (top + bottom) / 2.0
+            arrow    = "▲" if is_bull else "▼"
+            lbl = pg.TextItem(
+                text=f"{arrow} {sig.get('direction','').upper()}  RR {rr:.1f}",
+                color=col,
+                anchor=(0.0, 0.5),
+            )
+            lbl.setFont(QFont("Monospace", 7))
+            lbl.setPos(x_idx + 0.5, mid)
+            self._plot_c.addItem(lbl)
+            self._scanner_signal_items.append(lbl)
 
     # ── Session vol profile ───────────────────────────────────────────────────
 

@@ -5,6 +5,7 @@ Usage:
   uv run main.py trade_viewer_qt [args...]   # PyQtGraph viewer (current)
   uv run main.py trade_viewer    [args...]   # Matplotlib viewer (legacy)
   uv run main.py scheduler
+  uv run main.py scanner                     # SMC signal scanner
 """
 
 import argparse
@@ -14,6 +15,7 @@ COMMANDS = {
     "trade_viewer_qt": ("analysis.trade_viewer_qt", "main"),  # PyQtGraph (current)
     "trade_viewer":    ("analysis.trade_viewer",    "main"),  # Matplotlib (legacy)
     "scheduler":       ("analysis.scheduler",       "main"),
+    "scanner":         ("analysis.signal_scanner",  "main"),
 }
 
 
