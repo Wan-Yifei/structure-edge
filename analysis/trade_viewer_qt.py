@@ -293,6 +293,108 @@ def apply_profile_range(klines: pd.DataFrame, range_val: str) -> pd.DataFrame:
     return klines[(times >= start) & (times <= anchor)]
 
 
+def _compute_profile_bins(
+    klines: pd.DataFrame,
+    ticks: dict | None,
+    candle_mins: int,
+    i0: int,
+    i1: int,
+    n_bins: int = 60,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Volume profile bins for klines[i0..i1].
+
+    Prefers tick data (exact price levels via np.digitize); falls back to OHLCV
+    proportional distribution.  Returns (centers, volumes, used_ticks).
+    centers and volumes are empty arrays when the price range is degenerate.
+    """
+    kl = klines.iloc[i0 : i1 + 1]
+    lo = float(kl["low"].min())
+    hi = float(kl["high"].max())
+    if hi <= lo:
+        return np.array([]), np.array([]), False
+
+    bins    = np.linspace(lo, hi, n_bins + 1)
+    centers = (bins[:-1] + bins[1:]) / 2
+    volumes = np.zeros(n_bins, dtype=float)
+
+    used_ticks = False
+    if ticks:
+        tick_prices: list[float] = []
+        tick_vols:   list[float] = []
+        for idx in range(i0, i1 + 1):
+            row = klines.iloc[idx]
+            try:
+                bar_end = datetime.strptime(
+                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                bk = candle_start(
+                    bar_end - timedelta(minutes=candle_mins), candle_mins)
+            except ValueError:
+                continue
+            pd_ = ticks.get(bk)
+            if not pd_:
+                continue
+            for price, counts in pd_.items():
+                total = (counts.get("buy", 0)
+                         + counts.get("sell", 0)
+                         + counts.get("neutral", 0))
+                if total > 0:
+                    tick_prices.append(float(price))
+                    tick_vols.append(float(total))
+
+        if tick_prices:
+            tp   = np.array(tick_prices)
+            tv   = np.array(tick_vols)
+            mask = (tp >= lo) & (tp <= hi)
+            if mask.any():
+                indices = np.clip(np.digitize(tp[mask], bins) - 1,
+                                  0, n_bins - 1)
+                np.add.at(volumes, indices, tv[mask])
+                used_ticks = True
+
+    if not used_ticks:
+        klo  = kl["low"].values.astype(float)
+        khi  = kl["high"].values.astype(float)
+        kvol = kl["volume"].fillna(0).values.astype(float)
+        for j in range(len(kl)):
+            mask  = (centers >= klo[j]) & (centers <= khi[j])
+            n_hit = int(mask.sum())
+            if n_hit:
+                volumes[mask] += kvol[j] / n_hit
+
+    return centers, volumes, used_ticks
+
+
+def _compute_poc_vah_val(
+    centers: np.ndarray,
+    volumes: np.ndarray,
+    va_pct: float = 0.70,
+) -> tuple[float, float, float]:
+    """Return (poc_price, vah_price, val_price) from a volume profile.
+
+    VAH/VAL are the highest and lowest price bins that together account for
+    at least va_pct of the total volume, selected greedily from highest-volume
+    bins down.  Returns (poc, poc, poc) for degenerate inputs.
+    """
+    if centers.size == 0:
+        return 0.0, 0.0, 0.0
+    poc_idx = int(np.argmax(volumes))
+    poc     = float(centers[poc_idx])
+    total   = float(volumes.sum())
+    if total <= 0:
+        return poc, poc, poc
+    sorted_idx = np.argsort(volumes)[::-1]
+    cumvol     = 0.0
+    va_indices: list[int] = []
+    for idx in sorted_idx:
+        cumvol += float(volumes[idx])
+        va_indices.append(int(idx))
+        if cumvol / total >= va_pct:
+            break
+    vah = float(centers[max(va_indices)]) if va_indices else poc
+    val = float(centers[min(va_indices)]) if va_indices else poc
+    return poc, vah, val
+
+
 def _load_trade_from_db(trade_id: str) -> tuple[dict | None, str]:
     """Load a trade record from BacktestDB or ReviewTradesDB.
 
@@ -837,6 +939,14 @@ class TradeViewerQt(QMainWindow):
         # from resetting the user's manual pan/zoom on every tick.
         self._last_chart_key: tuple             = ("", "")
 
+        # Range Profile state
+        self._range_region:          pg.LinearRegionItem | None = None
+        self._range_profile_inline:  list                       = []
+        self._range_last_indices:    tuple[int, int]            = (-1, -1)
+        self._range_profile_timer    = QTimer(self)
+        self._range_profile_timer.setSingleShot(True)
+        self._range_profile_timer.timeout.connect(self._rebuild_range_profile)
+
         # Build UI
         self._build_toolbar(args)
         self._build_central()
@@ -1064,6 +1174,21 @@ class TradeViewerQt(QMainWindow):
             "Requires order_book_collector.py to be running.")
         self._dom_btn.clicked.connect(self._on_dom_toggle)
         tb3.addWidget(self._dom_btn)
+
+        tb3.addSeparator()
+
+        # Range Volume Profile
+        self._range_profile_btn = QPushButton("Range Profile")
+        self._range_profile_btn.setCheckable(True)
+        self._range_profile_btn.setChecked(False)
+        self._range_profile_btn.setToolTip(
+            "Toggle Range Volume Profile mode\n"
+            "Drag the shaded region on the chart to select a bar range.\n"
+            "Volume profile for that range appears in the right panel and\n"
+            "as a semi-transparent overlay on the main chart.\n"
+            "Uses tick-level data when available; falls back to OHLCV.")
+        self._range_profile_btn.clicked.connect(self._toggle_range_profile)
+        tb3.addWidget(self._range_profile_btn)
 
         # ── Row 4: trade review ───────────────────────────────────────────────
         self.addToolBarBreak()
@@ -1689,8 +1814,13 @@ class TradeViewerQt(QMainWindow):
         # X-axis time labels
         self._set_xaxis_ticks(klines)
 
-        # Session vol profile
-        self._rebuild_session_profile()
+        # Session vol profile (or range profile panel if active)
+        if self._range_region is not None:
+            self._clear_range_inline()
+            self._range_last_indices = (-1, -1)
+            self._rebuild_range_profile()
+        else:
+            self._rebuild_session_profile()
 
         # Set view range only when Code or TF changes (i.e. a genuinely new
         # chart).  Deferred via singleShot so profile / overlay drawing cannot
@@ -2514,6 +2644,196 @@ class TradeViewerQt(QMainWindow):
         pw.setYRange(candle_lo - pad, candle_hi + pad, padding=0)
 
     # ── Tick profile Y range sync ─────────────────────────────────────────────
+
+    # ── Range Volume Profile ──────────────────────────────────────────────────
+
+    def _toggle_range_profile(self, checked: bool) -> None:
+        if checked:
+            if self._klines is None or self._klines.empty:
+                self._range_profile_btn.setChecked(False)
+                return
+            # Default span: middle 40 % of currently visible range
+            xlo, xhi = self._plot_c.vb.viewRange()[0]
+            span = xhi - xlo
+            x0 = xlo + span * 0.30
+            x1 = xlo + span * 0.70
+            self._range_region = pg.LinearRegionItem(
+                values=[x0, x1],
+                orientation="vertical",
+                movable=True,
+                brush=pg.mkBrush(_qc("#1565c0", 40)),
+                pen=pg.mkPen(_qc("#42a5f5", 180), width=1),
+            )
+            self._range_region.setZValue(10)
+            self._plot_c.addItem(self._range_region)
+            self._range_region.sigRegionChanged.connect(self._on_range_region_changed)
+            self._range_last_indices = (-1, -1)
+            self._rebuild_range_profile()
+        else:
+            self._range_profile_timer.stop()
+            if self._range_region is not None:
+                self._plot_c.removeItem(self._range_region)
+                self._range_region = None
+            self._clear_range_inline()
+            self._range_last_indices = (-1, -1)
+            self._rebuild_session_profile()
+
+    def _on_range_region_changed(self) -> None:
+        self._range_profile_timer.start(150)
+
+    def _clear_range_inline(self) -> None:
+        for item in self._range_profile_inline:
+            self._plot_c.removeItem(item)
+        self._range_profile_inline.clear()
+
+    def _compute_range_profile(
+        self, i0: int, i1: int
+    ) -> tuple[np.ndarray, np.ndarray, bool]:
+        return _compute_profile_bins(
+            self._klines, self._ticks, self._candle_mins, i0, i1)
+
+    def _rebuild_range_profile(self) -> None:
+        if self._range_region is None or self._klines is None:
+            return
+        n = len(self._klines)
+        if n == 0:
+            return
+
+        rx0, rx1 = self._range_region.getRegion()
+        i0 = max(0,     int(round(min(rx0, rx1))))
+        i1 = min(n - 1, int(round(max(rx0, rx1))))
+        if i0 > i1:
+            i0, i1 = i1, i0
+        if (i0, i1) == self._range_last_indices:
+            return
+        self._range_last_indices = (i0, i1)
+
+        centers, volumes, used_ticks = self._compute_range_profile(i0, i1)
+        if centers.size == 0:
+            return
+
+        max_vol = float(volumes.max())
+        if max_vol <= 0:
+            return
+
+        poc, vah, val = _compute_poc_vah_val(centers, volumes)
+
+        bin_h    = float(centers[1] - centers[0]) if len(centers) > 1 else 1.0
+        n_bars   = i1 - i0
+        src_lbl  = "tick" if used_ticks else "OHLCV"
+
+        # ── Right panel ───────────────────────────────────────────────────────
+        pw = self._profile_widget
+        pw.clear()
+        pw.addItem(self._profile_hline)
+
+        bar_item = pg.BarGraphItem(
+            x0=np.zeros(len(centers)), x1=volumes,
+            y=centers, height=bin_h * 0.9,
+            brush=_qc("#42a5f5", 80), pen=pg.mkPen(None),
+        )
+        pw.addItem(bar_item)
+        pw.getPlotItem().setLabel(
+            "top", f"Range  {i1-i0+1}b  [{src_lbl}]",
+            **{"color": "#42a5f5", "size": "7pt"},
+        )
+
+        vb = pw.getViewBox()
+
+        def _add_panel_line(price: float, color: str,
+                            style=Qt.PenStyle.SolidLine) -> pg.TextItem:
+            line = pg.InfiniteLine(
+                pos=price, angle=0, movable=False,
+                pen=pg.mkPen(color, width=1, style=style),
+            )
+            lbl = pg.TextItem(
+                text="", color=color,
+                fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+                anchor=(0.0, 1.0),
+            )
+            lbl.setFont(QFont("Monospace", 7))
+            pw.addItem(line,  ignoreBounds=True)
+            pw.addItem(lbl,   ignoreBounds=True)
+            return lbl
+
+        poc_lbl = _add_panel_line(poc, _RED)
+        vah_lbl = _add_panel_line(vah, _GOLD, Qt.PenStyle.DashLine)
+        val_lbl = _add_panel_line(val, _GOLD, Qt.PenStyle.DashLine)
+
+        def _pin_panel_labels() -> None:
+            xlo = vb.viewRange()[0][0]
+            poc_lbl.setPos(xlo, poc);  poc_lbl.setText(f"POC {poc:.2f}")
+            vah_lbl.setPos(xlo, vah);  vah_lbl.setText(f"VAH {vah:.2f}")
+            val_lbl.setPos(xlo, val);  val_lbl.setText(f"VAL {val:.2f}")
+
+        vb.sigRangeChanged.connect(lambda *_: _pin_panel_labels())
+        _pin_panel_labels()
+
+        vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+        vb.setXRange(0, max_vol * 1.15, padding=0)
+        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+        vb.setYRange(ylo, yhi, padding=0)
+
+        # ── Inline overlay on main chart ──────────────────────────────────────
+        self._clear_range_inline()
+
+        # Bars grow rightward from i0; max bar fills 45 % of the range width.
+        max_width  = max(n_bars * 0.45, 1.0)
+        vol_norm   = volumes / max_vol * max_width
+        x0_arr     = np.full(len(centers), float(i0))
+        x1_arr     = x0_arr + vol_norm
+
+        inline_bar = pg.BarGraphItem(
+            x0=x0_arr, x1=x1_arr,
+            y=centers, height=bin_h * 0.9,
+            brush=_qc("#42a5f5", 35), pen=pg.mkPen(None),
+        )
+        inline_bar.setZValue(5)
+        self._plot_c.addItem(inline_bar)
+        self._range_profile_inline.append(inline_bar)
+
+        # POC line (red solid) across the selected range
+        poc_line = pg.PlotCurveItem(
+            x=[float(i0), float(i1)], y=[poc, poc],
+            pen=pg.mkPen(_RED, width=1),
+        )
+        poc_line.setZValue(6)
+        self._plot_c.addItem(poc_line)
+        self._range_profile_inline.append(poc_line)
+
+        # VAH / VAL lines (gold dashed) across the selected range
+        for price in (vah, val):
+            va_line = pg.PlotCurveItem(
+                x=[float(i0), float(i1)], y=[price, price],
+                pen=pg.mkPen(_GOLD, width=1, style=Qt.PenStyle.DashLine),
+            )
+            va_line.setZValue(6)
+            self._plot_c.addItem(va_line)
+            self._range_profile_inline.append(va_line)
+
+        # POC / VAH / VAL price labels pinned at the right edge of the selection
+        label_x = float(i1) + 0.3
+        for price, tag, color in [
+            (poc, "POC", _RED),
+            (vah, "VAH", _GOLD),
+            (val, "VAL", _GOLD),
+        ]:
+            lbl = pg.TextItem(
+                text=f"{tag} {price:.2f}", color=color,
+                fill=pg.mkBrush(_qc(_BG_TIP, 160)),
+                anchor=(0.0, 0.5),
+            )
+            lbl.setFont(QFont("Monospace", 7))
+            lbl.setPos(label_x, price)
+            lbl.setZValue(20)
+            self._plot_c.addItem(lbl)
+            self._range_profile_inline.append(lbl)
+
+        self._log(
+            f"Range profile | bars {i0}–{i1} ({i1-i0+1}) | "
+            f"source={src_lbl} | POC={poc:.2f} VAH={vah:.2f} VAL={val:.2f}"
+        )
 
     def _on_main_range_changed(self, _vb, ranges) -> None:
         """Called by _plot_c.vb.sigRangeChanged(ViewBox, [[xlo,xhi],[ylo,yhi]]).
