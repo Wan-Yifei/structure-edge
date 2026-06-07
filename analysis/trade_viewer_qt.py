@@ -1011,6 +1011,9 @@ class TradeViewerQt(QMainWindow):
         self._code_edit = QLineEdit(getattr(args, "code", "US.SNDK") or "US.SNDK")
         self._code_edit.setFixedWidth(90)
         self._code_edit.returnPressed.connect(self._trigger_fetch)
+        # Event filter: catches Enter key before QToolBar can consume it on Windows.
+        # returnPressed alone is unreliable inside a QToolBar on some Qt/Windows versions.
+        self._code_edit.installEventFilter(self)
         tb1.addWidget(self._code_edit)
 
         tb1.addSeparator()
@@ -1657,7 +1660,8 @@ class TradeViewerQt(QMainWindow):
             self._log("Not connected.")
             return
         if self._fetcher and self._fetcher.isRunning():
-            return  # previous fetch still in progress
+            self._log("Fetch in progress, please wait…")
+            return
 
         tf           = self._tf_combo.currentText()
         _, cm        = TIMEFRAME_MAP[tf]
@@ -1678,6 +1682,7 @@ class TradeViewerQt(QMainWindow):
                 self._live_ticks.clear()
             self._live_code = ""
             self._start_live()
+            self._log(f"Live: switched to {new_code}, waiting for first bar…")
             return  # let the refresh timer drive the first fetch for the new code
 
         with self._tick_lock:
@@ -3189,6 +3194,23 @@ class TradeViewerQt(QMainWindow):
             self._plot_v.getAxis("bottom").setTicks([pos_only])
         if self._ind("kd"):
             self._plot_kd.getAxis("bottom").setTicks([pos_only])
+
+    # ── Event filter (Enter key in toolbar QLineEdit) ─────────────────────────
+
+    def eventFilter(self, obj: object, event) -> bool:
+        """Intercept Enter key on code_edit before QToolBar can consume it.
+
+        On Windows, QToolBar sometimes swallows the Enter key for its own
+        navigation, preventing QLineEdit.returnPressed from firing.  Catching
+        the raw KeyPress here and forwarding to _trigger_fetch is reliable.
+        """
+        from PyQt6.QtCore import QEvent
+        if (obj is self._code_edit
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
+            self._trigger_fetch()
+            return True   # consume — prevents returnPressed double-fire
+        return super().eventFilter(obj, event)
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
