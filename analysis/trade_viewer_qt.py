@@ -293,6 +293,108 @@ def apply_profile_range(klines: pd.DataFrame, range_val: str) -> pd.DataFrame:
     return klines[(times >= start) & (times <= anchor)]
 
 
+def _compute_profile_bins(
+    klines: pd.DataFrame,
+    ticks: dict | None,
+    candle_mins: int,
+    i0: int,
+    i1: int,
+    n_bins: int = 60,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Volume profile bins for klines[i0..i1].
+
+    Prefers tick data (exact price levels via np.digitize); falls back to OHLCV
+    proportional distribution.  Returns (centers, volumes, used_ticks).
+    centers and volumes are empty arrays when the price range is degenerate.
+    """
+    kl = klines.iloc[i0 : i1 + 1]
+    lo = float(kl["low"].min())
+    hi = float(kl["high"].max())
+    if hi <= lo:
+        return np.array([]), np.array([]), False
+
+    bins    = np.linspace(lo, hi, n_bins + 1)
+    centers = (bins[:-1] + bins[1:]) / 2
+    volumes = np.zeros(n_bins, dtype=float)
+
+    used_ticks = False
+    if ticks:
+        tick_prices: list[float] = []
+        tick_vols:   list[float] = []
+        for idx in range(i0, i1 + 1):
+            row = klines.iloc[idx]
+            try:
+                bar_end = datetime.strptime(
+                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                bk = candle_start(
+                    bar_end - timedelta(minutes=candle_mins), candle_mins)
+            except ValueError:
+                continue
+            pd_ = ticks.get(bk)
+            if not pd_:
+                continue
+            for price, counts in pd_.items():
+                total = (counts.get("buy", 0)
+                         + counts.get("sell", 0)
+                         + counts.get("neutral", 0))
+                if total > 0:
+                    tick_prices.append(float(price))
+                    tick_vols.append(float(total))
+
+        if tick_prices:
+            tp   = np.array(tick_prices)
+            tv   = np.array(tick_vols)
+            mask = (tp >= lo) & (tp <= hi)
+            if mask.any():
+                indices = np.clip(np.digitize(tp[mask], bins) - 1,
+                                  0, n_bins - 1)
+                np.add.at(volumes, indices, tv[mask])
+                used_ticks = True
+
+    if not used_ticks:
+        klo  = kl["low"].values.astype(float)
+        khi  = kl["high"].values.astype(float)
+        kvol = kl["volume"].fillna(0).values.astype(float)
+        for j in range(len(kl)):
+            mask  = (centers >= klo[j]) & (centers <= khi[j])
+            n_hit = int(mask.sum())
+            if n_hit:
+                volumes[mask] += kvol[j] / n_hit
+
+    return centers, volumes, used_ticks
+
+
+def _compute_poc_vah_val(
+    centers: np.ndarray,
+    volumes: np.ndarray,
+    va_pct: float = 0.70,
+) -> tuple[float, float, float]:
+    """Return (poc_price, vah_price, val_price) from a volume profile.
+
+    VAH/VAL are the highest and lowest price bins that together account for
+    at least va_pct of the total volume, selected greedily from highest-volume
+    bins down.  Returns (poc, poc, poc) for degenerate inputs.
+    """
+    if centers.size == 0:
+        return 0.0, 0.0, 0.0
+    poc_idx = int(np.argmax(volumes))
+    poc     = float(centers[poc_idx])
+    total   = float(volumes.sum())
+    if total <= 0:
+        return poc, poc, poc
+    sorted_idx = np.argsort(volumes)[::-1]
+    cumvol     = 0.0
+    va_indices: list[int] = []
+    for idx in sorted_idx:
+        cumvol += float(volumes[idx])
+        va_indices.append(int(idx))
+        if cumvol / total >= va_pct:
+            break
+    vah = float(centers[max(va_indices)]) if va_indices else poc
+    val = float(centers[min(va_indices)]) if va_indices else poc
+    return poc, vah, val
+
+
 def _load_trade_from_db(trade_id: str) -> tuple[dict | None, str]:
     """Load a trade record from BacktestDB or ReviewTradesDB.
 
@@ -2587,70 +2689,8 @@ class TradeViewerQt(QMainWindow):
     def _compute_range_profile(
         self, i0: int, i1: int
     ) -> tuple[np.ndarray, np.ndarray, bool]:
-        """Volume profile for klines[i0..i1].
-
-        Prefers tick data (exact price levels); falls back to OHLCV distribution.
-        Returns (centers, volumes, used_ticks).
-        """
-        klines = self._klines.iloc[i0 : i1 + 1]
-        lo = float(klines["low"].min())
-        hi = float(klines["high"].max())
-        if hi <= lo:
-            return np.array([]), np.array([]), False
-
-        n_bins  = 60
-        bins    = np.linspace(lo, hi, n_bins + 1)
-        centers = (bins[:-1] + bins[1:]) / 2
-        volumes = np.zeros(n_bins, dtype=float)
-
-        # ── Tick data path ────────────────────────────────────────────────────
-        used_ticks = False
-        if self._ticks:
-            tick_prices: list[float] = []
-            tick_vols:   list[float] = []
-            cm = self._candle_mins
-            for idx in range(i0, i1 + 1):
-                row = self._klines.iloc[idx]
-                try:
-                    bar_end = datetime.strptime(
-                        str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-                    bk = candle_start(
-                        bar_end - timedelta(minutes=cm), cm)
-                except ValueError:
-                    continue
-                pd_ = self._ticks.get(bk)
-                if not pd_:
-                    continue
-                for price, counts in pd_.items():
-                    total = (counts.get("buy", 0)
-                             + counts.get("sell", 0)
-                             + counts.get("neutral", 0))
-                    if total > 0:
-                        tick_prices.append(float(price))
-                        tick_vols.append(float(total))
-
-            if tick_prices:
-                tp = np.array(tick_prices)
-                tv = np.array(tick_vols)
-                mask = (tp >= lo) & (tp <= hi)
-                if mask.any():
-                    indices = np.clip(np.digitize(tp[mask], bins) - 1,
-                                      0, n_bins - 1)
-                    np.add.at(volumes, indices, tv[mask])
-                    used_ticks = True
-
-        # ── OHLCV fallback ────────────────────────────────────────────────────
-        if not used_ticks:
-            klo  = klines["low"].values.astype(float)
-            khi  = klines["high"].values.astype(float)
-            kvol = klines["volume"].fillna(0).values.astype(float)
-            for j in range(len(klines)):
-                mask  = (centers >= klo[j]) & (centers <= khi[j])
-                n_hit = int(mask.sum())
-                if n_hit:
-                    volumes[mask] += kvol[j] / n_hit
-
-        return centers, volumes, used_ticks
+        return _compute_profile_bins(
+            self._klines, self._ticks, self._candle_mins, i0, i1)
 
     def _rebuild_range_profile(self) -> None:
         if self._range_region is None or self._klines is None:
@@ -2676,22 +2716,7 @@ class TradeViewerQt(QMainWindow):
         if max_vol <= 0:
             return
 
-        # ── POC ──────────────────────────────────────────────────────────────
-        poc_idx = int(np.argmax(volumes))
-        poc     = float(centers[poc_idx])
-
-        # ── VAH / VAL (70 % value area) ──────────────────────────────────────
-        total_vol   = float(volumes.sum())
-        sorted_idx  = np.argsort(volumes)[::-1]
-        cumvol      = 0.0
-        va_indices: list[int] = []
-        for idx in sorted_idx:
-            cumvol += volumes[idx]
-            va_indices.append(int(idx))
-            if total_vol > 0 and cumvol / total_vol >= 0.70:
-                break
-        vah = float(centers[max(va_indices)]) if va_indices else poc
-        val = float(centers[min(va_indices)]) if va_indices else poc
+        poc, vah, val = _compute_poc_vah_val(centers, volumes)
 
         bin_h    = float(centers[1] - centers[0]) if len(centers) > 1 else 1.0
         n_bars   = i1 - i0
