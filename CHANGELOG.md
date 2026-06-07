@@ -1,5 +1,76 @@
 # Changelog
 
+## v0.13.0 — SMC Signal Scanner (2026-06-07)
+
+### New: Signal Scanner (`analysis/signal_scanner.py`, `uv run main.py scanner`)
+
+- Standalone PyQt6 app that monitors a configurable watchlist and detects
+  SMC entry setups using the same strategy logic as the backtest engine.
+- `SignalDetector`: pure (no Qt) class — directly unit-testable; detects BOS/CHoCH
+  trend, unfilled FVGs, swing-based SL/TP, RR filter.
+- `ScanWorker(QThread)`: per-symbol bar cache (skips unchanged bars), deduplication
+  against open signals in DB, `QApplication.beep()` alert on new signal.
+- `ParamsDialog`: Auto mode (queries BacktestDB for highest-PF run) or Manual mode
+  (key BacktestParams fields as a form); "Preview match" button shows live DB result.
+- `SignalScanner` main window: watchlist table, recent-signals table (last 50),
+  log area, status bar, toolbar (Connect / Scan / Interval / Sound / Add / Remove /
+  Edit Params).
+
+### New: System tray notifications + click-to-open viewer (`analysis/signal_scanner.py`)
+
+- `QSystemTrayIcon` with teal icon; each new signal shows an 8-second OS-level
+  balloon notification with symbol, direction, entry zone, and RR.
+- Clicking the balloon (or double-clicking a row in the signals table) launches a
+  new `trade_viewer_qt` process in Historical mode for that symbol and trend TF,
+  positioned at the signal date.
+
+### New: Signals persistence layer (`db/signals.py`)
+
+- `SignalsDB`: SQLite WAL-mode database at `db/signals.db`.
+- Schema: signal_id, symbol, direction, signal_time, trend/entry TF, entry zone,
+  SL, TP, RR, BOS price, strategy, params_json, algo_version, source, status,
+  closed_at, created_at.
+- `insert_signal`, `update_status`, `query_signals`, `get_open_signals`,
+  `get_all_open_signals`; context-manager support.
+
+### New: BacktestDB.get_best_params() (`backtest/db.py`)
+
+- Queries DuckDB for the highest-PF completed run for a symbol within a
+  configurable lookback window (default 3 months, min 5 trades, min PF 1.5).
+- Used by `ScanWorker` auto-params mode and `ParamsDialog` preview.
+
+### New: Scanner Signals overlay (`analysis/trade_viewer_qt.py`)
+
+- "Scanner Signals" toggle button in Row 3 toolbar.
+- Reads open signals from `db/signals.db` for the current symbol; overlays
+  entry zone band (teal/red, α=35), SL dashed line, TP dashed line, and
+  direction + RR label on the main chart.
+
+### Fix: Viewer — Enter key in code field (`analysis/trade_viewer_qt.py`)
+
+- `installEventFilter` on `_code_edit` intercepts `Key_Return / Key_Enter`
+  before `QToolBar` can consume them on Windows (where `returnPressed` alone
+  is unreliable inside a toolbar).
+- Added log messages for two previously silent-return paths in `_trigger_fetch`:
+  "Fetch in progress" and "Live: switched to X".
+
+### Fix: Viewer — subplot titles show current symbol (`analysis/trade_viewer_qt.py`)
+
+- Vol and KD subplots now display `"{symbol}  Vol"` / `"{symbol}  KD"` as titles,
+  updated on every render, so multiple open viewer windows are easy to distinguish.
+
+### New: Entry point (`main.py`)
+
+- `uv run main.py scanner` launches the signal scanner.
+
+### Tests
+
+- `tests/db/test_signals_db.py`: 9 unit tests for SignalsDB CRUD.
+- `tests/analysis/test_signal_detector.py`: 13 unit tests for SignalDetector
+  (guards, allow_short filter, min_rr filter, signal dict structure, mock-based).
+
+---
+
 ## v0.12.0 — Viewer: Range Volume Profile + daily TF + per-TF historical lookback (2026-06-07)
 
 ### New: Range Volume Profile (`analysis/trade_viewer_qt.py`)
