@@ -1601,6 +1601,8 @@ class TradeViewerQt(QMainWindow):
     def _on_indicator_toggle(self) -> None:
         # Toggle KD subplot row visibility
         if self._ind("kd"):
+            code = self._code_edit.text().strip()
+            self._plot_kd.setTitle(f"{code}  KD", color=_FG, size="8pt")
             self._plot_kd.show()
         else:
             self._plot_kd.hide()
@@ -1870,6 +1872,13 @@ class TradeViewerQt(QMainWindow):
         mode = self._mode_combo.currentText()
         self.setWindowTitle(
             f"Trade Viewer Qt  —  {code}  {tf}  {mode}")
+
+        # Keep subplot titles in sync with the current symbol so multiple
+        # open viewer windows are easy to distinguish at a glance.
+        self._plot_v.setTitle(f"{code}  Vol", color=_FG, size="8pt")
+        if self._plot_kd.isVisible():
+            self._plot_kd.setTitle(f"{code}  KD", color=_FG, size="8pt")
+
         self._log(
             f"Chart rendered | {n} candles | "
             f"{'heatmap' if show_hm else 'plain'}"

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 import sys
 import uuid
 from dataclasses import asdict
@@ -22,7 +23,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from PyQt6.QtCore import QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -42,6 +43,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStatusBar,
+    QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -522,7 +524,11 @@ class SignalScanner(QMainWindow):
         self._cfg    = self._load_cfg()
         self._worker: Optional[ScanWorker] = None
 
+        self._signal_data: list[dict] = []   # mirrors signals table rows (full dicts)
+        self._last_new_signal: Optional[dict] = None  # most recent signal for tray click
+
         self._build_ui()
+        self._build_tray()
         self._refresh_targets_table()
         self._refresh_signals_table()
 
@@ -646,6 +652,7 @@ class SignalScanner(QMainWindow):
         )
         self._signals_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._signals_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._signals_tbl.cellDoubleClicked.connect(self._on_signal_double_clicked)
         signals_lay.addWidget(self._signals_tbl)
         splitter.addWidget(signals_widget)
 
@@ -662,6 +669,67 @@ class SignalScanner(QMainWindow):
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("Ready")
+
+    # ── system tray ───────────────────────────────────────────────────────────
+
+    def _build_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray = None
+            return
+
+        # Simple 16×16 teal square as the tray icon
+        pix = QPixmap(16, 16)
+        pix.fill(QColor("#26a69a"))
+        self._tray = QSystemTrayIcon(QIcon(pix), self)
+        self._tray.setToolTip("SMC Signal Scanner")
+        self._tray.messageClicked.connect(self._on_tray_message_clicked)
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+
+    def _on_tray_message_clicked(self) -> None:
+        if self._last_new_signal:
+            self._open_viewer(self._last_new_signal)
+        self.show()
+        self.activateWindow()
+        self.raise_()
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.show()
+            self.activateWindow()
+            self.raise_()
+
+    # ── signal row double-click ───────────────────────────────────────────────
+
+    def _on_signal_double_clicked(self, row: int, _col: int) -> None:
+        if 0 <= row < len(self._signal_data):
+            self._open_viewer(self._signal_data[row])
+
+    # ── open trade viewer for a signal ───────────────────────────────────────
+
+    def _open_viewer(self, sig: dict) -> None:
+        symbol     = sig.get("symbol", "")
+        trend_tf   = sig.get("trend_tf", "1h")
+        sig_time   = str(sig.get("signal_time", ""))
+        date_str   = sig_time[:10] if sig_time else datetime.now().strftime("%Y-%m-%d")
+        if not symbol:
+            return
+        try:
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(_ROOT / "main.py"),
+                    "trade_viewer_qt",
+                    "--code", symbol,
+                    "--tf",   trend_tf,
+                    "--mode", "Historical",
+                    "--date", date_str,
+                ],
+                cwd=str(_ROOT),
+            )
+            self._log(f"Opened viewer: {symbol} {trend_tf} {date_str}")
+        except Exception as exc:
+            self._log(f"Failed to open viewer: {exc}")
 
     # ── toolbar actions ───────────────────────────────────────────────────────
 
@@ -779,6 +847,7 @@ class SignalScanner(QMainWindow):
         self._populate_signals_table(sigs[:50])
 
     def _populate_signals_table(self, sigs: list[dict]) -> None:
+        self._signal_data = list(sigs)  # keep full dicts for double-click jump
         self._signals_tbl.setRowCount(len(sigs))
         for row, sig in enumerate(sigs):
             direction = sig.get("direction", "")
@@ -802,11 +871,21 @@ class SignalScanner(QMainWindow):
     # ── worker callbacks ──────────────────────────────────────────────────────
 
     def _on_new_signal(self, sig: dict) -> None:
+        self._last_new_signal = sig
         self._refresh_signals_table()
-        self._status_bar.showMessage(
-            f"New signal: {sig['symbol']} {sig['direction'].upper()} "
-            f"RR {sig['rr_ratio']:.1f}  ({sig['signal_time'][:16]})"
+        summary = (
+            f"{sig['symbol']}  {sig['direction'].upper()}"
+            f"  zone {sig['entry_zone_bottom']:.2f}–{sig['entry_zone_top']:.2f}"
+            f"  RR {sig['rr_ratio']:.1f}"
         )
+        self._status_bar.showMessage(f"New signal: {summary}  ({sig['signal_time'][:16]})")
+        if self._tray is not None:
+            self._tray.showMessage(
+                f"SMC Signal  {sig['signal_time'][:16]}",
+                summary + "\n(double-click to open chart)",
+                QSystemTrayIcon.MessageIcon.Information,
+                8000,
+            )
 
     def _on_status_update(self, symbol: str, status: str) -> None:
         for row in range(self._targets_tbl.rowCount()):
@@ -823,6 +902,8 @@ class SignalScanner(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._stop_scan()
+        if self._tray is not None:
+            self._tray.hide()
         super().closeEvent(event)
 
 
