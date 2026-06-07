@@ -130,7 +130,13 @@ _TREND_WINDOW: dict[str, int] = {
 }
 
 _LIVE_LOOKBACK_DAYS: dict[str, int] = {
-    "1m": 2, "5m": 5, "15m": 7, "30m": 10, "1h": 14, "4h": 30,
+    "1m": 2, "3m": 3, "5m": 5, "15m": 7, "30m": 10, "1h": 14, "4h": 30,
+}
+
+# Historical mode: calendar days before the selected date to fetch.
+# Larger values for higher timeframes so the chart has enough candles.
+_HIST_LOOKBACK_DAYS: dict[str, int] = {
+    "1m": 3, "3m": 5, "5m": 10, "15m": 20, "30m": 30, "1h": 90, "4h": 500,
 }
 
 # EMA periods shown on the candle chart
@@ -778,8 +784,9 @@ class DataFetcher(QThread):
             # Determine fetch window
             if historical:
                 dt       = datetime.strptime(date_str, "%Y-%m-%d")
+                lb       = _HIST_LOOKBACK_DAYS.get(tf, 8)
                 end_dt   = dt + timedelta(days=3)
-                start    = (dt - timedelta(days=8)).strftime("%Y-%m-%d 20:00:00")
+                start    = (dt - timedelta(days=lb)).strftime("%Y-%m-%d 20:00:00")
                 end      = f"{end_dt.strftime('%Y-%m-%d')} 23:59:59"
             else:
                 # Use a future end date so that bars whose time_key is in a
