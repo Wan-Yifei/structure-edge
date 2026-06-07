@@ -110,33 +110,34 @@ TIMEFRAME_MAP: dict[str, tuple[KLType, int]] = {
     "30m": (KLType.K_30M,  30),
     "1h":  (KLType.K_60M,  60),
     "4h":  (KLType.K_240M, 240),
+    "1d":  (KLType.K_DAY,  1440),
 }
 
 _DAY_CANDLES: dict[str, int] = {
-    "1m": 390, "5m": 78, "15m": 26, "30m": 14, "1h": 7, "4h": 6,
+    "1m": 390, "5m": 78, "15m": 26, "30m": 14, "1h": 7, "4h": 6, "1d": 1,
 }
 
 # BOS max span: max bars between a reference swing and its break bar.
 # Viewer uses larger values than the backtest engine so that market structure
 # spanning the full visible window is shown (not just nearby swings).
 _BOS_MAX_SPAN: dict[str, int] = {
-    "1m": 390, "5m": 120, "15m": 100, "30m": 60, "1h": 40, "4h": 30,
+    "1m": 390, "5m": 120, "15m": 100, "30m": 60, "1h": 40, "4h": 30, "1d": 20,
 }
 
 # Trend window: backward-looking bar count used to determine local trend direction
 # for BOS/CHoCH classification.  Larger than engine default for broader context.
 _TREND_WINDOW: dict[str, int] = {
-    "1m": 120, "5m": 60, "15m": 50, "30m": 40, "1h": 30, "4h": 20,
+    "1m": 120, "5m": 60, "15m": 50, "30m": 40, "1h": 30, "4h": 20, "1d": 15,
 }
 
 _LIVE_LOOKBACK_DAYS: dict[str, int] = {
-    "1m": 2, "3m": 3, "5m": 5, "15m": 7, "30m": 10, "1h": 14, "4h": 30,
+    "1m": 2, "3m": 3, "5m": 5, "15m": 7, "30m": 10, "1h": 14, "4h": 30, "1d": 730,
 }
 
 # Historical mode: calendar days before the selected date to fetch.
 # Larger values for higher timeframes so the chart has enough candles.
 _HIST_LOOKBACK_DAYS: dict[str, int] = {
-    "1m": 3, "3m": 5, "5m": 10, "15m": 20, "30m": 30, "1h": 90, "4h": 500,
+    "1m": 3, "3m": 5, "5m": 10, "15m": 20, "30m": 30, "1h": 90, "4h": 500, "1d": 2000,
 }
 
 # EMA periods shown on the candle chart
