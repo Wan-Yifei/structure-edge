@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.12.0 — Viewer: Range Volume Profile + daily TF + per-TF historical lookback (2026-06-07)
+
+### New: Range Volume Profile (`analysis/trade_viewer_qt.py`)
+
+- Drag-selectable region on the candle chart renders a tick/OHLCV volume profile
+  in the right panel with POC / VAH / VAL lines and an inline overlay on the chart.
+- 31 unit tests for `_compute_profile_bins` and `_compute_poc_vah_val`.
+
+### New: Daily timeframe (`analysis/trade_viewer_qt.py`, `core/time_utils.py`)
+
+- Added `"1d"` (K_DAY) to `TIMEFRAME_MAP` — now available in the TF dropdown.
+- Historical lookback: 2000 calendar days; Live lookback: 730 days.
+- K_DAY `time_key` normalised to `"YYYY-MM-DD 00:00:00"` on fetch so all
+  downstream `[:16]` slices and `strptime("%Y-%m-%d %H:%M")` calls work uniformly.
+- X-axis labels show full `"YYYY-MM-DD"` for daily (vs `"MM-DD HH:MM"` for intraday).
+- `candle_start` extended to handle 240-min (4h) and 1440-min (1d) candles correctly.
+
+### New: Per-TF historical lookback (`analysis/trade_viewer_qt.py`)
+
+- Replaced fixed 8-day lookback with `_HIST_LOOKBACK_DAYS` dict:
+  `1m→3d, 3m→5d, 5m→10d, 15m→20d, 30m→30d, 1h→90d, 4h→500d, 1d→2000d`.
+- 4h now fetches ~570 bars; 1h ~440 bars instead of the previous ~13 / ~56 bars.
+
+---
+
 ## v0.11.0 — Absorption bubble fixes + hover tooltip + scheduler zombie watchdog (2026-06-05)
 
 ### Fix: Absorption bubble tick bucketing (`analysis/orderflow_detect.py`)
