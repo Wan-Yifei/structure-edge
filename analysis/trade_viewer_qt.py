@@ -808,6 +808,15 @@ class DataFetcher(QThread):
                 self.error.emit(f"Kline fetch failed: ret={ret}")
                 return
 
+            # K_DAY time_key arrives as "YYYY-MM-DD" (no time component).
+            # Normalise to "YYYY-MM-DD 00:00:00" so all downstream [:16] slices
+            # and strptime("%Y-%m-%d %H:%M") calls work identically for every TF.
+            if tf == "1d":
+                df = df.copy()
+                df["time_key"] = df["time_key"].astype(str).apply(
+                    lambda s: s + " 00:00:00" if len(s) == 10 else s
+                )
+
             # SMC detection on last N warmup bars
             warmup_n = min(len(df), 400)
             warmup   = df.iloc[-warmup_n:].reset_index(drop=True)
@@ -3039,8 +3048,14 @@ class TradeViewerQt(QMainWindow):
         """
         n    = len(klines)
         step = max(1, n // 10)
+        tf   = self._tf_combo.currentText()
+        # Daily: show "YYYY-MM-DD"; intraday: show "MM-DD HH:MM"
+        if tf == "1d":
+            label_slice = slice(0, 10)
+        else:
+            label_slice = slice(5, 16)
         ticks = [
-            (i, str(klines.iloc[i]["time_key"])[5:16])
+            (i, str(klines.iloc[i]["time_key"])[label_slice])
             for i in range(0, n, step)
         ]
         self._plot_c.getAxis("bottom").setTicks([ticks])
