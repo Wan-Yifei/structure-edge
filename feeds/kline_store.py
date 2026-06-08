@@ -73,26 +73,30 @@ class KlineStore:
         return self._con.execute(sql, params).df()
 
     def has_data(self, code: str, ktype: str) -> bool:
-        # Use .df() instead of .fetchone() to avoid DuckDB 1.5.2 internal assertion
-        # on empty result sets with aggregate queries.
+        # DuckDB 1.5.2: aggregate functions (COUNT/MIN/MAX) on an empty filtered
+        # result set throw an InternalException inside .execute() itself.
+        # SELECT 1 ... LIMIT 1 avoids aggregates entirely — returns 0 rows (not NULL).
         df = self._con.execute(
-            "SELECT COUNT(*) AS n FROM klines WHERE code = ? AND ktype = ?",
+            "SELECT 1 FROM klines WHERE code = ? AND ktype = ? LIMIT 1",
             [code, ktype],
         ).df()
-        return int(df.iloc[0]["n"]) > 0
+        return not df.empty
 
     def date_range(self, code: str, ktype: str) -> tuple[str, str] | None:
         """Return (min_time_key, max_time_key) or None if no data."""
-        # Use .df() instead of .fetchone() to avoid DuckDB 1.5.2 internal assertion
-        # on empty result sets with MIN/MAX aggregate queries.
-        df = self._con.execute(
-            "SELECT MIN(time_key) AS min_t, MAX(time_key) AS max_t "
-            "FROM klines WHERE code=? AND ktype=?",
+        # DuckDB 1.5.2: MIN/MAX on empty filtered result sets crash inside .execute().
+        # Use ORDER BY + LIMIT 1 instead — returns 0 rows when no match, not NULL.
+        min_df = self._con.execute(
+            "SELECT time_key FROM klines WHERE code=? AND ktype=? ORDER BY time_key ASC LIMIT 1",
             [code, ktype],
         ).df()
-        if df.empty or pd.isna(df.iloc[0]["min_t"]):
+        if min_df.empty:
             return None
-        return df.iloc[0]["min_t"], df.iloc[0]["max_t"]
+        max_df = self._con.execute(
+            "SELECT time_key FROM klines WHERE code=? AND ktype=? ORDER BY time_key DESC LIMIT 1",
+            [code, ktype],
+        ).df()
+        return str(min_df.iloc[0]["time_key"]), str(max_df.iloc[0]["time_key"])
 
     def close(self):
         """Close the DuckDB connection."""

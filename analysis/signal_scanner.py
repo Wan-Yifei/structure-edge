@@ -254,7 +254,8 @@ class ScanWorker(QThread):
                 try:
                     self._scan_symbol(symbol, symbol_cfg if isinstance(symbol_cfg, dict) else {}, scanner_cfg)
                 except Exception as exc:
-                    self.log.emit(f"[{symbol}] scan error: {exc}")
+                    import traceback
+                    self.log.emit(f"[{symbol}] scan error: {exc}\n{traceback.format_exc()}")
                     self.status_update.emit(symbol, f"ERR: {exc}")
 
             if self._running:
