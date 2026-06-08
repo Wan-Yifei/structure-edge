@@ -36,6 +36,7 @@
     "US.BE",
     "US.CRWV",
     "US.CSCO",
+    "US.GLW",
     "US.LITE",
     "US.MRVL",
     "US.MU",
@@ -71,7 +72,8 @@
     "US.PLTR": "AI family",
     "US.UUUU": "nuclear fusion & energy",
     "US.NNE": "nuclear fusion & energy",
-    "US.AVGO": "半导体"
+    "US.AVGO": "半导体",
+    "US.GLW": "半导体"
   },
   "order_book_enabled": true,
   "remote_backup": {
@@ -83,5 +85,5 @@
     "tick_db": "db/ticks.db",
     "order_book_db": "db/order_book.db"
   },
-  "autostart": false
+  "autostart": true
 }

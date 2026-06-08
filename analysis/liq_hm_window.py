@@ -571,8 +571,8 @@ class LiqHmWindow(QWidget):
         self._absorb_cb = QCheckBox("Absorb")
         self._absorb_cb.setChecked(False)
         self._absorb_cb.setToolTip(
-            "Gold bubble  = aggressive buyers absorbed by passive sell wall (bearish).\n"
-            "Purple bubble = aggressive sellers absorbed by passive buy wall (bullish).\n"
+            "Purple bubble = buy orders absorbed by passive sell wall (bearish).\n"
+            "Gold bubble   = sell orders absorbed by passive buy wall (bullish).\n"
             "Bubble size encodes absorbed delta volume.  Reads ticks.db.")
         self._absorb_cb.stateChanged.connect(self._on_absorb_changed)
         row2.addWidget(self._absorb_cb)
@@ -587,6 +587,21 @@ class LiqHmWindow(QWidget):
             "Minimum |buy_vol − sell_vol| per column to show a bubble.")
         self._absorb_min_vol_spin.valueChanged.connect(self._on_absorb_changed)
         row2.addWidget(self._absorb_min_vol_spin)
+
+        row2.addWidget(_lbl("MaxΔP:"))
+        self._absorb_max_move_spin = QDoubleSpinBox()
+        self._absorb_max_move_spin.setRange(0.00, 9.99)
+        self._absorb_max_move_spin.setSingleStep(0.01)
+        self._absorb_max_move_spin.setDecimals(2)
+        self._absorb_max_move_spin.setValue(0.10)
+        self._absorb_max_move_spin.setFixedWidth(60)
+        self._absorb_max_move_spin.setSpecialValueText("∞")
+        self._absorb_max_move_spin.setToolTip(
+            "Max mid-price move per column to qualify as true absorption (0 = no limit).\n"
+            "Filters out events where price moved significantly against the aggressive side\n"
+            "(e.g. a spike-down with dip buyers is not genuine sell-side absorption).")
+        self._absorb_max_move_spin.valueChanged.connect(self._on_absorb_changed)
+        row2.addWidget(self._absorb_max_move_spin)
 
         # ── Two-row toolbar container ──────────────────────────────────────────
         self._toolbar = QWidget()
@@ -1067,12 +1082,14 @@ class LiqHmWindow(QWidget):
 
         if self._absorb_cb.isChecked() and self._absorb_ticks:
             from analysis.orderflow_detect import detect_absorption_bubbles
+            max_move = self._absorb_max_move_spin.value()
             bubbles = detect_absorption_bubbles(
                 self._absorb_ticks,
                 self._col_ts,
                 self._mid_prices,
                 col_secs=self._col_secs_spin.value(),
                 min_delta_vol=float(self._absorb_min_vol_spin.value()),
+                max_price_move=max_move if max_move > 0 else None,
             )
             self._draw_absorb_bubbles(bubbles)
 
@@ -1205,22 +1222,22 @@ class LiqHmWindow(QWidget):
     def _draw_absorb_bubbles(self, bubbles: list[tuple]) -> None:
         """Draw ScatterPlotItem bubbles at absorption events on the price path.
 
-        Gold   = aggressive buyers absorbed (BUY direction, passive sellers won).
-        Purple = aggressive sellers absorbed (SELL direction, passive buyers won).
+        Gold   = sell orders absorbed by passive buyers (SELL direction — bullish).
+        Purple = buy orders absorbed by passive sellers (BUY direction — bearish).
         Bubble size scales with absorbed delta volume (8–30 px range).
         Hovering a bubble shows a tooltip with direction and absorbed delta volume.
         """
         if not bubbles:
             return
-        _GOLD   = (255, 160,   0, 200)
-        _PURPLE = (171,  71, 188, 200)
+        _GOLD   = (255, 160,   0, 200)   # gold   — sell absorbed, bullish
+        _PURPLE = (171,  71, 188, 200)   # purple — buy absorbed, bearish
 
         max_vol = max(b[3] for b in bubbles)
         outline = pg.mkPen("white", width=0.5)
         spots = []
         for col_idx, price, direction, vol in bubbles:
             size  = 8.0 + 22.0 * (vol / max_vol)
-            color = _GOLD if direction == "BUY" else _PURPLE
+            color = _PURPLE if direction == "BUY" else _GOLD
             spots.append({
                 "pos":   (float(col_idx) + 0.5, price),
                 "size":  size,
@@ -1242,7 +1259,7 @@ class LiqHmWindow(QWidget):
             QToolTip.hideText()
             return
         d = points[0].data()
-        label = "Buyers absorbed by sellers (bearish)" if d["direction"] == "BUY" else "Sellers absorbed by buyers (bullish)"
+        label = "Buy absorbed (bearish)" if d["direction"] == "BUY" else "Sell absorbed (bullish)"
         QToolTip.showText(QCursor.pos(), f"{label}\nΔvol: {d['vol']:,.0f}")
 
     def _load_absorb_ticks(self) -> None:
@@ -1331,10 +1348,10 @@ class LiqHmWindow(QWidget):
 
         if self._absorb_cb.isChecked():
             parts.append(
-                f'&nbsp;&nbsp;<font color="#ffa000">●</font>'
-                f'&nbsp;<font color="{_FG}">Buyers absorbed by sellers (bearish)</font>'
                 f'&nbsp;&nbsp;<font color="#ab47bc">●</font>'
-                f'&nbsp;<font color="{_FG}">Sellers absorbed by buyers (bullish)</font>'
+                f'&nbsp;<font color="{_FG}">Buy absorbed (bearish)</font>'
+                f'&nbsp;&nbsp;<font color="#ffa000">●</font>'
+                f'&nbsp;<font color="{_FG}">Sell absorbed (bullish)</font>'
             )
 
         self._legend_lbl.setText("".join(parts))

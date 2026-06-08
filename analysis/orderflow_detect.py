@@ -501,24 +501,31 @@ def detect_absorption_bubbles(
     mid_prices: list[float | None],
     col_secs: int,
     min_delta_vol: float = 500.0,
+    max_price_move: float | None = None,
 ) -> list[tuple]:
     """Detect columns where aggressive order flow is absorbed by passive orders.
 
-    For each column time window the net delta (buy_vol − sell_vol) is compared
-    against the mid-price movement to that column:
+    For each column window, net delta (buy_vol − sell_vol) is compared against
+    the mid-price movement.  True absorption: the aggressive side fails to move
+    price in their direction and price stays roughly flat.
 
-    - delta >= +min_delta_vol AND price_change <= 0  →  'BUY' absorbed
-      (aggressive buyers absorbed by passive sell wall — bearish)
-    - delta <= -min_delta_vol AND price_change >= 0  →  'SELL' absorbed
-      (aggressive sellers absorbed by passive buy wall — bullish)
+    - delta >= +min_delta_vol AND -max_price_move <= price_change <= 0
+      → 'BUY' absorbed (aggressive buyers held by passive sell wall — bearish)
+    - delta <= -min_delta_vol AND 0 <= price_change <= max_price_move
+      → 'SELL' absorbed (aggressive sellers held by passive buy wall — bullish)
+
+    When max_price_move is None the upper bound is not applied (legacy behaviour:
+    any price_change in the passive side's direction qualifies).
 
     Args:
-        ticks:          Tick records {ts, price, volume, direction}.
-                        direction must be 'BUY', 'SELL', or 'NEUTRAL'.
-        col_ts:         Per-column timestamps (col_ts[i] = snapshot time of column i).
-        mid_prices:     Per-column mid-price (None if unavailable for that column).
-        col_secs:       Column duration in seconds; determines bucket half-width.
-        min_delta_vol:  Minimum |delta| required to flag as absorption.
+        ticks:           Tick records {ts, price, volume, direction}.
+                         direction must be 'BUY', 'SELL', or 'NEUTRAL'.
+        col_ts:          Per-column timestamps (col_ts[i] = snapshot time of column i).
+        mid_prices:      Per-column mid-price (None if unavailable for that column).
+        col_secs:        Column duration in seconds; determines bucket half-width.
+        min_delta_vol:   Minimum |delta| required to flag as absorption.
+        max_price_move:  Maximum allowed |price_change| for the event to qualify.
+                         None means no upper bound (original behaviour).
 
     Returns:
         List of (col_idx, mid_price, direction, delta_vol).
@@ -576,9 +583,17 @@ def detect_absorption_bubbles(
         if abs(delta) < min_delta_vol:
             continue
 
-        if delta > 0 and (price_change is None or price_change <= 0):
+        buy_ok = price_change is None or (
+            price_change <= 0
+            and (max_price_move is None or price_change >= -max_price_move)
+        )
+        sell_ok = price_change is None or (
+            price_change >= 0
+            and (max_price_move is None or price_change <= max_price_move)
+        )
+        if delta > 0 and buy_ok:
             results.append((i, mid, "BUY", delta))
-        elif delta < 0 and (price_change is None or price_change >= 0):
+        elif delta < 0 and sell_ok:
             results.append((i, mid, "SELL", abs(delta)))
 
     return results
