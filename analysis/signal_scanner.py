@@ -244,7 +244,11 @@ class ScanWorker(QThread):
 
         self.log.emit(f"Scan worker started — {len(enabled)} symbol(s), interval {interval_s}s")
 
+        cycle = 0
         while self._running:
+            cycle += 1
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.log.emit(f"[{ts}] Cycle #{cycle} — scanning {len(enabled)} symbol(s)")
             for symbol_cfg in enabled:
                 if not self._running:
                     break
@@ -277,11 +281,15 @@ class ScanWorker(QThread):
 
         tf      = _fetcher_tf(params.trend_tf)
         end_dt  = datetime.now()
-        start_dt = end_dt - timedelta(days=10)
+        # 3-day window is enough for strategy logic and keeps API payloads small.
+        # force_refresh=True bypasses the DuckDB kline cache so the scanner always
+        # sees the latest bars from moomoo (cache tolerance of 7 days would otherwise
+        # return stale data from the previous trading day indefinitely).
+        start_dt = end_dt - timedelta(days=3)
         start   = start_dt.strftime("%Y-%m-%d")
         end     = end_dt.strftime("%Y-%m-%d")
 
-        htf = fetch_klines(symbol, tf, start, end)
+        htf = fetch_klines(symbol, tf, start, end, force_refresh=True)
         if htf is None or htf.empty:
             self.status_update.emit(symbol, "no data")
             return
