@@ -1273,7 +1273,7 @@ class LiqHmWindow(QWidget):
     def _on_absorb_hovered(self, scatter, points, ev) -> None:
         from PyQt6.QtWidgets import QToolTip
         from PyQt6.QtGui import QCursor
-        if not points:
+        if len(points) == 0:
             QToolTip.hideText()
             return
         d = points[0].data()
