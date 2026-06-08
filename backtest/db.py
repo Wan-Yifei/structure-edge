@@ -444,31 +444,39 @@ class BacktestDB:
         cutoff = (datetime.utcnow() - timedelta(days=lookback_months * 30)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
-        row = self._conn.execute(
-            """
-            SELECT r.config_json, r.trend_tf, r.entry_tf,
-                   s.profit_factor, s.n_trades
-            FROM runs r
-            JOIN run_stats s ON r.run_id = s.run_id
-            WHERE r.symbol    = ?
-              AND r.status    = 'done'
-              AND r.created_at >= ?
-              AND s.n_trades  >= ?
-              AND s.profit_factor >= ?
-            ORDER BY s.profit_factor DESC
-            LIMIT 1
-            """,
-            [symbol, cutoff, min_n_trades, min_pf],
-        ).fetchone()
-        if row is None:
+        # Use .df() instead of .fetchone() to avoid a DuckDB internal assertion
+        # that fires on ORDER BY … LIMIT 1 when the filtered result set is empty.
+        try:
+            df = self._conn.execute(
+                """
+                SELECT r.config_json, r.trend_tf, r.entry_tf,
+                       s.profit_factor, s.n_trades
+                FROM runs r
+                JOIN run_stats s ON r.run_id = s.run_id
+                WHERE r.symbol    = ?
+                  AND r.status    = 'done'
+                  AND r.created_at >= ?
+                  AND s.n_trades  >= ?
+                  AND s.profit_factor >= ?
+                ORDER BY s.profit_factor DESC
+                LIMIT 1
+                """,
+                [symbol, cutoff, min_n_trades, min_pf],
+            ).df()
+        except Exception:
             return None
-        cols = [d[0] for d in self._conn.description]
-        result = dict(zip(cols, row))
-        result["_meta"] = {
-            "pf":       result.pop("profit_factor"),
-            "n_trades": result.pop("n_trades"),
+        if df.empty:
+            return None
+        row = df.iloc[0]
+        return {
+            "config_json": row["config_json"],
+            "trend_tf":    row["trend_tf"],
+            "entry_tf":    row["entry_tf"],
+            "_meta": {
+                "pf":       float(row["profit_factor"]),
+                "n_trades": int(row["n_trades"]),
+            },
         }
-        return result
 
     # ── live_trades ───────────────────────────────────────────────────────────
 

@@ -110,7 +110,7 @@ class SignalDetector:
         # FVG detection
         fvgs = detect_fvg(
             window,
-            min_width_pct=params.fvg_min_width_pct,
+            min_gap_pct=params.fvg_min_width_pct,
             require_displacement=params.displacement_required,
         )
         unfilled = [g for g in fvgs if not g.get("filled", False)]
