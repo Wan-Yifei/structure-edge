@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.13.1 — LiqHm UX + DuckDB fixes (2026-06-08)
+
+### Fix: DuckDB 1.5.2 internal assertion in signal scanner (`feeds/kline_store.py`)
+
+- `KlineStore.date_range()`: replaced `SELECT MIN/MAX … fetchone()` with two
+  `ORDER BY … LIMIT 1` queries — avoids the DuckDB 1.5.2 internal assertion that
+  fires on aggregate functions applied to empty filtered result sets.
+- `KlineStore.has_data()`: replaced `SELECT COUNT(*) … fetchone()` with
+  `SELECT 1 … LIMIT 1` for the same reason.
+- Root cause: DuckDB 1.5.2 throws `INTERNAL Error: Attempted to access index 0
+  within vector of size 0` inside `.execute()` itself (not `.fetchone()`) when
+  `MIN`/`MAX`/`COUNT` are applied to a WHERE-filtered empty result set.
+
+### Improve: Liquidity Heatmap UX (`analysis/liq_hm_window.py`)
+
+- **Two-row toolbar**: core display controls (Bid/Ask, Gamma, Price, Min.Vol,
+  Col(s), History, Reset) on row 1; detection overlays (Iceberg, Spoof,
+  Imbalance, Absorb) on row 2 — no more horizontal scrolling to reach controls.
+- **Gamma range** extended from 5.0 to 10.0 for stronger contrast suppression.
+- **Col(s) minimum** reduced from 5 s to 1 s; step changed to 1 s for
+  fine-grained refresh-rate control.
+- Default window size adjusted to 1000 × 460 px.
+
+### Fix: Scanner error traceback logging (`analysis/signal_scanner.py`)
+
+- Per-symbol scan errors now log the full Python traceback (not just the
+  exception message) to aid debugging.
+
 ## v0.13.0 — SMC Signal Scanner (2026-06-07)
 
 ### New: Signal Scanner (`analysis/signal_scanner.py`, `uv run main.py scanner`)

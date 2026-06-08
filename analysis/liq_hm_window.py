@@ -338,7 +338,7 @@ class LiqHmWindow(QWidget):
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("Liquidity Heatmap")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.resize(1100, 420)
+        self.resize(1000, 460)
 
         self._code: str  = ""
         self._live: bool = True
@@ -404,8 +404,9 @@ class LiqHmWindow(QWidget):
             w.setStyleSheet(f"color:{_FG};padding:0 4px;")
             return w
 
-        tb = QToolBar()
-        tb.setMovable(False)
+        # ── Row 1: core display controls ──────────────────────────────────────
+        row1 = QToolBar()
+        row1.setMovable(False)
 
         self._bid_ask_cb = QCheckBox("Bid/Ask")
         self._bid_ask_cb.setChecked(False)
@@ -413,11 +414,11 @@ class LiqHmWindow(QWidget):
             "Checked: teal = Bid, red = Ask (shown separately)\n"
             "Unchecked: combined with black → purple → yellow colormap")
         self._bid_ask_cb.stateChanged.connect(self._on_controls_changed)
-        tb.addWidget(self._bid_ask_cb)
+        row1.addWidget(self._bid_ask_cb)
 
-        tb.addWidget(_lbl("Gamma:"))
+        row1.addWidget(_lbl("Gamma:"))
         self._gamma_spin = QDoubleSpinBox()
-        self._gamma_spin.setRange(0.2, 5.0)
+        self._gamma_spin.setRange(0.2, 10.0)
         self._gamma_spin.setSingleStep(0.1)
         self._gamma_spin.setDecimals(1)
         self._gamma_spin.setValue(1.0)
@@ -427,17 +428,17 @@ class LiqHmWindow(QWidget):
             ">1: suppresses sparse zones — only the densest orders stay bright.\n"
             "<1: boosts dim zones — reveals weaker order clusters.")
         self._gamma_spin.valueChanged.connect(self._on_gamma_changed)
-        tb.addWidget(self._gamma_spin)
+        row1.addWidget(self._gamma_spin)
 
         self._price_path_cb = QCheckBox("Price")
         self._price_path_cb.setChecked(True)
         self._price_path_cb.setToolTip(
             "Overlay the mid-price path ((bid+ask)/2) per column as a white line.")
         self._price_path_cb.stateChanged.connect(self._on_price_path_changed)
-        tb.addWidget(self._price_path_cb)
+        row1.addWidget(self._price_path_cb)
 
-        tb.addSeparator()
-        tb.addWidget(_lbl("Min.Vol:"))
+        row1.addSeparator()
+        row1.addWidget(_lbl("Min.Vol:"))
         self._min_vol_spin = QSpinBox()
         self._min_vol_spin.setRange(0, 1_000_000)
         self._min_vol_spin.setSingleStep(100)
@@ -448,21 +449,21 @@ class LiqHmWindow(QWidget):
             "Spoof detection: 0 = auto (median of latest snapshot levels)"
         )
         self._min_vol_spin.valueChanged.connect(self._on_controls_changed)
-        tb.addWidget(self._min_vol_spin)
+        row1.addWidget(self._min_vol_spin)
 
-        tb.addSeparator()
-        tb.addWidget(_lbl("Col(s):"))
+        row1.addSeparator()
+        row1.addWidget(_lbl("Col(s):"))
         self._col_secs_spin = QSpinBox()
-        self._col_secs_spin.setRange(5, 300)
-        self._col_secs_spin.setSingleStep(5)
+        self._col_secs_spin.setRange(1, 300)
+        self._col_secs_spin.setSingleStep(1)
         self._col_secs_spin.setValue(COL_SECS_DEF)
         self._col_secs_spin.setFixedWidth(55)
-        self._col_secs_spin.setToolTip("Seconds per column (time resolution)")
+        self._col_secs_spin.setToolTip("Seconds per column — also controls refresh rate")
         self._col_secs_spin.valueChanged.connect(self._on_col_secs_changed)
-        tb.addWidget(self._col_secs_spin)
+        row1.addWidget(self._col_secs_spin)
 
-        tb.addSeparator()
-        tb.addWidget(_lbl("History:"))
+        row1.addSeparator()
+        row1.addWidget(_lbl("History:"))
         self._max_cols_spin = QSpinBox()
         self._max_cols_spin.setRange(60, 1440)
         self._max_cols_spin.setSingleStep(60)
@@ -470,20 +471,28 @@ class LiqHmWindow(QWidget):
         self._max_cols_spin.setFixedWidth(60)
         self._max_cols_spin.setToolTip("Number of columns kept in memory")
         self._max_cols_spin.valueChanged.connect(self._on_max_cols_changed)
-        tb.addWidget(self._max_cols_spin)
+        row1.addWidget(self._max_cols_spin)
 
-        tb.addSeparator()
+        row1.addSeparator()
+        reset_btn = QPushButton("⟲ Reset")
+        reset_btn.setToolTip("Reset zoom to full view (double-click chart also resets)")
+        reset_btn.setFixedWidth(70)
+        reset_btn.clicked.connect(self._reset_view)
+        row1.addWidget(reset_btn)
 
-        # Iceberg detection
+        # ── Row 2: detection overlay controls ─────────────────────────────────
+        row2 = QToolBar()
+        row2.setMovable(False)
+
         self._ice_cb = QCheckBox("Iceberg")
         self._ice_cb.setChecked(False)
         self._ice_cb.setToolTip(
             "Purple line: price level where resting volume repeatedly drops then\n"
             "refreshes — hallmark of a hidden large order refilling at a fixed price.")
         self._ice_cb.stateChanged.connect(self._on_controls_changed)
-        tb.addWidget(self._ice_cb)
+        row2.addWidget(self._ice_cb)
 
-        tb.addWidget(_lbl("Min.Ref:"))
+        row2.addWidget(_lbl("Min.Ref:"))
         self._ice_min_ref_spin = QSpinBox()
         self._ice_min_ref_spin.setRange(1, 50)
         self._ice_min_ref_spin.setSingleStep(1)
@@ -491,20 +500,19 @@ class LiqHmWindow(QWidget):
         self._ice_min_ref_spin.setFixedWidth(50)
         self._ice_min_ref_spin.setToolTip("Minimum refreshes to classify as iceberg")
         self._ice_min_ref_spin.valueChanged.connect(self._on_controls_changed)
-        tb.addWidget(self._ice_min_ref_spin)
+        row2.addWidget(self._ice_min_ref_spin)
 
-        tb.addSeparator()
+        row2.addSeparator()
 
-        # Spoof detection
         self._spoof_cb = QCheckBox("Spoof")
         self._spoof_cb.setChecked(False)
         self._spoof_cb.setToolTip(
             "Orange ▲/▼: large order that appears then vanishes without execution.\n"
             "▲ = bid spoof (false buy pressure)  ▼ = ask spoof (false sell pressure)")
         self._spoof_cb.stateChanged.connect(self._on_controls_changed)
-        tb.addWidget(self._spoof_cb)
+        row2.addWidget(self._spoof_cb)
 
-        tb.addWidget(_lbl("Max.Dur(s):"))
+        row2.addWidget(_lbl("Max.Dur(s):"))
         self._spoof_dur_spin = QSpinBox()
         self._spoof_dur_spin.setRange(3, 300)
         self._spoof_dur_spin.setSingleStep(5)
@@ -512,11 +520,10 @@ class LiqHmWindow(QWidget):
         self._spoof_dur_spin.setFixedWidth(50)
         self._spoof_dur_spin.setToolTip("Max seconds a large order can live before being flagged")
         self._spoof_dur_spin.valueChanged.connect(self._on_controls_changed)
-        tb.addWidget(self._spoof_dur_spin)
+        row2.addWidget(self._spoof_dur_spin)
 
-        tb.addSeparator()
+        row2.addSeparator()
 
-        # Stacked imbalance detection
         self._simb_cb = QCheckBox("Imbalance")
         self._simb_cb.setChecked(False)
         self._simb_cb.setToolTip(
@@ -524,9 +531,9 @@ class LiqHmWindow(QWidget):
             "Red bar  = bearish stacked imbalance (ask dominates N consecutive depth levels)\n"
             "Bid/ask levels paired by depth rank; missing side counts as 0.")
         self._simb_cb.stateChanged.connect(self._on_controls_changed)
-        tb.addWidget(self._simb_cb)
+        row2.addWidget(self._simb_cb)
 
-        tb.addWidget(_lbl("Lvl:"))
+        row2.addWidget(_lbl("Lvl:"))
         self._simb_levels_spin = QSpinBox()
         self._simb_levels_spin.setRange(2, 10)
         self._simb_levels_spin.setSingleStep(1)
@@ -534,9 +541,9 @@ class LiqHmWindow(QWidget):
         self._simb_levels_spin.setFixedWidth(45)
         self._simb_levels_spin.setToolTip("Minimum consecutive imbalanced depth levels")
         self._simb_levels_spin.valueChanged.connect(self._on_controls_changed)
-        tb.addWidget(self._simb_levels_spin)
+        row2.addWidget(self._simb_levels_spin)
 
-        tb.addWidget(_lbl("Ratio:"))
+        row2.addWidget(_lbl("Ratio:"))
         self._simb_ratio_spin = QDoubleSpinBox()
         self._simb_ratio_spin.setRange(1.5, 20.0)
         self._simb_ratio_spin.setSingleStep(0.5)
@@ -545,9 +552,9 @@ class LiqHmWindow(QWidget):
         self._simb_ratio_spin.setFixedWidth(52)
         self._simb_ratio_spin.setToolTip("bid/ask (or ask/bid) volume ratio threshold per level")
         self._simb_ratio_spin.valueChanged.connect(self._on_controls_changed)
-        tb.addWidget(self._simb_ratio_spin)
+        row2.addWidget(self._simb_ratio_spin)
 
-        tb.addWidget(_lbl("Depth:"))
+        row2.addWidget(_lbl("Depth:"))
         self._simb_depth_spin = QSpinBox()
         self._simb_depth_spin.setRange(3, 50)
         self._simb_depth_spin.setSingleStep(1)
@@ -557,11 +564,10 @@ class LiqHmWindow(QWidget):
             "Max depth ranks to analyse (top-of-book only).\n"
             "Deep orders far from the spread are noise — keep this at 5–15.")
         self._simb_depth_spin.valueChanged.connect(self._on_controls_changed)
-        tb.addWidget(self._simb_depth_spin)
+        row2.addWidget(self._simb_depth_spin)
 
-        tb.addSeparator()
+        row2.addSeparator()
 
-        # Absorption bubble overlay
         self._absorb_cb = QCheckBox("Absorb")
         self._absorb_cb.setChecked(False)
         self._absorb_cb.setToolTip(
@@ -569,9 +575,9 @@ class LiqHmWindow(QWidget):
             "Purple bubble = aggressive sellers absorbed by passive buy wall (bullish).\n"
             "Bubble size encodes absorbed delta volume.  Reads ticks.db.")
         self._absorb_cb.stateChanged.connect(self._on_absorb_changed)
-        tb.addWidget(self._absorb_cb)
+        row2.addWidget(self._absorb_cb)
 
-        tb.addWidget(_lbl("MinΔ:"))
+        row2.addWidget(_lbl("MinΔ:"))
         self._absorb_min_vol_spin = QSpinBox()
         self._absorb_min_vol_spin.setRange(10, 100_000)
         self._absorb_min_vol_spin.setSingleStep(10)
@@ -580,18 +586,15 @@ class LiqHmWindow(QWidget):
         self._absorb_min_vol_spin.setToolTip(
             "Minimum |buy_vol − sell_vol| per column to show a bubble.")
         self._absorb_min_vol_spin.valueChanged.connect(self._on_absorb_changed)
-        tb.addWidget(self._absorb_min_vol_spin)
+        row2.addWidget(self._absorb_min_vol_spin)
 
-        tb.addSeparator()
-
-        # Reset zoom button
-        reset_btn = QPushButton("⟲ Reset")
-        reset_btn.setToolTip("Reset zoom to full view (double-click chart also resets)")
-        reset_btn.setFixedWidth(70)
-        reset_btn.clicked.connect(self._reset_view)
-        tb.addWidget(reset_btn)
-
-        self._toolbar = tb
+        # ── Two-row toolbar container ──────────────────────────────────────────
+        self._toolbar = QWidget()
+        tb_lay = QVBoxLayout(self._toolbar)
+        tb_lay.setContentsMargins(0, 0, 0, 0)
+        tb_lay.setSpacing(0)
+        tb_lay.addWidget(row1)
+        tb_lay.addWidget(row2)
 
         # Legend bar — separate row below toolbar so it never gets truncated
         self._legend_lbl = QLabel()
