@@ -73,21 +73,26 @@ class KlineStore:
         return self._con.execute(sql, params).df()
 
     def has_data(self, code: str, ktype: str) -> bool:
-        n = self._con.execute(
-            "SELECT COUNT(*) FROM klines WHERE code = ? AND ktype = ?",
+        # Use .df() instead of .fetchone() to avoid DuckDB 1.5.2 internal assertion
+        # on empty result sets with aggregate queries.
+        df = self._con.execute(
+            "SELECT COUNT(*) AS n FROM klines WHERE code = ? AND ktype = ?",
             [code, ktype],
-        ).fetchone()[0]
-        return n > 0
+        ).df()
+        return int(df.iloc[0]["n"]) > 0
 
     def date_range(self, code: str, ktype: str) -> tuple[str, str] | None:
         """Return (min_time_key, max_time_key) or None if no data."""
-        row = self._con.execute(
-            "SELECT MIN(time_key), MAX(time_key) FROM klines WHERE code=? AND ktype=?",
+        # Use .df() instead of .fetchone() to avoid DuckDB 1.5.2 internal assertion
+        # on empty result sets with MIN/MAX aggregate queries.
+        df = self._con.execute(
+            "SELECT MIN(time_key) AS min_t, MAX(time_key) AS max_t "
+            "FROM klines WHERE code=? AND ktype=?",
             [code, ktype],
-        ).fetchone()
-        if row is None or row[0] is None:
+        ).df()
+        if df.empty or pd.isna(df.iloc[0]["min_t"]):
             return None
-        return row[0], row[1]
+        return df.iloc[0]["min_t"], df.iloc[0]["max_t"]
 
     def close(self):
         """Close the DuckDB connection."""
