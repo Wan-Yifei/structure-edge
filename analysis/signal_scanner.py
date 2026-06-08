@@ -677,27 +677,47 @@ class SignalScanner(QMainWindow):
             self._tray = None
             return
 
-        # Simple 16×16 teal square as the tray icon
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction
+
         pix = QPixmap(16, 16)
         pix.fill(QColor("#26a69a"))
         self._tray = QSystemTrayIcon(QIcon(pix), self)
         self._tray.setToolTip("SMC Signal Scanner")
+
+        menu = QMenu()
+        show_act = QAction("Show", self)
+        show_act.triggered.connect(self._tray_show)
+        quit_act = QAction("Quit", self)
+        quit_act.triggered.connect(self._tray_quit)
+        menu.addAction(show_act)
+        menu.addSeparator()
+        menu.addAction(quit_act)
+        self._tray.setContextMenu(menu)
+
         self._tray.messageClicked.connect(self._on_tray_message_clicked)
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
 
-    def _on_tray_message_clicked(self) -> None:
-        if self._last_new_signal:
-            self._open_viewer(self._last_new_signal)
-        self.show()
+    def _tray_show(self) -> None:
+        self.showNormal()
         self.activateWindow()
         self.raise_()
 
+    def _tray_quit(self) -> None:
+        self._stop_scan()
+        if self._tray is not None:
+            self._tray.hide()
+        QApplication.quit()
+
+    def _on_tray_message_clicked(self) -> None:
+        if self._last_new_signal:
+            self._open_viewer(self._last_new_signal)
+        self._tray_show()
+
     def _on_tray_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self.show()
-            self.activateWindow()
-            self.raise_()
+            self._tray_show()
 
     # ── signal row double-click ───────────────────────────────────────────────
 
@@ -901,10 +921,20 @@ class SignalScanner(QMainWindow):
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        self._stop_scan()
         if self._tray is not None:
-            self._tray.hide()
-        super().closeEvent(event)
+            # Minimize to tray instead of quitting; use tray menu Quit to exit.
+            event.ignore()
+            self.hide()
+            self._tray.showMessage(
+                "SMC Signal Scanner",
+                "Scanner is still running in the background.\n"
+                "Right-click the tray icon to quit.",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
+        else:
+            self._stop_scan()
+            super().closeEvent(event)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
@@ -912,6 +942,7 @@ class SignalScanner(QMainWindow):
 def main(argv=None) -> None:
     app = QApplication(sys.argv if argv is None else [sys.argv[0]] + list(argv))
     app.setApplicationName("SMC Signal Scanner")
+    app.setQuitOnLastWindowClosed(False)  # keep alive when minimized to tray
     win = SignalScanner()
     win.show()
     sys.exit(app.exec())
