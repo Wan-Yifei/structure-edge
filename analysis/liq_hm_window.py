@@ -679,6 +679,7 @@ class LiqHmWindow(QWidget):
         if code == self._code:
             return
         self._code = code
+        self.setWindowTitle(f"Liquidity Heatmap  —  {code}")
         self._reset_grid()
 
     def set_live(self, live: bool) -> None:
