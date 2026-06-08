@@ -359,6 +359,9 @@ class LiqHmWindow(QWidget):
         # Per-column mid-price for the price path line (None = no data that column)
         self._mid_prices: list[float | None] = []
 
+        # Live mid from the most recent update_quote() call — appended to path tail
+        self._live_mid: float | None = None
+
         # Latest OB snapshot — cached for fast depth-to-cursor calculation
         self._latest_snap: list[dict] = []
 
@@ -757,6 +760,7 @@ class LiqHmWindow(QWidget):
         self._bin_size  = 0.0
         self._best_bid  = None
         self._best_ask  = None
+        self._live_mid  = None
         for img in (self._img_combined, self._img_bid, self._img_ask):
             img.clear()
         self._price_path_item.setData([], [])
@@ -984,12 +988,7 @@ class LiqHmWindow(QWidget):
 
         # Mid-price path line
         if self._price_path_cb.isChecked() and self._mid_prices:
-            xs = np.arange(n, dtype=np.float64) + 0.5
-            ys = np.array(
-                [m if m is not None else np.nan for m in self._mid_prices[:n]],
-                dtype=np.float64,
-            )
-            self._price_path_item.setData(xs, ys)
+            self._update_price_path(n)
             self._price_path_item.setVisible(True)
         else:
             self._price_path_item.setVisible(False)
@@ -1001,6 +1000,22 @@ class LiqHmWindow(QWidget):
         if self._best_ask is not None:
             self._ask_line.setValue(self._best_ask)
             self._ask_line.setVisible(True)
+
+    def _update_price_path(self, n: int | None = None) -> None:
+        """Rebuild the price path curve, appending the live mid as a trailing point."""
+        if n is None:
+            n = len(self._col_ts)
+        if not self._mid_prices:
+            return
+        xs = np.arange(n, dtype=np.float64) + 0.5
+        ys = np.array(
+            [m if m is not None else np.nan for m in self._mid_prices[:n]],
+            dtype=np.float64,
+        )
+        if self._live_mid is not None:
+            xs = np.append(xs, float(n))
+            ys = np.append(ys, self._live_mid)
+        self._price_path_item.setData(xs, ys)
 
     def update_quote(self, bid: float, ask: float) -> None:
         """Update the best bid/ask spread lines from an external live quote.
@@ -1017,6 +1032,9 @@ class LiqHmWindow(QWidget):
             self._best_ask = ask
             self._ask_line.setValue(ask)
             self._ask_line.setVisible(True)
+        if bid > 0 and ask > 0 and self._price_path_cb.isChecked() and self._mid_prices:
+            self._live_mid = (bid + ask) / 2
+            self._update_price_path()
 
     # ── iceberg / spoof detection and drawing ──────────────────────────────────
 
@@ -1253,8 +1271,8 @@ class LiqHmWindow(QWidget):
         self._absorb_items.append(scat)
 
     def _on_absorb_hovered(self, scatter, points, ev) -> None:
-        from PyQt5.QtWidgets import QToolTip
-        from PyQt5.QtGui import QCursor
+        from PyQt6.QtWidgets import QToolTip
+        from PyQt6.QtGui import QCursor
         if not points:
             QToolTip.hideText()
             return
