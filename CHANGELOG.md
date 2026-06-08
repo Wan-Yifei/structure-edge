@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.13.2 — LiqHm absorb + price path fixes (2026-06-08)
+
+### Fix: Absorption bubble color mapping inverted (`analysis/liq_hm_window.py`)
+
+- BUY-absorbed events now render purple (bearish); SELL-absorbed render gold
+  (bullish) — was previously swapped.
+- Tooltip and legend text updated to match corrected semantics.
+
+### Fix: Price path (Lo→Hi) lagging behind best bid/ask dashed lines
+
+- `update_quote()` now sets `_live_mid = (bid+ask)/2` and immediately appends
+  it as a trailing point at `x = n` via `_update_price_path()`.
+- The price path now updates at quote-tick frequency, in sync with the bid/ask
+  spread lines, instead of waiting for the next column push (every `col_secs` s).
+
+### Fix: `ModuleNotFoundError: No module named 'PyQt5'` in absorb hover tooltip
+
+- `_on_absorb_hovered()` was importing from PyQt5; changed to PyQt6.
+
+### Improve: MaxΔP filter for absorption detection
+
+- `detect_absorption_bubbles()`: new `max_price_move` parameter — caps the
+  allowed mid-price move per column for an event to qualify as true absorption.
+  Filters out false positives (e.g. spike-down with dip buyers).
+- LiqHmWindow: new MaxΔP spinbox (0–9.99, default 0.10; 0 = ∞).
+
 ## v0.13.1 — LiqHm UX + DuckDB fixes (2026-06-08)
 
 ### Fix: DuckDB 1.5.2 internal assertion in signal scanner (`feeds/kline_store.py`)
