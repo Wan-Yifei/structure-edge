@@ -85,5 +85,6 @@
     "tick_db": "db/ticks.db",
     "order_book_db": "db/order_book.db"
   },
-  "autostart": true
+  "autostart": true,
+  "default_code": "US.SOXL"
 }

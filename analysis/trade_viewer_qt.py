@@ -378,28 +378,42 @@ def _compute_poc_vah_val(
 ) -> tuple[float, float, float]:
     """Return (poc_price, vah_price, val_price) from a volume profile.
 
-    VAH/VAL are the highest and lowest price bins that together account for
-    at least va_pct of the total volume, selected greedily from highest-volume
-    bins down.  Returns (poc, poc, poc) for degenerate inputs.
+    Uses the standard market-profile algorithm: start at POC and expand the
+    Value Area outward (up or down, whichever adds more volume at each step)
+    until va_pct of total volume is covered.  VAL ≤ POC ≤ VAH by construction.
+
+    When all bins have equal volume (OHLCV flat distribution) argmax returns
+    index 0 (bottom price), which would be misleading; in that case the median
+    bin is used as POC instead.
     """
     if centers.size == 0:
         return 0.0, 0.0, 0.0
     poc_idx = int(np.argmax(volumes))
-    poc     = float(centers[poc_idx])
-    total   = float(volumes.sum())
+    # OHLCV flat distribution: all bins equal → use median bin as POC
+    if np.all(volumes == volumes[poc_idx]):
+        poc_idx = len(volumes) // 2
+    poc   = float(centers[poc_idx])
+    total = float(volumes.sum())
     if total <= 0:
         return poc, poc, poc
-    sorted_idx = np.argsort(volumes)[::-1]
-    cumvol     = 0.0
-    va_indices: list[int] = []
-    for idx in sorted_idx:
-        cumvol += float(volumes[idx])
-        va_indices.append(int(idx))
-        if cumvol / total >= va_pct:
+
+    # Expand VA outward from POC; at each step pick the side that adds more volume.
+    lo_idx = poc_idx
+    hi_idx = poc_idx
+    cumvol = float(volumes[poc_idx])
+    while cumvol / total < va_pct:
+        above = float(volumes[hi_idx + 1]) if hi_idx + 1 < len(volumes) else 0.0
+        below = float(volumes[lo_idx - 1]) if lo_idx - 1 >= 0 else 0.0
+        if above == 0.0 and below == 0.0:
             break
-    vah = float(centers[max(va_indices)]) if va_indices else poc
-    val = float(centers[min(va_indices)]) if va_indices else poc
-    return poc, vah, val
+        if above >= below:
+            hi_idx += 1
+            cumvol += float(volumes[hi_idx])
+        else:
+            lo_idx -= 1
+            cumvol += float(volumes[lo_idx])
+
+    return poc, float(centers[hi_idx]), float(centers[lo_idx])
 
 
 def _load_trade_from_db(trade_id: str) -> tuple[dict | None, str]:
@@ -965,6 +979,8 @@ class TradeViewerQt(QMainWindow):
         self._range_profile_timer    = QTimer(self)
         self._range_profile_timer.setSingleShot(True)
         self._range_profile_timer.timeout.connect(self._rebuild_range_profile)
+        # Label-pinning connections on the profile ViewBox — cleared on each rebuild
+        self._profile_pin_conns:     list                       = []
 
         # Build UI
         self._build_toolbar(args)
@@ -1010,7 +1026,8 @@ class TradeViewerQt(QMainWindow):
 
         # Code
         tb1.addWidget(_lbl("Code:"))
-        self._code_edit = QLineEdit(getattr(args, "code", "US.SNDK") or "US.SNDK")
+        _fb = _default_code()
+        self._code_edit = QLineEdit(getattr(args, "code", _fb) or _fb)
         self._code_edit.setFixedWidth(90)
         self._code_edit.returnPressed.connect(self._trigger_fetch)
         # Event filter: catches Enter key before QToolBar can consume it on Windows.
@@ -2543,9 +2560,20 @@ class TradeViewerQt(QMainWindow):
 
     # ── Session vol profile ───────────────────────────────────────────────────
 
+    def _disconnect_profile_pins(self) -> None:
+        """Disconnect all accumulated label-pinning slots from the profile ViewBox."""
+        vb = self._profile_widget.getViewBox()
+        for conn in self._profile_pin_conns:
+            try:
+                vb.sigRangeChanged.disconnect(conn)
+            except Exception:
+                pass
+        self._profile_pin_conns.clear()
+
     def _rebuild_session_profile(self) -> None:
         if self._klines is None:
             return
+        self._disconnect_profile_pins()
         pw     = self._profile_widget
         pw.clear()
         # pw.clear() removes all items — restore the crosshair sync line
@@ -2581,9 +2609,8 @@ class TradeViewerQt(QMainWindow):
         pw.getPlotItem().setLabel("top", range_val.upper(),
                                   **{"color": _FG, "size": "8pt"})
 
-        # POC — line + separate TextItem so the label never clips at panel edges
-        poc_idx = int(np.argmax(volumes))
-        poc     = float(centers[poc_idx])
+        poc, vah, val = _compute_poc_vah_val(centers, volumes)
+
         poc_line = pg.InfiniteLine(
             pos=poc, angle=0, movable=False,
             pen=pg.mkPen(_RED, width=1),
@@ -2591,7 +2618,7 @@ class TradeViewerQt(QMainWindow):
         poc_label = pg.TextItem(
             text=f"POC {poc:.2f}", color=_RED,
             fill=pg.mkBrush(_qc(_BG_TIP, 180)),
-            anchor=(0.0, 1.0),   # top-left: text grows right and upward from anchor
+            anchor=(0.0, 1.0),
         )
         poc_label.setFont(QFont("Monospace", 7))
         pw.addItem(poc_line,  ignoreBounds=True)
@@ -2600,59 +2627,45 @@ class TradeViewerQt(QMainWindow):
         vb = pw.getViewBox()
 
         def _pin_poc_label() -> None:
-            """Re-position POC label at left edge of current view."""
             xlo = vb.viewRange()[0][0]
             poc_label.setPos(xlo, poc)
 
-        # Pin once now; re-pin whenever the view is panned / zoomed
-        vb.sigRangeChanged.connect(lambda *_: _pin_poc_label())
+        conn = vb.sigRangeChanged.connect(lambda *_: _pin_poc_label())
+        self._profile_pin_conns.append(conn)
         _pin_poc_label()
 
-        # VAH / VAL (70 % of volume)
-        total_vol = float(volumes.sum())
-        if total_vol > 0:
-            sorted_idx = np.argsort(volumes)[::-1]
-            cumvol     = 0.0
-            va_indices = []
-            for idx in sorted_idx:
-                cumvol += volumes[idx]
-                va_indices.append(idx)
-                if cumvol / total_vol >= 0.70:
-                    break
-            if va_indices:
-                vah = float(centers[max(va_indices)])
-                val = float(centers[min(va_indices)])
-                for price, lbl in [(vah, "VAH"), (val, "VAL")]:
-                    va_line = pg.InfiniteLine(
-                        pos=price, angle=0, movable=False,
-                        pen=pg.mkPen(_GOLD, width=1, style=Qt.PenStyle.DashLine),
-                    )
-                    va_label = pg.TextItem(
-                        text=f"{lbl} {price:.2f}", color=_GOLD,
-                        fill=pg.mkBrush(_qc(_BG_TIP, 180)),
-                        anchor=(0.0, 0.0),   # top-left; text grows right and downward
-                    )
-                    va_label.setFont(QFont("Monospace", 7))
-                    pw.addItem(va_line,  ignoreBounds=True)
-                    pw.addItem(va_label, ignoreBounds=True)
+        for price, lbl in [(vah, "VAH"), (val, "VAL")]:
+            va_line = pg.InfiniteLine(
+                pos=price, angle=0, movable=False,
+                pen=pg.mkPen(_GOLD, width=1, style=Qt.PenStyle.DashLine),
+            )
+            va_label = pg.TextItem(
+                text=f"{lbl} {price:.2f}", color=_GOLD,
+                fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+                anchor=(0.0, 0.0),
+            )
+            va_label.setFont(QFont("Monospace", 7))
+            pw.addItem(va_line,  ignoreBounds=True)
+            pw.addItem(va_label, ignoreBounds=True)
 
-                    def _pin_va(lbl_item=va_label, p=price) -> None:
-                        xlo = vb.viewRange()[0][0]
-                        lbl_item.setPos(xlo, p)
+            def _pin_va(lbl_item=va_label, p=price) -> None:
+                xlo = vb.viewRange()[0][0]
+                lbl_item.setPos(xlo, p)
 
-                    vb.sigRangeChanged.connect(lambda *_, f=_pin_va: f())
-                    _pin_va()
+            conn2 = vb.sigRangeChanged.connect(lambda *_, f=_pin_va: f())
+            self._profile_pin_conns.append(conn2)
+            _pin_va()
 
         # X: pin with 15 % right margin; disable auto-range so it doesn't revert.
         max_vol = float(volumes.max())
         vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         vb.setXRange(0, max_vol * 1.15, padding=0)
 
-        # Y: mirror the main chart's current visible price range so the profile
-        # stays in sync with whatever the user is looking at.
-        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        # Y: fit the profile's own price range so bars always fill the panel.
+        # Using main-chart Y-sync compressed the bars to a sliver on daily charts.
+        y_pad = (hi - lo) * 0.10
         vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
-        vb.setYRange(ylo, yhi, padding=0)
+        vb.setYRange(lo - y_pad, hi + y_pad, padding=0)
 
     def _filter_sessions(self, klines: pd.DataFrame) -> pd.DataFrame:
         """Keep only rows whose time falls in the active session windows."""
@@ -2893,6 +2906,7 @@ class TradeViewerQt(QMainWindow):
         src_lbl  = "tick" if used_ticks else "OHLCV"
 
         # ── Right panel ───────────────────────────────────────────────────────
+        self._disconnect_profile_pins()
         pw = self._profile_widget
         pw.clear()
         pw.addItem(self._profile_hline)
@@ -2936,14 +2950,17 @@ class TradeViewerQt(QMainWindow):
             vah_lbl.setPos(xlo, vah);  vah_lbl.setText(f"VAH {vah:.2f}")
             val_lbl.setPos(xlo, val);  val_lbl.setText(f"VAL {val:.2f}")
 
-        vb.sigRangeChanged.connect(lambda *_: _pin_panel_labels())
+        conn = vb.sigRangeChanged.connect(lambda *_: _pin_panel_labels())
+        self._profile_pin_conns.append(conn)
         _pin_panel_labels()
 
         vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         vb.setXRange(0, max_vol * 1.15, padding=0)
-        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        range_lo = float(centers[0])
+        range_hi = float(centers[-1])
+        y_pad = (range_hi - range_lo) * 0.10
         vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
-        vb.setYRange(ylo, yhi, padding=0)
+        vb.setYRange(range_lo - y_pad, range_hi + y_pad, padding=0)
 
         # ── Inline overlay on main chart ──────────────────────────────────────
         self._clear_range_inline()
@@ -3006,15 +3023,12 @@ class TradeViewerQt(QMainWindow):
         )
 
     def _on_main_range_changed(self, _vb, ranges) -> None:
-        """Called by _plot_c.vb.sigRangeChanged(ViewBox, [[xlo,xhi],[ylo,yhi]]).
+        """Called by _plot_c.vb.sigRangeChanged.
 
-        Keeps the session volume profile Y range locked to the main chart's
-        visible price range so the profile never drifts out of view when the
-        user pans/zooms.  The tick profile Y is NOT synced here — it is set
-        per-candle in _show_tick_profile() to fit the candle's own price range.
+        Profile Y is now fitted to the profile's own data range (set in
+        _rebuild_session_profile / _rebuild_range_profile), so main-chart Y
+        changes are intentionally not forwarded here.
         """
-        _, (ylo, yhi) = ranges
-        self._profile_widget.getViewBox().setYRange(ylo, yhi, padding=0)
 
     def _pin_heatmap_legend(self, *_) -> None:
         """Re-anchor the heatmap legend to the top-left of the candle view."""
@@ -3288,9 +3302,19 @@ def _safe_float(v) -> float:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _default_code() -> str:
+    cfg = pathlib.Path(__file__).parent.parent / "config" / "schedule.json"
+    try:
+        import json
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        return data.get("default_code") or (data.get("targets") or ["US.SOXL"])[0]
+    except Exception:
+        return "US.SOXL"
+
+
 def _parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Trade Viewer Qt (PyQtGraph)")
-    ap.add_argument("--code",    default="US.SNDK")
+    ap.add_argument("--code",    default=_default_code())
     ap.add_argument("--tf",      default="5m",
                     choices=list(TIMEFRAME_MAP.keys()))
     ap.add_argument("--mode",    default="Live",

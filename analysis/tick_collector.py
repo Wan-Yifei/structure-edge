@@ -173,13 +173,14 @@ def main(argv=None):
     state = {"last_tick_time": None, "first_tick_done": False, "session_count": 0}
 
     # ── open moomoo quote context ──────────────────────────────────────────
-    from moomoo import OpenQuoteContext, SubType, RET_OK
+    from moomoo import OpenQuoteContext, SubType, RET_OK, Session
 
     ctx          = OpenQuoteContext(host=args.host, port=args.port)
     HandlerClass = _make_handler(store, state)
     ctx.set_handler(HandlerClass())
 
-    ret, msg = ctx.subscribe(codes, [SubType.TICKER], subscribe_push=True)
+    ret, msg = ctx.subscribe(codes, [SubType.TICKER], subscribe_push=True,
+                             extended_time=True, session=Session.ALL)
     if ret != RET_OK:
         log.error("Subscribe failed: %s", msg)
         ctx.close()

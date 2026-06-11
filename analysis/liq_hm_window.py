@@ -485,6 +485,14 @@ class LiqHmWindow(QWidget):
         reset_btn.clicked.connect(self._reset_view)
         row1.addWidget(reset_btn)
 
+        row1.addSeparator()
+        self._pin_btn = QPushButton("📌 Pin")
+        self._pin_btn.setCheckable(True)
+        self._pin_btn.setFixedWidth(60)
+        self._pin_btn.setToolTip("Keep this window on top of all other windows")
+        self._pin_btn.toggled.connect(self._on_pin_toggled)
+        row1.addWidget(self._pin_btn)
+
         # ── Row 2: detection overlay controls ─────────────────────────────────
         row2 = QToolBar()
         row2.setMovable(False)
@@ -944,6 +952,7 @@ class LiqHmWindow(QWidget):
         if self._col_ts:
             self._render()
             self._redraw_orderflow_markers()
+            self._load_absorb_ticks()
         # Start normal one-by-one updates
         if self._live and self._code:
             self._timer.start(self._col_secs_spin.value() * 1000)
@@ -1316,6 +1325,8 @@ class LiqHmWindow(QWidget):
 
     def _on_absorb_ready(self, ticks: list) -> None:
         """Receive ticks from background worker and redraw absorption bubbles."""
+        buy  = sum(1 for t in ticks if t.get("direction") == "BUY")
+        sell = sum(1 for t in ticks if t.get("direction") == "SELL")
         self._absorb_ticks = ticks
         self._redraw_orderflow_markers()
 
@@ -1424,6 +1435,14 @@ class LiqHmWindow(QWidget):
             return
         self._plot_widget.setXRange(0, self._max_cols_spin.value(), padding=0)
         self._plot_widget.setYRange(self._price_min, self._price_max, padding=0.02)
+
+    def _on_pin_toggled(self, checked: bool) -> None:
+        flags = self.windowFlags()
+        if checked:
+            self.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
+        else:
+            self.setWindowFlags(flags & ~Qt.WindowType.WindowStaysOnTopHint)
+        self.show()
 
     def mouseDoubleClickEvent(self, event) -> None:
         """Double-click anywhere on the window resets the zoom."""
