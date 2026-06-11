@@ -87,10 +87,10 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
     """Warn and auto-reconnect when no tick received for longer than *timeout_minutes*."""
     from moomoo import SubType, RET_OK, Session
 
-    timeout_sec    = timeout_minutes * 60
-    check_interval = min(60, timeout_sec)   # check every 60 s (or timeout if shorter)
-    last_log_time  = time.time()
-    reconnecting   = False
+    timeout_sec      = timeout_minutes * 60
+    check_interval   = min(60, timeout_sec)   # check every 60 s (or timeout if shorter)
+    last_log_time    = time.time()
+    last_resub_time: float | None = None      # wall-clock time of last re-subscribe attempt
 
     while not stop_event.wait(check_interval):
         now = time.time()
@@ -101,36 +101,37 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
             last_log_time = now
 
         last = state["last_tick_time"]
-        if last is None:
-            continue
 
-        elapsed = now - last
-        if elapsed > timeout_sec:
-            if not reconnecting:
-                log.warning(
-                    "NO DATA  %.0f min since last tick — re-subscribing",
-                    elapsed / 60,
-                )
-                reconnecting = True
-                try:
-                    ctx.unsubscribe(codes, [SubType.TICKER])
-                except Exception:
-                    pass
-                try:
-                    ret, msg = ctx.subscribe(
-                        codes, [SubType.TICKER],
-                        subscribe_push=True, extended_time=True, session=Session.ALL,
-                    )
-                    if ret == RET_OK:
-                        log.info("Re-subscribed OK — waiting for first tick")
-                        state["last_tick_time"] = None   # reset so warning doesn't repeat
-                        reconnecting = False
-                    else:
-                        log.error("Re-subscribe failed: %s — will retry next cycle", msg)
-                except Exception as exc:
-                    log.error("Re-subscribe error: %s — will retry next cycle", exc)
+        # Determine elapsed since last data; after a re-subscribe use that as the clock
+        if last is not None:
+            elapsed = now - last
+        elif last_resub_time is not None:
+            elapsed = now - last_resub_time   # time since re-subscribe; no data yet
         else:
-            reconnecting = False             # data resumed, clear flag
+            continue                           # never had any data yet, nothing to do
+
+        if elapsed > timeout_sec:
+            log.warning(
+                "NO DATA  %.0f min since last tick — re-subscribing",
+                elapsed / 60,
+            )
+            last_resub_time = now
+            state["last_tick_time"] = None    # clear so elapsed resets to resub clock
+            try:
+                ctx.unsubscribe(codes, [SubType.TICKER])
+            except Exception:
+                pass
+            try:
+                ret, msg = ctx.subscribe(
+                    codes, [SubType.TICKER],
+                    subscribe_push=True, extended_time=True, session=Session.ALL,
+                )
+                if ret == RET_OK:
+                    log.info("Re-subscribed OK — waiting for first tick")
+                else:
+                    log.error("Re-subscribe failed: %s — will retry next cycle", msg)
+            except Exception as exc:
+                log.error("Re-subscribe error: %s — will retry next cycle", exc)
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
