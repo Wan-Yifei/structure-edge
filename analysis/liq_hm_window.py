@@ -33,9 +33,8 @@ from core.time_utils import candle_start
 _BG   = "#0d1117"
 _FG   = "#b0bec5"
 _GRID = "#263238"
-_TEAL = "#26a69a"   # bid colormap side
-_RED  = "#ef5350"   # ask / red-up convention
-_BLUE = "#42a5f5"   # bid spread line (matches main-chart EMA/range-profile blue)
+_TEAL = "#26a69a"   # bid side (also bull color in green-up / Western convention)
+_RED  = "#ef5350"   # ask side (also bull color in red-up / CN convention)
 
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
@@ -356,6 +355,7 @@ class LiqHmWindow(QWidget):
         # Best bid / ask from the most recent snapshot (盘口)
         self._best_bid: float | None = None
         self._best_ask: float | None = None
+        self._red_up: bool = True  # mirrors trade_viewer red-up convention
 
         # Per-column mid-price for the price path line (None = no data that column)
         self._mid_prices: list[float | None] = []
@@ -677,13 +677,13 @@ class LiqHmWindow(QWidget):
         _quote_fill = pg.mkBrush(QColor(13, 17, 23, 200))
         self._bid_line = pg.InfiniteLine(
             angle=0, movable=False,
-            pen=pg.mkPen(_BLUE, width=1, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(_TEAL, width=1, style=Qt.PenStyle.DashLine),
         )
         self._bid_line.setVisible(False)
         self._bid_line.setZValue(20)
         self._plot_widget.addItem(self._bid_line)
 
-        self._bid_label = pg.TextItem(anchor=(0.0, 1.0), color=_BLUE, fill=_quote_fill)
+        self._bid_label = pg.TextItem(anchor=(0.0, 1.0), color=_TEAL, fill=_quote_fill)
         self._bid_label.setZValue(21)
         self._bid_label.setVisible(False)
         self._plot_widget.addItem(self._bid_label, ignoreBounds=True)
@@ -1015,6 +1015,24 @@ class LiqHmWindow(QWidget):
             self._price_path_item.setVisible(False)
 
         # Update best bid/ask spread lines
+        if self._best_bid is not None:
+            self._set_quote_line(self._bid_line, self._bid_label, self._best_bid, "B")
+        if self._best_ask is not None:
+            self._set_quote_line(self._ask_line, self._ask_label, self._best_ask, "A")
+
+    def set_red_up(self, red_up: bool) -> None:
+        """Sync bid/ask line colors with the main chart's red-up convention.
+
+        red-up=True  (CN): ask=RED  bid=TEAL
+        red-up=False (WS): ask=TEAL bid=RED
+        """
+        self._red_up = red_up
+        bid_col = _TEAL if red_up else _RED
+        ask_col = _RED  if red_up else _TEAL
+        self._bid_line.setPen(pg.mkPen(bid_col, width=1, style=Qt.PenStyle.DashLine))
+        self._bid_label.setColor(bid_col)
+        self._ask_line.setPen(pg.mkPen(ask_col, width=1, style=Qt.PenStyle.DashLine))
+        self._ask_label.setColor(ask_col)
         if self._best_bid is not None:
             self._set_quote_line(self._bid_line, self._bid_label, self._best_bid, "B")
         if self._best_ask is not None:

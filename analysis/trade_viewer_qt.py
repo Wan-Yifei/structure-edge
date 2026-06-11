@@ -1661,6 +1661,8 @@ class TradeViewerQt(QMainWindow):
         if show_hm:
             self._pin_heatmap_legend()
         self._render(self._klines, self._ticks)
+        if self._liq_hm_window is not None:
+            self._liq_hm_window.set_red_up(self._ind("red_up"))
 
     def _on_tick_size_toggle(self) -> None:
         """Re-render the tick profile panel when S/M/L filter changes."""
@@ -2100,6 +2102,7 @@ class TradeViewerQt(QMainWindow):
             self._liq_hm_window.destroyed.connect(self._on_liq_hm_closed)
             self._liq_hm_window.set_code(code)
             self._liq_hm_window.set_live(live)
+            self._liq_hm_window.set_red_up(self._ind("red_up"))
             self._liq_hm_window.show()
         else:
             if self._liq_hm_window is not None:
