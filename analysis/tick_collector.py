@@ -83,55 +83,88 @@ def _make_handler(store, state: dict):
 
 
 def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
-              ctx, codes):
-    """Warn and auto-reconnect when no tick received for longer than *timeout_minutes*."""
-    from moomoo import SubType, RET_OK, Session
+              ctx_holder: list, codes: list,
+              host: str, port: int, handler_class):
+    """Auto-reconnect when no tick received for longer than *timeout_minutes*.
+
+    Two-tier recovery:
+      1. Re-subscribe on the existing OpenQuoteContext (handles silent subscription drop).
+      2. If that fails, close the dead ctx and create a fresh one (handles TCP-level
+         disconnect where the ctx itself is no longer usable).
+    """
+    from moomoo import OpenQuoteContext, SubType, RET_OK, Session
 
     timeout_sec      = timeout_minutes * 60
-    check_interval   = min(60, timeout_sec)   # check every 60 s (or timeout if shorter)
+    check_interval   = min(60, timeout_sec)
     last_log_time    = time.time()
-    last_resub_time: float | None = None      # wall-clock time of last re-subscribe attempt
+    last_resub_time: float | None = None
+
+    def _try_subscribe(ctx) -> bool:
+        try:
+            ctx.unsubscribe(codes, [SubType.TICKER])
+        except Exception:
+            pass
+        try:
+            ret, msg = ctx.subscribe(
+                codes, [SubType.TICKER],
+                subscribe_push=True, extended_time=True, session=Session.ALL,
+            )
+            if ret == RET_OK:
+                return True
+            log.warning("Re-subscribe on existing ctx failed: %s", msg)
+        except Exception as exc:
+            log.warning("Re-subscribe on existing ctx error: %s", exc)
+        return False
+
+    def _rebuild_ctx() -> bool:
+        """Close the dead ctx and spin up a fresh one; update ctx_holder[0]."""
+        try:
+            ctx_holder[0].close()
+        except Exception:
+            pass
+        try:
+            new_ctx = OpenQuoteContext(host=host, port=port)
+            new_ctx.set_handler(handler_class())
+            ret, msg = new_ctx.subscribe(
+                codes, [SubType.TICKER],
+                subscribe_push=True, extended_time=True, session=Session.ALL,
+            )
+            if ret == RET_OK:
+                ctx_holder[0] = new_ctx
+                log.info("Rebuilt context and re-subscribed OK")
+                return True
+            log.error("New ctx subscribe failed: %s — will retry", msg)
+            new_ctx.close()
+        except Exception as exc:
+            log.error("Context rebuild failed: %s — will retry", exc)
+        return False
 
     while not stop_event.wait(check_interval):
         now = time.time()
 
-        # Periodic count log (once per timeout window)
         if now - last_log_time >= timeout_sec:
             log.info("This session: %d ticks", state.get("session_count", 0))
             last_log_time = now
 
         last = state["last_tick_time"]
-
-        # Determine elapsed since last data; after a re-subscribe use that as the clock
         if last is not None:
             elapsed = now - last
         elif last_resub_time is not None:
-            elapsed = now - last_resub_time   # time since re-subscribe; no data yet
+            elapsed = now - last_resub_time
         else:
-            continue                           # never had any data yet, nothing to do
+            continue
 
-        if elapsed > timeout_sec:
-            log.warning(
-                "NO DATA  %.0f min since last tick — re-subscribing",
-                elapsed / 60,
-            )
-            last_resub_time = now
-            state["last_tick_time"] = None    # clear so elapsed resets to resub clock
-            try:
-                ctx.unsubscribe(codes, [SubType.TICKER])
-            except Exception:
-                pass
-            try:
-                ret, msg = ctx.subscribe(
-                    codes, [SubType.TICKER],
-                    subscribe_push=True, extended_time=True, session=Session.ALL,
-                )
-                if ret == RET_OK:
-                    log.info("Re-subscribed OK — waiting for first tick")
-                else:
-                    log.error("Re-subscribe failed: %s — will retry next cycle", msg)
-            except Exception as exc:
-                log.error("Re-subscribe error: %s — will retry next cycle", exc)
+        if elapsed <= timeout_sec:
+            continue
+
+        log.warning("NO DATA  %.0f min since last tick — reconnecting", elapsed / 60)
+        last_resub_time = now
+        state["last_tick_time"] = None
+
+        if _try_subscribe(ctx_holder[0]):
+            log.info("Re-subscribed on existing context OK")
+        else:
+            _rebuild_ctx()
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -205,8 +238,8 @@ def main(argv=None):
     # ── open moomoo quote context ──────────────────────────────────────────
     from moomoo import OpenQuoteContext, SubType, RET_OK, Session
 
-    ctx          = OpenQuoteContext(host=args.host, port=args.port)
     HandlerClass = _make_handler(store, state)
+    ctx          = OpenQuoteContext(host=args.host, port=args.port)
     ctx.set_handler(HandlerClass())
 
     ret, msg = ctx.subscribe(codes, [SubType.TICKER], subscribe_push=True,
@@ -220,9 +253,12 @@ def main(argv=None):
     log.info("Subscribed — collecting ticks. Press Ctrl-C to stop.")
 
     # ── watchdog thread ────────────────────────────────────────────────────
+    ctx_holder = [ctx]   # mutable so watchdog can replace a dead ctx
     stop_event = threading.Event()
     threading.Thread(
-        target=_watchdog, args=(state, timeout_minutes, stop_event, ctx, codes),
+        target=_watchdog,
+        args=(state, timeout_minutes, stop_event,
+              ctx_holder, codes, args.host, args.port, HandlerClass),
         daemon=True,
     ).start()
 
@@ -242,7 +278,7 @@ def main(argv=None):
         while not stop:
             time.sleep(1)
     finally:
-        ctx.close()
+        ctx_holder[0].close()
         log.info("Session ended.")
         store.close()
 
