@@ -541,8 +541,8 @@ class LiqHmWindow(QWidget):
         self._simb_cb = QCheckBox("Imbalance")
         self._simb_cb.setChecked(False)
         self._simb_cb.setToolTip(
-            "Blue bar = bullish stacked imbalance (bid dominates N consecutive depth levels)\n"
-            "Red bar  = bearish stacked imbalance (ask dominates N consecutive depth levels)\n"
+            "Lime bar   = bullish stacked imbalance (bid dominates N consecutive depth levels)\n"
+            "Pink bar   = bearish stacked imbalance (ask dominates N consecutive depth levels)\n"
             "Bid/ask levels paired by depth rank; missing side counts as 0.")
         self._simb_cb.stateChanged.connect(self._on_controls_changed)
         row2.addWidget(self._simb_cb)
@@ -1263,15 +1263,15 @@ class LiqHmWindow(QWidget):
     def _draw_simb_markers(self, simbs: list[tuple]) -> None:
         """Vertical bars at stacked-imbalance zones.
 
-        Blue = bullish (BID dominates); red-orange = bearish (ASK dominates).
+        Lime = bullish (BID dominates); pink = bearish (ASK dominates).
         Each bar spans [price_lo, price_hi] at the snapshot's column.
         Opacity encodes mean_ratio strength (capped at 5×).
         """
         if not simbs:
             return
 
-        _BID_COL = (100, 181, 246)   # Material Blue 300
-        _ASK_COL = (255, 112,  67)   # Material Deep-Orange 400
+        _BID_COL = (178, 255,  89)   # Lime A200 — high contrast vs teal heatmap
+        _ASK_COL = (255,  64, 129)   # Pink A200 — high contrast vs red-orange heatmap
 
         bid_xs: list[float] = []
         bid_ys: list[float] = []
@@ -1296,7 +1296,7 @@ class LiqHmWindow(QWidget):
             item = pg.PlotCurveItem(
                 x=np.array(xs, dtype=np.float64),
                 y=np.array(ys, dtype=np.float64),
-                pen=pg.mkPen(color=(*col, 200), width=4),
+                pen=pg.mkPen(color=(*col, 220), width=5),
                 connect="finite",
             )
             item.setZValue(12)
@@ -1432,6 +1432,12 @@ class LiqHmWindow(QWidget):
         if self._spoof_cb.isChecked():
             parts.append(
                 f'&nbsp;&nbsp;<font color="orange">▲ Bid spoof&nbsp;▼ Ask spoof</font>'
+            )
+
+        if self._simb_cb.isChecked():
+            parts.append(
+                f'&nbsp;&nbsp;<font color="#b2ff59">| Bullish imbalance</font>'
+                f'&nbsp;&nbsp;<font color="#ff4081">| Bearish imbalance</font>'
             )
 
         if self._absorb_cb.isChecked():
