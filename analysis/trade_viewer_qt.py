@@ -2577,10 +2577,13 @@ class TradeViewerQt(QMainWindow):
         if self._klines is None:
             return
         self._disconnect_profile_pins()
-        pw     = self._profile_widget
+        pw = self._profile_widget
         pw.clear()
-        # pw.clear() removes all items — restore the crosshair sync line
-        pw.addItem(self._profile_hline)
+        vb = pw.getViewBox()
+        # Disable Y auto-range before adding items so the crosshair hline at
+        # y=0 (default position) cannot pull the view range away from the data.
+        vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+        pw.addItem(self._profile_hline, ignoreBounds=True)
 
         range_val = self._get_range_val()
         klines    = apply_profile_range(self._klines, range_val)
@@ -2627,8 +2630,6 @@ class TradeViewerQt(QMainWindow):
         pw.addItem(poc_line,  ignoreBounds=True)
         pw.addItem(poc_label, ignoreBounds=True)
 
-        vb = pw.getViewBox()
-
         def _pin_poc_label() -> None:
             xlo = vb.viewRange()[0][0]
             poc_label.setPos(xlo, poc)
@@ -2659,15 +2660,10 @@ class TradeViewerQt(QMainWindow):
             self._profile_pin_conns.append(conn2)
             _pin_va()
 
-        # X: pin with 15 % right margin; disable auto-range so it doesn't revert.
         max_vol = float(volumes.max())
         vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         vb.setXRange(0, max_vol * 1.15, padding=0)
-
-        # Y: fit the profile's own price range so bars always fill the panel.
-        # Using main-chart Y-sync compressed the bars to a sliver on daily charts.
         y_pad = (hi - lo) * 0.10
-        vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         vb.setYRange(lo - y_pad, hi + y_pad, padding=0)
 
     def _filter_sessions(self, klines: pd.DataFrame) -> pd.DataFrame:
@@ -2912,7 +2908,9 @@ class TradeViewerQt(QMainWindow):
         self._disconnect_profile_pins()
         pw = self._profile_widget
         pw.clear()
-        pw.addItem(self._profile_hline)
+        vb = pw.getViewBox()
+        vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+        pw.addItem(self._profile_hline, ignoreBounds=True)
 
         bar_item = pg.BarGraphItem(
             x0=np.zeros(len(centers)), x1=volumes,
@@ -2924,8 +2922,6 @@ class TradeViewerQt(QMainWindow):
             "top", f"Range  {i1-i0+1}b  [{src_lbl}]",
             **{"color": "#42a5f5", "size": "7pt"},
         )
-
-        vb = pw.getViewBox()
 
         def _add_panel_line(price: float, color: str,
                             style=Qt.PenStyle.SolidLine) -> pg.TextItem:
@@ -2962,7 +2958,6 @@ class TradeViewerQt(QMainWindow):
         range_lo = float(centers[0])
         range_hi = float(centers[-1])
         y_pad = (range_hi - range_lo) * 0.10
-        vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         vb.setYRange(range_lo - y_pad, range_hi + y_pad, padding=0)
 
         # ── Inline overlay on main chart ──────────────────────────────────────
