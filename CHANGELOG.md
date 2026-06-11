@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.13.6 — tick collector auto-reconnect + imbalance color improvements (2026-06-11)
+
+### Fix: Tick collector silently drops subscription (`analysis/tick_collector.py`)
+
+- Added two-tier watchdog auto-reconnect:
+  1. Re-subscribe on existing ctx (handles silent subscription drop).
+  2. If that fails (e.g. `WinError 10054` / `_init_connect_sync` timeout),
+     close the dead ctx and rebuild a fresh `OpenQuoteContext`, re-set handler,
+     and re-subscribe. `ctx` is held in a `ctx_holder` list so the watchdog
+     thread can replace it without breaking main()'s shutdown path.
+- Watchdog check interval reduced to 60 s (was `timeout_sec`), so reconnect
+  fires faster after detection.
+- Fixed watchdog loop stall: after re-subscribe, `last_resub_time` used as
+  elapsed clock instead of `last_tick_time = None` silently skipping checks.
+
+### Fix: Imbalance bars hard to see against heatmap background (`analysis/liq_hm_window.py`)
+
+- Bullish bar: Material Blue 300 → **Lime A200** `(178,255,89)`.
+- Bearish bar: Deep-Orange 400 → **Pink A200** `(255,64,129)`.
+- Line width 4 → 5; opacity 200 → 220.
+- Added missing Imbalance entry to the legend bar.
+
 ## v0.13.5 — fix aggressor bubbles disappearing after first tick update (2026-06-11)
 
 ### Fix: Aggressor bubbles vanish after first live data update (`analysis/liq_hm_window.py`)
