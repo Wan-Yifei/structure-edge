@@ -584,8 +584,8 @@ class LiqHmWindow(QWidget):
         self._absorb_cb = QCheckBox("Absorb")
         self._absorb_cb.setChecked(False)
         self._absorb_cb.setToolTip(
-            "Purple bubble = buy orders absorbed by passive sell wall (bearish).\n"
-            "Gold bubble   = sell orders absorbed by passive buy wall (bullish).\n"
+            "Purple bubble = buy orders absorbed by passive sell wall.\n"
+            "Gold bubble   = sell orders absorbed by passive buy wall.\n"
             "Bubble size encodes absorbed delta volume.  Reads ticks.db.")
         self._absorb_cb.stateChanged.connect(self._on_absorb_changed)
         row2.addWidget(self._absorb_cb)
@@ -1270,15 +1270,15 @@ class LiqHmWindow(QWidget):
     def _draw_absorb_bubbles(self, bubbles: list[tuple]) -> None:
         """Draw ScatterPlotItem bubbles at absorption events on the price path.
 
-        Gold   = sell orders absorbed by passive buyers (SELL direction — bullish).
-        Purple = buy orders absorbed by passive sellers (BUY direction — bearish).
+        Gold   = sell orders absorbed by passive buy wall (SELL direction).
+        Purple = buy orders absorbed by passive sell wall (BUY direction).
         Bubble size scales with absorbed delta volume (8–30 px range).
         Hovering a bubble shows a tooltip with direction and absorbed delta volume.
         """
         if not bubbles:
             return
-        _GOLD   = (255, 160,   0, 200)   # gold   — sell absorbed, bullish
-        _PURPLE = (171,  71, 188, 200)   # purple — buy absorbed, bearish
+        _GOLD   = (255, 160,   0, 200)   # gold   — sell absorbed
+        _PURPLE = (171,  71, 188, 200)   # purple — buy absorbed
 
         max_vol = max(b[3] for b in bubbles)
         outline = pg.mkPen("white", width=0.5)
@@ -1307,7 +1307,7 @@ class LiqHmWindow(QWidget):
             QToolTip.hideText()
             return
         d = points[0].data()
-        label = "Buy absorbed (bearish)" if d["direction"] == "BUY" else "Sell absorbed (bullish)"
+        label = "Buy absorbed" if d["direction"] == "BUY" else "Sell absorbed"
         QToolTip.showText(QCursor.pos(), f"{label}\nΔvol: {d['vol']:,.0f}")
 
     def _load_absorb_ticks(self) -> None:
@@ -1399,9 +1399,9 @@ class LiqHmWindow(QWidget):
         if self._absorb_cb.isChecked():
             parts.append(
                 f'&nbsp;&nbsp;<font color="#ab47bc">●</font>'
-                f'&nbsp;<font color="{_FG}">Buy absorbed (bearish)</font>'
+                f'&nbsp;<font color="{_FG}">Buy absorbed</font>'
                 f'&nbsp;&nbsp;<font color="#ffa000">●</font>'
-                f'&nbsp;<font color="{_FG}">Sell absorbed (bullish)</font>'
+                f'&nbsp;<font color="{_FG}">Sell absorbed</font>'
             )
 
         self._legend_lbl.setText("".join(parts))
