@@ -597,3 +597,61 @@ def detect_absorption_bubbles(
             results.append((i, mid, "SELL", abs(delta)))
 
     return results
+
+
+def detect_aggressor_bubbles(
+    ticks: list[dict],
+    col_ts: list[datetime],
+    mid_prices: list[float | None],
+    col_secs: int,
+    min_delta_vol: float = 500.0,
+) -> list[tuple]:
+    """Find columns with dominant directional order flow (aggressors).
+
+    No price-movement filter is applied — any column whose |buy_vol − sell_vol|
+    exceeds min_delta_vol produces a bubble.  The bubble direction is the
+    dominant side (BUY or SELL); interpreting whether the flow was absorbed
+    is left to the user.
+
+    Returns:
+        List of (col_idx, mid_price, direction, delta_vol).
+    """
+    if not ticks or not col_ts:
+        return []
+
+    ts_list = list(col_ts)
+    col_buy: dict[int, float] = defaultdict(float)
+    col_sell: dict[int, float] = defaultdict(float)
+
+    for tk in ticks:
+        direction = tk.get("direction", "NEUTRAL")
+        if direction not in ("BUY", "SELL"):
+            continue
+        tt = tk["ts"]
+        idx = _bisect.bisect_right(ts_list, tt) - 1
+        if idx < 0:
+            continue
+        vol = float(tk["volume"])
+        if direction == "BUY":
+            col_buy[idx] += vol
+        else:
+            col_sell[idx] += vol
+
+    results = []
+    for i in sorted(set(col_buy) | set(col_sell)):
+        if i >= len(col_ts) or i >= len(mid_prices):
+            continue
+        mid = mid_prices[i]
+        if mid is None:
+            continue
+        buy_vol  = col_buy.get(i, 0.0)
+        sell_vol = col_sell.get(i, 0.0)
+        delta    = buy_vol - sell_vol
+        if abs(delta) < min_delta_vol:
+            continue
+        if delta > 0:
+            results.append((i, mid, "BUY", delta))
+        else:
+            results.append((i, mid, "SELL", abs(delta)))
+
+    return results

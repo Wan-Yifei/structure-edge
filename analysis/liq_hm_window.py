@@ -581,12 +581,13 @@ class LiqHmWindow(QWidget):
 
         row2.addSeparator()
 
-        self._absorb_cb = QCheckBox("Absorb")
+        self._absorb_cb = QCheckBox("Aggressor")
         self._absorb_cb.setChecked(False)
         self._absorb_cb.setToolTip(
-            "Purple bubble = buy orders absorbed by passive sell wall.\n"
-            "Gold bubble   = sell orders absorbed by passive buy wall.\n"
-            "Bubble size encodes absorbed delta volume.  Reads ticks.db.")
+            "Purple bubble = dominant BUY aggression (net buyers > threshold).\n"
+            "Gold bubble   = dominant SELL aggression (net sellers > threshold).\n"
+            "Bubble size encodes net delta volume.  Reads ticks.db.\n"
+            "Whether the flow was absorbed is for the user to judge from the heatmap.")
         self._absorb_cb.stateChanged.connect(self._on_absorb_changed)
         row2.addWidget(self._absorb_cb)
 
@@ -600,21 +601,6 @@ class LiqHmWindow(QWidget):
             "Minimum |buy_vol − sell_vol| per column to show a bubble.")
         self._absorb_min_vol_spin.valueChanged.connect(self._on_absorb_changed)
         row2.addWidget(self._absorb_min_vol_spin)
-
-        row2.addWidget(_lbl("MaxΔP:"))
-        self._absorb_max_move_spin = QDoubleSpinBox()
-        self._absorb_max_move_spin.setRange(0.00, 9.99)
-        self._absorb_max_move_spin.setSingleStep(0.01)
-        self._absorb_max_move_spin.setDecimals(2)
-        self._absorb_max_move_spin.setValue(0.10)
-        self._absorb_max_move_spin.setFixedWidth(60)
-        self._absorb_max_move_spin.setSpecialValueText("∞")
-        self._absorb_max_move_spin.setToolTip(
-            "Max mid-price move per column to qualify as true absorption (0 = no limit).\n"
-            "Filters out events where price moved significantly against the aggressive side\n"
-            "(e.g. a spike-down with dip buyers is not genuine sell-side absorption).")
-        self._absorb_max_move_spin.valueChanged.connect(self._on_absorb_changed)
-        row2.addWidget(self._absorb_max_move_spin)
 
         # ── Two-row toolbar container ──────────────────────────────────────────
         self._toolbar = QWidget()
@@ -1129,15 +1115,13 @@ class LiqHmWindow(QWidget):
             self._draw_simb_markers(simbs)
 
         if self._absorb_cb.isChecked() and self._absorb_ticks:
-            from analysis.orderflow_detect import detect_absorption_bubbles
-            max_move = self._absorb_max_move_spin.value()
-            bubbles = detect_absorption_bubbles(
+            from analysis.orderflow_detect import detect_aggressor_bubbles
+            bubbles = detect_aggressor_bubbles(
                 self._absorb_ticks,
                 self._col_ts,
                 self._mid_prices,
                 col_secs=self._col_secs_spin.value(),
                 min_delta_vol=float(self._absorb_min_vol_spin.value()),
-                max_price_move=max_move if max_move > 0 else None,
             )
             self._draw_absorb_bubbles(bubbles)
 
@@ -1268,17 +1252,17 @@ class LiqHmWindow(QWidget):
             self._simb_items.append(item)
 
     def _draw_absorb_bubbles(self, bubbles: list[tuple]) -> None:
-        """Draw ScatterPlotItem bubbles at absorption events on the price path.
+        """Draw ScatterPlotItem bubbles at aggressor events on the price path.
 
-        Gold   = sell orders absorbed by passive buy wall (SELL direction).
-        Purple = buy orders absorbed by passive sell wall (BUY direction).
-        Bubble size scales with absorbed delta volume (8–30 px range).
-        Hovering a bubble shows a tooltip with direction and absorbed delta volume.
+        Gold   = dominant SELL aggression (net sellers exceeded threshold).
+        Purple = dominant BUY aggression (net buyers exceeded threshold).
+        Bubble size scales with net delta volume (8–30 px range).
+        Hovering a bubble shows a tooltip with direction and net delta volume.
         """
         if not bubbles:
             return
-        _GOLD   = (255, 160,   0, 200)   # gold   — sell absorbed
-        _PURPLE = (171,  71, 188, 200)   # purple — buy absorbed
+        _GOLD   = (255, 160,   0, 200)   # gold   — sell aggressor
+        _PURPLE = (171,  71, 188, 200)   # purple — buy aggressor
 
         max_vol = max(b[3] for b in bubbles)
         outline = pg.mkPen("white", width=0.5)
@@ -1307,7 +1291,7 @@ class LiqHmWindow(QWidget):
             QToolTip.hideText()
             return
         d = points[0].data()
-        label = "Buy absorbed" if d["direction"] == "BUY" else "Sell absorbed"
+        label = "BUY aggressor" if d["direction"] == "BUY" else "SELL aggressor"
         QToolTip.showText(QCursor.pos(), f"{label}\nΔvol: {d['vol']:,.0f}")
 
     def _load_absorb_ticks(self) -> None:
@@ -1399,9 +1383,9 @@ class LiqHmWindow(QWidget):
         if self._absorb_cb.isChecked():
             parts.append(
                 f'&nbsp;&nbsp;<font color="#ab47bc">●</font>'
-                f'&nbsp;<font color="{_FG}">Buy absorbed</font>'
+                f'&nbsp;<font color="{_FG}">BUY aggressor</font>'
                 f'&nbsp;&nbsp;<font color="#ffa000">●</font>'
-                f'&nbsp;<font color="{_FG}">Sell absorbed</font>'
+                f'&nbsp;<font color="{_FG}">SELL aggressor</font>'
             )
 
         self._legend_lbl.setText("".join(parts))
