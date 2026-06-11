@@ -755,6 +755,14 @@ class LiqHmWindow(QWidget):
             except Exception:
                 pass
             self._bulk_worker = None
+        # Discard stale absorb worker so its callback can't overwrite the new code's ticks
+        if self._absorb_worker is not None:
+            try:
+                self._absorb_worker.done.disconnect()
+            except Exception:
+                pass
+            self._absorb_worker = None
+        self._absorb_ticks = []
         self._needs_init = True
 
         self._timer.stop()
@@ -1353,9 +1361,11 @@ class LiqHmWindow(QWidget):
 
     def _on_absorb_ready(self, ticks: list) -> None:
         """Receive ticks from background worker and redraw absorption bubbles."""
-        buy  = sum(1 for t in ticks if t.get("direction") == "BUY")
-        sell = sum(1 for t in ticks if t.get("direction") == "SELL")
-        self._absorb_ticks = ticks
+        # Only overwrite if the worker found data — an empty result means the tick
+        # collector is not running or the window just advanced; keep the last good cache
+        # so existing bubbles stay visible.
+        if ticks:
+            self._absorb_ticks = ticks
         self._redraw_orderflow_markers()
 
     def _on_absorb_changed(self) -> None:

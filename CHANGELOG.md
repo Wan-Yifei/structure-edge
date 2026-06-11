@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.13.5 — fix aggressor bubbles disappearing after first tick update (2026-06-11)
+
+### Fix: Aggressor bubbles vanish after first live data update (`analysis/liq_hm_window.py`)
+
+- `_on_absorb_ready` was unconditionally overwriting `_absorb_ticks` with the
+  worker's result, including empty lists when the tick collector has no data in
+  the current window.  Bubbles disappeared after the first reload cycle.
+- Fixed: only replace `_absorb_ticks` when the worker returns a non-empty result;
+  stale/empty reloads keep the last good cache so existing bubbles stay visible.
+- `_reset_grid()` now also disconnects and clears `_absorb_worker` (mirrors the
+  existing `_bulk_worker` pattern) and explicitly clears `_absorb_ticks`, so
+  switching symbols can't leave a stale worker calling back with the old code's ticks.
+
 ## v0.13.4 — fix bid/ask label anchor order (2026-06-11)
 
 ### Fix: A/B price label vertical order was swapped (`analysis/liq_hm_window.py`)
