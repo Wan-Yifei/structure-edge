@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.13.3 — LiqHm aggressor overlay + bid/ask line fixes (2026-06-11)
+
+### Refactor: Absorb → Aggressor detection (`analysis/liq_hm_window.py`, `orderflow_detect.py`)
+
+- Overlay renamed from "Absorb" to "Aggressor"; checkbox tooltip updated.
+- New `detect_aggressor_bubbles()` — same bucketing as absorption but no
+  price-movement filter; direction interpretation left to user.
+- Gold = net BUY aggression; purple = net SELL aggression.
+- MaxΔP spinbox removed; MinΔ threshold retained.
+- `_on_bulk_ready` now calls `_load_absorb_ticks()` so the overlay populates
+  after prefill (previously never triggered after bulk load).
+
+### Fix: Bid/ask spread lines now visible (`analysis/liq_hm_window.py`)
+
+- Lines were invisible (teal/red blended into Bid/Ask heatmap colormap).
+- Changed to colored dashed lines + `TextItem` price labels ("B …" / "A …")
+  pinned to the left edge of the view via `_set_quote_line()`.
+- Default colors match heatmap Bid/Ask colormap: ask=RED, bid=TEAL.
+- Colors automatically follow the main viewer's "Red Up" toggle via
+  `set_red_up()`: red-up=True → ask=RED bid=TEAL; red-up=False → ask=TEAL bid=RED.
+
+### Feat: Default symbol from config (`analysis/trade_viewer_qt.py`)
+
+- `_default_code()` reads `default_code` from `config/schedule.json` instead
+  of hardcoding "US.SNDK".
+
+### Fix: Tick collector 24H coverage (`analysis/tick_collector.py`)
+
+- Added `session=Session.ALL` alongside `extended_time=True` to the TICKER
+  subscription — required for overnight US ticks (OpenD ≥ 9.2.4207).
+  Without it the collector silently collected zero ticks outside regular hours.
+
 ## v0.13.2 — LiqHm absorb + price path fixes (2026-06-08)
 
 ### Fix: Absorption bubble color mapping inverted (`analysis/liq_hm_window.py`)
