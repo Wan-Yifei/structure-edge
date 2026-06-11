@@ -672,21 +672,33 @@ class LiqHmWindow(QWidget):
         self._plot_widget.addItem(self._price_path_item)
 
         # Best bid / ask horizontal lines (盘口)
+        # White dashed so they're visible in both Combined and Bid/Ask colormap modes.
+        _quote_fill = pg.mkBrush(QColor(13, 17, 23, 200))
         self._bid_line = pg.InfiniteLine(
             angle=0, movable=False,
-            pen=pg.mkPen(_TEAL, width=1, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen("white", width=1, style=Qt.PenStyle.DashLine),
         )
         self._bid_line.setVisible(False)
         self._bid_line.setZValue(20)
         self._plot_widget.addItem(self._bid_line)
 
+        self._bid_label = pg.TextItem(anchor=(0.0, 1.0), color=_TEAL, fill=_quote_fill)
+        self._bid_label.setZValue(21)
+        self._bid_label.setVisible(False)
+        self._plot_widget.addItem(self._bid_label, ignoreBounds=True)
+
         self._ask_line = pg.InfiniteLine(
             angle=0, movable=False,
-            pen=pg.mkPen(_RED, width=1, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen("white", width=1, style=Qt.PenStyle.DashLine),
         )
         self._ask_line.setVisible(False)
         self._ask_line.setZValue(20)
         self._plot_widget.addItem(self._ask_line)
+
+        self._ask_label = pg.TextItem(anchor=(0.0, 0.0), color=_RED, fill=_quote_fill)
+        self._ask_label.setZValue(21)
+        self._ask_label.setVisible(False)
+        self._plot_widget.addItem(self._ask_label, ignoreBounds=True)
 
         # Mouse tracking
         self._plot_widget.scene().sigMouseMoved.connect(self._on_mouse_move)
@@ -767,7 +779,9 @@ class LiqHmWindow(QWidget):
         self._price_lbl.setVisible(False)
         self._time_lbl.setVisible(False)
         self._bid_line.setVisible(False)
+        self._bid_label.setVisible(False)
         self._ask_line.setVisible(False)
+        self._ask_label.setVisible(False)
         self._clear_overlay_items()
 
     def _depth_to_cursor(self, target: float) -> str:
@@ -1001,11 +1015,24 @@ class LiqHmWindow(QWidget):
 
         # Update best bid/ask spread lines
         if self._best_bid is not None:
-            self._bid_line.setValue(self._best_bid)
-            self._bid_line.setVisible(True)
+            self._set_quote_line(self._bid_line, self._bid_label, self._best_bid, "B")
         if self._best_ask is not None:
-            self._ask_line.setValue(self._best_ask)
-            self._ask_line.setVisible(True)
+            self._set_quote_line(self._ask_line, self._ask_label, self._best_ask, "A")
+
+    def _set_quote_line(
+        self,
+        line: pg.InfiniteLine,
+        label: pg.TextItem,
+        price: float,
+        prefix: str,
+    ) -> None:
+        """Position a bid/ask InfiniteLine and its price label at the left edge of the view."""
+        line.setValue(price)
+        line.setVisible(True)
+        xlo, xhi = self._plot_widget.getPlotItem().vb.viewRange()[0]
+        label.setText(f"{prefix} {price:.2f}")
+        label.setPos(xlo + (xhi - xlo) * 0.005, price)
+        label.setVisible(True)
 
     def _update_price_path(self, n: int | None = None) -> None:
         """Rebuild the price path curve, appending the live mid as a trailing point."""
@@ -1032,12 +1059,10 @@ class LiqHmWindow(QWidget):
         """
         if bid > 0:
             self._best_bid = bid
-            self._bid_line.setValue(bid)
-            self._bid_line.setVisible(True)
+            self._set_quote_line(self._bid_line, self._bid_label, bid, "B")
         if ask > 0:
             self._best_ask = ask
-            self._ask_line.setValue(ask)
-            self._ask_line.setVisible(True)
+            self._set_quote_line(self._ask_line, self._ask_label, ask, "A")
 
     @pyqtSlot(float, float)
     def update_live_price(self, bid: float, ask: float) -> None:
