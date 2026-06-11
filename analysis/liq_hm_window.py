@@ -683,7 +683,7 @@ class LiqHmWindow(QWidget):
         self._bid_line.setZValue(20)
         self._plot_widget.addItem(self._bid_line)
 
-        self._bid_label = pg.TextItem(anchor=(0.0, 1.0), color=_TEAL, fill=_quote_fill)
+        self._bid_label = pg.TextItem(anchor=(0.0, 0.0), color=_TEAL, fill=_quote_fill)
         self._bid_label.setZValue(21)
         self._bid_label.setVisible(False)
         self._plot_widget.addItem(self._bid_label, ignoreBounds=True)
@@ -696,7 +696,7 @@ class LiqHmWindow(QWidget):
         self._ask_line.setZValue(20)
         self._plot_widget.addItem(self._ask_line)
 
-        self._ask_label = pg.TextItem(anchor=(0.0, 0.0), color=_RED, fill=_quote_fill)
+        self._ask_label = pg.TextItem(anchor=(0.0, 1.0), color=_RED, fill=_quote_fill)
         self._ask_label.setZValue(21)
         self._ask_label.setVisible(False)
         self._plot_widget.addItem(self._ask_label, ignoreBounds=True)

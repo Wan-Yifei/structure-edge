@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.13.4 — fix bid/ask label anchor order (2026-06-11)
+
+### Fix: A/B price label vertical order was swapped (`analysis/liq_hm_window.py`)
+
+- `_bid_label` anchor was `(0, 1.0)` (bottom) → text floated upward into the spread.
+- `_ask_label` anchor was `(0, 0.0)` (top) → text floated downward into the spread.
+- With a tight spread the text heights exceeded the gap, making "B" appear above "A".
+- Fixed: bid label anchor → `(0, 0.0)` (floats below bid line);
+  ask label anchor → `(0, 1.0)` (floats above ask line).
+- A is now always above B regardless of spread width; dashed line colors unaffected.
+
 ## v0.13.3 — LiqHm aggressor overlay + bid/ask line fixes (2026-06-11)
 
 ### Refactor: Absorb → Aggressor detection (`analysis/liq_hm_window.py`, `orderflow_detect.py`)
