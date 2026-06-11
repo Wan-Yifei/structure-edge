@@ -33,8 +33,9 @@ from core.time_utils import candle_start
 _BG   = "#0d1117"
 _FG   = "#b0bec5"
 _GRID = "#263238"
-_TEAL = "#26a69a"   # bid
-_RED  = "#ef5350"   # ask
+_TEAL = "#26a69a"   # bid colormap side
+_RED  = "#ef5350"   # ask / red-up convention
+_BLUE = "#42a5f5"   # bid spread line (matches main-chart EMA/range-profile blue)
 
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
@@ -676,20 +677,20 @@ class LiqHmWindow(QWidget):
         _quote_fill = pg.mkBrush(QColor(13, 17, 23, 200))
         self._bid_line = pg.InfiniteLine(
             angle=0, movable=False,
-            pen=pg.mkPen("white", width=1, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(_BLUE, width=1, style=Qt.PenStyle.DashLine),
         )
         self._bid_line.setVisible(False)
         self._bid_line.setZValue(20)
         self._plot_widget.addItem(self._bid_line)
 
-        self._bid_label = pg.TextItem(anchor=(0.0, 1.0), color=_TEAL, fill=_quote_fill)
+        self._bid_label = pg.TextItem(anchor=(0.0, 1.0), color=_BLUE, fill=_quote_fill)
         self._bid_label.setZValue(21)
         self._bid_label.setVisible(False)
         self._plot_widget.addItem(self._bid_label, ignoreBounds=True)
 
         self._ask_line = pg.InfiniteLine(
             angle=0, movable=False,
-            pen=pg.mkPen("white", width=1, style=Qt.PenStyle.DashLine),
+            pen=pg.mkPen(_RED, width=1, style=Qt.PenStyle.DashLine),
         )
         self._ask_line.setVisible(False)
         self._ask_line.setZValue(20)
