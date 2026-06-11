@@ -82,26 +82,55 @@ def _make_handler(store, state: dict):
     return _Handler
 
 
-def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event):
-    """Warn when no tick received for longer than *timeout_minutes*; log counts at same interval."""
-    timeout_sec = timeout_minutes * 60
-    warned      = False
-    while not stop_event.wait(timeout_sec):
-        session = state.get("session_count", 0)
-        log.info("This session: %d ticks", session)
+def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
+              ctx, codes):
+    """Warn and auto-reconnect when no tick received for longer than *timeout_minutes*."""
+    from moomoo import SubType, RET_OK, Session
+
+    timeout_sec    = timeout_minutes * 60
+    check_interval = min(60, timeout_sec)   # check every 60 s (or timeout if shorter)
+    last_log_time  = time.time()
+    reconnecting   = False
+
+    while not stop_event.wait(check_interval):
+        now = time.time()
+
+        # Periodic count log (once per timeout window)
+        if now - last_log_time >= timeout_sec:
+            log.info("This session: %d ticks", state.get("session_count", 0))
+            last_log_time = now
+
         last = state["last_tick_time"]
         if last is None:
             continue
-        elapsed = time.time() - last
+
+        elapsed = now - last
         if elapsed > timeout_sec:
-            if not warned:
+            if not reconnecting:
                 log.warning(
-                    "NO DATA  %.0f min since last tick — check OpenD connection and market hours",
+                    "NO DATA  %.0f min since last tick — re-subscribing",
                     elapsed / 60,
                 )
-                warned = True
+                reconnecting = True
+                try:
+                    ctx.unsubscribe(codes, [SubType.TICKER])
+                except Exception:
+                    pass
+                try:
+                    ret, msg = ctx.subscribe(
+                        codes, [SubType.TICKER],
+                        subscribe_push=True, extended_time=True, session=Session.ALL,
+                    )
+                    if ret == RET_OK:
+                        log.info("Re-subscribed OK — waiting for first tick")
+                        state["last_tick_time"] = None   # reset so warning doesn't repeat
+                        reconnecting = False
+                    else:
+                        log.error("Re-subscribe failed: %s — will retry next cycle", msg)
+                except Exception as exc:
+                    log.error("Re-subscribe error: %s — will retry next cycle", exc)
         else:
-            warned = False                  # reset after data resumes
+            reconnecting = False             # data resumed, clear flag
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -192,7 +221,8 @@ def main(argv=None):
     # ── watchdog thread ────────────────────────────────────────────────────
     stop_event = threading.Event()
     threading.Thread(
-        target=_watchdog, args=(state, timeout_minutes, stop_event), daemon=True
+        target=_watchdog, args=(state, timeout_minutes, stop_event, ctx, codes),
+        daemon=True,
     ).start()
 
     # ── run until interrupted ──────────────────────────────────────────────
