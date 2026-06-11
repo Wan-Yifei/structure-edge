@@ -46,7 +46,7 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import (
-    Qt, QThread, QTimer, pyqtSignal, QRectF, QPointF,
+    Qt, QThread, QTimer, pyqtSignal, QRectF, QPointF, QMetaObject, Q_ARG,
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPicture, QPen, QBrush, QFont,
@@ -68,7 +68,7 @@ from strategy.smc.order_blocks import detect_order_blocks
 from strategy.smc.kd_trend import compute_kd
 from moomoo import (
     OpenQuoteContext, SubType, KLType, AuType,
-    TickerHandlerBase, RET_OK,
+    TickerHandlerBase, StockQuoteHandlerBase, RET_OK,
 )
 
 # ── PyQtGraph global config ───────────────────────────────────────────────────
@@ -940,7 +940,9 @@ class TradeViewerQt(QMainWindow):
         self._ticks:        dict | None         = None
         self._live_ticks:   dict                = defaultdict(
             lambda: defaultdict(lambda: {"buy": 0, "sell": 0, "neutral": 0}))
-        self._tick_lock     = threading.Lock()
+        self._tick_lock      = threading.Lock()
+        self._last_tick_price: float            = 0.0
+        self._last_nbbo:      tuple[float, float] = (0.0, 0.0)
         self._fetcher:      DataFetcher | None  = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._trigger_fetch)
@@ -1540,13 +1542,14 @@ class TradeViewerQt(QMainWindow):
         if not code or not self._ctx:
             return
         try:
-            self._ctx.subscribe(code, [SubType.TICKER])
+            self._ctx.subscribe(code, [SubType.TICKER, SubType.QUOTE],
+                                extended_time=True)
             tf = self._tf_combo.currentText()
             _, candle_mins = TIMEFRAME_MAP[tf]
 
             viewer = self
 
-            class _Handler(TickerHandlerBase):
+            class _TickHandler(TickerHandlerBase):
                 def on_recv_rsp(self, rsp_str):
                     ret, data = super().on_recv_rsp(rsp_str)
                     if ret != RET_OK or data is None or data.empty:
@@ -1564,8 +1567,27 @@ class TradeViewerQt(QMainWindow):
                             key    = ("buy" if d == "BUY"
                                       else ("sell" if d == "SELL" else "neutral"))
                             viewer._live_ticks[bucket][price][key] += vol
+                            viewer._last_tick_price = price
 
-            self._ctx.set_handler(_Handler())
+            class _QuoteHandler(StockQuoteHandlerBase):
+                def on_recv_rsp(self, rsp_str):
+                    ret, data = super().on_recv_rsp(rsp_str)
+                    if ret != RET_OK or data is None or data.empty:
+                        return
+                    for _, row in data.iterrows():
+                        bid = float(row.get("bid_price", 0) or 0)
+                        ask = float(row.get("ask_price", 0) or 0)
+                        if bid > 0 and ask > 0:
+                            viewer._last_nbbo = (bid, ask)
+                            if viewer._liq_hm_window is not None:
+                                QMetaObject.invokeMethod(
+                                    viewer._liq_hm_window, "update_live_price",
+                                    Qt.ConnectionType.QueuedConnection,
+                                    Q_ARG(float, bid), Q_ARG(float, ask),
+                                )
+
+            self._ctx.set_handler(_TickHandler())
+            self._ctx.set_handler(_QuoteHandler())
             self._live_code = code
             interval = self._refresh_spin.value() * 1000
             self._refresh_timer.start(interval)
@@ -1578,7 +1600,8 @@ class TradeViewerQt(QMainWindow):
         self._refresh_timer.stop()
         try:
             if self._ctx and self._live_code:
-                self._ctx.unsubscribe(self._live_code, [SubType.TICKER])
+                self._ctx.unsubscribe(self._live_code,
+                                      [SubType.TICKER, SubType.QUOTE])
         except Exception:
             pass
         self._live_code = ""
@@ -1675,7 +1698,8 @@ class TradeViewerQt(QMainWindow):
             # Code changed while in Live mode — resubscribe and discard stale ticks.
             try:
                 if self._ctx:
-                    self._ctx.unsubscribe(self._live_code, [SubType.TICKER])
+                    self._ctx.unsubscribe(self._live_code,
+                                          [SubType.TICKER, SubType.QUOTE])
             except Exception:
                 pass
             with self._tick_lock:
@@ -1706,7 +1730,7 @@ class TradeViewerQt(QMainWindow):
         # Push real-time NBBO to the heatmap so its spread lines reflect the
         # true best bid/ask rather than values derived from ORDER_BOOK depth
         # (which on LITE accounts does not start at the actual NBBO).
-        if self._liq_hm_window is not None and not historical and self._live_code:
+        if not historical and self._live_code:
             try:
                 ret, df = ctx.get_market_snapshot([self._live_code])
                 if ret == RET_OK and not df.empty:
@@ -1714,7 +1738,9 @@ class TradeViewerQt(QMainWindow):
                     bid = float(row.get("bid_price", 0) or 0)
                     ask = float(row.get("ask_price", 0) or 0)
                     if bid > 0 and ask > 0:
-                        self._liq_hm_window.update_quote(bid, ask)
+                        self._last_nbbo = (bid, ask)
+                        if self._liq_hm_window is not None:
+                            self._liq_hm_window.update_quote(bid, ask)
             except Exception:
                 pass
 
@@ -2846,10 +2872,8 @@ class TradeViewerQt(QMainWindow):
             return
 
         rx0, rx1 = self._range_region.getRegion()
-        i0 = max(0,     int(round(min(rx0, rx1))))
-        i1 = min(n - 1, int(round(max(rx0, rx1))))
-        if i0 > i1:
-            i0, i1 = i1, i0
+        i0 = max(0, min(n - 1, int(round(min(rx0, rx1)))))
+        i1 = max(0, min(n - 1, int(round(max(rx0, rx1)))))
         if (i0, i1) == self._range_last_indices:
             return
         self._range_last_indices = (i0, i1)

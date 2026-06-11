@@ -19,7 +19,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 import numpy as np
 from datetime import datetime, timedelta
 
-from PyQt6.QtCore    import Qt, QRectF, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore    import Qt, QRectF, QTimer, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui     import QColor, QPainterPath
 from PyQt6.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QLabel, QPushButton,
@@ -385,6 +385,8 @@ class LiqHmWindow(QWidget):
         self._bulk_worker: _BulkSnapshotWorker | None  = None
         # True after _reset_grid(); cleared after initial bulk pre-fill completes
         self._needs_init:  bool                        = False
+        # Timestamp of the last snapshot pushed; used to skip duplicate polls
+        self._last_snap_ts: datetime | None            = None
 
         self._build_toolbar()
         self._build_chart()
@@ -670,6 +672,7 @@ class LiqHmWindow(QWidget):
         # Mid-price path line — connects (bid+ask)/2 per column
         self._price_path_item = pg.PlotCurveItem(
             pen=pg.mkPen(color=(255, 255, 255, 180), width=1.5),
+            connect="finite",
         )
         self._price_path_item.setZValue(8)
         self._plot_widget.addItem(self._price_path_item)
@@ -755,6 +758,7 @@ class LiqHmWindow(QWidget):
         self._raw_snaps   = []
         self._mid_prices  = []
         self._latest_snap = []
+        self._last_snap_ts = None
         self._price_min = 0.0
         self._price_max = 0.0
         self._bin_size  = 0.0
@@ -828,11 +832,18 @@ class LiqHmWindow(QWidget):
         """Called in main thread when background query completes."""
         if not snap:
             return
-        self._maybe_init_price_range(snap)
-        self._push_column(snap)
+        snap_ts = snap[0]["ts"]
+        new_data = snap_ts != self._last_snap_ts
+        if new_data:
+            self._last_snap_ts = snap_ts
+            self._maybe_init_price_range(snap)
+        # Always push a column so the time axis keeps advancing.
+        # When data is stale pass an empty snap so no OB grid is painted.
+        self._push_column(snap if new_data else [], ts=snap_ts)
         self._render()
-        self._redraw_orderflow_markers()
-        self._load_absorb_ticks()   # refresh tick window when a new column arrives
+        if new_data:
+            self._redraw_orderflow_markers()
+            self._load_absorb_ticks()
 
     def _maybe_init_price_range(self, snap: list[dict]) -> None:
         prices = [r["price"] for r in snap]
@@ -1017,12 +1028,12 @@ class LiqHmWindow(QWidget):
             ys = np.append(ys, self._live_mid)
         self._price_path_item.setData(xs, ys)
 
+    @pyqtSlot(float, float)
     def update_quote(self, bid: float, ask: float) -> None:
-        """Update the best bid/ask spread lines from an external live quote.
+        """Update Best Bid/Ask spread lines only.
 
-        Overrides the values derived from ORDER_BOOK snapshots, which on LITE
-        accounts do not reflect the true NBBO.  Must be called from the main
-        thread (e.g. from the viewer's refresh timer).
+        Called from get_market_snapshot (regular-session data) — does NOT
+        touch _live_mid to avoid a mismatch with after-hours OB prices.
         """
         if bid > 0:
             self._best_bid = bid
@@ -1032,9 +1043,19 @@ class LiqHmWindow(QWidget):
             self._best_ask = ask
             self._ask_line.setValue(ask)
             self._ask_line.setVisible(True)
-        if bid > 0 and ask > 0 and self._price_path_cb.isChecked() and self._mid_prices:
+
+    @pyqtSlot(float, float)
+    def update_live_price(self, bid: float, ask: float) -> None:
+        """Update the price path trailing point from real-time QUOTE subscription.
+
+        Only called from the QUOTE push handler so the mid always reflects the
+        correct session (extended hours included).  Safe to invoke via
+        QMetaObject.invokeMethod from a non-Qt thread.
+        """
+        if bid > 0 and ask > 0:
             self._live_mid = (bid + ask) / 2
-            self._update_price_path()
+            if self._price_path_cb.isChecked() and self._mid_prices:
+                self._update_price_path()
 
     # ── iceberg / spoof detection and drawing ──────────────────────────────────
 
