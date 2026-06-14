@@ -53,7 +53,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QSplitter, QToolBar, QLabel, QComboBox, QLineEdit, QSpinBox,
+    QSplitter, QToolBar, QLabel, QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox,
     QPushButton, QCheckBox, QButtonGroup, QRadioButton, QSizePolicy,
     QFrame, QStatusBar, QMessageBox,
 )
@@ -652,14 +652,13 @@ class FvgItem(pg.GraphicsObject):
     def _build(self) -> None:
         pic = QPicture()
         p   = QPainter(pic)
-        bull_fill = _qc(_GREEN, 35)
-        bear_fill = _qc(_RED,   35)
-        bull_pen  = QPen(_qc(_GREEN, 120), 0)
-        bear_pen  = QPen(_qc(_RED,   120), 0)
-        # Filled FVGs: faint dashed outline only so the viewer can still show
-        # where they were without the zone dominating the chart.
-        bull_fill_f = _qc(_GREEN, 10)
-        bear_fill_f = _qc(_RED,   10)
+        # Diagonal-stripe brushes make FVG zones visually distinct from OB boxes
+        # (which use solid fills).  FDiag = forward-slash lines (bull ↑);
+        # BDiag = back-slash lines (bear ↓).
+        bull_brush = QBrush(_qc(_GREEN, 180), Qt.BrushStyle.FDiagPattern)
+        bear_brush = QBrush(_qc(_RED,   180), Qt.BrushStyle.BDiagPattern)
+        bull_pen   = QPen(_qc(_GREEN, 140), 0)
+        bear_pen   = QPen(_qc(_RED,   140), 0)
 
         for g in self._gaps:
             if g.get("filled", False):
@@ -670,8 +669,8 @@ class FvgItem(pg.GraphicsObject):
             bot  = float(g["bottom"])
             bull = g.get("direction", "bull") == "bull"
 
-            p.setPen(bull_pen  if bull else bear_pen)
-            p.setBrush(QBrush(bull_fill if bull else bear_fill))
+            p.setPen(bull_pen   if bull else bear_pen)
+            p.setBrush(bull_brush if bull else bear_brush)
             width = self._n - x0
             if width > 0:
                 p.drawRect(QRectF(x0, bot, width, top - bot))
@@ -851,7 +850,11 @@ class DataFetcher(QThread):
                 # require_displacement=False: show all FVGs in the viewer.
                 # The backtest engine applies displacement filtering separately
                 # via params.displacement_required; the viewer shows everything.
-                raw_fvgs = detect_fvg(warmup, require_displacement=False)
+                raw_fvgs = detect_fvg(
+                    warmup,
+                    require_displacement=False,
+                    min_gap_pct=p.get("fvg_min_gap_pct", 0.001),
+                )
 
                 # Only forward unfilled FVGs; filled zones have already been
                 # closed by price and are not actionable.
@@ -1122,6 +1125,18 @@ class TradeViewerQt(QMainWindow):
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
             tb2.addWidget(cb)
+            if key == "fvg":
+                self._fvg_min_pct = QDoubleSpinBox()
+                self._fvg_min_pct.setRange(0.05, 5.0)
+                self._fvg_min_pct.setSingleStep(0.05)
+                self._fvg_min_pct.setValue(0.10)
+                self._fvg_min_pct.setDecimals(2)
+                self._fvg_min_pct.setSuffix("%")
+                self._fvg_min_pct.setFixedWidth(72)
+                self._fvg_min_pct.setEnabled(False)
+                self._fvg_min_pct.setToolTip("FVG minimum gap size (% of price)")
+                self._fvg_min_pct.valueChanged.connect(self._trigger_fetch)
+                tb2.addWidget(self._fvg_min_pct)
 
         tb2.addSeparator()
 
@@ -1681,6 +1696,7 @@ class TradeViewerQt(QMainWindow):
         self._ob_legend.setVisible(show_ob)
         if show_ob:
             self._pin_ob_legend()
+        self._fvg_min_pct.setEnabled(self._ind("fvg"))
         self._render(self._klines, self._ticks)
         if self._liq_hm_window is not None:
             self._liq_hm_window.set_red_up(self._ind("red_up"))
@@ -1757,13 +1773,14 @@ class TradeViewerQt(QMainWindow):
             live_snap = {k: dict(v) for k, v in self._live_ticks.items()}
 
         params = {
-            "code":        self._code_edit.text().strip(),
-            "tf":          tf,
-            "historical":  historical,
-            "date_str":    date_str,
-            "candle_mins": cm,
-            "ind":         ind,
-            "live_ticks":  live_snap,
+            "code":            self._code_edit.text().strip(),
+            "tf":              tf,
+            "historical":      historical,
+            "date_str":        date_str,
+            "candle_mins":     cm,
+            "ind":             ind,
+            "live_ticks":      live_snap,
+            "fvg_min_gap_pct": self._fvg_min_pct.value() / 100.0,
         }
         self._log(f"Fetching K-lines ({tf}) ...")
         self._fetcher = DataFetcher(ctx, params)
