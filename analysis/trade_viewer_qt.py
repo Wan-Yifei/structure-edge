@@ -1129,7 +1129,7 @@ class TradeViewerQt(QMainWindow):
                 self._fvg_min_pct = QDoubleSpinBox()
                 self._fvg_min_pct.setRange(0.05, 5.0)
                 self._fvg_min_pct.setSingleStep(0.05)
-                self._fvg_min_pct.setValue(0.10)
+                self._fvg_min_pct.setValue(1.00)
                 self._fvg_min_pct.setDecimals(2)
                 self._fvg_min_pct.setSuffix("%")
                 self._fvg_min_pct.setFixedWidth(72)
