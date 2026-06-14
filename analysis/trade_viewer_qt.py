@@ -834,7 +834,7 @@ class DataFetcher(QThread):
             warmup   = df.iloc[-warmup_n:].reset_index(drop=True)
 
             smc_signals: list[dict] = []
-            if ind.get("bos_choch") or ind.get("ob"):
+            if True:  # always compute — checkbox only controls display
                 smc_signals = detect_bos_choch(
                     warmup,
                     max_span_bars=_BOS_MAX_SPAN.get(tf),
@@ -849,25 +849,19 @@ class DataFetcher(QThread):
             # are drawn at the correct x position on the chart.
             disp_off = len(df) - warmup_n   # 0 when all bars fit in warmup
 
+            # Always compute FVG/OB — checkboxes only control display visibility.
             fvg_gaps: list[dict] = []
-            if ind.get("fvg"):
-                # require_displacement=False: show all FVGs in the viewer.
-                # The backtest engine applies displacement filtering separately
-                # via params.displacement_required; the viewer shows everything.
-                raw_fvgs = detect_fvg(
-                    warmup,
-                    require_displacement=False,
-                    min_gap_pct=p.get("fvg_min_gap_pct", 0.001),
-                )
-
-                # Only forward unfilled FVGs; filled zones have already been
-                # closed by price and are not actionable.
-                for g in raw_fvgs:
-                    if g.get("filled", False):
-                        continue
-                    r = dict(g)
-                    r["idx"] = max(0, g["idx"] + disp_off)
-                    fvg_gaps.append(r)
+            raw_fvgs = detect_fvg(
+                warmup,
+                require_displacement=False,
+                min_gap_pct=p.get("fvg_min_gap_pct", 0.001),
+            )
+            for g in raw_fvgs:
+                if g.get("filled", False):
+                    continue
+                r = dict(g)
+                r["idx"] = max(0, g["idx"] + disp_off)
+                fvg_gaps.append(r)
 
             # Apply disp_off to BOS/CHoCH signal indices so they render at
             # the correct x position relative to the full kline DataFrame.
@@ -881,7 +875,7 @@ class DataFetcher(QThread):
                 smc_signals = adj_smc
 
             ob_blocks: list[dict] = []
-            if ind.get("ob") and smc_signals:
+            if smc_signals:
                 # detect_order_blocks uses warmup-relative indices; add disp_off.
                 raw_obs = detect_order_blocks(warmup, [
                     dict(s, idx=s["idx"] - disp_off,
