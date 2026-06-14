@@ -1662,6 +1662,7 @@ class TradeViewerQt(QMainWindow):
 
     def _on_mode_changed(self, mode: str) -> None:
         self._date_edit.setEnabled(mode == "Historical")
+        self._last_chart_key = ("", "")  # force zoom reset on next render
         if mode == "Live":
             self._start_live()
         else:
