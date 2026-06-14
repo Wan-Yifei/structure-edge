@@ -2801,8 +2801,8 @@ class TradeViewerQt(QMainWindow):
         pw.addItem(buy_bar)
         pw.addItem(sell_bar)
 
-        pw.getPlotItem().setLabel("bottom", "log(vol+1)", **{"color": _GREY, "size": "6pt"})
-        pw.getPlotItem().setLabel("top", header,          **{"color": _FG,   "size": "7pt"})
+        pw.getPlotItem().setLabel("bottom", "", **{})
+        pw.getPlotItem().setLabel("top", header, **{"color": _FG, "size": "7pt"})
 
         total_buy  = sum(buys)
         total_sell = sum(sells)
@@ -2870,13 +2870,13 @@ class TradeViewerQt(QMainWindow):
             pw.clear()
             pw.addItem(self._tick_profile_hline)
             n = i1 - i0 + 1
-            lbl = pg.TextItem(text=f"Range {n}b\nNo tick data", color=_GREY, anchor=(0.5, 0.5))
+            lbl = pg.TextItem(text=f"Range {n} bars\nNo tick data", color=_GREY, anchor=(0.5, 0.5))
             lbl.setFont(QFont("Monospace", 8))
             lbl.setPos(0.0, 0.0)
             pw.addItem(lbl)
-            pw.getPlotItem().setLabel("top", f"Range  {n}b", **{"color": _GREY, "size": "7pt"})
+            pw.getPlotItem().setLabel("top", f"Range  {n} bars", **{"color": _GREY, "size": "7pt"})
             return
-        self._draw_tick_profile(merged, f"Range  {i1 - i0 + 1}b")
+        self._draw_tick_profile(merged, f"Range  {i1 - i0 + 1} bars")
 
     # ── Tick profile Y range sync ─────────────────────────────────────────────
 
