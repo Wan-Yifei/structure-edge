@@ -748,12 +748,7 @@ class ObItem(pg.GraphicsObject):
             if width > 0:
                 p.drawRect(QRectF(x0, bot, width, top - bot))
 
-            # Subtype label at left edge of zone
-            label_map = {"regular": "OB", "mitigation": "OB~", "breaker": "BRK"}
-            lbl       = label_map.get(subtype, "OB")
-            p.setPen(QPen(pen_color, 0))
-            p.setFont(QFont("Monospace", 6))
-            p.drawText(QPointF(x0, top), lbl)
+            pass  # labels removed — see OB legend in chart top-left
 
         p.end()
         self._picture = pic
@@ -1478,6 +1473,21 @@ class TradeViewerQt(QMainWindow):
         # Pin legend to top-left whenever view range changes
         self._plot_c.vb.sigRangeChanged.connect(self._pin_heatmap_legend)
 
+        # ── OB legend (second row, top-left) ──────────────────────────────────
+        self._ob_legend = pg.TextItem(
+            html=(
+                f'<span style="color:{_OB_BULL};  font-family:Monospace; font-size:8pt;">&#9632; Bull OB&nbsp;&nbsp;</span>'
+                f'<span style="color:{_OB_BEAR};  font-family:Monospace; font-size:8pt;">&#9632; Bear OB&nbsp;&nbsp;</span>'
+                f'<span style="color:{_OB_MIT};   font-family:Monospace; font-size:8pt;">&#9632; Mitig.&nbsp;&nbsp;</span>'
+                f'<span style="color:{_OB_BREAK}; font-family:Monospace; font-size:8pt;">&#9632; Breaker</span>'
+            ),
+            anchor=(0.0, 0.0),
+        )
+        self._ob_legend.setZValue(60)
+        self._ob_legend.setVisible(False)
+        self._plot_c.addItem(self._ob_legend, ignoreBounds=True)
+        self._plot_c.vb.sigRangeChanged.connect(self._pin_ob_legend)
+
         # Session vol profile (bottom-right)
         self._profile_widget = pg.PlotWidget()
         self._profile_widget.setBackground(_BG)
@@ -1667,6 +1677,10 @@ class TradeViewerQt(QMainWindow):
         self._heatmap_legend.setVisible(show_hm)
         if show_hm:
             self._pin_heatmap_legend()
+        show_ob = self._ind("ob")
+        self._ob_legend.setVisible(show_ob)
+        if show_ob:
+            self._pin_ob_legend()
         self._render(self._klines, self._ticks)
         if self._liq_hm_window is not None:
             self._liq_hm_window.set_red_up(self._ind("red_up"))
@@ -1854,6 +1868,9 @@ class TradeViewerQt(QMainWindow):
         # Order Blocks
         self._ob_item.set_data(
             self._ob_blocks if show_ob else [], n)
+        self._ob_legend.setVisible(show_ob)
+        if show_ob:
+            self._pin_ob_legend()
 
         # Volume bars
         x      = np.arange(n)
@@ -3074,11 +3091,22 @@ class TradeViewerQt(QMainWindow):
         if not self._heatmap_legend.isVisible():
             return
         xlo, xhi = self._plot_c.vb.viewRange()[0]
-        _,   yhi = self._plot_c.vb.viewRange()[1]
-        x_pad    = (xhi - xlo) * 0.01   # 1% from left
-        y_pad    = (self._plot_c.vb.viewRange()[1][1]
-                    - self._plot_c.vb.viewRange()[1][0]) * 0.015
+        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        x_pad    = (xhi - xlo) * 0.01
+        y_pad    = (yhi - ylo) * 0.015
         self._heatmap_legend.setPos(xlo + x_pad, yhi - y_pad)
+
+    def _pin_ob_legend(self, *_) -> None:
+        """Re-anchor the OB legend just below the heatmap legend."""
+        if not self._ob_legend.isVisible():
+            return
+        xlo, xhi = self._plot_c.vb.viewRange()[0]
+        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        x_pad    = (xhi - xlo) * 0.01
+        # Offset one row below the heatmap legend slot (3.5% of y range)
+        y_top    = yhi - (yhi - ylo) * 0.015
+        y_row    = (yhi - ylo) * 0.035
+        self._ob_legend.setPos(xlo + x_pad, y_top - y_row)
 
     # ── Crosshair + tooltip ───────────────────────────────────────────────────
 
