@@ -17,6 +17,7 @@ import pandas as pd
 def detect_order_blocks(
     klines: pd.DataFrame,
     bos_signals: list[dict],
+    max_count: int = 4,
 ) -> list[dict]:
     """Return Order Blocks derived from BOS/CHoCH signals.
 
@@ -105,4 +106,4 @@ def detect_order_blocks(
         })
 
     # keep only the most recent OBs to avoid cluttering the chart
-    return blocks[-4:]
+    return blocks[-max_count:] if max_count > 0 else blocks

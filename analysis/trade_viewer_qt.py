@@ -881,7 +881,9 @@ class DataFetcher(QThread):
                     dict(s, idx=s["idx"] - disp_off,
                          from_idx=s.get("from_idx", s["idx"]) - disp_off)
                     for s in smc_signals
-                ] if disp_off > 0 else smc_signals)
+                ] if disp_off > 0 else smc_signals,
+                    max_count=p.get("ob_max_count", 4),
+                )
                 for b in raw_obs:
                     r = dict(b)
                     r["idx"]     = max(0, b["idx"]      + disp_off)
@@ -1123,6 +1125,15 @@ class TradeViewerQt(QMainWindow):
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
             tb2.addWidget(cb)
+            if key == "ob":
+                self._ob_max_count = QSpinBox()
+                self._ob_max_count.setRange(1, 20)
+                self._ob_max_count.setValue(4)
+                self._ob_max_count.setFixedWidth(50)
+                self._ob_max_count.setEnabled(False)
+                self._ob_max_count.setToolTip("Max number of recent OBs to display")
+                self._ob_max_count.valueChanged.connect(self._trigger_fetch)
+                tb2.addWidget(self._ob_max_count)
             if key == "fvg":
                 self._fvg_min_pct = QDoubleSpinBox()
                 self._fvg_min_pct.setRange(0.05, 5.0)
@@ -1696,6 +1707,7 @@ class TradeViewerQt(QMainWindow):
         self._ob_legend.setVisible(show_ob)
         if show_ob:
             self._pin_ob_legend()
+        self._ob_max_count.setEnabled(self._ind("ob"))
         self._fvg_min_pct.setEnabled(self._ind("fvg"))
         self._render(self._klines, self._ticks)
         if self._liq_hm_window is not None:
@@ -1781,6 +1793,7 @@ class TradeViewerQt(QMainWindow):
             "ind":             ind,
             "live_ticks":      live_snap,
             "fvg_min_gap_pct": self._fvg_min_pct.value() / 100.0,
+            "ob_max_count":    self._ob_max_count.value(),
         }
         self._log(f"Fetching K-lines ({tf}) ...")
         self._fetcher = DataFetcher(ctx, params)
