@@ -1657,6 +1657,7 @@ class TradeViewerQt(QMainWindow):
 
     def _on_tf_changed(self, tf: str) -> None:
         _, self._candle_mins = TIMEFRAME_MAP[tf]
+        self._last_chart_key = ("", "")  # force zoom reset on next render
         self._trigger_fetch()
 
     def _on_mode_changed(self, mode: str) -> None:
