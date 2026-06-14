@@ -112,20 +112,65 @@ _CHECKPOINT_INTERVAL = 10  # run PASSIVE checkpoint every N watchdog ticks
 
 
 def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
-              ctx=None, codes: list[str] | None = None, store=None):
-    """Warn when no update received for *timeout_minutes*; re-subscribe if possible.
+              ctx_holder: list, codes: list[str],
+              host: str, port: int, handler_class,
+              store=None):
+    """Warn and reconnect when no OB update received for *timeout_minutes*.
 
-    Also runs a PASSIVE WAL checkpoint every _CHECKPOINT_INTERVAL ticks to keep
-    the WAL file from growing unboundedly under high write rates.
+    Two-tier recovery (mirrors tick_collector):
+      1. Re-subscribe on the existing OpenQuoteContext.
+      2. If that fails, close the dead ctx and rebuild a fresh one.
+
+    Also runs a PASSIVE WAL checkpoint every _CHECKPOINT_INTERVAL ticks.
     """
-    from moomoo import SubType
-    timeout_sec   = timeout_minutes * 60
-    warned        = False
-    tick_count    = 0
-    while not stop_event.wait(timeout_sec):
+    from moomoo import OpenQuoteContext, SubType
+
+    timeout_sec      = timeout_minutes * 60
+    check_interval   = min(60, timeout_sec)
+    last_log_time    = time.time()
+    last_resub_time: float | None = None
+    tick_count       = 0
+
+    def _try_subscribe(ctx) -> bool:
+        try:
+            ctx.unsubscribe(codes, [SubType.ORDER_BOOK])
+        except Exception:
+            pass
+        try:
+            ret, msg = ctx.subscribe(codes, [SubType.ORDER_BOOK], subscribe_push=True)
+            if ret == 0:
+                return True
+            log.warning("Re-subscribe on existing ctx failed: %s", msg)
+        except Exception as exc:
+            log.warning("Re-subscribe on existing ctx error: %s", exc)
+        return False
+
+    def _rebuild_ctx() -> bool:
+        try:
+            ctx_holder[0].close()
+        except Exception:
+            pass
+        try:
+            new_ctx = OpenQuoteContext(host=host, port=port)
+            new_ctx.set_handler(handler_class())
+            ret, msg = new_ctx.subscribe(codes, [SubType.ORDER_BOOK], subscribe_push=True)
+            if ret == 0:
+                ctx_holder[0] = new_ctx
+                log.info("Rebuilt context and re-subscribed OK")
+                return True
+            log.error("New ctx subscribe failed: %s — will retry", msg)
+            new_ctx.close()
+        except Exception as exc:
+            log.error("Context rebuild failed: %s — will retry", exc)
+        return False
+
+    while not stop_event.wait(check_interval):
         tick_count += 1
-        session = state.get("session_count", 0)
-        log.info("This session: %d rows", session)
+        now = time.time()
+
+        if now - last_log_time >= timeout_sec:
+            log.info("This session: %d rows", state.get("session_count", 0))
+            last_log_time = now
 
         if store is not None:
             try:
@@ -143,29 +188,24 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
                 log.warning("WAL checkpoint failed: %s", exc)
 
         last = state["last_update_time"]
-        if last is None:
-            continue
-        elapsed = time.time() - last
-        if elapsed > timeout_sec:
-            if not warned:
-                log.warning(
-                    "NO DATA  %.0f min since last order book update — attempting re-subscribe",
-                    elapsed / 60,
-                )
-                warned = True
-                if ctx is not None and codes:
-                    try:
-                        ret, msg = ctx.subscribe(codes, [SubType.ORDER_BOOK],
-                                                 subscribe_push=True)
-                        if ret == 0:
-                            log.info("Re-subscribed OK: %s", ", ".join(codes))
-                            warned = False  # reset so next timeout triggers another warning+retry
-                        else:
-                            log.error("Re-subscribe failed: %s", msg)
-                    except Exception as exc:
-                        log.error("Re-subscribe error: %s", exc)
+        if last is not None:
+            elapsed = now - last
+        elif last_resub_time is not None:
+            elapsed = now - last_resub_time
         else:
-            warned = False
+            continue
+
+        if elapsed <= timeout_sec:
+            continue
+
+        log.warning("NO DATA  %.0f min since last OB update — reconnecting", elapsed / 60)
+        last_resub_time = now
+        state["last_update_time"] = None
+
+        if _try_subscribe(ctx_holder[0]):
+            log.info("Re-subscribed on existing context OK")
+        else:
+            _rebuild_ctx()
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -226,8 +266,8 @@ def main(argv=None):
 
     from moomoo import OpenQuoteContext, SubType, RET_OK
 
-    ctx          = OpenQuoteContext(host=args.host, port=args.port)
     HandlerClass = _make_handler(store, state)
+    ctx          = OpenQuoteContext(host=args.host, port=args.port)
     ctx.set_handler(HandlerClass())
 
     ret, msg = ctx.subscribe(codes, [SubType.ORDER_BOOK], subscribe_push=True)
@@ -239,10 +279,12 @@ def main(argv=None):
 
     log.info("Subscribed — collecting order book snapshots. Press Ctrl-C to stop.")
 
+    ctx_holder = [ctx]   # mutable so watchdog can replace a dead ctx
     stop_event = threading.Event()
     threading.Thread(
         target=_watchdog,
-        args=(state, timeout_minutes, stop_event, ctx, codes, store),
+        args=(state, timeout_minutes, stop_event,
+              ctx_holder, codes, args.host, args.port, HandlerClass, store),
         daemon=True,
     ).start()
 
@@ -261,7 +303,7 @@ def main(argv=None):
         while not stop:
             time.sleep(1)
     finally:
-        ctx.close()
+        ctx_holder[0].close()
         log.info("Session ended.")
         store.close()
 
