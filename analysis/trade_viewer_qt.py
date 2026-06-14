@@ -2863,13 +2863,10 @@ class TradeViewerQt(QMainWindow):
             dlbl.setPos(float(buys_log.max()) / 2 if buys_log.size else 0.0, float(max(prices)))
         pw.addItem(dlbl)
 
-        if y_lo is not None and y_hi is not None:
-            lo, hi = y_lo, y_hi
-        else:
-            lo = float(min(prices))
-            hi = float(max(prices))
-        pad = max((hi - lo) * 0.08, bin_h * 2)
-        pw.setYRange(lo - pad, hi + pad, padding=0)
+        # Sync Y range to current main chart viewport so profile aligns spatially.
+        # sigRangeChanged doesn't fire on hover, so we apply it once after drawing.
+        _, (ylo, yhi) = self._plot_c.vb.viewRange()
+        pw.setYRange(ylo, yhi, padding=0)
 
     def _show_tick_profile(self, candle_idx: int) -> None:
         if self._range_region is not None:
@@ -3142,12 +3139,9 @@ class TradeViewerQt(QMainWindow):
         self._show_range_tick_profile(i0, i1)
 
     def _on_main_range_changed(self, _vb, ranges) -> None:
-        """Called by _plot_c.vb.sigRangeChanged.
-
-        Profile Y is now fitted to the profile's own data range (set in
-        _rebuild_session_profile / _rebuild_range_profile), so main-chart Y
-        changes are intentionally not forwarded here.
-        """
+        """Sync tick profile Y axis with the main candle chart on every zoom/pan."""
+        ylo, yhi = ranges[1]
+        self._tick_profile_widget.setYRange(ylo, yhi, padding=0)
 
     def _pin_heatmap_legend(self, *_) -> None:
         """Re-anchor the heatmap legend to the top-left of the candle view."""
