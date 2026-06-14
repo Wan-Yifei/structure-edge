@@ -1444,10 +1444,12 @@ class TradeViewerQt(QMainWindow):
         # Single-candle tick profile (top-right, shown on hover)
         self._tick_profile_widget = pg.PlotWidget()
         self._tick_profile_widget.setBackground(_BG)
-        self._tick_profile_widget.setMinimumWidth(160)
-        self._tick_profile_widget.setMaximumWidth(200)
+        self._tick_profile_widget.setMinimumWidth(200)
+        self._tick_profile_widget.setMaximumWidth(300)
         self._tick_profile_widget.getPlotItem().showGrid(x=True, y=False, alpha=0.15)
         self._tick_profile_widget.getPlotItem().setMenuEnabled(False)
+        self._tick_profile_widget.getPlotItem().getAxis("left").setStyle(
+            autoReduceTextSpace=True, tickTextOffset=2)
         # Add crosshair line (survives until next pw.clear() call; restored in _show_tick_profile)
         self._tick_profile_widget.addItem(self._tick_profile_hline)
         right_layout.addWidget(self._tick_profile_widget, 1)
@@ -1479,10 +1481,15 @@ class TradeViewerQt(QMainWindow):
         # Session vol profile (bottom-right)
         self._profile_widget = pg.PlotWidget()
         self._profile_widget.setBackground(_BG)
-        self._profile_widget.setMinimumWidth(160)
-        self._profile_widget.setMaximumWidth(200)
+        self._profile_widget.setMinimumWidth(200)
+        self._profile_widget.setMaximumWidth(300)
         self._profile_widget.getPlotItem().showGrid(x=True, y=False, alpha=0.15)
         self._profile_widget.getPlotItem().setMenuEnabled(False)
+        self._profile_widget.getPlotItem().getAxis("left").setStyle(
+            autoReduceTextSpace=True, tickTextOffset=2)
+        self._profile_widget.getPlotItem().getAxis("bottom").setStyle(
+            autoReduceTextSpace=True, tickTextOffset=2)
+        self._profile_widget.getPlotItem().getAxis("bottom").enableAutoSIPrefix(True)
         # Add the crosshair sync line here so it persists across pw.clear() calls
         self._profile_widget.addItem(self._profile_hline)
         right_layout.addWidget(self._profile_widget, 2)
@@ -2842,6 +2849,15 @@ class TradeViewerQt(QMainWindow):
                 for k, v in counts.items():
                     bucket[k] = bucket.get(k, 0) + v
         if not merged:
+            pw = self._tick_profile_widget
+            pw.clear()
+            pw.addItem(self._tick_profile_hline)
+            n = i1 - i0 + 1
+            lbl = pg.TextItem(text=f"Range {n}b\nNo tick data", color=_GREY, anchor=(0.5, 0.5))
+            lbl.setFont(QFont("Monospace", 8))
+            lbl.setPos(0.0, 0.0)
+            pw.addItem(lbl)
+            pw.getPlotItem().setLabel("top", f"Range  {n}b", **{"color": _GREY, "size": "7pt"})
             return
         self._draw_tick_profile(merged, f"Range  {i1 - i0 + 1}b")
 
