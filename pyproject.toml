@@ -17,6 +17,7 @@ dependencies = [
     "pyqt6>=6.11.0",
     "pyqtgraph>=0.14.0",
     "pystray>=0.19.5",
+    "scipy>=1.17.1",
     "ta",
     "tqdm>=4.67.3",
 ]
