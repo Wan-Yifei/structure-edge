@@ -2335,11 +2335,11 @@ class TradeViewerQt(QMainWindow):
         # Draw the two midlines on top of the fills
         line_mid1 = pg.PlotCurveItem(
             x=x, y=mid1,
-            pen=pg.mkPen(_UP, width=1),
+            pen=pg.mkPen("#42a5f5", width=1),
         )
         line_mid2 = pg.PlotCurveItem(
             x=x, y=mid2,
-            pen=pg.mkPen("#42a5f5", width=1),
+            pen=pg.mkPen(_UP, width=1),
         )
         self._plot_c.addItem(line_mid1, ignoreBounds=True)
         self._plot_c.addItem(line_mid2, ignoreBounds=True)
