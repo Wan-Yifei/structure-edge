@@ -2758,17 +2758,31 @@ class TradeViewerQt(QMainWindow):
 
     # ── Tick profile (single candle on hover) ─────────────────────────────────
 
-    def _draw_tick_profile(self, pd_: dict, header: str) -> None:
+    def _draw_tick_profile(self, pd_: dict, header: str,
+                           y_lo: float | None = None,
+                           y_hi: float | None = None) -> None:
         """Render tick buy/sell/neutral bars into the tick profile panel.
 
         pd_ maps price → {buy, sell, neutral, buy_s, …} (same format as self._ticks values).
         header is placed in the top label of the panel.
-        Y range is fitted to min/max of prices in pd_.
+        y_lo/y_hi: explicit Y range (use candle OHLC for single-candle mode so stray
+        ticks outside the candle range don't distort the scale).  When omitted the
+        range is derived from min/max of prices in pd_ (suitable for range accumulation).
         """
         show_s = self._ind("tick_s")
         show_m = self._ind("tick_m")
         show_l = self._ind("tick_l")
         prices = sorted(pd_.keys())
+        # When candle bounds are provided, restrict to prices within [y_lo, y_hi]
+        # so stray ticks from adjacent bars don't appear in the profile.
+        if y_lo is not None and y_hi is not None and prices:
+            eps = max((y_hi - y_lo) * 0.01, 0.001)
+            prices = [p for p in prices if y_lo - eps <= p <= y_hi + eps]
+        if not prices:
+            pw = self._tick_profile_widget
+            pw.clear()
+            pw.addItem(self._tick_profile_hline)
+            return
         has_breakdown = "buy_s" in next(iter(pd_.values()), {})
         if has_breakdown and (show_s or show_m or show_l):
             buys = [
@@ -2849,8 +2863,11 @@ class TradeViewerQt(QMainWindow):
             dlbl.setPos(float(buys_log.max()) / 2 if buys_log.size else 0.0, float(max(prices)))
         pw.addItem(dlbl)
 
-        lo  = float(min(prices))
-        hi  = float(max(prices))
+        if y_lo is not None and y_hi is not None:
+            lo, hi = y_lo, y_hi
+        else:
+            lo = float(min(prices))
+            hi = float(max(prices))
         pad = max((hi - lo) * 0.08, bin_h * 2)
         pw.setYRange(lo - pad, hi + pad, padding=0)
 
@@ -2862,6 +2879,14 @@ class TradeViewerQt(QMainWindow):
         if candle_idx < 0 or candle_idx >= len(self._klines):
             return
 
+        # Always update so the cache check in _on_mouse_move stays consistent.
+        self._last_hover_idx = candle_idx
+
+        def _clear_panel():
+            pw = self._tick_profile_widget
+            pw.clear()
+            pw.addItem(self._tick_profile_hline)
+
         row = self._klines.iloc[candle_idx]
         try:
             bar_end = datetime.strptime(
@@ -2869,14 +2894,19 @@ class TradeViewerQt(QMainWindow):
             bk = candle_start(
                 bar_end - timedelta(minutes=self._candle_mins), self._candle_mins)
         except ValueError:
+            _clear_panel()
             return
 
         pd_ = self._ticks.get(bk)
         if not pd_:
+            _clear_panel()
             return
 
-        self._last_hover_idx = candle_idx
-        self._draw_tick_profile(pd_, str(row["time_key"])[:16])
+        self._draw_tick_profile(
+            pd_, str(row["time_key"])[:16],
+            y_lo=float(row.get("low", min(pd_.keys()))),
+            y_hi=float(row.get("high", max(pd_.keys()))),
+        )
 
     def _show_range_tick_profile(self, i0: int, i1: int) -> None:
         """Accumulate tick data across candles i0..i1 and render in tick panel."""
@@ -3224,7 +3254,8 @@ class TradeViewerQt(QMainWindow):
             )
             self._ohlcv_label.setVisible(True)
 
-            self._show_tick_profile(idx)
+            if idx != self._last_hover_idx:
+                self._show_tick_profile(idx)
 
             # DOM / Liq HM crosshair sync (historical mode only)
             if self._dom_window is not None or self._liq_hm_window is not None:
