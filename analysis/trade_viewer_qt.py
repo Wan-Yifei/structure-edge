@@ -2219,10 +2219,13 @@ class TradeViewerQt(QMainWindow):
         warmup = self._warmup if self._warmup is not None else klines
         kd     = compute_kd(warmup, fast=_KD_FAST, slow=_KD_SLOW)
 
-        # Align to klines length (warmup may be longer)
+        # Align to klines length; warmup may be shorter than klines in Live mode
+        # (warmup capped at 400 bars, klines can be 1500+).
+        # x must cover exactly the last len(width) bars of the chart.
         n      = len(klines)
-        width  = kd["width"].values[-n:]
-        x      = np.arange(n)
+        width  = kd["width"].values[-n:]   # at most min(400, n) values
+        nw     = len(width)
+        x      = np.arange(n - nw, n)
 
         # Store for crosshair readout in _on_mouse_move
         self._kd_width_arr = width
@@ -2233,12 +2236,12 @@ class TradeViewerQt(QMainWindow):
 
         bull_fill = pg.FillBetweenItem(
             pg.PlotCurveItem(x=x, y=bull_y),
-            pg.PlotCurveItem(x=x, y=np.zeros(n)),
+            pg.PlotCurveItem(x=x, y=np.zeros(nw)),
             brush=_qc(_UP, 100),
         )
         bear_fill = pg.FillBetweenItem(
             pg.PlotCurveItem(x=x, y=bear_y),
-            pg.PlotCurveItem(x=x, y=np.zeros(n)),
+            pg.PlotCurveItem(x=x, y=np.zeros(nw)),
             brush=_qc(_DOWN, 100),
         )
         self._plot_kd.addItem(bull_fill)
@@ -2254,8 +2257,8 @@ class TradeViewerQt(QMainWindow):
         self._kd_items.append(line)
 
         # Spread midline (MID1 – MID2) as a secondary context line (dashed, dim)
-        spread = kd["spread"].values[-n:]
-        spread_norm = spread / (np.abs(spread).max() or 1.0) * (width.max() or 1.0)
+        spread = kd["spread"].values[-n:][-nw:]
+        spread_norm = spread / (np.abs(spread).max() or 1.0) * (np.abs(width).max() or 1.0)
         spread_line = pg.PlotCurveItem(
             x=x, y=spread_norm,
             pen=pg.mkPen(_GREY, width=1, style=Qt.PenStyle.DashLine),
@@ -2287,29 +2290,28 @@ class TradeViewerQt(QMainWindow):
         kd     = compute_kd(warmup, fast=_KD_FAST, slow=_KD_SLOW)
 
         n    = len(klines)
-        x    = np.arange(n, dtype=float)
         mid1 = kd["mid1"].values[-n:].astype(float)
         mid2 = kd["mid2"].values[-n:].astype(float)
+        nw   = len(mid1)   # warmup may be shorter than klines in Live mode
+        x    = np.arange(n - nw, n, dtype=float)
 
         # Find zero-crossings of (mid1 - mid2) for directional fill segments.
-        # At each crossover the two lines intersect; interpolate the exact x so
-        # the fill polygon closes cleanly without a gap at the transition.
         diff = mid1 - mid2
         crosses: list[float] = []
-        for k in range(1, n):
+        for k in range(1, nw):
             if diff[k - 1] * diff[k] < 0:
                 # Linear interpolation of crossing x-position
                 t = diff[k - 1] / (diff[k - 1] - diff[k])
                 crosses.append(k - 1 + t)
 
         # Build per-segment fill items between crossover boundaries
-        boundaries = [0.0] + crosses + [float(n - 1)]
+        boundaries = [0.0] + crosses + [float(nw - 1)]
         for seg_idx in range(len(boundaries) - 1):
             x0_f = boundaries[seg_idx]
             x1_f = boundaries[seg_idx + 1]
             i0   = int(np.floor(x0_f))
             i1   = int(np.ceil(x1_f)) + 1
-            i1   = min(i1, n)
+            i1   = min(i1, nw)
             if i1 <= i0 + 1:
                 continue
 
@@ -2319,7 +2321,7 @@ class TradeViewerQt(QMainWindow):
 
             # Determine color from midpoint of this segment
             mid_i   = (i0 + i1) // 2
-            is_bull = diff[min(mid_i, n - 1)] >= 0
+            is_bull = diff[min(mid_i, nw - 1)] >= 0
             color   = _UP if is_bull else _DOWN
 
             fill = pg.FillBetweenItem(
