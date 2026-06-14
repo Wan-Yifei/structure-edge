@@ -1970,7 +1970,8 @@ class TradeViewerQt(QMainWindow):
         # chart).  Deferred via singleShot so profile / overlay drawing cannot
         # override the range we set here.
         code = self._code_edit.text().strip()
-        chart_key = (code, tf)
+        date_str  = self._date_edit.text().strip()
+        chart_key = (code, tf, date_str)
         if chart_key != self._last_chart_key:
             self._last_chart_key = chart_key
             n_snap = n
