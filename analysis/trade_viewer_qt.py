@@ -1666,7 +1666,11 @@ class TradeViewerQt(QMainWindow):
 
     def _on_tick_size_toggle(self) -> None:
         """Re-render the tick profile panel when S/M/L filter changes."""
-        if self._last_hover_idx is not None:
+        if self._range_region is not None:
+            i0, i1 = self._range_last_indices
+            if i0 >= 0:
+                self._show_range_tick_profile(i0, i1)
+        elif self._last_hover_idx is not None:
             self._show_tick_profile(self._last_hover_idx)
 
     def _on_session_toggle(self) -> None:
@@ -2697,7 +2701,105 @@ class TradeViewerQt(QMainWindow):
 
     # ── Tick profile (single candle on hover) ─────────────────────────────────
 
+    def _draw_tick_profile(self, pd_: dict, header: str) -> None:
+        """Render tick buy/sell/neutral bars into the tick profile panel.
+
+        pd_ maps price → {buy, sell, neutral, buy_s, …} (same format as self._ticks values).
+        header is placed in the top label of the panel.
+        Y range is fitted to min/max of prices in pd_.
+        """
+        show_s = self._ind("tick_s")
+        show_m = self._ind("tick_m")
+        show_l = self._ind("tick_l")
+        prices = sorted(pd_.keys())
+        has_breakdown = "buy_s" in next(iter(pd_.values()), {})
+        if has_breakdown and (show_s or show_m or show_l):
+            buys = [
+                (pd_[p].get("buy_s", 0) if show_s else 0) +
+                (pd_[p].get("buy_m", 0) if show_m else 0) +
+                (pd_[p].get("buy_l", 0) if show_l else 0)
+                for p in prices
+            ]
+            sells = [
+                (pd_[p].get("sell_s", 0) if show_s else 0) +
+                (pd_[p].get("sell_m", 0) if show_m else 0) +
+                (pd_[p].get("sell_l", 0) if show_l else 0)
+                for p in prices
+            ]
+            neutrals = [
+                (pd_[p].get("neutral_s", 0) if show_s else 0) +
+                (pd_[p].get("neutral_m", 0) if show_m else 0) +
+                (pd_[p].get("neutral_l", 0) if show_l else 0)
+                for p in prices
+            ]
+        else:
+            buys     = [pd_[p]["buy"]            for p in prices]
+            sells    = [pd_[p]["sell"]           for p in prices]
+            neutrals = [pd_[p].get("neutral", 0) for p in prices]
+
+        pw = self._tick_profile_widget
+        pw.clear()
+        pw.addItem(self._tick_profile_hline)
+
+        bin_h = (max(prices) - min(prices)) / max(len(prices), 1) * 0.9 if prices else 0.01
+        bin_h = max(bin_h, 0.001)
+
+        buys_arr    = np.array(buys,     dtype=float)
+        sells_arr   = np.array(sells,    dtype=float)
+        neutral_arr = np.array(neutrals, dtype=float)
+        buys_log    = np.log1p(buys_arr)
+        sells_log   = np.log1p(sells_arr)
+        neutral_log = np.log1p(neutral_arr)
+        zeros       = np.zeros(len(prices))
+
+        half_n = neutral_log / 2
+        neutral_bar = pg.BarGraphItem(
+            x0=-half_n, x1=half_n,
+            y=prices, height=bin_h,
+            brush=_qc(_GREY, 80), pen=pg.mkPen(None),
+        )
+        pw.addItem(neutral_bar)
+
+        red_up   = self._ind("red_up")
+        buy_col  = _RED   if red_up else _GREEN
+        sell_col = _GREEN if red_up else _RED
+
+        buy_bar = pg.BarGraphItem(
+            x0=zeros, x1=buys_log,
+            y=prices, height=bin_h,
+            brush=_qc(buy_col, 180), pen=pg.mkPen(None),
+        )
+        sell_bar = pg.BarGraphItem(
+            x0=-sells_log, x1=zeros,
+            y=prices, height=bin_h,
+            brush=_qc(sell_col, 180), pen=pg.mkPen(None),
+        )
+        pw.addItem(buy_bar)
+        pw.addItem(sell_bar)
+
+        pw.getPlotItem().setLabel("bottom", "log(vol+1)", **{"color": _GREY, "size": "6pt"})
+        pw.getPlotItem().setLabel("top", header,          **{"color": _FG,   "size": "7pt"})
+
+        total_buy  = sum(buys)
+        total_sell = sum(sells)
+        delta      = total_buy - total_sell
+        sign       = "+" if delta >= 0 else ""
+        delta_str  = (f"{sign}{delta/1000:.0f}K" if abs(delta) >= 1000 else f"{sign}{delta}")
+        d_col      = buy_col if delta >= 0 else sell_col
+        dlbl       = pg.TextItem(text=f"Δ {delta_str}", color=d_col, anchor=(0.5, 0.0))
+        dlbl.setFont(QFont("Monospace", 7))
+        if prices:
+            dlbl.setPos(float(buys_log.max()) / 2 if buys_log.size else 0.0, float(max(prices)))
+        pw.addItem(dlbl)
+
+        lo  = float(min(prices))
+        hi  = float(max(prices))
+        pad = max((hi - lo) * 0.08, bin_h * 2)
+        pw.setYRange(lo - pad, hi + pad, padding=0)
+
     def _show_tick_profile(self, candle_idx: int) -> None:
+        if self._range_region is not None:
+            return
         if self._klines is None or self._ticks is None:
             return
         if candle_idx < 0 or candle_idx >= len(self._klines):
@@ -2717,119 +2819,31 @@ class TradeViewerQt(QMainWindow):
             return
 
         self._last_hover_idx = candle_idx
+        self._draw_tick_profile(pd_, str(row["time_key"])[:16])
 
-        # Build buy/sell/neutral arrays respecting the S/M/L order-size filter.
-        # When tick data includes size breakdowns (new format), honour the filter;
-        # fall back to totals for legacy data or if all size filters are off.
-        show_s = self._ind("tick_s")
-        show_m = self._ind("tick_m")
-        show_l = self._ind("tick_l")
-        prices = sorted(pd_.keys())
-        has_breakdown = "buy_s" in next(iter(pd_.values()), {})
-        if has_breakdown and (show_s or show_m or show_l):
-            buys     = [
-                (pd_[p].get("buy_s", 0) if show_s else 0) +
-                (pd_[p].get("buy_m", 0) if show_m else 0) +
-                (pd_[p].get("buy_l", 0) if show_l else 0)
-                for p in prices
-            ]
-            sells    = [
-                (pd_[p].get("sell_s", 0) if show_s else 0) +
-                (pd_[p].get("sell_m", 0) if show_m else 0) +
-                (pd_[p].get("sell_l", 0) if show_l else 0)
-                for p in prices
-            ]
-            neutrals = [
-                (pd_[p].get("neutral_s", 0) if show_s else 0) +
-                (pd_[p].get("neutral_m", 0) if show_m else 0) +
-                (pd_[p].get("neutral_l", 0) if show_l else 0)
-                for p in prices
-            ]
-        else:
-            buys     = [pd_[p]["buy"]     for p in prices]
-            sells    = [pd_[p]["sell"]    for p in prices]
-            neutrals = [pd_[p].get("neutral", 0) for p in prices]
-
-        pw = self._tick_profile_widget
-        pw.clear()
-        # Restore crosshair line after clear (clear() removes all items)
-        pw.addItem(self._tick_profile_hline)
-
-        bin_h = (max(prices) - min(prices)) / max(len(prices), 1) * 0.9 if prices else 0.01
-        bin_h = max(bin_h, 0.001)
-
-        buys_arr     = np.array(buys,     dtype=float)
-        sells_arr    = np.array(sells,    dtype=float)
-        neutral_arr  = np.array(neutrals, dtype=float)
-
-        # Log-transform volumes: log1p spreads out the range so small bars
-        # remain visible alongside high-volume bins.  Actual delta is still
-        # computed from the raw values and shown as a label.
-        buys_log    = np.log1p(buys_arr)
-        sells_log   = np.log1p(sells_arr)
-        neutral_log = np.log1p(neutral_arr)
-        zeros       = np.zeros(len(prices))
-
-        # Neutral: symmetric grey bar centred at 0, drawn first (behind buy/sell).
-        # Extends ±half_width on each side so it does not hide buy/sell overlap.
-        half_n = neutral_log / 2
-        neutral_bar = pg.BarGraphItem(
-            x0=-half_n, x1=half_n,
-            y=prices, height=bin_h,
-            brush=_qc(_GREY, 80), pen=pg.mkPen(None),
-        )
-        pw.addItem(neutral_bar)
-
-        red_up   = self._ind("red_up")
-        buy_col  = _RED   if red_up else _GREEN
-        sell_col = _GREEN if red_up else _RED
-
-        # Buys extend rightward: x0=0 → x1=log(buy+1)
-        buy_bar = pg.BarGraphItem(
-            x0=zeros, x1=buys_log,
-            y=prices, height=bin_h,
-            brush=_qc(buy_col, 180), pen=pg.mkPen(None),
-        )
-        # Sells extend leftward: x0=-log(sell+1) → x1=0
-        sell_bar = pg.BarGraphItem(
-            x0=-sells_log, x1=zeros,
-            y=prices, height=bin_h,
-            brush=_qc(sell_col, 180), pen=pg.mkPen(None),
-        )
-        pw.addItem(buy_bar)
-        pw.addItem(sell_bar)
-
-        # X-axis label makes the log scale explicit
-        pw.getPlotItem().setLabel(
-            "bottom", "log(vol+1)", **{"color": _GREY, "size": "6pt"})
-        pw.getPlotItem().setLabel(
-            "top", str(row["time_key"])[:16], **{"color": _FG, "size": "7pt"})
-
-        # Delta label shows actual (non-log) values
-        total_buy  = sum(buys)
-        total_sell = sum(sells)
-        delta      = total_buy - total_sell
-        sign       = "+" if delta >= 0 else ""
-        delta_str  = (f"{sign}{delta/1000:.0f}K" if abs(delta) >= 1000
-                      else f"{sign}{delta}")
-        d_col      = buy_col if delta >= 0 else sell_col
-        dlbl       = pg.TextItem(
-            text=f"Δ {delta_str}", color=d_col, anchor=(0.5, 0.0),
-        )
-        dlbl.setFont(QFont("Monospace", 7))
-        if prices:
-            dlbl.setPos(float(buys_log.max()) / 2 if buys_log.size else 0.0,
-                        float(max(prices)))
-        pw.addItem(dlbl)
-
-        # Y range: fit to the candle's own price range so the bars fill the
-        # panel height.  Main-chart Y-sync (via sigRangeChanged) is intentionally
-        # NOT applied here — the full main-chart range would compress the bars
-        # into an invisible sliver when viewing individual candles.
-        candle_lo = float(row.get("low",  min(prices)))
-        candle_hi = float(row.get("high", max(prices)))
-        pad = max((candle_hi - candle_lo) * 0.08, bin_h * 2)
-        pw.setYRange(candle_lo - pad, candle_hi + pad, padding=0)
+    def _show_range_tick_profile(self, i0: int, i1: int) -> None:
+        """Accumulate tick data across candles i0..i1 and render in tick panel."""
+        if self._klines is None or self._ticks is None:
+            return
+        cm = self._candle_mins
+        merged: dict = {}
+        for idx in range(i0, i1 + 1):
+            row = self._klines.iloc[idx]
+            try:
+                bar_end = datetime.strptime(str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
+            except ValueError:
+                continue
+            pd_ = self._ticks.get(bk)
+            if not pd_:
+                continue
+            for price, counts in pd_.items():
+                bucket = merged.setdefault(price, {})
+                for k, v in counts.items():
+                    bucket[k] = bucket.get(k, 0) + v
+        if not merged:
+            return
+        self._draw_tick_profile(merged, f"Range  {i1 - i0 + 1}b")
 
     # ── Tick profile Y range sync ─────────────────────────────────────────────
 
@@ -2864,6 +2878,11 @@ class TradeViewerQt(QMainWindow):
                 self._range_region = None
             self._clear_range_inline()
             self._range_last_indices = (-1, -1)
+            pw = self._tick_profile_widget
+            pw.clear()
+            pw.addItem(self._tick_profile_hline)
+            if self._last_hover_idx is not None:
+                self._show_tick_profile(self._last_hover_idx)
             self._rebuild_session_profile()
 
     def _on_range_region_changed(self) -> None:
@@ -3023,6 +3042,8 @@ class TradeViewerQt(QMainWindow):
             f"Range profile | bars {i0}–{i1} ({i1-i0+1}) | "
             f"source={src_lbl} | POC={poc:.2f} VAH={vah:.2f} VAL={val:.2f}"
         )
+
+        self._show_range_tick_profile(i0, i1)
 
     def _on_main_range_changed(self, _vb, ranges) -> None:
         """Called by _plot_c.vb.sigRangeChanged.
