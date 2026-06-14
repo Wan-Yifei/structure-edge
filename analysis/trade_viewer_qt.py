@@ -639,12 +639,14 @@ class FvgItem(pg.GraphicsObject):
         super().__init__()
         self._gaps:    list[dict] = []
         self._n:       int        = 0
+        self._red_up:  bool       = False
         self._picture: QPicture | None = None
         self._rect     = QRectF()
 
-    def set_data(self, fvg_gaps: list[dict], n_bars: int) -> None:
+    def set_data(self, fvg_gaps: list[dict], n_bars: int, red_up: bool = False) -> None:
         self._gaps    = fvg_gaps
         self._n       = n_bars
+        self._red_up  = red_up
         self._picture = None
         self.prepareGeometryChange()
         self.update()
@@ -654,11 +656,13 @@ class FvgItem(pg.GraphicsObject):
         p   = QPainter(pic)
         # Diagonal-stripe brushes make FVG zones visually distinct from OB boxes
         # (which use solid fills).  FDiag = forward-slash lines (bull ↑);
-        # BDiag = back-slash lines (bear ↓).
-        bull_brush = QBrush(_qc(_GREEN, 180), Qt.BrushStyle.FDiagPattern)
-        bear_brush = QBrush(_qc(_RED,   180), Qt.BrushStyle.BDiagPattern)
-        bull_pen   = QPen(_qc(_GREEN, 140), 0)
-        bear_pen   = QPen(_qc(_RED,   140), 0)
+        # BDiag = back-slash lines (bear ↓).  Colors follow red_up toggle.
+        bull_col   = _RED   if self._red_up else _GREEN
+        bear_col   = _GREEN if self._red_up else _RED
+        bull_brush = QBrush(_qc(bull_col, 180), Qt.BrushStyle.FDiagPattern)
+        bear_brush = QBrush(_qc(bear_col, 180), Qt.BrushStyle.BDiagPattern)
+        bull_pen   = QPen(_qc(bull_col, 140), 0)
+        bear_pen   = QPen(_qc(bear_col, 140), 0)
 
         for g in self._gaps:
             if g.get("filled", False):
@@ -1880,7 +1884,7 @@ class TradeViewerQt(QMainWindow):
 
         # FVG zones
         self._fvg_item.set_data(
-            self._fvg_gaps if show_fvg else [], n)
+            self._fvg_gaps if show_fvg else [], n, red_up=red_up)
 
         # Order Blocks
         self._ob_item.set_data(
