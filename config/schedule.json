@@ -1,5 +1,6 @@
 {
   "_comment": "All times are US Eastern Time (ET). Collector starts prestart_minutes before each session.",
+  "default_code": "US.SOXL",
   "prestart_minutes": 5,
   "data_timeout_minutes": 10,
   "live_refresh_seconds": 15,
@@ -55,6 +56,7 @@
     "US.SNDK",
     "US.SOXL",
     "US.SOXS",
+    "US.SPCX",
     "US.STX",
     "US.TSEM",
     "US.TSLA",
@@ -73,7 +75,8 @@
     "US.UUUU": "nuclear fusion & energy",
     "US.NNE": "nuclear fusion & energy",
     "US.AVGO": "半导体",
-    "US.GLW": "半导体"
+    "US.GLW": "半导体",
+    "US.SPCX": "Space X family"
   },
   "order_book_enabled": true,
   "remote_backup": {
@@ -85,6 +88,5 @@
     "tick_db": "db/ticks.db",
     "order_book_db": "db/order_book.db"
   },
-  "autostart": true,
-  "default_code": "US.SOXL"
+  "autostart": true
 }
