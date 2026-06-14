@@ -2780,17 +2780,21 @@ class TradeViewerQt(QMainWindow):
         )
         pw.addItem(neutral_bar)
 
+        red_up   = self._ind("red_up")
+        buy_col  = _RED   if red_up else _GREEN
+        sell_col = _GREEN if red_up else _RED
+
         # Buys extend rightward: x0=0 → x1=log(buy+1)
         buy_bar = pg.BarGraphItem(
             x0=zeros, x1=buys_log,
             y=prices, height=bin_h,
-            brush=_qc(_GREEN, 180), pen=pg.mkPen(None),
+            brush=_qc(buy_col, 180), pen=pg.mkPen(None),
         )
         # Sells extend leftward: x0=-log(sell+1) → x1=0
         sell_bar = pg.BarGraphItem(
             x0=-sells_log, x1=zeros,
             y=prices, height=bin_h,
-            brush=_qc(_RED, 180), pen=pg.mkPen(None),
+            brush=_qc(sell_col, 180), pen=pg.mkPen(None),
         )
         pw.addItem(buy_bar)
         pw.addItem(sell_bar)
@@ -2808,7 +2812,7 @@ class TradeViewerQt(QMainWindow):
         sign       = "+" if delta >= 0 else ""
         delta_str  = (f"{sign}{delta/1000:.0f}K" if abs(delta) >= 1000
                       else f"{sign}{delta}")
-        d_col      = _UP if delta >= 0 else _DOWN
+        d_col      = buy_col if delta >= 0 else sell_col
         dlbl       = pg.TextItem(
             text=f"Δ {delta_str}", color=d_col, anchor=(0.5, 0.0),
         )
