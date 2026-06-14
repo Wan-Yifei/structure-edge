@@ -3252,7 +3252,10 @@ class TradeViewerQt(QMainWindow):
 
             # KDV: show spread-width value of the hovered bar.
             if self._plot_kd.isVisible() and self._kd_width_arr is not None:
-                kd_idx = max(0, min(idx, len(self._kd_width_arr) - 1))
+                # _kd_width_arr covers the last nw bars of klines; subtract offset.
+                kd_offset = (len(self._klines) - len(self._kd_width_arr)
+                             if self._klines is not None else 0)
+                kd_idx = max(0, min(idx - kd_offset, len(self._kd_width_arr) - 1))
                 kd_val = float(self._kd_width_arr[kd_idx])
                 kd_str = f"{kd_val:+.4f}"
                 xlo_kd, xhi_kd = self._plot_kd.vb.viewRange()[0]
