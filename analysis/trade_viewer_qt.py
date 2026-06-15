@@ -131,7 +131,7 @@ _TREND_WINDOW: dict[str, int] = {
 }
 
 _LIVE_LOOKBACK_DAYS: dict[str, int] = {
-    "1m": 2, "3m": 3, "5m": 5, "15m": 7, "30m": 10, "1h": 14, "4h": 30, "1d": 730,
+    "1m": 5, "3m": 5, "5m": 5, "15m": 7, "30m": 10, "1h": 14, "4h": 30, "1d": 730,
 }
 
 # Historical mode: calendar days before the selected date to fetch.
