@@ -67,7 +67,7 @@ from strategy.smc.fvg import detect_fvg
 from strategy.smc.order_blocks import detect_order_blocks
 from strategy.smc.kd_trend import compute_kd
 from moomoo import (
-    OpenQuoteContext, SubType, KLType, AuType,
+    OpenQuoteContext, SubType, KLType, AuType, Session,
     TickerHandlerBase, StockQuoteHandlerBase, RET_OK,
 )
 
@@ -1626,7 +1626,8 @@ class TradeViewerQt(QMainWindow):
             sub_types = [SubType.TICKER, SubType.QUOTE]
             if kl_sub is not None:
                 sub_types.append(kl_sub)
-            self._ctx.subscribe(code, sub_types, extended_time=True)
+            self._ctx.subscribe(code, sub_types,
+                                extended_time=True, session=Session.ALL)
             self._live_kl_sub = kl_sub
             _, candle_mins = TIMEFRAME_MAP[tf]
 
@@ -1849,6 +1850,9 @@ class TradeViewerQt(QMainWindow):
                 pass
 
     def _on_data_ready(self, result: dict) -> None:
+        prev_n = len(self._klines) if self._klines is not None else 0
+        xlo, xhi = self._plot_c.vb.viewRange()[0] if prev_n > 0 else (0, 0)
+
         self._klines      = result["klines"]
         self._ticks       = result["ticks"]
         self._warmup      = result["warmup"]
@@ -1856,6 +1860,16 @@ class TradeViewerQt(QMainWindow):
         self._fvg_gaps    = result["fvg_gaps"]
         self._ob_blocks   = result["ob_blocks"]
         self._render(self._klines, self._ticks)
+
+        # In Live mode, auto-scroll right when new bars arrive and the view
+        # was already at the right edge (user hasn't manually panned left).
+        new_n = len(self._klines)
+        if (self._mode_combo.currentText() == "Live"
+                and new_n > prev_n > 0
+                and xhi >= prev_n - 2):
+            visible = xhi - xlo
+            new_xhi = new_n - 0.5
+            self._plot_c.setXRange(new_xhi - visible, new_xhi, padding=0)
         # Keep DOM window in sync with active code, mode, and timeframe
         if self._dom_window is not None:
             code = self._code_edit.text().strip()
