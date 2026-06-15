@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.13.7 — live mode fixes + aggressor bubble performance + WAL stability (2026-06-15)
+
+### Fix: Range profile missing lower half when tick coverage is partial (`analysis/trade_viewer_qt.py`)
+
+- `_compute_profile_bins` used all-or-nothing tick logic: if any bar had tick data
+  all bars without tick coverage were silently dropped, biasing the profile toward
+  the most recently loaded dates.
+- Fixed: per-bar hybrid approach — tick data used where available, OHLCV proportional
+  fill applied for bars with no tick coverage, so the full price range always contributes.
+
+### Fix: Volume profile disappeared after get_cur_kline supplement (`analysis/trade_viewer_qt.py`)
+
+- `get_cur_kline` returns fewer columns than `request_history_kline` (missing `change_rate`).
+- `pd.concat` produced NaN columns, breaking downstream profile processing.
+- Fixed: `cur_new.reindex(columns=df.columns)` aligns columns before concat.
+
+### Fix: Aggressor bubbles lag 5-6 minutes during active markets (`analysis/liq_hm_window.py`)
+
+- Worker re-queried the entire 2-hour tick window on every heatmap update, causing
+  slow DB scans during high-volume sessions (e.g. 6M+ ticks in ticks.db).
+- Fixed: incremental loading — full query on first load, then only fetch ticks after
+  `_absorb_last_ts` on subsequent calls; cache trimmed to visible window.
+- Added `_absorb_reload_pending` flag: if `_on_tick` is blocked by a running worker,
+  re-triggers immediately after the worker finishes so bubbles stay current.
+- `_query_ticks` now uses `TickStore` (WAL-aware) instead of raw `sqlite3.connect`
+  to avoid silent failures under write pressure.
+
+### Fix: WAL file grows unboundedly and degrades read performance (`analysis/tick_collector.py`)
+
+- tick_collector had no periodic WAL checkpoint, unlike ob_collector.
+- Fixed: watchdog runs `PRAGMA wal_checkpoint(PASSIVE)` every 10 ticks (~10 min).
+
+### Fix: OB timestamps could be wrong if system timezone is not ET (`analysis/order_book_collector.py`, `analysis/liq_hm_window.py`)
+
+- `datetime.now()` depended on system timezone; changed to explicit
+  `datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)` so OB
+  timestamps are always in US Eastern time regardless of where the code runs.
+
+### Improvement: Tick profile delta moved to panel title (`analysis/trade_viewer_qt.py`)
+
+- Delta total `Δ ±NNK` label was placed as a floating `TextItem` at the top of the
+  buy bars, causing it to be obscured by profile bars during busy sessions.
+- Moved into the panel's top label alongside the header (e.g. `09:35  Δ +12K`);
+  floating TextItem removed.
+
 ## v0.13.6 — tick collector auto-reconnect + imbalance color improvements (2026-06-11)
 
 ### Fix: Tick collector silently drops subscription (`analysis/tick_collector.py`)
