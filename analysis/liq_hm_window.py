@@ -18,6 +18,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 import numpy as np
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 from PyQt6.QtCore    import Qt, QRectF, QTimer, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui     import QColor, QPainterPath
@@ -138,20 +141,13 @@ def _query_ticks(code: str, start: datetime, end: datetime) -> list[dict]:
     if not _TICK_DB_PATH.exists():
         return []
     try:
-        con = sqlite3.connect(str(_TICK_DB_PATH), check_same_thread=False)
-        cur = con.execute(
-            "SELECT ts, price, volume, direction FROM ticks "
-            "WHERE code = ? AND ts >= ? AND ts < ? ORDER BY ts",
-            [code, start.isoformat(sep=" "), end.isoformat(sep=" ")],
-        )
-        rows = [
-            {"ts": datetime.fromisoformat(r[0]),
-             "price": float(r[1]), "volume": int(r[2]), "direction": r[3]}
-            for r in cur.fetchall()
-        ]
-        con.close()
+        from feeds.tick_store import TickStore
+        store = TickStore(_TICK_DB_PATH, read_only=True)
+        rows  = store.query_ticks(code, start, end)
+        store.close()
         return rows
-    except Exception:
+    except Exception as exc:
+        print(f"[QueryTicks] ERROR: {exc}", flush=True)
         return []
 
 
@@ -378,8 +374,11 @@ class LiqHmWindow(QWidget):
         self._absorb_items:  list = []
 
         # Tick cache + worker for absorption bubble overlay
-        self._absorb_ticks:  list[dict]               = []
-        self._absorb_worker: _AbsorbTickWorker | None = None
+        self._absorb_ticks:         list[dict]               = []
+        self._absorb_worker:        _AbsorbTickWorker | None = None
+        self._absorb_reload_pending: bool                    = False
+        # Tracks the newest tick ts already in cache; None = need full reload.
+        self._absorb_last_ts:       datetime | None          = None
 
         # Background query workers (one at a time each)
         self._worker:      _SnapshotWorker | None      = None
@@ -762,7 +761,8 @@ class LiqHmWindow(QWidget):
             except Exception:
                 pass
             self._absorb_worker = None
-        self._absorb_ticks = []
+        self._absorb_ticks   = []
+        self._absorb_last_ts = None
         self._needs_init = True
 
         self._timer.stop()
@@ -916,7 +916,7 @@ class LiqHmWindow(QWidget):
                 self._raw_snaps = [s for s in self._raw_snaps if s["ts"] >= cutoff]
 
         col    = len(self._col_ts)
-        col_ts = ts if ts is not None else datetime.now()
+        col_ts = ts if ts is not None else datetime.now(_ET).replace(tzinfo=None)
         self._col_ts.append(col_ts)
 
         for row in snap:
@@ -1351,22 +1351,37 @@ class LiqHmWindow(QWidget):
         if not self._absorb_cb.isChecked() or not self._code or not self._col_ts:
             return
         if self._absorb_worker is not None and self._absorb_worker.isRunning():
+            # Record that the window has advanced; re-load immediately after the
+            # current worker finishes so bubbles stay current during busy markets.
+            self._absorb_reload_pending = True
             return
+        self._absorb_reload_pending = False
         col_secs = self._col_secs_spin.value()
-        start = self._col_ts[0]
-        end   = self._col_ts[-1] + timedelta(seconds=col_secs)
+        if self._absorb_last_ts is None:
+            # Full load: query the entire visible window.
+            start = self._col_ts[0] - timedelta(seconds=col_secs)
+        else:
+            # Incremental: fetch only ticks strictly after the last cached one.
+            start = self._absorb_last_ts + timedelta(milliseconds=1)
+        end = self._col_ts[-1] + timedelta(seconds=col_secs * 2)
         self._absorb_worker = _AbsorbTickWorker(self._code, start, end)
         self._absorb_worker.done.connect(self._on_absorb_ready)
         self._absorb_worker.start()
 
     def _on_absorb_ready(self, ticks: list) -> None:
-        """Receive ticks from background worker and redraw absorption bubbles."""
-        # Only overwrite if the worker found data — an empty result means the tick
-        # collector is not running or the window just advanced; keep the last good cache
-        # so existing bubbles stay visible.
+        """Receive ticks from background worker; merge into cache incrementally."""
         if ticks:
-            self._absorb_ticks = ticks
+            # Append new ticks and update the high-water mark.
+            self._absorb_ticks.extend(ticks)
+            self._absorb_last_ts = ticks[-1]["ts"]
+            # Trim entries that have scrolled off the left edge of the heatmap.
+            if self._col_ts:
+                cutoff = self._col_ts[0]
+                self._absorb_ticks = [t for t in self._absorb_ticks
+                                      if t["ts"] >= cutoff]
         self._redraw_orderflow_markers()
+        if self._absorb_reload_pending:
+            self._load_absorb_ticks()
 
     def _on_absorb_changed(self) -> None:
         """Checkbox or MinΔ changed: redraw if ticks are cached, else load from DB."""

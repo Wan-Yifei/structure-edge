@@ -22,6 +22,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,7 +89,7 @@ def _make_handler(store, state: dict):
             if now - last_write.get(code, 0.0) < _MIN_WRITE_INTERVAL:
                 return ret, data  # skip — too soon since last write for this code
 
-            ts = datetime.now()
+            ts = datetime.now(_ET).replace(tzinfo=None)
             n  = store.insert_snapshot(code, ts, bids, asks)
             if n:
                 last_write[code] = now

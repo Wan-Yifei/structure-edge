@@ -2908,20 +2908,18 @@ class TradeViewerQt(QMainWindow):
         pw.addItem(buy_bar)
         pw.addItem(sell_bar)
 
-        pw.getPlotItem().setLabel("bottom", "", **{})
-        pw.getPlotItem().setLabel("top", header, **{"color": _FG, "size": "7pt"})
-
         total_buy  = sum(buys)
         total_sell = sum(sells)
         delta      = total_buy - total_sell
         sign       = "+" if delta >= 0 else ""
         delta_str  = (f"{sign}{delta/1000:.0f}K" if abs(delta) >= 1000 else f"{sign}{delta}")
         d_col      = buy_col if delta >= 0 else sell_col
-        dlbl       = pg.TextItem(text=f"Δ {delta_str}", color=d_col, anchor=(0.5, 0.0))
-        dlbl.setFont(QFont("Monospace", 7))
-        if prices:
-            dlbl.setPos(float(buys_log.max()) / 2 if buys_log.size else 0.0, float(max(prices)))
-        pw.addItem(dlbl)
+        title_html = (
+            f"<span style='color:{_FG}'>{header}</span>"
+            f"&nbsp;&nbsp;<span style='color:{d_col}'>Δ {delta_str}</span>"
+        )
+        pw.getPlotItem().setLabel("bottom", "", **{})
+        pw.getPlotItem().setLabel("top", title_html, **{"size": "7pt"})
 
         # Sync Y range to current main chart viewport so profile aligns spatially.
         # sigRangeChanged doesn't fire on hover, so we apply it once after drawing.

@@ -82,15 +82,21 @@ def _make_handler(store, state: dict):
     return _Handler
 
 
+_CHECKPOINT_INTERVAL = 10  # run PASSIVE WAL checkpoint every N watchdog ticks
+
+
 def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
               ctx_holder: list, codes: list,
-              host: str, port: int, handler_class):
+              host: str, port: int, handler_class,
+              store=None):
     """Auto-reconnect when no tick received for longer than *timeout_minutes*.
 
     Two-tier recovery:
       1. Re-subscribe on the existing OpenQuoteContext (handles silent subscription drop).
       2. If that fails, close the dead ctx and create a fresh one (handles TCP-level
          disconnect where the ctx itself is no longer usable).
+    Also runs a PASSIVE WAL checkpoint every _CHECKPOINT_INTERVAL ticks to prevent
+    the WAL file from growing unboundedly and degrading read performance.
     """
     from moomoo import OpenQuoteContext, SubType, RET_OK, Session
 
@@ -98,6 +104,7 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
     check_interval   = min(60, timeout_sec)
     last_log_time    = time.time()
     last_resub_time: float | None = None
+    watchdog_tick    = 0
 
     def _try_subscribe(ctx) -> bool:
         try:
@@ -141,10 +148,18 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
 
     while not stop_event.wait(check_interval):
         now = time.time()
+        watchdog_tick += 1
 
         if now - last_log_time >= timeout_sec:
             log.info("This session: %d ticks", state.get("session_count", 0))
             last_log_time = now
+
+        if store is not None and watchdog_tick % _CHECKPOINT_INTERVAL == 0:
+            try:
+                store._con.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                log.info("WAL checkpoint (PASSIVE) done")
+            except Exception as exc:
+                log.warning("WAL checkpoint failed: %s", exc)
 
         last = state["last_tick_time"]
         if last is not None:
@@ -258,7 +273,7 @@ def main(argv=None):
     threading.Thread(
         target=_watchdog,
         args=(state, timeout_minutes, stop_event,
-              ctx_holder, codes, args.host, args.port, HandlerClass),
+              ctx_holder, codes, args.host, args.port, HandlerClass, store),
         daemon=True,
     ).start()
 
