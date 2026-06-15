@@ -816,8 +816,15 @@ class DataFetcher(QThread):
                 code, start=start, end=end, ktype=ktype,
                 autype=AuType.NONE, max_count=2000, extended_time=True,
             )
-            if ret != RET_OK or df is None or df.empty:
-                self.error.emit(f"Kline fetch failed: ret={ret}")
+            if ret != RET_OK:
+                self.error.emit(f"Kline fetch failed: {df}")
+                return
+            if df is None or df.empty:
+                self.error.emit(
+                    f"Kline fetch returned no data for {code} {tf} "
+                    f"({start[:10]} → {end[:10]}). "
+                    "Check moomoo data subscription or try a higher timeframe."
+                )
                 return
 
             # K_DAY time_key arrives as "YYYY-MM-DD" (no time component).
