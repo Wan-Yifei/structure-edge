@@ -113,6 +113,19 @@ TIMEFRAME_MAP: dict[str, tuple[KLType, int]] = {
     "1d":  (KLType.K_DAY,  1440),
 }
 
+# SubType equivalents for each TF, used to subscribe K-line push so that
+# request_history_kline for intraday bars (especially 1min) returns data.
+# K_240M has no push SubType in moomoo SDK; omit to avoid subscribe error.
+_TF_KLINE_SUBTYPE: dict[str, object] = {
+    "1m":  SubType.K_1M,
+    "3m":  SubType.K_3M,
+    "5m":  SubType.K_5M,
+    "15m": SubType.K_15M,
+    "30m": SubType.K_30M,
+    "1h":  SubType.K_60M,
+    "1d":  SubType.K_DAY,
+}
+
 _DAY_CANDLES: dict[str, int] = {
     "1m": 390, "5m": 78, "15m": 26, "30m": 14, "1h": 7, "4h": 6, "1d": 1,
 }
@@ -972,7 +985,8 @@ class TradeViewerQt(QMainWindow):
         self._liq_hm_window: "LiqHmWindow | None" = None
         self._dom_window:  QWidget | None      = None  # DOM depth-of-market window
         self._trade_record: dict | None         = None  # active trade review
-        self._live_code: str = ""  # code currently subscribed for tick push
+        self._live_code: str = ""        # code currently subscribed for tick push
+        self._live_kl_sub: object = None  # kline SubType subscribed alongside TICKER/QUOTE
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
         # from resetting the user's manual pan/zoom on every tick.
         self._last_chart_key: tuple             = ("", "")
@@ -1607,9 +1621,13 @@ class TradeViewerQt(QMainWindow):
         if not code or not self._ctx:
             return
         try:
-            self._ctx.subscribe(code, [SubType.TICKER, SubType.QUOTE],
-                                extended_time=True)
             tf = self._tf_combo.currentText()
+            kl_sub = _TF_KLINE_SUBTYPE.get(tf)
+            sub_types = [SubType.TICKER, SubType.QUOTE]
+            if kl_sub is not None:
+                sub_types.append(kl_sub)
+            self._ctx.subscribe(code, sub_types, extended_time=True)
+            self._live_kl_sub = kl_sub
             _, candle_mins = TIMEFRAME_MAP[tf]
 
             viewer = self
@@ -1665,11 +1683,14 @@ class TradeViewerQt(QMainWindow):
         self._refresh_timer.stop()
         try:
             if self._ctx and self._live_code:
-                self._ctx.unsubscribe(self._live_code,
-                                      [SubType.TICKER, SubType.QUOTE])
+                unsub = [SubType.TICKER, SubType.QUOTE]
+                if self._live_kl_sub is not None:
+                    unsub.append(self._live_kl_sub)
+                self._ctx.unsubscribe(self._live_code, unsub)
         except Exception:
             pass
         self._live_code = ""
+        self._live_kl_sub = None
 
     # ── Toolbar callbacks ─────────────────────────────────────────────────────
 
@@ -1777,8 +1798,10 @@ class TradeViewerQt(QMainWindow):
             # Code changed while in Live mode — resubscribe and discard stale ticks.
             try:
                 if self._ctx:
-                    self._ctx.unsubscribe(self._live_code,
-                                          [SubType.TICKER, SubType.QUOTE])
+                    unsub = [SubType.TICKER, SubType.QUOTE]
+                    if self._live_kl_sub is not None:
+                        unsub.append(self._live_kl_sub)
+                    self._ctx.unsubscribe(self._live_code, unsub)
             except Exception:
                 pass
             with self._tick_lock:
