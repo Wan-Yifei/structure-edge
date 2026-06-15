@@ -840,6 +840,23 @@ class DataFetcher(QThread):
                 )
                 return
 
+            # In Live mode, supplement with get_cur_kline so that bars from the
+            # current session (which request_history_kline may not yet include)
+            # are also visible.  Requires that the symbol is already subscribed.
+            if not historical:
+                try:
+                    r2, cur_df = self._ctx.get_cur_kline(
+                        code, 200, ktype, AuType.NONE)
+                    if r2 == RET_OK and cur_df is not None and not cur_df.empty:
+                        hist_keys = set(df["time_key"].astype(str))
+                        cur_new   = cur_df[
+                            ~cur_df["time_key"].astype(str).isin(hist_keys)]
+                        if not cur_new.empty:
+                            df = pd.concat([df, cur_new], ignore_index=True)
+                            df = df.sort_values("time_key").reset_index(drop=True)
+                except Exception:
+                    pass  # non-fatal — historical data still usable
+
             # K_DAY time_key arrives as "YYYY-MM-DD" (no time component).
             # Normalise to "YYYY-MM-DD 00:00:00" so all downstream [:16] slices
             # and strptime("%Y-%m-%d %H:%M") calls work identically for every TF.
