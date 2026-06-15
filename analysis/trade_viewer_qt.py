@@ -337,11 +337,17 @@ def _compute_profile_bins(
     centers = (bins[:-1] + bins[1:]) / 2
     volumes = np.zeros(n_bins, dtype=float)
 
+    # Hybrid: use tick data where available, OHLCV proportional fill for bars
+    # that have no tick coverage.  This ensures bars outside the loaded tick
+    # date range still contribute to the profile rather than being silently
+    # dropped, which would bias the profile toward the most-recently-loaded days.
     used_ticks = False
-    if ticks:
-        tick_prices: list[float] = []
-        tick_vols:   list[float] = []
-        for idx in range(i0, i1 + 1):
+    klo  = kl["low"].values.astype(float)
+    khi  = kl["high"].values.astype(float)
+    kvol = kl["volume"].fillna(0).values.astype(float)
+    for j, idx in enumerate(range(i0, i1 + 1)):
+        bar_ticks_used = False
+        if ticks:
             row = klines.iloc[idx]
             try:
                 bar_end = datetime.strptime(
@@ -349,33 +355,25 @@ def _compute_profile_bins(
                 bk = candle_start(
                     bar_end - timedelta(minutes=candle_mins), candle_mins)
             except ValueError:
-                continue
-            pd_ = ticks.get(bk)
-            if not pd_:
-                continue
-            for price, counts in pd_.items():
-                total = (counts.get("buy", 0)
-                         + counts.get("sell", 0)
-                         + counts.get("neutral", 0))
-                if total > 0:
-                    tick_prices.append(float(price))
-                    tick_vols.append(float(total))
+                bk = None
+            if bk is not None:
+                pd_ = ticks.get(bk)
+                if pd_:
+                    for price, counts in pd_.items():
+                        total = (counts.get("buy", 0)
+                                 + counts.get("sell", 0)
+                                 + counts.get("neutral", 0))
+                        if total > 0:
+                            p = float(price)
+                            if lo <= p <= hi:
+                                bi = int(np.clip(np.digitize(p, bins) - 1,
+                                                 0, n_bins - 1))
+                                volumes[bi] += total
+                                bar_ticks_used = True
+                    if bar_ticks_used:
+                        used_ticks = True
 
-        if tick_prices:
-            tp   = np.array(tick_prices)
-            tv   = np.array(tick_vols)
-            mask = (tp >= lo) & (tp <= hi)
-            if mask.any():
-                indices = np.clip(np.digitize(tp[mask], bins) - 1,
-                                  0, n_bins - 1)
-                np.add.at(volumes, indices, tv[mask])
-                used_ticks = True
-
-    if not used_ticks:
-        klo  = kl["low"].values.astype(float)
-        khi  = kl["high"].values.astype(float)
-        kvol = kl["volume"].fillna(0).values.astype(float)
-        for j in range(len(kl)):
+        if not bar_ticks_used:
             mask  = (centers >= klo[j]) & (centers <= khi[j])
             n_hit = int(mask.sum())
             if n_hit:
@@ -852,6 +850,7 @@ class DataFetcher(QThread):
                         cur_new   = cur_df[
                             ~cur_df["time_key"].astype(str).isin(hist_keys)]
                         if not cur_new.empty:
+                            cur_new = cur_new.reindex(columns=df.columns)
                             df = pd.concat([df, cur_new], ignore_index=True)
                             df = df.sort_values("time_key").reset_index(drop=True)
                 except Exception:
