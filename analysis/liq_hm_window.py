@@ -194,17 +194,6 @@ class _BulkSnapshotWorker(QThread):
 
 # ── color renderers ────────────────────────────────────────────────────────────
 
-def _col_norm(log_g: np.ndarray) -> np.ndarray:
-    """Normalize each column (OB snapshot) by its own max.
-
-    Prevents a few high-volume historical columns from suppressing current-price
-    depth to near-zero alpha when price has moved significantly.
-    """
-    col_max = log_g.max(axis=1, keepdims=True)   # shape (cols, 1)
-    np.maximum(col_max, 1e-9, out=col_max)        # avoid /0 on empty columns
-    return (log_g / col_max).astype(np.float32)
-
-
 def _hot_rgba(grid: np.ndarray, gamma: float = 1.0) -> np.ndarray | None:
     """Combined bid+ask: black → purple → amber → yellow.
 
@@ -214,7 +203,7 @@ def _hot_rgba(grid: np.ndarray, gamma: float = 1.0) -> np.ndarray | None:
     if grid.max() <= 0:
         return None
     log_g = np.log1p(grid)
-    norm  = _col_norm(log_g)
+    norm  = (log_g / log_g.max()).astype(np.float32)
     if gamma != 1.0:
         np.power(norm, gamma, out=norm)
     rgba  = np.zeros((*norm.shape, 4), dtype=np.uint8)
@@ -252,7 +241,7 @@ def _single_rgba(grid: np.ndarray, hex_color: str,
     if grid.max() <= 0:
         return None
     log_g = np.log1p(grid)
-    norm  = _col_norm(log_g)
+    norm  = (log_g / log_g.max()).astype(np.float32)
     if gamma != 1.0:
         np.power(norm, gamma, out=norm)
     c     = QColor(hex_color)
