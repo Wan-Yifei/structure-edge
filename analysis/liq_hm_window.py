@@ -1013,7 +1013,7 @@ class LiqHmWindow(QWidget):
 
         if n <= 1:
             self._plot_widget.setXRange(0, max_cols, padding=0)
-            self._plot_widget.setYRange(self._price_min, self._price_max, padding=0.02)
+            self._plot_widget.setYRange(self._price_min, self._price_max, padding=0)
 
         # Mid-price path line
         if self._price_path_cb.isChecked() and self._mid_prices:
@@ -1330,7 +1330,7 @@ class LiqHmWindow(QWidget):
                 "data":  {"direction": direction, "vol": vol},
             })
 
-        scat = pg.ScatterPlotItem(spots=spots, hoverable=True)
+        scat = pg.ScatterPlotItem(spots=spots, hoverable=True, tip=None)
         scat.setZValue(12)
         scat.sigHovered.connect(self._on_absorb_hovered)
         self._plot_widget.addItem(scat)
@@ -1493,7 +1493,7 @@ class LiqHmWindow(QWidget):
         if n == 0 or self._bin_size == 0.0:
             return
         self._plot_widget.setXRange(0, self._max_cols_spin.value(), padding=0)
-        self._plot_widget.setYRange(self._price_min, self._price_max, padding=0.02)
+        self._plot_widget.setYRange(self._price_min, self._price_max, padding=0)
 
     def _on_pin_toggled(self, checked: bool) -> None:
         flags = self.windowFlags()
@@ -1512,16 +1512,13 @@ class LiqHmWindow(QWidget):
 
     def closeEvent(self, event) -> None:
         self._timer.stop()
-        for worker in (self._worker, self._bulk_worker):
-            if worker is not None and worker.isRunning():
+        for worker in (self._worker, self._bulk_worker, self._absorb_worker):
+            if worker is not None:
                 try:
                     worker.done.disconnect()
                 except Exception:
                     pass
-                worker.quit()
-                if not worker.wait(500):
-                    worker.terminate()
-                    worker.wait(200)
+                worker.quit()   # non-blocking; thread finishes in background
         super().closeEvent(event)
 
 
