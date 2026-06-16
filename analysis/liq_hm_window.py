@@ -1512,13 +1512,22 @@ class LiqHmWindow(QWidget):
 
     def closeEvent(self, event) -> None:
         self._timer.stop()
-        for worker in (self._worker, self._bulk_worker, self._absorb_worker):
-            if worker is not None:
-                try:
-                    worker.done.disconnect()
-                except Exception:
-                    pass
-                worker.quit()   # non-blocking; thread finishes in background
+        workers = [w for w in (self._worker, self._bulk_worker, self._absorb_worker)
+                   if w is not None]
+        # Disconnect signals first so no callback fires on the dead window.
+        for w in workers:
+            try:
+                w.done.disconnect()
+            except Exception:
+                pass
+        # These threads run a single blocking read (sqlite3 / DuckDB, read-only)
+        # with no Qt event loop, so quit() is a no-op.  Terminate all at once,
+        # then wait together so total block = max(finish_times), not their sum.
+        for w in workers:
+            if w.isRunning():
+                w.terminate()
+        for w in workers:
+            w.wait(200)
         super().closeEvent(event)
 
 
