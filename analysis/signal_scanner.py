@@ -22,7 +22,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from PyQt6.QtCore import QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -46,6 +47,7 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QToolBar,
     QVBoxLayout,
@@ -433,6 +435,35 @@ class ScanWorker(QThread):
                 self.log.emit(f"[{symbol} {tf}] fvg_watch DB write error: {exc}")
 
 
+# ── backscan worker ────────────────────────────────────────────────────────────
+
+class BackscanWorker(QThread):
+    """Runs a single read-only historical FVG-watch scan off the UI thread.
+
+    Wraps analysis.fvg_backscan.run_backscan() — the exact function the CLI
+    tool uses — so the GUI panel and the CLI never diverge in behavior.
+    Never touches SignalsDB.
+    """
+
+    finished_ok = pyqtSignal(list)
+    failed      = pyqtSignal(str)
+
+    def __init__(self, symbol: str, tf: str, start: str, end: str, parent=None) -> None:
+        super().__init__(parent)
+        self._symbol = symbol
+        self._tf     = tf
+        self._start  = start
+        self._end    = end
+
+    def run(self) -> None:
+        try:
+            from analysis.fvg_backscan import run_backscan
+            df = run_backscan(None, self._symbol or None, self._tf or None, self._start, self._end)
+            self.finished_ok.emit(df.to_dict("records"))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 # ── params dialog ─────────────────────────────────────────────────────────────
 
 class ParamsDialog(QDialog):
@@ -618,12 +649,15 @@ class SignalScanner(QMainWindow):
         self._worker: Optional[ScanWorker] = None
 
         self._signal_data: list[dict] = []   # mirrors signals table rows (full dicts)
+        self._fvg_watch_data: list[dict] = []  # mirrors fvg watch table rows (full dicts)
         self._last_new_signal: Optional[dict] = None  # most recent signal for tray click
+        self._backscan_worker: Optional["BackscanWorker"] = None
 
         self._build_ui()
         self._build_tray()
         self._refresh_targets_table()
         self._refresh_signals_table()
+        self._refresh_fvg_watch_table()
 
     # ── config ────────────────────────────────────────────────────────────────
 
@@ -714,44 +748,10 @@ class SignalScanner(QMainWindow):
         edit_btn.clicked.connect(self._on_edit_params)
         tb.addWidget(edit_btn)
 
-        # Splitter: targets table (top) + signals table (bottom)
-        splitter = QSplitter()
-        splitter.setOrientation(splitter.orientation())
-        from PyQt6.QtCore import Qt as _Qt
-        splitter.setOrientation(_Qt.Orientation.Vertical)
-        main_lay.addWidget(splitter)
-
-        # Targets table
-        targets_widget = QWidget()
-        targets_lay = QVBoxLayout(targets_widget)
-        targets_lay.setContentsMargins(0, 0, 0, 0)
-        targets_lay.addWidget(QLabel("Targets"))
-        self._targets_tbl = QTableWidget(0, 5)
-        self._targets_tbl.setHorizontalHeaderLabels(
-            ["Symbol", "Mode", "Lookback", "TFs", "Last scan"]
-        )
-        self._targets_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._targets_tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._targets_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        targets_lay.addWidget(self._targets_tbl)
-        splitter.addWidget(targets_widget)
-
-        # Signals table
-        signals_widget = QWidget()
-        signals_lay = QVBoxLayout(signals_widget)
-        signals_lay.setContentsMargins(0, 0, 0, 0)
-        signals_lay.addWidget(QLabel("Recent signals (last 50)"))
-        self._signals_tbl = QTableWidget(0, 8)
-        self._signals_tbl.setHorizontalHeaderLabels(
-            ["Time", "Symbol", "Dir", "Entry zone", "SL", "TP", "RR", "Status"]
-        )
-        self._signals_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._signals_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._signals_tbl.cellDoubleClicked.connect(self._on_signal_double_clicked)
-        signals_lay.addWidget(self._signals_tbl)
-        splitter.addWidget(signals_widget)
-
-        splitter.setSizes([300, 350])
+        tabs = QTabWidget()
+        main_lay.addWidget(tabs)
+        tabs.addTab(self._build_live_tab(), "Live")
+        tabs.addTab(self._build_backscan_tab(), "Backscan")
 
         # Log area
         self._log_edit = QTextEdit()
@@ -764,6 +764,119 @@ class SignalScanner(QMainWindow):
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("Ready")
+
+    def _build_live_tab(self) -> QWidget:
+        """Targets / (entry) Signals / FVG Watch Signals — the live-monitoring view."""
+        tab = QWidget()
+        tab_lay = QVBoxLayout(tab)
+        tab_lay.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QSplitter()
+        splitter.setOrientation(Qt.Orientation.Vertical)
+        tab_lay.addWidget(splitter)
+
+        # Targets table
+        targets_widget = QWidget()
+        targets_lay = QVBoxLayout(targets_widget)
+        targets_lay.setContentsMargins(0, 0, 0, 0)
+        targets_lay.addWidget(QLabel("Targets  (click Entry / FVG Watch to toggle)"))
+        self._targets_tbl = QTableWidget(0, 7)
+        self._targets_tbl.setHorizontalHeaderLabels(
+            ["Symbol", "Entry", "FVG Watch", "Mode", "Lookback", "TFs", "Last scan"]
+        )
+        self._targets_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._targets_tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._targets_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._targets_tbl.itemChanged.connect(self._on_target_item_changed)
+        targets_lay.addWidget(self._targets_tbl)
+        splitter.addWidget(targets_widget)
+
+        # Entry signals table
+        signals_widget = QWidget()
+        signals_lay = QVBoxLayout(signals_widget)
+        signals_lay.setContentsMargins(0, 0, 0, 0)
+        signals_header = QHBoxLayout()
+        signals_header.addWidget(QLabel("Recent entry signals (last 50)"))
+        signals_header.addStretch()
+        del_sig_btn = QPushButton("Delete")
+        del_sig_btn.clicked.connect(self._on_delete_signal)
+        signals_header.addWidget(del_sig_btn)
+        signals_lay.addLayout(signals_header)
+        self._signals_tbl = QTableWidget(0, 8)
+        self._signals_tbl.setHorizontalHeaderLabels(
+            ["Time", "Symbol", "Dir", "Entry zone", "SL", "TP", "RR", "Status"]
+        )
+        self._signals_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._signals_tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._signals_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._signals_tbl.cellDoubleClicked.connect(self._on_signal_double_clicked)
+        signals_lay.addWidget(self._signals_tbl)
+        splitter.addWidget(signals_widget)
+
+        # FVG watch signals table
+        fvg_watch_widget = QWidget()
+        fvg_watch_lay = QVBoxLayout(fvg_watch_widget)
+        fvg_watch_lay.setContentsMargins(0, 0, 0, 0)
+        fvg_watch_header = QHBoxLayout()
+        fvg_watch_header.addWidget(QLabel("FVG watch signals (last 50)"))
+        fvg_watch_header.addStretch()
+        del_fvg_btn = QPushButton("Delete")
+        del_fvg_btn.clicked.connect(self._on_delete_fvg_watch)
+        fvg_watch_header.addWidget(del_fvg_btn)
+        fvg_watch_lay.addLayout(fvg_watch_header)
+        self._fvg_watch_tbl = QTableWidget(0, 7)
+        self._fvg_watch_tbl.setHorizontalHeaderLabels(
+            ["Time", "Symbol", "TF", "Dir", "Zone", "Filled", "Status"]
+        )
+        self._fvg_watch_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._fvg_watch_tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._fvg_watch_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        fvg_watch_lay.addWidget(self._fvg_watch_tbl)
+        splitter.addWidget(fvg_watch_widget)
+
+        splitter.setSizes([250, 250, 250])
+        return tab
+
+    def _build_backscan_tab(self) -> QWidget:
+        """Read-only historical FVG-watch scan — same logic as analysis/fvg_backscan.py."""
+        tab = QWidget()
+        tab_lay = QVBoxLayout(tab)
+
+        form = QHBoxLayout()
+        form.addWidget(QLabel("Symbol:"))
+        self._backscan_symbol_cb = QComboBox()
+        self._backscan_symbol_cb.setEditable(True)
+        self._backscan_symbol_cb.currentTextChanged.connect(self._on_backscan_symbol_changed)
+        form.addWidget(self._backscan_symbol_cb)
+
+        form.addWidget(QLabel("TF:"))
+        self._backscan_tf_cb = QComboBox()
+        form.addWidget(self._backscan_tf_cb)
+
+        form.addWidget(QLabel("Start:"))
+        self._backscan_start_edit = QLineEdit()
+        self._backscan_start_edit.setPlaceholderText("YYYY-MM-DD")
+        form.addWidget(self._backscan_start_edit)
+
+        self._backscan_run_btn = QPushButton("Run")
+        self._backscan_run_btn.clicked.connect(self._on_run_backscan)
+        form.addWidget(self._backscan_run_btn)
+        form.addStretch()
+        tab_lay.addLayout(form)
+
+        self._backscan_status_lbl = QLabel("Idle")
+        tab_lay.addWidget(self._backscan_status_lbl)
+
+        self._backscan_tbl = QTableWidget(0, 8)
+        self._backscan_tbl.setHorizontalHeaderLabels(
+            ["Symbol", "TF", "Direction", "Formed time", "Zone bottom", "Zone top", "Width %", "Filled"]
+        )
+        self._backscan_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._backscan_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tab_lay.addWidget(self._backscan_tbl)
+
+        self._populate_backscan_symbol_choices()
+        return tab
 
     # ── system tray ───────────────────────────────────────────────────────────
 
@@ -935,20 +1048,49 @@ class SignalScanner(QMainWindow):
         overrides = scanner.get("overrides", {})
         default  = scanner.get("default", {})
 
-        self._targets_tbl.setRowCount(len(enabled))
-        for row, symbol in enumerate(enabled):
-            ov = overrides.get(symbol, {})
-            auto = ov.get("auto_params", default.get("auto_params", True))
-            mode = "Auto" if auto else "Manual"
-            lb   = ov.get("lookback_months", default.get("lookback_months", 3))
-            p    = ov.get("params", {})
-            tfs  = f"{p.get('trend_tf', default.get('trend_tf', '1h'))}/{p.get('entry_tf', default.get('entry_tf', '15m'))}"
+        # Block signals while repopulating so the checkbox cells we create
+        # below don't re-trigger _on_target_item_changed.
+        self._targets_tbl.blockSignals(True)
+        try:
+            self._targets_tbl.setRowCount(len(enabled))
+            for row, symbol in enumerate(enabled):
+                ov = overrides.get(symbol, {})
+                auto = ov.get("auto_params", default.get("auto_params", True))
+                mode = "Auto" if auto else "Manual"
+                lb   = ov.get("lookback_months", default.get("lookback_months", 3))
+                p    = ov.get("params", {})
+                tfs  = f"{p.get('trend_tf', default.get('trend_tf', '1h'))}/{p.get('entry_tf', default.get('entry_tf', '15m'))}"
+                entry_on = bool(ov.get("entry_signal_enabled", default.get("entry_signal_enabled", True)))
+                fvg_on   = bool(ov.get("fvg_watch_enabled", default.get("fvg_watch_enabled", False)))
 
-            self._targets_tbl.setItem(row, 0, QTableWidgetItem(symbol))
-            self._targets_tbl.setItem(row, 1, QTableWidgetItem(mode))
-            self._targets_tbl.setItem(row, 2, QTableWidgetItem(str(lb) + " mo"))
-            self._targets_tbl.setItem(row, 3, QTableWidgetItem(tfs if not auto else "—"))
-            self._targets_tbl.setItem(row, 4, QTableWidgetItem("—"))
+                self._targets_tbl.setItem(row, 0, QTableWidgetItem(symbol))
+                self._targets_tbl.setItem(row, 1, self._checkbox_item(entry_on))
+                self._targets_tbl.setItem(row, 2, self._checkbox_item(fvg_on))
+                self._targets_tbl.setItem(row, 3, QTableWidgetItem(mode))
+                self._targets_tbl.setItem(row, 4, QTableWidgetItem(str(lb) + " mo"))
+                self._targets_tbl.setItem(row, 5, QTableWidgetItem(tfs if not auto else "—"))
+                self._targets_tbl.setItem(row, 6, QTableWidgetItem("—"))
+        finally:
+            self._targets_tbl.blockSignals(False)
+
+    @staticmethod
+    def _checkbox_item(checked: bool) -> QTableWidgetItem:
+        item = QTableWidgetItem()
+        item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        return item
+
+    def _on_target_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() not in (1, 2):
+            return
+        symbol_item = self._targets_tbl.item(item.row(), 0)
+        if symbol_item is None:
+            return
+        symbol = symbol_item.text()
+        key = "entry_signal_enabled" if item.column() == 1 else "fvg_watch_enabled"
+        overrides = self._scanner_cfg().setdefault("overrides", {}).setdefault(symbol, {})
+        overrides[key] = item.checkState() == Qt.CheckState.Checked
+        self._save_cfg()
 
     def _refresh_signals_table(self) -> None:
         try:
@@ -984,6 +1126,66 @@ class SignalScanner(QMainWindow):
                     item.setForeground(color)
                 self._signals_tbl.setItem(row, col, item)
 
+    def _on_delete_signal(self) -> None:
+        rows = sorted({i.row() for i in self._signals_tbl.selectedItems()})
+        ids = [self._signal_data[r]["signal_id"] for r in rows if r < len(self._signal_data)]
+        if not ids:
+            return
+        if QMessageBox.question(
+            self, "Delete signal(s)", f"Delete {len(ids)} signal(s)? This cannot be undone.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        from db.signals import SignalsDB
+        with SignalsDB(_SIGNALS_DB_PATH) as db:
+            for sid in ids:
+                db.delete_signal(sid)
+        self._refresh_signals_table()
+
+    def _refresh_fvg_watch_table(self) -> None:
+        try:
+            from db.signals import SignalsDB
+            with SignalsDB(_SIGNALS_DB_PATH, read_only=False) as db:
+                sigs = db.get_all_open_fvg_watch()
+        except Exception:
+            sigs = []
+        self._populate_fvg_watch_table(sigs[:50])
+
+    def _populate_fvg_watch_table(self, sigs: list[dict]) -> None:
+        self._fvg_watch_data = list(sigs)
+        self._fvg_watch_tbl.setRowCount(len(sigs))
+        for row, sig in enumerate(sigs):
+            direction = sig.get("direction", "")
+            color = QColor("#26a69a") if direction == "bull" else QColor("#ef5350")
+            items = [
+                sig.get("formed_time", "")[:16],
+                sig.get("symbol", ""),
+                sig.get("tf", ""),
+                direction.upper(),
+                f"{sig.get('zone_bottom', 0):.2f}–{sig.get('zone_top', 0):.2f}",
+                "Yes" if sig.get("filled") else "No",
+                sig.get("status", ""),
+            ]
+            for col, text in enumerate(items):
+                item = QTableWidgetItem(text)
+                if col == 3:  # direction column
+                    item.setForeground(color)
+                self._fvg_watch_tbl.setItem(row, col, item)
+
+    def _on_delete_fvg_watch(self) -> None:
+        rows = sorted({i.row() for i in self._fvg_watch_tbl.selectedItems()})
+        ids = [self._fvg_watch_data[r]["signal_id"] for r in rows if r < len(self._fvg_watch_data)]
+        if not ids:
+            return
+        if QMessageBox.question(
+            self, "Delete FVG watch signal(s)", f"Delete {len(ids)} signal(s)? This cannot be undone.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        from db.signals import SignalsDB
+        with SignalsDB(_SIGNALS_DB_PATH) as db:
+            for sid in ids:
+                db.delete_fvg_watch(sid)
+        self._refresh_fvg_watch_table()
+
     # ── worker callbacks ──────────────────────────────────────────────────────
 
     def _on_new_signal(self, sig: dict) -> None:
@@ -1005,6 +1207,7 @@ class SignalScanner(QMainWindow):
 
     def _on_new_fvg_watch(self, sig: dict) -> None:
         """Lightweight FVG-formed alert — no RR/SL/TP, separate from _on_new_signal."""
+        self._refresh_fvg_watch_table()
         summary = (
             f"{sig['symbol']}  {sig['tf']}  {sig['direction'].upper()}"
             f"  zone {sig['zone_bottom']:.2f}–{sig['zone_top']:.2f}"
@@ -1022,12 +1225,76 @@ class SignalScanner(QMainWindow):
         for row in range(self._targets_tbl.rowCount()):
             item = self._targets_tbl.item(row, 0)
             if item and item.text() == symbol:
-                self._targets_tbl.setItem(row, 4, QTableWidgetItem(status))
+                self._targets_tbl.setItem(row, 6, QTableWidgetItem(status))
                 break
 
     def _log(self, msg: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         self._log_edit.append(f"{ts}  {msg}")
+
+    # ── backscan tab ──────────────────────────────────────────────────────────
+
+    def _populate_backscan_symbol_choices(self) -> None:
+        from analysis.fvg_watcher import load_fvg_watch_config
+        config = load_fvg_watch_config()
+        self._backscan_symbol_cb.clear()
+        self._backscan_symbol_cb.addItems(sorted(config.keys()))
+        if config:
+            self._on_backscan_symbol_changed(self._backscan_symbol_cb.currentText())
+
+    def _on_backscan_symbol_changed(self, symbol: str) -> None:
+        from analysis.fvg_watcher import load_fvg_watch_config
+        config = load_fvg_watch_config()
+        tfs = [entry["tf"] for entry in config.get(symbol, [])]
+        self._backscan_tf_cb.clear()
+        self._backscan_tf_cb.addItem("All")
+        self._backscan_tf_cb.addItems(tfs)
+
+    def _on_run_backscan(self) -> None:
+        if self._backscan_worker is not None and self._backscan_worker.isRunning():
+            return
+        symbol = self._backscan_symbol_cb.currentText().strip()
+        tf = self._backscan_tf_cb.currentText().strip()
+        tf = "" if tf in ("", "All") else tf
+        start = self._backscan_start_edit.text().strip()
+        if not start:
+            QMessageBox.warning(self, "Backscan", "Start date is required (YYYY-MM-DD).")
+            return
+        end = datetime.now().strftime("%Y-%m-%d")
+
+        self._backscan_run_btn.setEnabled(False)
+        self._backscan_status_lbl.setText("Running...")
+        self._backscan_worker = BackscanWorker(symbol, tf, start, end, self)
+        self._backscan_worker.finished_ok.connect(self._on_backscan_finished)
+        self._backscan_worker.failed.connect(self._on_backscan_error)
+        self._backscan_worker.start()
+
+    def _on_backscan_finished(self, rows: list[dict]) -> None:
+        self._backscan_run_btn.setEnabled(True)
+        self._backscan_status_lbl.setText(f"{len(rows)} match(es)")
+        self._backscan_tbl.setRowCount(len(rows))
+        for row, sig in enumerate(rows):
+            direction = sig.get("direction", "")
+            color = QColor("#26a69a") if direction == "bull" else QColor("#ef5350")
+            items = [
+                sig.get("symbol", ""),
+                sig.get("tf", ""),
+                direction.upper(),
+                str(sig.get("formed_time", "")),
+                f"{sig.get('zone_bottom', 0):.2f}",
+                f"{sig.get('zone_top', 0):.2f}",
+                f"{sig.get('width_pct', 0):.4f}",
+                "Yes" if sig.get("filled") else "No",
+            ]
+            for col, text in enumerate(items):
+                item = QTableWidgetItem(text)
+                if col == 2:  # direction column
+                    item.setForeground(color)
+                self._backscan_tbl.setItem(row, col, item)
+
+    def _on_backscan_error(self, message: str) -> None:
+        self._backscan_run_btn.setEnabled(True)
+        self._backscan_status_lbl.setText(f"Error: {message}")
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 

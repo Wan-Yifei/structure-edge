@@ -103,6 +103,21 @@ def test_update_status_sets_closed_at_if_omitted(db):
     assert row["closed_at"] is not None  # auto-filled
 
 
+# ── delete_signal ─────────────────────────────────────────────────────────────
+
+def test_delete_signal_removes_row(db):
+    sig = _make_sig()
+    sid = db.insert_signal(sig)
+    db.delete_signal(sid)
+
+    assert db.get_open_signals("US.AAPL") == []
+    assert db.query_signals("US.AAPL", "2026-01-01") == []
+
+
+def test_delete_signal_missing_id_is_noop(db):
+    db.delete_signal(str(uuid.uuid4()))  # no matching row — must not raise
+
+
 # ── query_signals ─────────────────────────────────────────────────────────────
 
 def test_query_signals_since_filter(db):
@@ -217,3 +232,26 @@ def test_query_fvg_watch_since_and_status_filter(db):
 
     none_filled = db.query_fvg_watch("US.SOXL", "2026-01-01", status="filled")
     assert len(none_filled) == 0
+
+
+def test_get_all_open_fvg_watch_multi_symbol(db):
+    db.insert_fvg_watch(_make_fvg_watch(symbol="US.SOXL", signal_id=str(uuid.uuid4())))
+    db.insert_fvg_watch(_make_fvg_watch(symbol="US.SOXS", signal_id=str(uuid.uuid4())))
+    db.insert_fvg_watch(_make_fvg_watch(symbol="US.NVDA", signal_id=str(uuid.uuid4())))
+
+    all_open = db.get_all_open_fvg_watch()
+    symbols = {r["symbol"] for r in all_open}
+    assert symbols == {"US.SOXL", "US.SOXS", "US.NVDA"}
+
+
+def test_delete_fvg_watch_removes_row(db):
+    sig = _make_fvg_watch()
+    sid = db.insert_fvg_watch(sig)
+    db.delete_fvg_watch(sid)
+
+    assert db.get_open_fvg_watch("US.SOXL", "15m") == []
+    assert db.get_all_open_fvg_watch() == []
+
+
+def test_delete_fvg_watch_missing_id_is_noop(db):
+    db.delete_fvg_watch(str(uuid.uuid4()))  # no matching row — must not raise

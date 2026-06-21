@@ -143,6 +143,11 @@ class SignalsDB:
         )
         self._conn.commit()
 
+    def delete_signal(self, signal_id: str) -> None:
+        """Physically remove a signal row (unlike update_status, this cannot be undone)."""
+        self._conn.execute("DELETE FROM signals WHERE signal_id=?", (signal_id,))
+        self._conn.commit()
+
     # ── read ──────────────────────────────────────────────────────────────────
 
     def query_signals(
@@ -230,6 +235,18 @@ class SignalsDB:
             (symbol, tf),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_all_open_fvg_watch(self) -> list[dict]:
+        """Return all open FVG-watch signals across every symbol/tf."""
+        rows = self._conn.execute(
+            "SELECT * FROM fvg_watch_signals WHERE status='open' ORDER BY formed_time DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_fvg_watch(self, signal_id: str) -> None:
+        """Physically remove a FVG-watch signal row (cannot be undone)."""
+        self._conn.execute("DELETE FROM fvg_watch_signals WHERE signal_id=?", (signal_id,))
+        self._conn.commit()
 
     def query_fvg_watch(
         self,
