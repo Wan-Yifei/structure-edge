@@ -8,6 +8,7 @@ from strategy.smc.market_structure import find_swings, detect_bos_choch, determi
 from strategy.smc.fvg import (
     detect_fvg, fvg_entry_depth, is_displacement_candle,
     compute_volume_profile, fvg_overlaps_lvn,
+    gap_width_pct, gaps_for_combo, build_daily_lvn_profiles, gap_overlaps_lvn,
 )
 from strategy.smc.confirmation import check_ltf_confirmation
 
@@ -327,6 +328,125 @@ class TestFvgEntryDepth:
     def test_degenerate_zone_returns_zero(self):
         fvg = {"direction": "bull", "top": 10.0, "bottom": 10.0}
         assert fvg_entry_depth(fvg, 10.0) == 0.0
+
+
+# ── combo-based detection helpers (gap_width_pct / gaps_for_combo / LVN) ───────
+
+def _displacement_klines() -> pd.DataFrame:
+    """5 calm baseline candles, then a weak (non-displacement) FVG at idx 5-7,
+    then a strong (displacement) FVG at idx 8-10. Both gaps are geometrically
+    valid; only the second has a middle candle that passes is_displacement_candle.
+    """
+    opens  = [100.3, 100.3, 100.3, 100.3, 100.3, 102.3, 103.3, 105.2, 106.3, 107.5, 113.2]
+    closes = [100.6, 100.6, 100.6, 100.6, 100.6, 102.7, 103.6, 105.8, 106.7, 111.5, 113.8]
+    highs  = [101,   101,   101,   101,   101,   103,   104,   106,   107,   112,   114]
+    lows   = [100,   100,   100,   100,   100,   102,   103,   105,   106,   107,   113]
+    return _klines(closes=closes, highs=highs, lows=lows, opens=opens)
+
+
+def _klines_with_dates(closes, highs, lows, dates, volumes=None):
+    n = len(closes)
+    volumes = volumes if volumes is not None else [1000] * n
+    return pd.DataFrame({
+        "time_key": [f"{dates[i]} {9 + i:02d}:00:00" for i in range(n)],
+        "open":     list(closes),
+        "high":     highs,
+        "low":      lows,
+        "close":    closes,
+        "volume":   volumes,
+    })
+
+
+def _lvn_klines() -> pd.DataFrame:
+    """Day 1 (idx 0-2) builds a volume profile with a heavy-volume zone at
+    100-101 and a light-volume zone (LVN) at 102-103. Day 2 (idx 3-8) has two
+    bull FVGs: one at idx 5 sitting inside day 1's LVN zone, one at idx 8
+    sitting inside day 1's heavy-volume zone.
+    """
+    dates   = ["2025-01-01"] * 3 + ["2025-01-02"] * 6
+    closes  = [100.5, 100.5, 102.5,  101.5, 102.0, 102.5,  100.15, 100.4, 100.75]
+    highs   = [101,   101,   103,    102.0, 102.5, 103.0,  100.3,  100.5, 100.9]
+    lows    = [100,   100,   102,    101.0, 101.5, 102.5,  100.0,  100.3, 100.6]
+    volumes = [1000,  1000,  10,     1000,  1000,  1000,   1000,   1000,  1000]
+    return _klines_with_dates(closes, highs, lows, dates, volumes)
+
+
+class TestGapWidthPct:
+    def test_known_width(self):
+        gap = {"top": 110.0, "bottom": 90.0}
+        assert gap_width_pct(gap) == pytest.approx(0.2)
+
+    def test_zero_midpoint_returns_zero(self):
+        gap = {"top": 0.0, "bottom": 0.0}
+        assert gap_width_pct(gap) == 0.0
+
+
+class TestGapsForCombo:
+    def test_no_displacement_filter_keeps_both_gaps(self):
+        klines = _displacement_klines()
+        gaps = gaps_for_combo(klines, {"min_gap_pct": 0.0, "require_displacement": False})
+        idxs = {g["idx"] for g in gaps}
+        assert 7  in idxs  # weak gap
+        assert 10 in idxs  # strong gap
+
+    def test_displacement_filter_drops_weak_gap_keeps_strong_gap(self):
+        klines = _displacement_klines()
+        combo = {
+            "min_gap_pct": 0.0, "require_displacement": True,
+            "atr_mult": 1.5, "body_ratio_min": 0.5, "lookback": 5,
+        }
+        gaps = gaps_for_combo(klines, combo)
+        idxs = {g["idx"] for g in gaps}
+        assert 7  not in idxs
+        assert 10 in idxs
+
+    def test_require_lvn_overlap_keeps_only_lvn_gaps(self):
+        klines = _lvn_klines()
+        profiles = build_daily_lvn_profiles(klines)
+        combo = {"min_gap_pct": 0.0, "require_displacement": False,
+                  "require_lvn_overlap": True, "lvn_threshold": 0.30}
+        gaps = gaps_for_combo(klines, combo, lvn_profiles=profiles)
+        idxs = {g["idx"] for g in gaps}
+        assert 5 in idxs
+        assert 8 not in idxs
+
+
+class TestBuildDailyLvnProfiles:
+    def test_first_date_has_no_profile(self):
+        profiles = build_daily_lvn_profiles(_lvn_klines())
+        assert "2025-01-01" not in profiles
+
+    def test_second_date_profile_built_from_first_day(self):
+        profiles = build_daily_lvn_profiles(_lvn_klines())
+        edges, bin_vols = profiles["2025-01-02"]
+        assert edges is not None
+        # day 1's range is 100-103; the profile must span exactly that range.
+        assert edges[0]  == pytest.approx(100.0)
+        assert edges[-1] == pytest.approx(103.0)
+
+
+class TestGapOverlapsLvn:
+    def _gap(self, klines, idx):
+        gaps = detect_fvg(klines, min_gap_pct=0.0, require_displacement=False)
+        return next(g for g in gaps if g["idx"] == idx)
+
+    def test_gap_in_low_volume_zone_overlaps(self):
+        klines = _lvn_klines()
+        profiles = build_daily_lvn_profiles(klines)
+        gap = self._gap(klines, 5)  # zone 102.0-102.5, day1's light-volume zone
+        assert gap_overlaps_lvn(klines, gap, profiles, lvn_threshold=0.30)
+
+    def test_gap_in_high_volume_zone_does_not_overlap(self):
+        klines = _lvn_klines()
+        profiles = build_daily_lvn_profiles(klines)
+        gap = self._gap(klines, 8)  # zone 100.3-100.6, day1's heavy-volume zone
+        assert not gap_overlaps_lvn(klines, gap, profiles, lvn_threshold=0.30)
+
+    def test_missing_profile_returns_false(self):
+        klines = _lvn_klines()
+        gap = self._gap(klines, 5)
+        assert gap_overlaps_lvn(klines, gap, None, lvn_threshold=0.30) is False
+        assert gap_overlaps_lvn(klines, gap, {}, lvn_threshold=0.30) is False
 
 
 # ── is_displacement_candle ────────────────────────────────────────────────────

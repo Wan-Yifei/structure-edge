@@ -212,3 +212,98 @@ def fvg_overlaps_lvn(
 
     zone_vol = bin_vols[mask].mean()
     return zone_vol < lvn_threshold * max_vol
+
+
+# ── Combo-based detection (parameter sweeps, live watchers, backscans) ────────
+
+_DISPLACEMENT_PARAMS = ("atr_mult", "body_ratio_min", "lookback")
+_LVN_N_BINS          = 100  # bins for compute_volume_profile, matches engine.py's default
+
+
+def gap_width_pct(gap: dict) -> float:
+    """Gap width normalized by its own midpoint price."""
+    top, bottom = gap["top"], gap["bottom"]
+    mid = (top + bottom) / 2
+    return (top - bottom) / mid if mid > 0 else 0.0
+
+
+def build_daily_lvn_profiles(klines: pd.DataFrame, n_bins: int = _LVN_N_BINS) -> dict[str, tuple]:
+    """Map each trading date -> volume profile of the PRECEDING trading date.
+
+    One profile per calendar day, shared by every gap detected that day —
+    much cheaper than recomputing a rolling window per gap, and avoids mixing
+    together price levels from days the price has since drifted away from.
+    The first date in the frame has no preceding day and is left unmapped.
+    """
+    dates = klines["time_key"].astype(str).str.slice(0, 10)
+    unique_dates = dates.unique()
+    profiles: dict[str, tuple] = {}
+    for i in range(1, len(unique_dates)):
+        prev_date, cur_date = unique_dates[i - 1], unique_dates[i]
+        day_bars = klines[dates.values == prev_date]
+        profiles[cur_date] = compute_volume_profile(day_bars, n_bins=n_bins)
+    return profiles
+
+
+def gap_overlaps_lvn(
+    klines: pd.DataFrame,
+    gap: dict,
+    lvn_profiles: dict | None,
+    lvn_threshold: float,
+) -> bool:
+    """Whether gap sits in a low-volume node of its day's preceding-day profile."""
+    if not lvn_profiles:
+        return False
+    date = str(klines.iloc[gap["idx"]]["time_key"])[:10]
+    edges, bin_vols = lvn_profiles.get(date, (None, None))
+    return fvg_overlaps_lvn(gap, edges, bin_vols, lvn_threshold)
+
+
+def _filter_gaps(
+    klines: pd.DataFrame,
+    gaps: list[dict],
+    combo: dict,
+    lvn_profiles: dict | None,
+) -> list[dict]:
+    """Apply the displacement and LVN-overlap filters to an already-detected gap list."""
+    if combo.get("require_displacement", False):
+        gaps = [
+            g for g in gaps
+            if is_displacement_candle(
+                klines, g["idx"],
+                combo["atr_mult"], combo["body_ratio_min"], combo["lookback"],
+            )
+        ]
+    if combo.get("require_lvn_overlap", False):
+        gaps = [g for g in gaps if gap_overlaps_lvn(klines, g, lvn_profiles, combo["lvn_threshold"])]
+    return gaps
+
+
+def gaps_for_combo(
+    klines: pd.DataFrame,
+    combo: dict,
+    lvn_profiles: dict | None = None,
+    raw_gaps_cache: dict | None = None,
+) -> list[dict]:
+    """Detect FVGs for one parameter combo (a dict with detect_fvg's own param
+    names: min_gap_pct, require_displacement, atr_mult, body_ratio_min,
+    lookback, require_lvn_overlap, lvn_threshold).
+
+    detect_fvg()'s own require_displacement branch hardcodes
+    is_displacement_candle()'s defaults, so the displacement filter is
+    applied separately here to allow custom atr_mult/body_ratio_min/lookback
+    — mirrors the pattern backtest/engine.py already uses (engine.py:712-714).
+
+    raw_gaps_cache (keyed by min_gap_pct) lets callers sweeping many combos
+    against the same klines skip re-running detect_fvg for combos that only
+    differ in displacement/LVN params, which are applied as a cheap filter
+    on top of the same raw gap list.
+    """
+    mgp = combo["min_gap_pct"]
+    if raw_gaps_cache is not None and mgp in raw_gaps_cache:
+        gaps = raw_gaps_cache[mgp]
+    else:
+        gaps = detect_fvg(klines, min_gap_pct=mgp, require_displacement=False)
+        if raw_gaps_cache is not None:
+            raw_gaps_cache[mgp] = gaps
+    return _filter_gaps(klines, gaps, combo, lvn_profiles)
