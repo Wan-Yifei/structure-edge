@@ -36,6 +36,22 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 CREATE INDEX IF NOT EXISTS idx_sig_symbol_time ON signals(symbol, signal_time DESC);
 CREATE INDEX IF NOT EXISTS idx_sig_status      ON signals(status);
+
+CREATE TABLE IF NOT EXISTS fvg_watch_signals (
+    signal_id         TEXT PRIMARY KEY,
+    symbol            TEXT NOT NULL,
+    tf                TEXT NOT NULL,
+    direction         TEXT NOT NULL,
+    zone_top          REAL NOT NULL,
+    zone_bottom       REAL NOT NULL,
+    formed_time       TEXT NOT NULL,
+    filled            INTEGER NOT NULL DEFAULT 0,
+    params_json       TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'open',
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fvgw_symbol_tf ON fvg_watch_signals(symbol, tf, formed_time DESC);
+CREATE INDEX IF NOT EXISTS idx_fvgw_status    ON fvg_watch_signals(status);
 """
 
 
@@ -171,4 +187,67 @@ class SignalsDB:
         rows = self._conn.execute(
             "SELECT * FROM signals WHERE status='open' ORDER BY signal_time DESC"
         ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── fvg_watch_signals (lightweight "FVG formed" alerts) ─────────────────────
+
+    def insert_fvg_watch(self, sig: dict) -> str:
+        """Insert a new FVG-watch signal record. Returns the generated signal_id."""
+        signal_id = sig.get("signal_id") or str(uuid.uuid4())
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO fvg_watch_signals (
+                signal_id, symbol, tf, direction,
+                zone_top, zone_bottom, formed_time, filled,
+                params_json, status, created_at
+            ) VALUES (
+                ?,?,?,?,  ?,?,?,?,  ?,?,?
+            )
+            """,
+            (
+                signal_id,
+                sig["symbol"],
+                sig["tf"],
+                sig["direction"],
+                float(sig["zone_top"]),
+                float(sig["zone_bottom"]),
+                sig["formed_time"],
+                int(sig.get("filled", False)),
+                sig["params_json"],
+                sig.get("status", "open"),
+                sig.get("created_at", now),
+            ),
+        )
+        self._conn.commit()
+        return signal_id
+
+    def get_open_fvg_watch(self, symbol: str, tf: str) -> list[dict]:
+        """Return all open FVG-watch signals for (symbol, tf) — used for dedup."""
+        rows = self._conn.execute(
+            "SELECT * FROM fvg_watch_signals WHERE symbol=? AND tf=? AND status='open'"
+            " ORDER BY formed_time DESC",
+            (symbol, tf),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def query_fvg_watch(
+        self,
+        symbol: str,
+        since_dt: str,
+        status: Optional[str] = None,
+    ) -> list[dict]:
+        """Return FVG-watch signals for symbol formed at or after since_dt."""
+        if status is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM fvg_watch_signals WHERE symbol=? AND formed_time>=? AND status=?"
+                " ORDER BY formed_time DESC",
+                (symbol, since_dt, status),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM fvg_watch_signals WHERE symbol=? AND formed_time>=?"
+                " ORDER BY formed_time DESC",
+                (symbol, since_dt),
+            ).fetchall()
         return [dict(r) for r in rows]

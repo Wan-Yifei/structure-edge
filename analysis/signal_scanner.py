@@ -219,13 +219,15 @@ class ScanWorker(QThread):
 
     Emits:
         log(str)             — status / error messages
-        new_signal(dict)     — a freshly detected signal dict
+        new_signal(dict)     — a freshly detected entry signal dict
+        new_fvg_watch_signal(dict) — a freshly detected lightweight FVG-formed signal
         status_update(symbol, status_str)  — per-symbol last-scan status
     """
 
-    log           = pyqtSignal(str)
-    new_signal    = pyqtSignal(dict)
-    status_update = pyqtSignal(str, str)
+    log                  = pyqtSignal(str)
+    new_signal           = pyqtSignal(dict)
+    new_fvg_watch_signal = pyqtSignal(dict)
+    status_update        = pyqtSignal(str, str)
 
     def __init__(self, cfg: dict, parent=None) -> None:
         super().__init__(parent)
@@ -255,8 +257,14 @@ class ScanWorker(QThread):
                 symbol = symbol_cfg if isinstance(symbol_cfg, str) else symbol_cfg.get("symbol", "")
                 if not symbol:
                     continue
+                sym_cfg   = symbol_cfg if isinstance(symbol_cfg, dict) else {}
+                default   = scanner_cfg.get("default", {})
+                overrides = scanner_cfg.get("overrides", {}).get(symbol, {})
                 try:
-                    self._scan_symbol(symbol, symbol_cfg if isinstance(symbol_cfg, dict) else {}, scanner_cfg)
+                    if overrides.get("entry_signal_enabled", default.get("entry_signal_enabled", True)):
+                        self._scan_symbol(symbol, sym_cfg, scanner_cfg)
+                    if overrides.get("fvg_watch_enabled", default.get("fvg_watch_enabled", False)):
+                        self._scan_symbol_fvg_watch(symbol, scanner_cfg)
                 except Exception as exc:
                     import traceback
                     self.log.emit(f"[{symbol}] scan error: {exc}\n{traceback.format_exc()}")
@@ -367,6 +375,63 @@ class ScanWorker(QThread):
         if scanner_cfg.get("alert_sound", True):
             QApplication.beep()
 
+    def _scan_symbol_fvg_watch(self, symbol: str, scanner_cfg: dict) -> None:
+        """Lightweight 'FVG formed' alert — no trend/SL/TP/RR, independent of
+        _scan_symbol's full entry-signal pipeline. Per-(symbol, tf) params come
+        from config/scanner/fvg_watch_params.json, hand-picked from
+        backtest/fvg_width_sweep.py output.
+        """
+        from analysis.fvg_watcher import load_fvg_watch_config, scan_symbol_tf
+        from db.signals import SignalsDB
+
+        watch_cfg = load_fvg_watch_config().get(symbol, [])
+        if not watch_cfg:
+            return
+
+        end_dt   = datetime.now()
+        start_dt = end_dt - timedelta(days=3)  # same rolling window as _scan_symbol
+        start    = start_dt.strftime("%Y-%m-%d")
+        end      = end_dt.strftime("%Y-%m-%d")
+
+        for entry in watch_cfg:
+            tf = _fetcher_tf(entry["tf"])
+            try:
+                hits = scan_symbol_tf(symbol, tf, entry, start, end, force_refresh=True)
+            except Exception as exc:
+                self.log.emit(f"[{symbol} {tf}] fvg_watch error: {exc}")
+                continue
+
+            if not hits:
+                continue
+
+            cache_key = f"{symbol}_{tf}_fvgwatch"
+            last_formed = self._bar_cache.get(cache_key)
+            newest = max(h["formed_time"] for h in hits)
+            if newest == last_formed:
+                continue
+            self._bar_cache[cache_key] = newest
+
+            try:
+                with SignalsDB(_SIGNALS_DB_PATH) as db:
+                    open_keys = {
+                        (round(s["zone_bottom"], 4), round(s["zone_top"], 4))
+                        for s in db.get_open_fvg_watch(symbol, tf)
+                    }
+                    for hit in hits:
+                        key = (round(hit["zone_bottom"], 4), round(hit["zone_top"], 4))
+                        if key in open_keys:
+                            continue
+                        hit["signal_id"] = str(uuid.uuid4())
+                        db.insert_fvg_watch(hit)
+                        self.new_fvg_watch_signal.emit(hit)
+                        self.log.emit(
+                            f"[{symbol} {tf}] FVG formed {hit['direction'].upper()} "
+                            f"zone {hit['zone_bottom']:.2f}-{hit['zone_top']:.2f}"
+                        )
+                        self._alert(hit, scanner_cfg)
+            except Exception as exc:
+                self.log.emit(f"[{symbol} {tf}] fvg_watch DB write error: {exc}")
+
 
 # ── params dialog ─────────────────────────────────────────────────────────────
 
@@ -385,6 +450,21 @@ class ParamsDialog(QDialog):
         override = scanner.get("overrides", {}).get(symbol, {})
 
         layout = QVBoxLayout(self)
+
+        # Signal-type toggles — the two alert types are independent of each other.
+        toggle_box = QGroupBox("Signal types")
+        toggle_lay = QHBoxLayout(toggle_box)
+        self._entry_enabled_cb = QCheckBox("Entry signal (trend + FVG + SL/TP/RR)")
+        self._entry_enabled_cb.setChecked(
+            bool(override.get("entry_signal_enabled", default.get("entry_signal_enabled", True)))
+        )
+        self._fvg_watch_enabled_cb = QCheckBox("FVG watch (config/scanner/fvg_watch_params.json)")
+        self._fvg_watch_enabled_cb.setChecked(
+            bool(override.get("fvg_watch_enabled", default.get("fvg_watch_enabled", False)))
+        )
+        toggle_lay.addWidget(self._entry_enabled_cb)
+        toggle_lay.addWidget(self._fvg_watch_enabled_cb)
+        layout.addWidget(toggle_box)
 
         # Mode
         mode_box = QGroupBox("Parameter source")
@@ -501,7 +581,11 @@ class ParamsDialog(QDialog):
     def result_cfg(self) -> dict:
         """Return the updated override dict for this symbol."""
         auto = self._auto_rb.isChecked()
-        out: dict = {"auto_params": auto}
+        out: dict = {
+            "auto_params": auto,
+            "entry_signal_enabled": self._entry_enabled_cb.isChecked(),
+            "fvg_watch_enabled":    self._fvg_watch_enabled_cb.isChecked(),
+        }
         if auto:
             out["lookback_months"] = self._lookback_sp.value()
             out["min_n_trades"]    = self._min_trades_sp.value()
@@ -573,6 +657,8 @@ class SignalScanner(QMainWindow):
                     "lookback_months": 3,
                     "min_n_trades": 5,
                     "min_pf": 1.5,
+                    "entry_signal_enabled": True,
+                    "fvg_watch_enabled": False,
                 },
                 "overrides": {},
             }
@@ -778,6 +864,7 @@ class SignalScanner(QMainWindow):
         self._worker = ScanWorker(cfg)
         self._worker.log.connect(self._log)
         self._worker.new_signal.connect(self._on_new_signal)
+        self._worker.new_fvg_watch_signal.connect(self._on_new_fvg_watch)
         self._worker.status_update.connect(self._on_status_update)
         self._worker.start()
         self._scan_btn.setText("⏹ Stop")
@@ -912,6 +999,21 @@ class SignalScanner(QMainWindow):
             self._tray.showMessage(
                 f"SMC Signal  {sig['signal_time'][:16]}",
                 summary + "\n(double-click to open chart)",
+                QSystemTrayIcon.MessageIcon.Information,
+                8000,
+            )
+
+    def _on_new_fvg_watch(self, sig: dict) -> None:
+        """Lightweight FVG-formed alert — no RR/SL/TP, separate from _on_new_signal."""
+        summary = (
+            f"{sig['symbol']}  {sig['tf']}  {sig['direction'].upper()}"
+            f"  zone {sig['zone_bottom']:.2f}–{sig['zone_top']:.2f}"
+        )
+        self._status_bar.showMessage(f"FVG formed: {summary}  ({sig['formed_time'][:16]})")
+        if self._tray is not None:
+            self._tray.showMessage(
+                f"FVG formed  {sig['formed_time'][:16]}",
+                summary,
                 QSystemTrayIcon.MessageIcon.Information,
                 8000,
             )

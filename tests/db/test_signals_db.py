@@ -152,3 +152,68 @@ def test_context_manager(tmp_path):
     with SignalsDB(db_path) as db:
         rows = db.get_open_signals("US.AAPL")
         assert len(rows) == 1
+
+
+# ── fvg_watch_signals (lightweight "FVG formed" alerts) ─────────────────────
+
+def _make_fvg_watch(**kw) -> dict:
+    base = {
+        "signal_id":   str(uuid.uuid4()),
+        "symbol":      "US.SOXL",
+        "tf":          "15m",
+        "direction":   "bull",
+        "zone_top":    102.5,
+        "zone_bottom": 102.0,
+        "formed_time": "2026-06-20 14:30:00",
+        "filled":      False,
+        "params_json": json.dumps({"min_gap_pct": 0.001}),
+        "status":      "open",
+        "created_at":  "2026-06-20 14:30:01",
+    }
+    base.update(kw)
+    return base
+
+
+def test_insert_and_get_open_fvg_watch(db):
+    sig = _make_fvg_watch()
+    returned_id = db.insert_fvg_watch(sig)
+    assert returned_id == sig["signal_id"]
+
+    open_sigs = db.get_open_fvg_watch("US.SOXL", "15m")
+    assert len(open_sigs) == 1
+    row = open_sigs[0]
+    assert row["symbol"] == "US.SOXL"
+    assert row["tf"] == "15m"
+    assert abs(row["zone_top"] - 102.5) < 1e-6
+    assert row["status"] == "open"
+
+
+def test_get_open_fvg_watch_filters_by_tf(db):
+    db.insert_fvg_watch(_make_fvg_watch(tf="15m"))
+    db.insert_fvg_watch(_make_fvg_watch(signal_id=str(uuid.uuid4()), tf="30m"))
+
+    assert len(db.get_open_fvg_watch("US.SOXL", "15m")) == 1
+    assert len(db.get_open_fvg_watch("US.SOXL", "30m")) == 1
+    assert len(db.get_open_fvg_watch("US.SOXL", "60m")) == 0
+
+
+def test_insert_fvg_watch_or_ignore_duplicate(db):
+    sig = _make_fvg_watch()
+    db.insert_fvg_watch(sig)
+    db.insert_fvg_watch(sig)  # same signal_id — should silently skip
+    assert len(db.get_open_fvg_watch("US.SOXL", "15m")) == 1
+
+
+def test_query_fvg_watch_since_and_status_filter(db):
+    sid1 = db.insert_fvg_watch(_make_fvg_watch(formed_time="2026-06-01 09:00:00"))
+    db.insert_fvg_watch(_make_fvg_watch(signal_id=str(uuid.uuid4()), formed_time="2026-06-07 10:00:00"))
+
+    recent = db.query_fvg_watch("US.SOXL", "2026-06-05")
+    assert len(recent) == 1
+    assert recent[0]["formed_time"] == "2026-06-07 10:00:00"
+
+    all_sigs = db.query_fvg_watch("US.SOXL", "2026-01-01", status="open")
+    assert len(all_sigs) == 2
+
+    none_filled = db.query_fvg_watch("US.SOXL", "2026-01-01", status="filled")
+    assert len(none_filled) == 0

@@ -6,6 +6,7 @@ Usage:
   uv run main.py trade_viewer    [args...]   # Matplotlib viewer (legacy)
   uv run main.py scheduler
   uv run main.py scanner                     # SMC signal scanner
+  uv run main.py fvg_backscan --symbol US.SOXL --start 2026-05-01   # FVG-watch backscan
 """
 
 import argparse
@@ -16,6 +17,7 @@ COMMANDS = {
     "trade_viewer":    ("analysis.trade_viewer",    "main"),  # Matplotlib (legacy)
     "scheduler":       ("analysis.scheduler",       "main"),
     "scanner":         ("analysis.signal_scanner",  "main"),
+    "fvg_backscan":    ("analysis.fvg_backscan",    "main"),
 }
 
 
