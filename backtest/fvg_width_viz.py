@@ -43,10 +43,11 @@ _CATEGORY_DESC = {
 }
 
 _CAPTION = (
-    "Color = filter applied to that param combo:\n"
-    + "    ".join(f"{cat} = {desc}" for cat, desc in _CATEGORY_DESC.items())
-    + "\nX = n_gaps, FVGs detected by that combo (log scale — more filtering moves points left)"
-      "     Y = mean_width_pct, mean gap width as a fraction of price (higher = wider gaps)"
+    "Color (filter applied to that param combo):\n"
+    + "\n".join(f"  {cat:<16} {desc}" for cat, desc in _CATEGORY_DESC.items())
+    + "\nAxes:\n"
+      "  X = n_gaps, FVGs detected by that combo (log scale — more filtering moves points left)\n"
+      "  Y = mean_width_pct, mean gap width as a fraction of price (higher = wider gaps)"
 )
 
 _TF_ORDER = ["1m", "3m", "5m", "15m", "30m", "60m", "2h", "3h", "4h", "1d"]
@@ -109,7 +110,7 @@ def plot_from_csv(
     nrows = -(-len(tfs) // ncols)  # ceil division
 
     plt.style.use("dark_background")
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows + 1.2), facecolor=_BG)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows + 2.0), facecolor=_BG)
     axes = list(axes.flat) if len(tfs) > 1 else [axes]
 
     for ax, tf in zip(axes, tfs):
@@ -117,7 +118,7 @@ def plot_from_csv(
     for ax in axes[len(tfs):]:
         ax.axis("off")
 
-    fig.subplots_adjust(top=0.86, bottom=0.20, hspace=0.4, wspace=0.3)
+    fig.subplots_adjust(top=0.86, bottom=0.30, hspace=0.4, wspace=0.3)
 
     handles, labels = axes[0].get_legend_handles_labels()
     leg = fig.legend(handles, labels, loc="upper center", ncol=len(_CATEGORY_COLORS),
@@ -128,8 +129,8 @@ def plot_from_csv(
     fig.suptitle(f"FVG width/count tradeoff — {csv_path.parent.name}",
                  color=_FG, fontsize=12, fontweight="bold", y=0.99)
 
-    fig.text(0.5, 0.005, _CAPTION, ha="center", va="bottom", color=_FG,
-             fontsize=8, linespacing=1.6)
+    fig.text(0.02, 0.01, _CAPTION, ha="left", va="bottom", color=_FG,
+             fontsize=8, linespacing=1.6, family="monospace")
 
     out = pathlib.Path(save_path)
     out.parent.mkdir(parents=True, exist_ok=True)
