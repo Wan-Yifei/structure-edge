@@ -1,0 +1,10 @@
+{
+    "_note": "Per-(symbol, timeframe) FVG-formed watch params. Selected via backtest/fvg_width_select.py --min-mean-width-pct 0.025 (max n_gaps subject to mean_width_pct >= 2.5%) against the 20260621_0239_fvg_width_sweep run. Keys match detect_fvg()/strategy.smc.fvg.gaps_for_combo()'s own param names verbatim (not BacktestParams' renamed equivalents) since this file is filled in directly from sweep results.",
+    "US.SOXL": [
+        {"tf": "15m", "min_gap_pct": 0.005, "require_displacement": false,
+         "require_lvn_overlap": true, "lvn_threshold": 0.4},
+        {"tf": "30m", "min_gap_pct": 0.005, "require_displacement": true,
+         "atr_mult": 1.0, "body_ratio_min": 0.5, "lookback": 5,
+         "require_lvn_overlap": false}
+    ]
+}
