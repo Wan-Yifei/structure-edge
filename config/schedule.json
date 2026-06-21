@@ -33,8 +33,6 @@
   "targets": [
     "US.AAPL",
     "US.AMD",
-    "US.AVGO",
-    "US.BE",
     "US.CSCO",
     "US.GLW",
     "US.MRVL",
@@ -48,12 +46,12 @@
     "US.SNDK",
     "US.SOXL",
     "US.SOXS",
+    "US.SPCH",
     "US.SPCX",
     "US.STX",
     "US.TSEM",
     "US.TSLA",
     "US.TSM",
-    "US.UUUU",
     "US.WDC"
   ],
   "target_categories": {
@@ -61,10 +59,9 @@
     "US.AAPL": "全部",
     "US.TSLA": "全部",
     "US.PLTR": "AI family",
-    "US.UUUU": "nuclear fusion & energy",
-    "US.AVGO": "半导体",
     "US.GLW": "半导体",
-    "US.SPCX": "Space X family"
+    "US.SPCX": "Space X family",
+    "US.SPCH": "Space X family"
   },
   "order_book_enabled": true,
   "remote_backup": {
@@ -76,5 +73,27 @@
     "tick_db": "db/ticks.db",
     "order_book_db": "db/order_book.db"
   },
-  "autostart": true
+  "autostart": true,
+  "scanner": {
+    "enabled": [
+      "US.SOXL"
+    ],
+    "scan_interval_s": 60,
+    "alert_sound": true,
+    "default": {
+      "strategy": "smc",
+      "auto_params": true,
+      "lookback_months": 3,
+      "min_n_trades": 5,
+      "min_pf": 1.5,
+      "entry_signal_enabled": true,
+      "fvg_watch_enabled": false
+    },
+    "overrides": {
+      "US.SOXL": {
+        "entry_signal_enabled": false,
+        "fvg_watch_enabled": true
+      }
+    }
+  }
 }
