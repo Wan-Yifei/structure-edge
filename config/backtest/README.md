@@ -127,3 +127,11 @@ uv run backtest/run.py --config config/backtest/cross_stock_grid_v1.json
 ```
 
 `aggregate_random.py` 详细说明见 [`backtest/README.md`](../../backtest/README.md)。
+
+---
+
+## 非交易类工具配置
+
+`fvg_width_default.json` 不属于以上交易策略回测体系——它给 [`backtest/fvg_width_sweep.py`](../../backtest/fvg_width_sweep.py) 使用，
+只调 `strategy/smc/fvg.py` 自身的 FVG 检测参数（宽度/位移过滤），不产生交易、不挂 `smc_v` 算法版本号。
+字段形状也不同：`tfs` 是单时间框架列表（FVG 检测不需要 HTF/LTF 配对），没有 `tf_pairs`/`workers`。

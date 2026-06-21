@@ -1,0 +1,17 @@
+{
+    "_note": "FVG width/count parameter sweep — tunes strategy/smc/fvg.py's own detection knobs. Not a trading backtest: no trades, no algo version.",
+    "codes": ["US.SOXL"],
+    "tfs": ["5m", "15m", "30m", "60m", "3h", "4h"],
+    "start": "2025-05-22",
+    "end": "2026-05-22",
+    "top_n": 15,
+    "param_grid": {
+        "min_gap_pct": [0.0005, 0.001, 0.002, 0.003, 0.005],
+        "require_displacement": [false, true],
+        "atr_mult": [1.0, 1.5, 2.0],
+        "body_ratio_min": [0.3, 0.5, 0.7],
+        "lookback": [3, 5, 10],
+        "require_lvn_overlap": [false, true],
+        "lvn_threshold": [0.2, 0.3, 0.4]
+    }
+}
