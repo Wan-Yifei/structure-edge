@@ -73,27 +73,5 @@
     "tick_db": "db/ticks.db",
     "order_book_db": "db/order_book.db"
   },
-  "autostart": true,
-  "scanner": {
-    "enabled": [
-      "US.SOXL"
-    ],
-    "scan_interval_s": 60,
-    "alert_sound": true,
-    "default": {
-      "strategy": "smc",
-      "auto_params": true,
-      "lookback_months": 3,
-      "min_n_trades": 5,
-      "min_pf": 1.5,
-      "entry_signal_enabled": true,
-      "fvg_watch_enabled": false
-    },
-    "overrides": {
-      "US.SOXL": {
-        "entry_signal_enabled": false,
-        "fvg_watch_enabled": true
-      }
-    }
-  }
+  "autostart": true
 }
