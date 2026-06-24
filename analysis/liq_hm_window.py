@@ -192,6 +192,30 @@ class _BulkSnapshotWorker(QThread):
         self.done.emit(_query_n_snapshots(self._code, self._n))
 
 
+# Keep-alive list for workers whose owner discarded them while still running.
+_PENDING_WORKERS: list[QThread] = []
+
+
+def _retire_worker(worker: QThread) -> None:
+    """Detach a worker whose result is no longer wanted.
+
+    Dropping the last Python reference to a QThread while it is still
+    running calls its C++ destructor on a live thread, which makes Qt abort
+    the process with "QThread: Destroyed while thread is still running".
+    These workers run one blocking read with no event loop, so they always
+    finish on their own shortly; just disconnect the signal (so no stale
+    callback touches a dead window) and, if still running, hold a reference
+    until `finished` confirms the OS thread actually exited.
+    """
+    try:
+        worker.done.disconnect()
+    except Exception:
+        pass
+    if worker.isRunning():
+        _PENDING_WORKERS.append(worker)
+        worker.finished.connect(lambda: _PENDING_WORKERS.remove(worker))
+
+
 # ── color renderers ────────────────────────────────────────────────────────────
 
 def _hot_rgba(grid: np.ndarray, gamma: float = 1.0) -> np.ndarray | None:
@@ -716,6 +740,8 @@ class LiqHmWindow(QWidget):
         self._live = live
         if live and self._code:
             if self._needs_init:
+                if self._bulk_worker is not None and self._bulk_worker.isRunning():
+                    return   # prefill already in flight — _on_bulk_ready will clear _needs_init
                 # Pre-fill with the last 5 historical snapshots, then start timer
                 self._bulk_worker = _BulkSnapshotWorker(self._code, 5)
                 self._bulk_worker.done.connect(self._on_bulk_ready)
@@ -749,17 +775,11 @@ class LiqHmWindow(QWidget):
     def _reset_grid(self) -> None:
         # Discard any in-flight bulk fetch for the old code
         if self._bulk_worker is not None:
-            try:
-                self._bulk_worker.done.disconnect()
-            except Exception:
-                pass
+            _retire_worker(self._bulk_worker)
             self._bulk_worker = None
         # Discard stale absorb worker so its callback can't overwrite the new code's ticks
         if self._absorb_worker is not None:
-            try:
-                self._absorb_worker.done.disconnect()
-            except Exception:
-                pass
+            _retire_worker(self._absorb_worker)
             self._absorb_worker = None
         self._absorb_ticks   = []
         self._absorb_last_ts = None
@@ -1512,22 +1532,9 @@ class LiqHmWindow(QWidget):
 
     def closeEvent(self, event) -> None:
         self._timer.stop()
-        workers = [w for w in (self._worker, self._bulk_worker, self._absorb_worker)
-                   if w is not None]
-        # Disconnect signals first so no callback fires on the dead window.
-        for w in workers:
-            try:
-                w.done.disconnect()
-            except Exception:
-                pass
-        # These threads run a single blocking read (sqlite3 / DuckDB, read-only)
-        # with no Qt event loop, so quit() is a no-op.  Terminate all at once,
-        # then wait together so total block = max(finish_times), not their sum.
-        for w in workers:
-            if w.isRunning():
-                w.terminate()
-        for w in workers:
-            w.wait(200)
+        for w in (self._worker, self._bulk_worker, self._absorb_worker):
+            if w is not None:
+                _retire_worker(w)
         super().closeEvent(event)
 
 

@@ -1118,6 +1118,15 @@ class TradeViewerQt(QMainWindow):
 
         tb1.addSeparator()
 
+        self._pin_btn = QPushButton("📌 Pin")
+        self._pin_btn.setCheckable(True)
+        self._pin_btn.setFixedWidth(60)
+        self._pin_btn.setToolTip("Keep this window on top of all other windows")
+        self._pin_btn.toggled.connect(self._on_pin_toggled)
+        tb1.addWidget(self._pin_btn)
+
+        tb1.addSeparator()
+
         # Refresh (Live)
         tb1.addWidget(_lbl("Refresh (s, min 5):"))
         self._refresh_spin = QSpinBox()
@@ -3356,6 +3365,14 @@ class TradeViewerQt(QMainWindow):
         """Reset zoom/pan to the initial view (last 150 bars)."""
         if self._klines is not None and not self._klines.empty:
             self._reset_view(len(self._klines))
+
+    def _on_pin_toggled(self, checked: bool) -> None:
+        flags = self.windowFlags()
+        if checked:
+            self.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
+        else:
+            self.setWindowFlags(flags & ~Qt.WindowType.WindowStaysOnTopHint)
+        self.show()
 
     def _reset_view(self, n_bars: int, init_bars: int = 150) -> None:
         """Set the initial view to the last init_bars candles.
