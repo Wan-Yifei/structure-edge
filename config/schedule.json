@@ -31,11 +31,7 @@
     }
   },
   "targets": [
-    "US.AAPL",
-    "US.AMD",
     "US.CSCO",
-    "US.GLW",
-    "US.MRVL",
     "US.MU",
     "US.NVDA",
     "US.NVTS",
@@ -48,7 +44,6 @@
     "US.SOXS",
     "US.SPCH",
     "US.SPCX",
-    "US.STX",
     "US.TSEM",
     "US.TSLA",
     "US.TSM",
@@ -56,10 +51,8 @@
   ],
   "target_categories": {
     "US.OKLO": "nuclear fusion & energy",
-    "US.AAPL": "全部",
     "US.TSLA": "全部",
     "US.PLTR": "AI family",
-    "US.GLW": "半导体",
     "US.SPCX": "Space X family",
     "US.SPCH": "Space X family"
   },
