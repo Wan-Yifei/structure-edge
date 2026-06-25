@@ -1186,7 +1186,7 @@ wheels = [
 
 [[package]]
 name = "moomoo-api"
-version = "10.5.6508"
+version = "10.7.6708"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pandas" },
@@ -1194,7 +1194,7 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "simplejson" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/26/57/252af3eef59527e7c902bd7e6c56a454b9e91d130596906536d8b264e821/moomoo_api-10.5.6508.tar.gz", hash = "sha256:5524055d43bad5e041db6c4c590ba65ffad5ac8a7a175efe475973f0fff0b9a7", size = 6197766, upload-time = "2026-05-07T10:32:59.605Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e9/99/fb00c446ead5a13f9fb27993e753b0309403aa12790d206bc1f4a0f0172f/moomoo_api-10.7.6708.tar.gz", hash = "sha256:be236ad43381f3fa744fa09887f5bd5b243805a23d57d5a259e0a75a5943f415", size = 6298265, upload-time = "2026-06-04T12:28:59.106Z" }
 
 [[package]]
 name = "moomoo-project"
@@ -1229,7 +1229,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.5.2" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "matplotlib", specifier = ">=3.10.9" },
-    { name = "moomoo-api", specifier = ">=10.5.6508" },
+    { name = "moomoo-api", specifier = ">=10.7.6708" },
     { name = "numpy", specifier = ">=2.4.5" },
     { name = "pandas", specifier = ">=3.0.3" },
     { name = "pillow", specifier = ">=12.2.0" },
