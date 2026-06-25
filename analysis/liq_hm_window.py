@@ -67,7 +67,11 @@ MAX_COLS_DEF = 240   # columns kept in memory  (2 h at 30 s/col)
 # ── data helpers ───────────────────────────────────────────────────────────────
 
 def _query_latest_snapshot(code: str) -> list[dict]:
-    """Return all rows from the most recent OB push for *code* (10-20 rows).
+    """Return all rows from the most recent OB push for *code*.
+
+    Row count depends on the account's quote depth entitlement (e.g. up to
+    60 BID + 60 ASK for US LV2) -- no LIMIT is applied here, so whatever the
+    collector stored for that timestamp comes back in full.
 
     Uses a plain sqlite3 connection (no URI mode) to avoid Windows path issues.
     ts is included so callers can use it for iceberg/spoof detection.
