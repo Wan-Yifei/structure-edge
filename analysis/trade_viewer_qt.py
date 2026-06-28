@@ -320,22 +320,33 @@ def _compute_profile_bins(
     i0: int,
     i1: int,
     n_bins: int = 60,
-) -> tuple[np.ndarray, np.ndarray, bool]:
+) -> tuple[np.ndarray, np.ndarray, bool, dict]:
     """Volume profile bins for klines[i0..i1].
 
     Prefers tick data (exact price levels via np.digitize); falls back to OHLCV
-    proportional distribution.  Returns (centers, volumes, used_ticks).
+    proportional distribution.  Returns (centers, volumes, used_ticks, stats).
     centers and volumes are empty arrays when the price range is degenerate.
+
+    stats holds range-wide totals {"total", "buy", "sell", "neutral", "medium"},
+    all derived from tick-covered bars only (OHLCV-fallback bars carry no
+    direction/size info, so they're excluded here even though they still
+    contribute to the visual `volumes` bins).  "total" = buy + sell + neutral,
+    so it's a closed sum -- moomoo's ticker_direction tags a large share of
+    prints NEUTRAL (zero-tick trades), so neutral is often the biggest of the
+    three.  "medium" is a size breakdown *within* buy + sell (buy_m + sell_m),
+    not a fourth additive bucket -- it will always be <= buy + sell.
     """
     kl = klines.iloc[i0 : i1 + 1]
     lo = float(kl["low"].min())
     hi = float(kl["high"].max())
+    empty_stats = {"total": 0.0, "buy": 0.0, "sell": 0.0, "neutral": 0.0, "medium": 0.0}
     if hi <= lo:
-        return np.array([]), np.array([]), False
+        return np.array([]), np.array([]), False, empty_stats
 
     bins    = np.linspace(lo, hi, n_bins + 1)
     centers = (bins[:-1] + bins[1:]) / 2
     volumes = np.zeros(n_bins, dtype=float)
+    stats   = dict(empty_stats)
 
     # Hybrid: use tick data where available, OHLCV proportional fill for bars
     # that have no tick coverage.  This ensures bars outside the loaded tick
@@ -360,9 +371,10 @@ def _compute_profile_bins(
                 pd_ = ticks.get(bk)
                 if pd_:
                     for price, counts in pd_.items():
-                        total = (counts.get("buy", 0)
-                                 + counts.get("sell", 0)
-                                 + counts.get("neutral", 0))
+                        buy     = counts.get("buy", 0)
+                        sell    = counts.get("sell", 0)
+                        neutral = counts.get("neutral", 0)
+                        total   = buy + sell + neutral
                         if total > 0:
                             p = float(price)
                             if lo <= p <= hi:
@@ -370,6 +382,12 @@ def _compute_profile_bins(
                                                  0, n_bins - 1))
                                 volumes[bi] += total
                                 bar_ticks_used = True
+                                stats["total"]   += total
+                                stats["buy"]     += buy
+                                stats["sell"]    += sell
+                                stats["neutral"] += neutral
+                                stats["medium"]  += (counts.get("buy_m", 0)
+                                                      + counts.get("sell_m", 0))
                     if bar_ticks_used:
                         used_ticks = True
 
@@ -379,7 +397,7 @@ def _compute_profile_bins(
             if n_hit:
                 volumes[mask] += kvol[j] / n_hit
 
-    return centers, volumes, used_ticks
+    return centers, volumes, used_ticks, stats
 
 
 def _compute_poc_vah_val(
@@ -3055,7 +3073,7 @@ class TradeViewerQt(QMainWindow):
 
     def _compute_range_profile(
         self, i0: int, i1: int
-    ) -> tuple[np.ndarray, np.ndarray, bool]:
+    ) -> tuple[np.ndarray, np.ndarray, bool, dict]:
         return _compute_profile_bins(
             self._klines, self._ticks, self._candle_mins, i0, i1)
 
@@ -3073,7 +3091,7 @@ class TradeViewerQt(QMainWindow):
             return
         self._range_last_indices = (i0, i1)
 
-        centers, volumes, used_ticks = self._compute_range_profile(i0, i1)
+        centers, volumes, used_ticks, stats = self._compute_range_profile(i0, i1)
         if centers.size == 0:
             return
 
@@ -3086,6 +3104,36 @@ class TradeViewerQt(QMainWindow):
         bin_h    = float(centers[1] - centers[0]) if len(centers) > 1 else 1.0
         n_bars   = i1 - i0
         src_lbl  = "tick" if used_ticks else "OHLCV"
+
+        def _fmt_vol(v: float) -> str:
+            if v >= 1_000_000:
+                return f"{v/1_000_000:.1f}M"
+            if v >= 1_000:
+                return f"{v/1_000:.0f}K"
+            return f"{v:.0f}"
+
+        # "total" = buy + sell + neutral from tick-covered bars only (a closed
+        # sum -- shown here so the four numbers are self-checkable instead of
+        # leaving a silent gap). moomoo's ticker_direction tags a lot of
+        # same-price prints NEUTRAL, so it's often the largest of the three.
+        # "medium" is a size breakdown *within* buy+sell, not a 5th additive
+        # bucket, hence the "*" -- it will always be <= buy + sell.
+        stats_lbl = (
+            f"Tot {_fmt_vol(stats['total'])}  "
+            f"Buy {_fmt_vol(stats['buy'])}  "
+            f"Sell {_fmt_vol(stats['sell'])}  "
+            f"Neu {_fmt_vol(stats['neutral'])}  "
+            f"Mid* {_fmt_vol(stats['medium'])}"
+        )
+        stats_tip = (
+            "Tot = Buy + Sell + Neutral, tick-covered bars only "
+            "(bars with no local tick data aren't counted here, even though "
+            "they still show up as bars in the profile).\n"
+            "Neu = moomoo ticker_direction NEUTRAL prints (often same-price/"
+            "zero-tick trades) -- frequently the largest bucket.\n"
+            "Mid* = medium-lot volume already included inside Buy/Sell "
+            "(buy_m + sell_m) -- not a separate bucket, so Buy+Sell+Mid != Tot."
+        )
 
         # ── Right panel ───────────────────────────────────────────────────────
         self._disconnect_profile_pins()
@@ -3126,11 +3174,22 @@ class TradeViewerQt(QMainWindow):
         vah_lbl = _add_panel_line(vah, _GOLD, Qt.PenStyle.DashLine)
         val_lbl = _add_panel_line(val, _GOLD, Qt.PenStyle.DashLine)
 
+        stats_item = pg.TextItem(
+            text=stats_lbl, color="#42a5f5",
+            fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+            anchor=(0.0, 0.0),
+        )
+        stats_item.setFont(QFont("Monospace", 7))
+        stats_item.setToolTip(stats_tip)
+        pw.addItem(stats_item, ignoreBounds=True)
+
         def _pin_panel_labels() -> None:
             xlo = vb.viewRange()[0][0]
+            yhi = vb.viewRange()[1][1]
             poc_lbl.setPos(xlo, poc);  poc_lbl.setText(f"POC {poc:.2f}")
             vah_lbl.setPos(xlo, vah);  vah_lbl.setText(f"VAH {vah:.2f}")
             val_lbl.setPos(xlo, val);  val_lbl.setText(f"VAL {val:.2f}")
+            stats_item.setPos(xlo, yhi)
 
         conn = vb.sigRangeChanged.connect(lambda *_: _pin_panel_labels())
         self._profile_pin_conns.append(conn)
@@ -3200,7 +3259,8 @@ class TradeViewerQt(QMainWindow):
 
         self._log(
             f"Range profile | bars {i0}–{i1} ({i1-i0+1}) | "
-            f"source={src_lbl} | POC={poc:.2f} VAH={vah:.2f} VAL={val:.2f}"
+            f"source={src_lbl} | POC={poc:.2f} VAH={vah:.2f} VAL={val:.2f} | "
+            f"{stats_lbl}"
         )
 
         self._show_range_tick_profile(i0, i1)
