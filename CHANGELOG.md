@@ -1,5 +1,76 @@
 # Changelog
 
+## v0.14.0 — CVD/A-D subplots, Range Profile direction stats, pin-to-top (2026-06-29)
+
+### Feat: Cumulative Volume Delta (CVD) subplot (`analysis/trade_viewer_qt.py`)
+
+- New "CVD" indicator toggle adds a subplot below the candle chart, X-linked
+  to the main chart like the existing KD/MAVOL subplots.
+- Per-bar delta = buy_vol - sell_vol from tick-tagged trades (same bucket
+  source as the Δ Delta overlay), cumulatively summed from the start of the
+  loaded klines (no per-session reset). Bars with no tick coverage contribute
+  0 (line holds flat rather than gapping).
+- Caveat: moomoo's `ticker_direction` tags a large share of same-price prints
+  NEUTRAL (~68.5% of volume observed on SOXL), which the delta excludes — CVD
+  here only reflects the tagged subset of volume, not the full tape.
+
+### Feat: Accumulation/Distribution Line subplot (`analysis/trade_viewer_qt.py`)
+
+- New "A/D" indicator toggle adds a second subplot using `ta.volume.AccDistIndexIndicator`
+  (close position within each bar's high-low range, weighted by volume).
+- Pure OHLCV indicator — no tick data required, so it has no NEUTRAL-volume
+  blind spot, but it's a price-action proxy for direction rather than actual
+  tagged trade sides. Intended to be read alongside CVD: agreement between
+  the two (real tagged flow vs. price-action proxy) is a stronger signal
+  than either alone.
+
+### Fix: CVD / A-D subplots rendered as a flat line (`analysis/trade_viewer_qt.py`)
+
+- Both are unbounded running cumulative sums (no per-session reset), so
+  PyQtGraph's default bounding-rect Y autorange fit the *entire* loaded
+  history. The default 150-bar view is a small slice of that history, so its
+  real variation was dwarfed by the full-history range and rendered as a
+  near-flat line — same class of bug the Volume subplot was already fixed
+  for (see `_reset_view` docstring).
+- Fixed: `_reset_view` now also derives CVD/A-D Y range from the visible
+  bars only, mirroring the existing Volume subplot fix.
+
+### Feat: Buy/Sell/Neutral/Medium volume stats in Range Profile (`analysis/trade_viewer_qt.py`)
+
+- `_compute_profile_bins` now also returns a `stats` dict (`total`, `buy`,
+  `sell`, `neutral`, `medium`) alongside the existing price-bin histogram.
+- Range Profile panel header shows `Tot / Buy / Sell / Neu / Mid*` for the
+  selected range, with a hover tooltip explaining the relationships.
+- `total` = `buy + sell + neutral` from tick-covered bars only (a closed,
+  self-checkable sum); `medium` (`Mid*`) is a buy_m+sell_m size breakdown
+  *within* buy+sell, not a separate additive bucket.
+
+### Feat: Pin-to-top button on main viewer (`analysis/trade_viewer_qt.py`)
+
+- Added a "📌 Pin" toggle button to the main toolbar (same
+  `WindowStaysOnTopHint` pattern already used by the Liquidity Heatmap window).
+
+### Fix: LiqHm window could crash the whole process on close (`analysis/liq_hm_window.py`)
+
+- `_reset_grid()` (stale-worker discard on code switch) and `set_live()`
+  (prefill restart) dropped the last Python reference to a still-running
+  `QThread`, which destroys the C++ object while the OS thread is alive —
+  Qt aborts the process with "QThread: Destroyed while thread is still
+  running". `closeEvent` previously masked this with `terminate()`, which
+  carries its own risk of corrupting the GIL if the kill lands while the
+  thread holds it (observed as the main window going unresponsive after
+  repeatedly closing the heatmap window).
+- Fixed: new `_retire_worker()` disconnects the result signal and, if the
+  worker is still running, holds a module-level reference until its own
+  `finished` signal confirms the thread actually exited — no `terminate()`,
+  no dropped live references.
+
+### Chore: moomoo-api 10.5.6508 → 10.7.6708 (`pyproject.toml`, `uv.lock`)
+
+- Picks up the `order_book_type` param on `get_order_book` (NORMAL/ODD board)
+  and `SubType.ORDER_BOOK_ODD`; verified backward compatible with all
+  existing `ORDER_BOOK` push call sites (no code changes needed).
+
 ## v0.13.7 — live mode fixes + aggressor bubble performance + WAL stability (2026-06-15)
 
 ### Fix: Range profile missing lower half when tick coverage is partial (`analysis/trade_viewer_qt.py`)

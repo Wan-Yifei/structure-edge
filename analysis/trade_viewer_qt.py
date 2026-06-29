@@ -13,13 +13,17 @@ Features (Phase 1 + 2):
   - FVG zone overlays
   - Order Block (OB) overlays with regular / mitigation / breaker subtypes
   - KD channel subplot (spread width momentum, bull/bear/flat coloured)
+  - CVD subplot (cumulative buy-sell tick delta)
+  - A/D Line subplot (ta.volume.AccDistIndexIndicator, pure OHLCV)
   - EMA overlays (20 / 50 / 200) on candle chart
   - Session Vol Profile panel (right)
   - Single-candle Tick Profile panel (centre-right, on hover)
+  - Range Profile: user-selected region volume-by-price + Buy/Sell/Neutral/Medium stats
   - Crosshair + OHLCV tooltip (left-side, below price label)
   - Indicator toggle toolbar
   - Session filter checkboxes (Pre / Regular / Post / Night)
   - Profile date-range selector (1D / 3D / 1W, trading-day aware)
+  - Pin-to-top toggle (WindowStaysOnTopHint)
   - Trade Review mode: enter a trade_id, see entry/exit/SL/TP markers
     plus HTF FVG + BOS context overlaid on the entry TF
 
@@ -66,6 +70,7 @@ from strategy.smc.market_structure import detect_bos_choch
 from strategy.smc.fvg import detect_fvg
 from strategy.smc.order_blocks import detect_order_blocks
 from strategy.smc.kd_trend import compute_kd
+from ta.volume import AccDistIndexIndicator
 from moomoo import (
     OpenQuoteContext, SubType, KLType, AuType, Session,
     TickerHandlerBase, StockQuoteHandlerBase, RET_OK,
@@ -1181,6 +1186,8 @@ class TradeViewerQt(QMainWindow):
             ("ob",        "OB"),
             ("kd_band",   "KD"),    # KD fast/slow midline ribbon on main chart
             ("kd",        "KDV"),   # KDV = KD spread-width subplot
+            ("cvd",       "CVD"),   # Cumulative Volume Delta subplot
+            ("adi",       "A/D"),   # Accumulation/Distribution Line subplot
             ("ema",       "EMA"),
             ("vol",       "MAVOL"), # Volume subplot toggle
         ]:
@@ -1391,10 +1398,44 @@ class TradeViewerQt(QMainWindow):
         ))
         self._plot_kd.hide()  # shown when KD checkbox enabled
 
+        # CVD subplot (row 3) — hidden until CVD indicator enabled
+        self._chart_widget.nextRow()
+        self._plot_cvd: pg.PlotItem = self._chart_widget.addPlot(row=3, col=0)
+        self._plot_cvd.showGrid(x=True, y=True, alpha=0.10)
+        self._plot_cvd.setLabel("left", "CVD", **{"color": _FG})
+        self._plot_cvd.getAxis("left").setTextPen(_qc(_FG))
+        self._plot_cvd.getAxis("bottom").setTextPen(_qc(_FG))
+        self._plot_cvd.setMenuEnabled(False)
+        self._plot_cvd.setXLink(self._plot_c)
+        # Add zero line reference
+        self._plot_cvd.addItem(pg.InfiniteLine(
+            pos=0, angle=0, movable=False,
+            pen=pg.mkPen(_GREY, width=1, style=Qt.PenStyle.DashLine),
+        ))
+        self._plot_cvd.hide()  # shown when CVD checkbox enabled
+
+        # A/D Line subplot (row 4) — hidden until A/D indicator enabled
+        self._chart_widget.nextRow()
+        self._plot_adi: pg.PlotItem = self._chart_widget.addPlot(row=4, col=0)
+        self._plot_adi.showGrid(x=True, y=True, alpha=0.10)
+        self._plot_adi.setLabel("left", "A/D", **{"color": _FG})
+        self._plot_adi.getAxis("left").setTextPen(_qc(_FG))
+        self._plot_adi.getAxis("bottom").setTextPen(_qc(_FG))
+        self._plot_adi.setMenuEnabled(False)
+        self._plot_adi.setXLink(self._plot_c)
+        # Add zero line reference
+        self._plot_adi.addItem(pg.InfiniteLine(
+            pos=0, angle=0, movable=False,
+            pen=pg.mkPen(_GREY, width=1, style=Qt.PenStyle.DashLine),
+        ))
+        self._plot_adi.hide()  # shown when A/D checkbox enabled
+
         # Row stretch factors
         self._chart_widget.ci.layout.setRowStretchFactor(0, 5)
         self._chart_widget.ci.layout.setRowStretchFactor(1, 1)
         self._chart_widget.ci.layout.setRowStretchFactor(2, 1)
+        self._chart_widget.ci.layout.setRowStretchFactor(3, 1)
+        self._chart_widget.ci.layout.setRowStretchFactor(4, 1)
 
         # ── Graphics items ────────────────────────────────────────────────────
         self._candle_item = CandlestickItem()
@@ -1411,6 +1452,8 @@ class TradeViewerQt(QMainWindow):
         self._ema_items:     list = []  # PlotCurveItem per EMA period
         self._kd_items:      list = []  # PlotCurveItem + fill for KD subplot
         self._kd_band_items: list = []  # PlotCurveItem + fill for KD band on main chart
+        self._cvd_items:     list = []  # PlotCurveItem for CVD subplot
+        self._adi_items:     list = []  # PlotCurveItem for A/D Line subplot
         self._trade_items:          list = []  # all trade review overlay items
         self._scanner_signal_items: list = []  # scanner signals overlay items
 
@@ -1469,6 +1512,42 @@ class TradeViewerQt(QMainWindow):
 
         # Stored KD width array for crosshair readout (populated by _draw_kd)
         self._kd_width_arr: np.ndarray | None = None
+
+        # CVD subplot: vertical line + value readout label
+        self._vline_cvd = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._vline_cvd.setVisible(False)
+        self._plot_cvd.addItem(self._vline_cvd, ignoreBounds=True)
+
+        self._cvd_label = pg.TextItem(
+            text="", color=_FG,
+            fill=pg.mkBrush(_qc(_BG_TIP, 200)),
+            anchor=(0.0, 0.5),
+        )
+        self._cvd_label.setFont(QFont("Monospace", 8))
+        self._cvd_label.setZValue(100)
+        self._cvd_label.setVisible(False)
+        self._plot_cvd.addItem(self._cvd_label, ignoreBounds=True)
+
+        # Stored CVD series for crosshair readout (populated by _draw_cvd)
+        self._cvd_arr: np.ndarray | None = None
+
+        # A/D Line subplot: vertical line + value readout label
+        self._vline_adi = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._vline_adi.setVisible(False)
+        self._plot_adi.addItem(self._vline_adi, ignoreBounds=True)
+
+        self._adi_label = pg.TextItem(
+            text="", color=_FG,
+            fill=pg.mkBrush(_qc(_BG_TIP, 200)),
+            anchor=(0.0, 0.5),
+        )
+        self._adi_label.setFont(QFont("Monospace", 8))
+        self._adi_label.setZValue(100)
+        self._adi_label.setVisible(False)
+        self._plot_adi.addItem(self._adi_label, ignoreBounds=True)
+
+        # Stored A/D Line series for crosshair readout (populated by _draw_adi)
+        self._adi_arr: np.ndarray | None = None
 
         # Last candle index shown in the tick profile (used to re-render on
         # order-size filter toggle without waiting for the next mouse move).
@@ -1770,6 +1849,22 @@ class TradeViewerQt(QMainWindow):
         else:
             self._plot_v.hide()
             self._vline_v.setVisible(False)
+        # Toggle CVD subplot visibility
+        if self._ind("cvd"):
+            code = self._code_edit.text().strip()
+            self._plot_cvd.setTitle(f"{code}  CVD", color=_FG, size="8pt")
+            self._plot_cvd.show()
+        else:
+            self._plot_cvd.hide()
+            self._vline_cvd.setVisible(False)
+        # Toggle A/D Line subplot visibility
+        if self._ind("adi"):
+            code = self._code_edit.text().strip()
+            self._plot_adi.setTitle(f"{code}  A/D", color=_FG, size="8pt")
+            self._plot_adi.show()
+        else:
+            self._plot_adi.hide()
+            self._vline_adi.setVisible(False)
         # Toggle heatmap legend visibility
         show_hm = self._ind("heatmap")
         self._heatmap_legend.setVisible(show_hm)
@@ -1943,6 +2038,8 @@ class TradeViewerQt(QMainWindow):
         show_ob     = self._ind("ob")
         show_kd     = self._ind("kd")
         show_kd_band = self._ind("kd_band")
+        show_cvd    = self._ind("cvd")
+        show_adi    = self._ind("adi")
         show_ema    = self._ind("ema")
         red_up      = self._ind("red_up")
         bull_col    = _RED   if red_up else _GREEN
@@ -2032,6 +2129,16 @@ class TradeViewerQt(QMainWindow):
         if show_kd:
             self._draw_kd(klines)
 
+        # CVD subplot
+        self._clear_cvd_items()
+        if show_cvd:
+            self._draw_cvd(klines, buckets, cm)
+
+        # A/D Line subplot
+        self._clear_adi_items()
+        if show_adi:
+            self._draw_adi(klines)
+
         # Trade Review overlay
         self._clear_trade_items()
         if self._trade_record is not None:
@@ -2074,6 +2181,10 @@ class TradeViewerQt(QMainWindow):
         self._plot_v.setTitle(f"{code}  Vol", color=_FG, size="8pt")
         if self._plot_kd.isVisible():
             self._plot_kd.setTitle(f"{code}  KD", color=_FG, size="8pt")
+        if self._plot_cvd.isVisible():
+            self._plot_cvd.setTitle(f"{code}  CVD", color=_FG, size="8pt")
+        if self._plot_adi.isVisible():
+            self._plot_adi.setTitle(f"{code}  A/D", color=_FG, size="8pt")
 
         self._log(
             f"Chart rendered | {n} candles | "
@@ -2353,6 +2464,79 @@ class TradeViewerQt(QMainWindow):
         )
         self._plot_kd.addItem(spread_line)
         self._kd_items.append(spread_line)
+
+    def _clear_cvd_items(self) -> None:
+        for item in self._cvd_items:
+            self._plot_cvd.removeItem(item)
+        self._cvd_items.clear()
+        self._cvd_arr = None
+
+    def _draw_cvd(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
+        """Draw Cumulative Volume Delta in the CVD subplot.
+
+        Per-bar delta = buy_vol - sell_vol from tick-tagged trades (same
+        source as the Delta overlay); bars with no tick coverage contribute 0
+        (the line holds flat rather than gapping). Neutral-tagged volume is
+        excluded from the delta itself, same caveat as the Range Profile
+        Buy/Sell stats -- moomoo's ticker_direction tags a large share of
+        same-price prints NEUTRAL, so this only reflects a subset of volume.
+        Cumulative from the start of the loaded klines, not reset per session.
+        """
+        n = len(klines)
+        delta = np.zeros(n, dtype=float)
+        for i, (_, row) in enumerate(klines.iterrows()):
+            try:
+                bar_end = datetime.strptime(
+                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
+            except ValueError:
+                continue
+            pd_ = buckets.get(bk)
+            if not pd_:
+                continue
+            total_buy  = sum(pd_[p]["buy"]  for p in pd_)
+            total_sell = sum(pd_[p]["sell"] for p in pd_)
+            delta[i] = total_buy - total_sell
+
+        cvd = np.cumsum(delta)
+        self._cvd_arr = cvd
+
+        x = np.arange(n)
+        line = pg.PlotCurveItem(
+            x=x, y=cvd,
+            pen=pg.mkPen("#42a5f5", width=1),
+        )
+        self._plot_cvd.addItem(line)
+        self._cvd_items.append(line)
+
+    def _clear_adi_items(self) -> None:
+        for item in self._adi_items:
+            self._plot_adi.removeItem(item)
+        self._adi_items.clear()
+        self._adi_arr = None
+
+    def _draw_adi(self, klines: pd.DataFrame) -> None:
+        """Draw the Accumulation/Distribution Line in the A/D subplot.
+
+        Pure OHLCV indicator (ta.volume.AccDistIndexIndicator) -- estimates
+        buy/sell pressure from where each bar's close sits within its own
+        high-low range, weighted by bar volume. Unlike CVD, it needs no tick
+        data and so has no NEUTRAL-volume blind spot, but it's a price-action
+        proxy for direction rather than actual tagged trade sides.
+        """
+        adi = AccDistIndexIndicator(
+            high=klines["high"], low=klines["low"], close=klines["close"],
+            volume=klines["volume"].fillna(0),
+        ).acc_dist_index().values
+
+        x = np.arange(len(klines))
+        line = pg.PlotCurveItem(
+            x=x, y=adi,
+            pen=pg.mkPen("#66bb6a", width=1),
+        )
+        self._plot_adi.addItem(line)
+        self._adi_items.append(line)
+        self._adi_arr = adi
 
     def _clear_kd_band_items(self) -> None:
         for item in self._kd_band_items:
@@ -3301,13 +3485,19 @@ class TradeViewerQt(QMainWindow):
                      and self._plot_v.sceneBoundingRect().contains(pos))
         in_kd     = (self._plot_kd.isVisible()
                      and self._plot_kd.sceneBoundingRect().contains(pos))
-        in_any    = in_candle or in_vol or in_kd
+        in_cvd    = (self._plot_cvd.isVisible()
+                     and self._plot_cvd.sceneBoundingRect().contains(pos))
+        in_adi    = (self._plot_adi.isVisible()
+                     and self._plot_adi.sceneBoundingRect().contains(pos))
+        in_any    = in_candle or in_vol or in_kd or in_cvd or in_adi
 
         if not in_any:
             for line in (self._vline, self._hline,
-                         self._vline_v, self._vline_kd,
+                         self._vline_v, self._vline_kd, self._vline_cvd,
+                         self._vline_adi,
                          self._price_label, self._ohlcv_label,
-                         self._vol_label, self._kd_label,
+                         self._vol_label, self._kd_label, self._cvd_label,
+                         self._adi_label,
                          self._profile_hline, self._tick_profile_hline):
                 line.setVisible(False)
             return
@@ -3318,8 +3508,12 @@ class TradeViewerQt(QMainWindow):
             mouse_pt = self._plot_c.vb.mapSceneToView(pos)
         elif in_vol:
             mouse_pt = self._plot_v.vb.mapSceneToView(pos)
-        else:
+        elif in_kd:
             mouse_pt = self._plot_kd.vb.mapSceneToView(pos)
+        elif in_cvd:
+            mouse_pt = self._plot_cvd.vb.mapSceneToView(pos)
+        else:
+            mouse_pt = self._plot_adi.vb.mapSceneToView(pos)
 
         x = mouse_pt.x()
         # Y price is only meaningful from the candle plot
@@ -3336,6 +3530,10 @@ class TradeViewerQt(QMainWindow):
             self._vline_v.setPos(x);  self._vline_v.setVisible(True)
         if self._plot_kd.isVisible():
             self._vline_kd.setPos(x); self._vline_kd.setVisible(True)
+        if self._plot_cvd.isVisible():
+            self._vline_cvd.setPos(x); self._vline_cvd.setVisible(True)
+        if self._plot_adi.isVisible():
+            self._vline_adi.setPos(x); self._vline_adi.setVisible(True)
 
         # Horizontal line only in candle plot
         self._hline.setPos(y);  self._hline.setVisible(in_candle)
@@ -3419,6 +3617,44 @@ class TradeViewerQt(QMainWindow):
             else:
                 self._kd_label.setVisible(False)
 
+            # CVD: show cumulative delta value of the hovered bar.
+            if self._plot_cvd.isVisible() and self._cvd_arr is not None:
+                cvd_idx = max(0, min(idx, len(self._cvd_arr) - 1))
+                cvd_val = float(self._cvd_arr[cvd_idx])
+                sign    = "+" if cvd_val >= 0 else ""
+                if abs(cvd_val) >= 1_000_000:
+                    cvd_str = f"{sign}{cvd_val/1_000_000:.2f}M"
+                elif abs(cvd_val) >= 1_000:
+                    cvd_str = f"{sign}{cvd_val/1_000:.0f}K"
+                else:
+                    cvd_str = f"{sign}{cvd_val:.0f}"
+                xlo_cvd, xhi_cvd = self._plot_cvd.vb.viewRange()[0]
+                lx_cvd = xlo_cvd + (xhi_cvd - xlo_cvd) * 0.01
+                self._cvd_label.setPos(lx_cvd, cvd_val)
+                self._cvd_label.setText(cvd_str)
+                self._cvd_label.setVisible(True)
+            else:
+                self._cvd_label.setVisible(False)
+
+            # A/D: show accumulation/distribution line value of the hovered bar.
+            if self._plot_adi.isVisible() and self._adi_arr is not None:
+                adi_idx = max(0, min(idx, len(self._adi_arr) - 1))
+                adi_val = float(self._adi_arr[adi_idx])
+                sign    = "+" if adi_val >= 0 else ""
+                if abs(adi_val) >= 1_000_000:
+                    adi_str = f"{sign}{adi_val/1_000_000:.2f}M"
+                elif abs(adi_val) >= 1_000:
+                    adi_str = f"{sign}{adi_val/1_000:.0f}K"
+                else:
+                    adi_str = f"{sign}{adi_val:.0f}"
+                xlo_adi, xhi_adi = self._plot_adi.vb.viewRange()[0]
+                lx_adi = xlo_adi + (xhi_adi - xlo_adi) * 0.01
+                self._adi_label.setPos(lx_adi, adi_val)
+                self._adi_label.setText(adi_str)
+                self._adi_label.setVisible(True)
+            else:
+                self._adi_label.setVisible(False)
+
     # ── X-axis tick labels ────────────────────────────────────────────────────
 
     def _on_home(self) -> None:
@@ -3470,6 +3706,23 @@ class TradeViewerQt(QMainWindow):
             max_v = float(vis_v["volume"].max()) if not vis_v.empty else 1.0
             self._plot_v.setYRange(0, max_v * 1.15, padding=0)
 
+        # CVD / A-D Line: both are unbounded running cumulative sums, so a
+        # plain bounding-rect autorange fits the *entire* loaded history --
+        # since the visible init_bars window is a small slice of that, its
+        # real variation gets dwarfed and the curve looks like a flat line.
+        # Derive Y range from the visible bars only, same fix as Volume above.
+        vis_start = max(0, n_bars - init_bars)
+        for arr, plot in ((self._cvd_arr, self._plot_cvd),
+                          (self._adi_arr, self._plot_adi)):
+            if arr is None or len(arr) != n_bars:
+                continue
+            vis = arr[vis_start:]
+            if len(vis) == 0:
+                continue
+            lo, hi = float(vis.min()), float(vis.max())
+            pad = (hi - lo) * 0.1 or max(abs(hi), 1.0) * 0.1
+            plot.setYRange(lo - pad, hi + pad, padding=0)
+
     def _set_xaxis_ticks(self, klines: pd.DataFrame) -> None:
         """Map integer bar indices to time_key strings on x-axis.
 
@@ -3495,6 +3748,10 @@ class TradeViewerQt(QMainWindow):
             self._plot_v.getAxis("bottom").setTicks([pos_only])
         if self._ind("kd"):
             self._plot_kd.getAxis("bottom").setTicks([pos_only])
+        if self._ind("cvd"):
+            self._plot_cvd.getAxis("bottom").setTicks([pos_only])
+        if self._ind("adi"):
+            self._plot_adi.getAxis("bottom").setTicks([pos_only])
 
     # ── Event filter (Enter key in toolbar QLineEdit) ─────────────────────────
 
