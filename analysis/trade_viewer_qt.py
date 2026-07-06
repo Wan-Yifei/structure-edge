@@ -956,21 +956,17 @@ class DataFetcher(QThread):
             else:
                 # Live mode: load today's ticks from DB first (covers the whole
                 # trading day even when the viewer is opened after hours), then
-                # overlay any ticks accumulated in this session on top.
+                # use the ticks accumulated in this session to fill any buckets
+                # ticks.db doesn't have yet. ticks.db is kept fresh by an
+                # external collector on the same feed, so a bucket already
+                # present there is authoritative — adding the live snapshot on
+                # top would double-count the same real trades.
                 today = datetime.now().strftime("%Y-%m-%d")
                 ticks = load_local_ticks(code, today, tf) or {}
                 live_snap: dict = p.get("live_ticks") or {}
                 for bk, pd_ in live_snap.items():
                     if bk not in ticks:
-                        ticks[bk] = dict(pd_)
-                    else:
-                        for price, counts in pd_.items():
-                            if price not in ticks[bk]:
-                                ticks[bk][price] = dict(counts)
-                            else:
-                                for k in counts:
-                                    ticks[bk][price][k] = (
-                                        ticks[bk][price].get(k, 0) + counts[k])
+                        ticks[bk] = {price: dict(counts) for price, counts in pd_.items()}
 
             self.ready.emit({
                 "klines":      df,
@@ -1769,7 +1765,7 @@ class TradeViewerQt(QMainWindow):
                             bucket = candle_start(t, candle_mins)
                             price  = float(row["price"])
                             vol    = int(row["volume"])
-                            d      = str(row["direction"]).upper()
+                            d      = str(row["ticker_direction"]).upper()
                             key    = ("buy" if d == "BUY"
                                       else ("sell" if d == "SELL" else "neutral"))
                             viewer._live_ticks[bucket][price][key] += vol
@@ -1820,6 +1816,12 @@ class TradeViewerQt(QMainWindow):
     def _on_tf_changed(self, tf: str) -> None:
         _, self._candle_mins = TIMEFRAME_MAP[tf]
         self._last_chart_key = ("", "")  # force zoom reset on next render
+        # Live tick buckets are keyed by bar-start time at the OLD candle_mins
+        # alignment; switching timeframe changes the alignment, so stale
+        # buckets from before the switch must not leak into new bars whose
+        # start time happens to coincide with an old bucket key.
+        with self._tick_lock:
+            self._live_ticks.clear()
         self._trigger_fetch()
 
     def _on_mode_changed(self, mode: str) -> None:
@@ -2045,22 +2047,21 @@ class TradeViewerQt(QMainWindow):
         bull_col    = _RED   if red_up else _GREEN
         bear_col    = _GREEN if red_up else _RED
 
-        # Compose live + historical ticks
+        # Compose live + historical ticks. ticks.db is kept fresh by an
+        # external collector process subscribed to the same feed, so once a
+        # bucket shows up there it is authoritative — _live_ticks (this
+        # process's own tick subscription) must only fill buckets ticks.db
+        # doesn't have yet, never add on top of one it already has, or the
+        # same real trades get counted twice.
         buckets: dict = {}
         if ticks:
             buckets.update(ticks)
         if self._mode_combo.currentText() == "Live":
             with self._tick_lock:
                 for bk, pd_ in self._live_ticks.items():
-                    if bk not in buckets:
-                        buckets[bk] = {}
-                    for price, counts in pd_.items():
-                        if price not in buckets[bk]:
-                            buckets[bk][price] = dict(counts)
-                        else:
-                            for k in counts:
-                                buckets[bk][price][k] = (
-                                    buckets[bk][price].get(k, 0) + counts[k])
+                    if bk in buckets:
+                        continue
+                    buckets[bk] = {price: dict(counts) for price, counts in pd_.items()}
 
         # Keep self._ticks in sync with the fully-merged buckets so that
         # _show_tick_profile (which reads self._ticks) also sees live data.

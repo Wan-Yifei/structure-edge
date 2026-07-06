@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.14.1 — live tick handler fixes (2026-07-06)
+
+### Fix: Live mode Δ Delta / CVD / Tick Profile / heatmap never updated from live ticks (`analysis/trade_viewer_qt.py`)
+
+- `_TickHandler.on_recv_rsp` (inside `_start_live`) read `row["direction"]` from
+  the live TICKER push DataFrame, but the moomoo SDK names that column
+  `ticker_direction`. This raised `KeyError` on every single tick since the
+  handler was first added (2026-05-26) — not a regression from the
+  moomoo-api 10.5.6508 → 10.7.6708 bump, the old wheel already used
+  `ticker_direction` too. The exception was silently swallowed by the SDK's
+  callback executor (logged as a warning only), so `_live_ticks` stayed
+  permanently empty and the bug went unnoticed: `ticks.db`, kept fresh by
+  the separate `analysis/tick_collector.py` collector process, backfilled
+  the gap within a refresh cycle in normal use. Only the newest 1-3
+  still-forming bars — not yet covered by that backfill — visibly showed no
+  delta/heatmap.
+- Fixed: read `row["ticker_direction"]` instead.
+
+### Fix: Live Δ Delta briefly showed absurdly inflated (M/B-scale) values after the above fix (`analysis/trade_viewer_qt.py`)
+
+- Fixing the field-name bug above exposed a second, more serious bug: two
+  places (`DataFetcher.run()` and `_render()`) merged the in-process live
+  tick accumulator (`_live_ticks`) by ADDING it on top of the freshly
+  reloaded `ticks.db` data for any bucket present in both — double-counting
+  the same real trades, since ticks.db is independently kept live-updated by
+  the external collector process on the same feed.
+- Worse, `_render()` writes its merged result back into `self._ticks`, and
+  is also invoked from `_on_indicator_toggle` (any checkbox toggle) using
+  whatever `self._ticks` currently holds — so every re-render (not just
+  every fetch cycle) added another full copy of the ever-growing
+  `_live_ticks` on top, compounding without bound over a long-running
+  session.
+- Fixed: both merge sites now treat `ticks.db` as authoritative once a
+  bucket appears there — `_live_ticks` only fills buckets `ticks.db` doesn't
+  have yet, never adds to one already present.
+- Also: `_on_tf_changed` now clears `_live_ticks` (previously cleared only
+  on code switch). Bucket keys are aligned to `candle_mins`, so switching
+  timeframe changes the alignment and stale entries from the old alignment
+  could otherwise collide with a new timeframe's bucket key.
+
 ## v0.14.0 — CVD/A-D subplots, Range Profile direction stats, pin-to-top (2026-06-29)
 
 ### Feat: Cumulative Volume Delta (CVD) subplot (`analysis/trade_viewer_qt.py`)
