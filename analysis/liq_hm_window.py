@@ -78,6 +78,7 @@ def _query_latest_snapshot(code: str) -> list[dict]:
     """
     if not _DB_PATH.exists():
         return []
+    con = None
     try:
         con = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
         cur = con.execute(
@@ -96,10 +97,12 @@ def _query_latest_snapshot(code: str) -> list[dict]:
             }
             for r in cur.fetchall()
         ]
-        con.close()
         return rows
     except Exception:
         return []
+    finally:
+        if con is not None:
+            con.close()
 
 
 def _query_n_snapshots(code: str, n: int) -> list[list[dict]]:
@@ -109,6 +112,7 @@ def _query_n_snapshots(code: str, n: int) -> list[list[dict]]:
     """
     if not _DB_PATH.exists():
         return []
+    con = None
     try:
         con = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
         cur = con.execute(
@@ -131,10 +135,12 @@ def _query_n_snapshots(code: str, n: int) -> list[list[dict]]:
             ]
             if rows:
                 snapshots.append(rows)
-        con.close()
         return snapshots
     except Exception:
         return []
+    finally:
+        if con is not None:
+            con.close()
 
 
 _TICK_DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
