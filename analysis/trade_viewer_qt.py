@@ -845,15 +845,36 @@ class DataFetcher(QThread):
                 start = (datetime.now() - timedelta(days=lb)).strftime(
                     "%Y-%m-%d %H:%M:%S")
 
+            # Paginate via page_req_key — a single max_count=2000 call silently
+            # truncates to the first 2000 bars from `start` when the requested
+            # range holds more (e.g. 1m over 5 days with near-24h sessions is
+            # up to ~7200 bars), dropping the most recent days including
+            # "today" entirely. Mirrors feeds/fetcher.py's paginated fetch.
             ktype, _ = TIMEFRAME_MAP[tf]
-            ret, df, _ = self._ctx.request_history_kline(
-                code, start=start, end=end, ktype=ktype,
-                autype=AuType.NONE, max_count=2000, extended_time=True,
-            )
-            if ret != RET_OK:
-                self.error.emit(f"Kline fetch failed: {df}")
-                return
-            if df is None or df.empty:
+            frames: list[pd.DataFrame] = []
+            page_req_key = None
+            while True:
+                if page_req_key is None:
+                    ret, page_df, page_req_key = self._ctx.request_history_kline(
+                        code, start=start, end=end, ktype=ktype,
+                        autype=AuType.NONE, max_count=2000, extended_time=True,
+                        session=Session.ALL,
+                    )
+                else:
+                    ret, page_df, page_req_key = self._ctx.request_history_kline(
+                        code, ktype=ktype, autype=AuType.NONE, max_count=2000,
+                        extended_time=True, session=Session.ALL,
+                        page_req_key=page_req_key,
+                    )
+                if ret != RET_OK:
+                    self.error.emit(f"Kline fetch failed: {page_df}")
+                    return
+                if page_df is not None and not page_df.empty:
+                    frames.append(page_df)
+                if not page_req_key:
+                    break
+            df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            if df.empty:
                 self.error.emit(
                     f"Kline fetch returned no data for {code} {tf} "
                     f"({start[:10]} → {end[:10]}). "
@@ -1188,7 +1209,7 @@ class TradeViewerQt(QMainWindow):
             ("vol",       "MAVOL"), # Volume subplot toggle
         ]:
             cb = QCheckBox(label)
-            cb.setChecked(key in ("heatmap", "delta", "bos_choch", "vol"))
+            cb.setChecked(key in ("heatmap", "delta", "bos_choch", "cvd"))
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
             tb2.addWidget(cb)
@@ -1439,9 +1460,9 @@ class TradeViewerQt(QMainWindow):
         # Row stretch factors — main chart is fixed; subplot rows collapse to
         # zero height when their indicator is off instead of leaving a gap.
         self._chart_widget.ci.layout.setRowStretchFactor(0, 5)
-        self._set_subplot_row_visible(self._plot_v,   1, True)   # MAVOL on by default
+        self._set_subplot_row_visible(self._plot_v,   1, False)
         self._set_subplot_row_visible(self._plot_kd,  2, False)
-        self._set_subplot_row_visible(self._plot_cvd, 3, False)
+        self._set_subplot_row_visible(self._plot_cvd, 3, True)   # CVD on by default
         self._set_subplot_row_visible(self._plot_adi, 4, False)
 
         # ── Graphics items ────────────────────────────────────────────────────
