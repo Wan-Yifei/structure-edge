@@ -1275,6 +1275,16 @@ class TradeViewerQt(QMainWindow):
             tb3.addWidget(cb)
 
         tb3.addSeparator()
+        cb_net = QCheckBox("Net")
+        cb_net.setChecked(False)
+        cb_net.setToolTip(
+            "Tick profile: show a single net (buy − sell) bar per price level\n"
+            "instead of separate diverging buy/sell bars")
+        cb_net.stateChanged.connect(self._on_tick_size_toggle)
+        self._ind_checks["tick_net"] = cb_net
+        tb3.addWidget(cb_net)
+
+        tb3.addSeparator()
 
         # Liquidity Heatmap floating window
         self._liq_hm_btn = QPushButton("Liquidity Heatmap")
@@ -1392,7 +1402,7 @@ class TradeViewerQt(QMainWindow):
             pos=0, angle=0, movable=False,
             pen=pg.mkPen(_GREY, width=1, style=Qt.PenStyle.DashLine),
         ))
-        self._plot_kd.hide()  # shown when KD checkbox enabled
+        # visibility + row-collapse applied below via _set_subplot_row_visible
 
         # CVD subplot (row 3) — hidden until CVD indicator enabled
         self._chart_widget.nextRow()
@@ -1408,7 +1418,7 @@ class TradeViewerQt(QMainWindow):
             pos=0, angle=0, movable=False,
             pen=pg.mkPen(_GREY, width=1, style=Qt.PenStyle.DashLine),
         ))
-        self._plot_cvd.hide()  # shown when CVD checkbox enabled
+        # visibility + row-collapse applied below via _set_subplot_row_visible
 
         # A/D Line subplot (row 4) — hidden until A/D indicator enabled
         self._chart_widget.nextRow()
@@ -1424,14 +1434,15 @@ class TradeViewerQt(QMainWindow):
             pos=0, angle=0, movable=False,
             pen=pg.mkPen(_GREY, width=1, style=Qt.PenStyle.DashLine),
         ))
-        self._plot_adi.hide()  # shown when A/D checkbox enabled
+        # visibility + row-collapse applied below via _set_subplot_row_visible
 
-        # Row stretch factors
+        # Row stretch factors — main chart is fixed; subplot rows collapse to
+        # zero height when their indicator is off instead of leaving a gap.
         self._chart_widget.ci.layout.setRowStretchFactor(0, 5)
-        self._chart_widget.ci.layout.setRowStretchFactor(1, 1)
-        self._chart_widget.ci.layout.setRowStretchFactor(2, 1)
-        self._chart_widget.ci.layout.setRowStretchFactor(3, 1)
-        self._chart_widget.ci.layout.setRowStretchFactor(4, 1)
+        self._set_subplot_row_visible(self._plot_v,   1, True)   # MAVOL on by default
+        self._set_subplot_row_visible(self._plot_kd,  2, False)
+        self._set_subplot_row_visible(self._plot_cvd, 3, False)
+        self._set_subplot_row_visible(self._plot_adi, 4, False)
 
         # ── Graphics items ────────────────────────────────────────────────────
         self._candle_item = CandlestickItem()
@@ -1837,35 +1848,50 @@ class TradeViewerQt(QMainWindow):
         if self._refresh_timer.isActive():
             self._refresh_timer.start(value * 1000)
 
+    def _set_subplot_row_visible(self, plot_item: pg.PlotItem, row: int, visible: bool) -> None:
+        """Show/hide a subplot row, collapsing its layout space to zero when hidden.
+
+        PlotItem.hide() alone leaves the row's stretch-factor share of space
+        empty in the GraphicsLayout grid; zeroing the row's stretch factor and
+        max height gives that space back to the other (visible) rows.
+        """
+        layout = self._chart_widget.ci.layout
+        if visible:
+            plot_item.show()
+            layout.setRowStretchFactor(row, 1)
+            layout.setRowMaximumHeight(row, 16777215)  # Qt's QWIDGETSIZE_MAX
+        else:
+            plot_item.hide()
+            layout.setRowStretchFactor(row, 0)
+            layout.setRowMaximumHeight(row, 0)
+
     def _on_indicator_toggle(self) -> None:
         # Toggle KD subplot row visibility
-        if self._ind("kd"):
+        show_kd = self._ind("kd")
+        if show_kd:
             code = self._code_edit.text().strip()
             self._plot_kd.setTitle(f"{code}  KD", color=_FG, size="8pt")
-            self._plot_kd.show()
-        else:
-            self._plot_kd.hide()
+        self._set_subplot_row_visible(self._plot_kd, 2, show_kd)
         # Toggle Vol (MAVOL) subplot visibility
-        if self._ind("vol"):
-            self._plot_v.show()
-        else:
-            self._plot_v.hide()
+        show_vol = self._ind("vol")
+        self._set_subplot_row_visible(self._plot_v, 1, show_vol)
+        if not show_vol:
             self._vline_v.setVisible(False)
         # Toggle CVD subplot visibility
-        if self._ind("cvd"):
+        show_cvd = self._ind("cvd")
+        if show_cvd:
             code = self._code_edit.text().strip()
             self._plot_cvd.setTitle(f"{code}  CVD", color=_FG, size="8pt")
-            self._plot_cvd.show()
-        else:
-            self._plot_cvd.hide()
+        self._set_subplot_row_visible(self._plot_cvd, 3, show_cvd)
+        if not show_cvd:
             self._vline_cvd.setVisible(False)
         # Toggle A/D Line subplot visibility
-        if self._ind("adi"):
+        show_adi = self._ind("adi")
+        if show_adi:
             code = self._code_edit.text().strip()
             self._plot_adi.setTitle(f"{code}  A/D", color=_FG, size="8pt")
-            self._plot_adi.show()
-        else:
-            self._plot_adi.hide()
+        self._set_subplot_row_visible(self._plot_adi, 4, show_adi)
+        if not show_adi:
             self._vline_adi.setVisible(False)
         # Toggle heatmap legend visibility
         show_hm = self._ind("heatmap")
@@ -2004,12 +2030,21 @@ class TradeViewerQt(QMainWindow):
         # In Live mode, auto-scroll right when new bars arrive and the view
         # was already at the right edge (user hasn't manually panned left).
         new_n = len(self._klines)
-        if (self._mode_combo.currentText() == "Live"
-                and new_n > prev_n > 0
-                and xhi >= prev_n - 2):
-            visible = xhi - xlo
-            new_xhi = new_n - 0.5
-            self._plot_c.setXRange(new_xhi - visible, new_xhi, padding=0)
+        if self._mode_combo.currentText() == "Live" and new_n > prev_n > 0:
+            # _reset_view() only sets pan/zoom limits (xMax/maxXRange) on a
+            # genuine code/tf change; without this, the limits set at the
+            # last reset stay frozen while new_n keeps growing, and once
+            # enough bars accumulate the stale xMax clamps setXRange below,
+            # silently cutting off the newest candle(s) until Home is pressed.
+            self._plot_c.vb.setLimits(xMax=new_n + 5, maxXRange=new_n + 10)
+            if xhi >= prev_n - 2:
+                visible = xhi - xlo
+                # Candle bodies are drawn i±0.35 wide, so the last body's
+                # right edge sits at new_n - 0.65. Leave a full bar of margin
+                # past that (matching _reset_view's buffer) so it never clips
+                # at padding=0.
+                new_xhi = new_n + 0.5
+                self._plot_c.setXRange(new_xhi - visible, new_xhi, padding=0)
         # Keep DOM window in sync with active code, mode, and timeframe
         if self._dom_window is not None:
             code = self._code_edit.text().strip()
@@ -2481,10 +2516,13 @@ class TradeViewerQt(QMainWindow):
         excluded from the delta itself, same caveat as the Range Profile
         Buy/Sell stats -- moomoo's ticker_direction tags a large share of
         same-price prints NEUTRAL, so this only reflects a subset of volume.
-        Cumulative from the start of the loaded klines, not reset per session.
+        Resets to 0 at the start of each calendar day (matches TradingView's
+        default CVD session reset) instead of accumulating across the whole
+        loaded range.
         """
         n = len(klines)
         delta = np.zeros(n, dtype=float)
+        day = [None] * n
         for i, (_, row) in enumerate(klines.iterrows()):
             try:
                 bar_end = datetime.strptime(
@@ -2492,6 +2530,7 @@ class TradeViewerQt(QMainWindow):
                 bk = candle_start(bar_end - timedelta(minutes=cm), cm)
             except ValueError:
                 continue
+            day[i] = bk.date()
             pd_ = buckets.get(bk)
             if not pd_:
                 continue
@@ -2499,7 +2538,15 @@ class TradeViewerQt(QMainWindow):
             total_sell = sum(pd_[p]["sell"] for p in pd_)
             delta[i] = total_buy - total_sell
 
-        cvd = np.cumsum(delta)
+        cvd = np.zeros(n, dtype=float)
+        running  = 0.0
+        prev_day = None
+        for i in range(n):
+            if day[i] is not None and day[i] != prev_day:
+                running  = 0.0
+                prev_day = day[i]
+            running += delta[i]
+            cvd[i] = running
         self._cvd_arr = cvd
 
         x = np.arange(n)
@@ -3107,18 +3154,33 @@ class TradeViewerQt(QMainWindow):
         buy_col  = _RED   if red_up else _GREEN
         sell_col = _GREEN if red_up else _RED
 
-        buy_bar = pg.BarGraphItem(
-            x0=zeros, x1=buys_log,
-            y=prices, height=bin_h,
-            brush=_qc(buy_col, 180), pen=pg.mkPen(None),
-        )
-        sell_bar = pg.BarGraphItem(
-            x0=-sells_log, x1=zeros,
-            y=prices, height=bin_h,
-            brush=_qc(sell_col, 180), pen=pg.mkPen(None),
-        )
-        pw.addItem(buy_bar)
-        pw.addItem(sell_bar)
+        if self._ind("tick_net"):
+            # Single net (buy - sell) bar per price level: one-sided, colored
+            # by sign, instead of two diverging buy/sell bars.
+            net       = buys_arr - sells_arr
+            net_log   = np.log1p(np.abs(net))
+            net_x0    = np.where(net >= 0, zeros, -net_log)
+            net_x1    = np.where(net >= 0, net_log, zeros)
+            net_brush = [_qc(buy_col, 180) if d >= 0 else _qc(sell_col, 180) for d in net]
+            net_bar = pg.BarGraphItem(
+                x0=net_x0, x1=net_x1,
+                y=prices, height=bin_h,
+                brushes=net_brush, pen=pg.mkPen(None),
+            )
+            pw.addItem(net_bar)
+        else:
+            buy_bar = pg.BarGraphItem(
+                x0=zeros, x1=buys_log,
+                y=prices, height=bin_h,
+                brush=_qc(buy_col, 180), pen=pg.mkPen(None),
+            )
+            sell_bar = pg.BarGraphItem(
+                x0=-sells_log, x1=zeros,
+                y=prices, height=bin_h,
+                brush=_qc(sell_col, 180), pen=pg.mkPen(None),
+            )
+            pw.addItem(buy_bar)
+            pw.addItem(sell_bar)
 
         total_buy  = sum(buys)
         total_sell = sum(sells)
