@@ -448,7 +448,7 @@ class LiqHmWindow(QWidget):
         row1.setMovable(False)
 
         self._bid_ask_cb = QCheckBox("Bid/Ask")
-        self._bid_ask_cb.setChecked(False)
+        self._bid_ask_cb.setChecked(True)
         self._bid_ask_cb.setToolTip(
             "Checked: teal = Bid, red = Ask (shown separately)\n"
             "Unchecked: combined with black → purple → yellow colormap")
@@ -460,7 +460,7 @@ class LiqHmWindow(QWidget):
         self._gamma_spin.setRange(0.2, 10.0)
         self._gamma_spin.setSingleStep(0.1)
         self._gamma_spin.setDecimals(1)
-        self._gamma_spin.setValue(1.0)
+        self._gamma_spin.setValue(3.0)
         self._gamma_spin.setFixedWidth(52)
         self._gamma_spin.setToolTip(
             "Colour gamma correction.\n"
@@ -992,6 +992,7 @@ class LiqHmWindow(QWidget):
             self._render()
             self._redraw_orderflow_markers()
             self._load_absorb_ticks()
+            self._reset_view()   # fit view to the freshly loaded pre-fill data
         # Start normal one-by-one updates
         if self._live and self._code:
             self._timer.start(self._col_secs_spin.value() * 1000)
