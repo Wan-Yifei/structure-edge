@@ -42,3 +42,11 @@ db/scheduler.log
 docker/backtest.env
 docker_db/
 backtest_results/
+
+# DB backups (e.g. db/ticks.db.bak_pre_soxl_only) — same size class as *.db,
+# just a different suffix so the *.db rule above doesn't catch them
+db/*.bak*
+
+# API tokens / credentials accidentally dropped in repo root
+github_token.txt
+*_token.txt
