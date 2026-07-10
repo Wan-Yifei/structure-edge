@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import pathlib
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Iterable
 
 _DEFAULT_DB = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
@@ -95,6 +95,25 @@ class TickStore:
             "SELECT DISTINCT date(ts) FROM ticks WHERE code = ? ORDER BY 1", [code]
         )
         return [date.fromisoformat(r[0]) for r in cur.fetchall()]
+
+    def prune_older_than(self, codes: list[str], days: int = 30) -> int:
+        """Delete tick rows older than *days* days, per code in *codes*.
+
+        Callers pass the known target codes (rather than SELECT DISTINCT code)
+        so each delete is a plain (code, ts) index range scan via
+        idx_ticks_code_ts, not a full table scan on a possibly huge table.
+        Returns total rows deleted.
+        """
+        cutoff = _ts_str(datetime.now() - timedelta(days=days))
+        deleted = 0
+        for code in codes:
+            cur = self._con.execute(
+                "DELETE FROM ticks WHERE code = ? AND ts < ?", [code, cutoff]
+            )
+            deleted += cur.rowcount
+        if deleted:
+            self._con.commit()
+        return deleted
 
     def row_count(self, code: str | None = None) -> int:
         if code:

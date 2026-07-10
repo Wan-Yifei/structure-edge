@@ -83,6 +83,8 @@ def _make_handler(store, state: dict):
 
 
 _CHECKPOINT_INTERVAL = 10  # run PASSIVE WAL checkpoint every N watchdog ticks
+_RETENTION_DAYS       = 30  # delete tick rows older than this many days
+_RETENTION_EXEMPT     = {"US.SOXL"}  # codes kept in full, never time-pruned
 
 
 def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
@@ -95,8 +97,10 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
       1. Re-subscribe on the existing OpenQuoteContext (handles silent subscription drop).
       2. If that fails, close the dead ctx and create a fresh one (handles TCP-level
          disconnect where the ctx itself is no longer usable).
-    Also runs a PASSIVE WAL checkpoint every _CHECKPOINT_INTERVAL ticks to prevent
-    the WAL file from growing unboundedly and degrading read performance.
+    Also runs, every _CHECKPOINT_INTERVAL ticks: a retention prune (deletes tick
+    rows older than _RETENTION_DAYS for codes not in _RETENTION_EXEMPT) and a
+    PASSIVE WAL checkpoint, to prevent the ticks table and WAL file from growing
+    unboundedly and degrading read performance.
     """
     from moomoo import OpenQuoteContext, SubType, RET_OK, Session
 
@@ -155,6 +159,13 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
             last_log_time = now
 
         if store is not None and watchdog_tick % _CHECKPOINT_INTERVAL == 0:
+            try:
+                prune_codes = [c for c in codes if c not in _RETENTION_EXEMPT]
+                deleted = store.prune_older_than(prune_codes, days=_RETENTION_DAYS)
+                if deleted:
+                    log.info("Pruned %d rows older than %d days", deleted, _RETENTION_DAYS)
+            except Exception as exc:
+                log.warning("Prune failed: %s", exc)
             try:
                 store._con.execute("PRAGMA wal_checkpoint(PASSIVE)")
                 log.info("WAL checkpoint (PASSIVE) done")
