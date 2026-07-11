@@ -59,7 +59,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QSplitter, QToolBar, QLabel, QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox,
     QPushButton, QCheckBox, QButtonGroup, QRadioButton, QSizePolicy,
-    QFrame, QStatusBar, QMessageBox,
+    QFrame, QStatusBar, QMessageBox, QDialog, QDialogButtonBox, QFormLayout,
 )
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -70,6 +70,8 @@ from strategy.smc.market_structure import detect_bos_choch
 from strategy.smc.fvg import detect_fvg
 from strategy.smc.order_blocks import detect_order_blocks
 from strategy.smc.kd_trend import compute_kd
+from strategy.chandelier_exit.atr import wilder_atr
+from strategy.chandelier_exit.chandelier import rolling_extremes
 from ta.volume import AccDistIndexIndicator
 from moomoo import (
     OpenQuoteContext, SubType, KLType, AuType, Session,
@@ -1006,6 +1008,52 @@ class DataFetcher(QThread):
             self.error.emit(str(exc))
 
 
+class ChandelierParamsDialog(QDialog):
+    """ATR period / multiplier / direction for the chandelier-exit corner label.
+
+    Values are only applied on OK; Cancel leaves the caller's current settings
+    untouched. See strategy/chandelier_exit/README.md for the underlying formula.
+    """
+
+    def __init__(self, period: int, multiplier: float, direction: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Chandelier Exit Parameters")
+
+        self._period_spin = QSpinBox()
+        self._period_spin.setRange(2, 200)
+        self._period_spin.setValue(period)
+
+        self._mult_spin = QDoubleSpinBox()
+        self._mult_spin.setRange(0.5, 10.0)
+        self._mult_spin.setSingleStep(0.1)
+        self._mult_spin.setDecimals(1)
+        self._mult_spin.setValue(multiplier)
+
+        self._dir_combo = QComboBox()
+        self._dir_combo.addItems(["Long", "Short"])
+        self._dir_combo.setCurrentIndex(0 if direction == "bull" else 1)
+
+        form = QFormLayout()
+        form.addRow("ATR period:", self._period_spin)
+        form.addRow("ATR multiplier:", self._mult_spin)
+        form.addRow("Direction:", self._dir_combo)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[int, float, str]:
+        """Return (period, multiplier, direction) -- direction is "bull"/"bear"."""
+        direction = "bull" if self._dir_combo.currentIndex() == 0 else "bear"
+        return self._period_spin.value(), self._mult_spin.value(), direction
+
+
 # ── Main window ───────────────────────────────────────────────────────────────
 
 class TradeViewerQt(QMainWindow):
@@ -1042,6 +1090,9 @@ class TradeViewerQt(QMainWindow):
         self._dom_window:  QWidget | None      = None  # DOM depth-of-market window
         self._trade_record: dict | None         = None  # active trade review
         self._live_code: str = ""        # code currently subscribed for tick push
+        self._chandelier_period:     int   = 20
+        self._chandelier_multiplier: float = 2.0
+        self._chandelier_direction:  str   = "bull"   # "bull" | "bear"
         self._live_kl_sub: object = None  # kline SubType subscribed alongside TICKER/QUOTE
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
         # from resetting the user's manual pan/zoom on every tick.
@@ -1207,6 +1258,7 @@ class TradeViewerQt(QMainWindow):
             ("adi",       "A/D"),   # Accumulation/Distribution Line subplot
             ("ema",       "EMA"),
             ("vol",       "MAVOL"), # Volume subplot toggle
+            ("chandelier", "Chandelier"), # ATR trailing-stop suggestion, bottom-right corner label
         ]:
             cb = QCheckBox(label)
             cb.setChecked(key in ("heatmap", "delta", "bos_choch", "cvd"))
@@ -1222,6 +1274,13 @@ class TradeViewerQt(QMainWindow):
                 self._ob_max_count.setToolTip("Max number of recent OBs to display")
                 self._ob_max_count.valueChanged.connect(self._trigger_fetch)
                 tb2.addWidget(self._ob_max_count)
+            if key == "chandelier":
+                chandelier_settings_btn = QPushButton("⚙")
+                chandelier_settings_btn.setFixedWidth(28)
+                chandelier_settings_btn.setToolTip(
+                    "Chandelier exit parameters (ATR period, multiplier, direction)")
+                chandelier_settings_btn.clicked.connect(self._on_chandelier_settings)
+                tb2.addWidget(chandelier_settings_btn)
             if key == "fvg":
                 self._fvg_min_pct = QDoubleSpinBox()
                 self._fvg_min_pct.setRange(0.05, 5.0)
@@ -1682,6 +1741,17 @@ class TradeViewerQt(QMainWindow):
         self._ob_legend.setVisible(False)
         self._plot_c.addItem(self._ob_legend, ignoreBounds=True)
         self._plot_c.vb.sigRangeChanged.connect(self._pin_ob_legend)
+
+        # ── Chandelier exit suggestion label (bottom-right) ─────────────────────
+        self._chandelier_label = pg.TextItem(
+            anchor=(1.0, 1.0),
+            fill=pg.mkBrush(_qc(_BG_TIP, 200)),
+        )
+        self._chandelier_label.setFont(QFont("Monospace", 8))
+        self._chandelier_label.setZValue(60)
+        self._chandelier_label.setVisible(False)
+        self._plot_c.addItem(self._chandelier_label, ignoreBounds=True)
+        self._plot_c.vb.sigRangeChanged.connect(self._pin_chandelier_label)
 
         # Session vol profile (bottom-right)
         self._profile_widget = pg.PlotWidget()
@@ -2195,6 +2265,12 @@ class TradeViewerQt(QMainWindow):
         self._clear_adi_items()
         if show_adi:
             self._draw_adi(klines)
+
+        # Chandelier exit suggestion (bottom-right corner label)
+        if self._ind("chandelier"):
+            self._update_chandelier_label()
+        else:
+            self._chandelier_label.setVisible(False)
 
         # Trade Review overlay
         self._clear_trade_items()
@@ -3559,6 +3635,75 @@ class TradeViewerQt(QMainWindow):
         y_top    = yhi - (yhi - ylo) * 0.015
         y_row    = (yhi - ylo) * 0.035
         self._ob_legend.setPos(xlo + x_pad, y_top - y_row)
+
+    def _pin_chandelier_label(self, *_) -> None:
+        """Re-anchor the chandelier suggestion label to the bottom-right of the candle view."""
+        if not self._chandelier_label.isVisible():
+            return
+        xlo, xhi = self._plot_c.vb.viewRange()[0]
+        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        x_pad    = (xhi - xlo) * 0.01
+        y_pad    = (yhi - ylo) * 0.015
+        self._chandelier_label.setPos(xhi - x_pad, ylo + y_pad)
+
+    def _on_chandelier_settings(self) -> None:
+        dlg = ChandelierParamsDialog(
+            self._chandelier_period, self._chandelier_multiplier,
+            self._chandelier_direction, self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._chandelier_period, self._chandelier_multiplier, self._chandelier_direction = dlg.values()
+            if self._ind("chandelier"):
+                self._update_chandelier_label()
+
+    def _update_chandelier_label(self) -> None:
+        """Recompute the bottom-right chandelier-exit suggestion from self._klines.
+
+        Point-in-time only (latest bar), same convention as
+        strategy/chandelier_exit/calculator.py -- not a ratcheted stop tracked
+        since a real entry date.
+        """
+        period = self._chandelier_period
+        if self._klines is None or self._klines.empty or len(self._klines) < period:
+            self._chandelier_label.setHtml(
+                f"<span style='color:{_GREY}'>Chandelier: need &ge;{period} bars</span>")
+            self._chandelier_label.setVisible(True)
+            self._pin_chandelier_label()
+            return
+
+        highs  = self._klines["high"].to_numpy(dtype=float)
+        lows   = self._klines["low"].to_numpy(dtype=float)
+        closes = self._klines["close"].to_numpy(dtype=float)
+        atr    = wilder_atr(highs, lows, closes, period)
+        hh, ll = rolling_extremes(highs, lows, period)
+
+        if np.isnan(atr[-1]) or np.isnan(hh[-1]) or np.isnan(ll[-1]):
+            self._chandelier_label.setHtml(
+                f"<span style='color:{_GREY}'>Chandelier: insufficient warmup</span>")
+            self._chandelier_label.setVisible(True)
+            self._pin_chandelier_label()
+            return
+
+        mult       = self._chandelier_multiplier
+        last_price = float(closes[-1])
+        bull       = self._chandelier_direction == "bull"
+        stop       = float(hh[-1] - atr[-1] * mult) if bull else float(ll[-1] + atr[-1] * mult)
+        dist       = abs(last_price - stop)
+        pct        = dist / last_price * 100 if last_price else 0.0
+
+        red_up    = self._ind("red_up")
+        # direction color follows the same buy/sell convention as tick-profile bars
+        col       = (_RED if red_up else _GREEN) if bull else (_GREEN if red_up else _RED)
+        dir_label = "Long" if bull else "Short"
+
+        html = (
+            f"<span style='color:{_FG}'>Chandelier {dir_label}  (p{period} x{mult:g})</span><br>"
+            f"<span style='color:{col}'>Stop: {stop:.4f}</span><br>"
+            f"<span style='color:{_GREY}'>Dist: {dist:.4f}  ({pct:.2f}%)</span>"
+        )
+        self._chandelier_label.setHtml(html)
+        self._chandelier_label.setVisible(True)
+        self._pin_chandelier_label()
 
     # ── Crosshair + tooltip ───────────────────────────────────────────────────
 
