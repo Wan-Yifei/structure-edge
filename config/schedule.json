@@ -31,31 +31,9 @@
     }
   },
   "targets": [
-    "US.CSCO",
-    "US.MU",
-    "US.NVDA",
-    "US.NVTS",
-    "US.OKLO",
-    "US.PLTR",
-    "US.QCOM",
-    "US.SIMO",
-    "US.SNDK",
-    "US.SOXL",
-    "US.SOXS",
-    "US.SPCH",
-    "US.SPCX",
-    "US.TSEM",
-    "US.TSLA",
-    "US.TSM",
-    "US.WDC"
+    "US.SOXL"
   ],
-  "target_categories": {
-    "US.OKLO": "nuclear fusion & energy",
-    "US.TSLA": "全部",
-    "US.PLTR": "AI family",
-    "US.SPCX": "Space X family",
-    "US.SPCH": "Space X family"
-  },
+  "target_categories": {},
   "order_book_enabled": true,
   "remote_backup": {
     "enabled": true,
