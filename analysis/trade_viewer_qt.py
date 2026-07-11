@@ -70,8 +70,7 @@ from strategy.smc.market_structure import detect_bos_choch
 from strategy.smc.fvg import detect_fvg
 from strategy.smc.order_blocks import detect_order_blocks
 from strategy.smc.kd_trend import compute_kd
-from strategy.chandelier_exit.atr import wilder_atr
-from strategy.chandelier_exit.chandelier import rolling_extremes
+from strategy.chandelier_exit.chandelier import current_stop
 from ta.volume import AccDistIndexIndicator
 from moomoo import (
     OpenQuoteContext, SubType, KLType, AuType, Session,
@@ -3137,6 +3136,31 @@ class TradeViewerQt(QMainWindow):
             self._profile_pin_conns.append(conn2)
             _pin_va()
 
+        # Project the current (latest) price onto the profile -- solid line,
+        # distinct from POC/VAH/VAL's dashed style, so it reads as "where
+        # price is now" vs. "where the volume concentrated".
+        last_price = float(klines["close"].iloc[-1])
+        price_line = pg.InfiniteLine(
+            pos=last_price, angle=0, movable=False,
+            pen=pg.mkPen("#42a5f5", width=1.5),
+        )
+        price_label = pg.TextItem(
+            text=f"Last {last_price:.2f}", color="#42a5f5",
+            fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+            anchor=(0.0, 1.0),
+        )
+        price_label.setFont(QFont("Monospace", 7))
+        pw.addItem(price_line,  ignoreBounds=True)
+        pw.addItem(price_label, ignoreBounds=True)
+
+        def _pin_price_label() -> None:
+            xlo = vb.viewRange()[0][0]
+            price_label.setPos(xlo, last_price)
+
+        conn3 = vb.sigRangeChanged.connect(lambda *_: _pin_price_label())
+        self._profile_pin_conns.append(conn3)
+        _pin_price_label()
+
         max_vol = float(volumes.max())
         vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         vb.setXRange(0, max_vol * 1.15, padding=0)
@@ -3517,6 +3541,10 @@ class TradeViewerQt(QMainWindow):
         poc_lbl = _add_panel_line(poc, _RED)
         vah_lbl = _add_panel_line(vah, _GOLD, Qt.PenStyle.DashLine)
         val_lbl = _add_panel_line(val, _GOLD, Qt.PenStyle.DashLine)
+        # Project the current price (range's last bar) onto the profile --
+        # solid accent line, distinct from POC/VAH/VAL's red/gold dashed style.
+        last_price = float(self._klines["close"].iloc[i1])
+        price_lbl  = _add_panel_line(last_price, "#42a5f5")
 
         stats_item = pg.TextItem(
             text=stats_lbl, color="#42a5f5",
@@ -3533,6 +3561,7 @@ class TradeViewerQt(QMainWindow):
             poc_lbl.setPos(xlo, poc);  poc_lbl.setText(f"POC {poc:.2f}")
             vah_lbl.setPos(xlo, vah);  vah_lbl.setText(f"VAH {vah:.2f}")
             val_lbl.setPos(xlo, val);  val_lbl.setText(f"VAL {val:.2f}")
+            price_lbl.setPos(xlo, last_price); price_lbl.setText(f"Last {last_price:.2f}")
             stats_item.setPos(xlo, yhi)
 
         conn = vb.sigRangeChanged.connect(lambda *_: _pin_panel_labels())
@@ -3674,32 +3703,29 @@ class TradeViewerQt(QMainWindow):
         highs  = self._klines["high"].to_numpy(dtype=float)
         lows   = self._klines["low"].to_numpy(dtype=float)
         closes = self._klines["close"].to_numpy(dtype=float)
-        atr    = wilder_atr(highs, lows, closes, period)
-        hh, ll = rolling_extremes(highs, lows, period)
+        mult   = self._chandelier_multiplier
+        bull   = self._chandelier_direction == "bull"
+        r      = current_stop(highs, lows, closes, period, mult, self._chandelier_direction)
 
-        if np.isnan(atr[-1]) or np.isnan(hh[-1]) or np.isnan(ll[-1]):
+        if r is None:
             self._chandelier_label.setHtml(
                 f"<span style='color:{_GREY}'>Chandelier: insufficient warmup</span>")
             self._chandelier_label.setVisible(True)
             self._pin_chandelier_label()
             return
 
-        mult       = self._chandelier_multiplier
-        last_price = float(closes[-1])
-        bull       = self._chandelier_direction == "bull"
-        stop       = float(hh[-1] - atr[-1] * mult) if bull else float(ll[-1] + atr[-1] * mult)
-        dist       = abs(last_price - stop)
-        pct        = dist / last_price * 100 if last_price else 0.0
-
         red_up    = self._ind("red_up")
         # direction color follows the same buy/sell convention as tick-profile bars
         col       = (_RED if red_up else _GREEN) if bull else (_GREEN if red_up else _RED)
         dir_label = "Long" if bull else "Short"
 
+        offset     = r["atr"] * mult
+        offset_pct = offset / r["price"] * 100 if r["price"] else 0.0
         html = (
             f"<span style='color:{_FG}'>Chandelier {dir_label}  (p{period} x{mult:g})</span><br>"
-            f"<span style='color:{col}'>Stop: {stop:.4f}</span><br>"
-            f"<span style='color:{_GREY}'>Dist: {dist:.4f}  ({pct:.2f}%)</span>"
+            f"<span style='color:{col}'>Stop: {r['stop']:.4f}</span><br>"
+            f"<span style='color:{_GREY}'>Dist: {r['dist']:.4f}  ({r['dist_pct']:.2f}%)</span><br>"
+            f"<span style='color:{_GREY}'>ATR&times;mult: {offset:.4f}  ({offset_pct:.2f}%)</span>"
         )
         self._chandelier_label.setHtml(html)
         self._chandelier_label.setVisible(True)

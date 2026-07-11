@@ -7,6 +7,7 @@ Usage:
   uv run main.py scheduler
   uv run main.py scanner                     # SMC signal scanner
   uv run main.py fvg_backscan --symbol US.SOXL --start 2026-05-01   # FVG-watch backscan
+  uv run main.py replay_trainer               # K-line replay trainer (paper trading practice)
 """
 
 import argparse
@@ -18,6 +19,7 @@ COMMANDS = {
     "scheduler":       ("analysis.scheduler",       "main"),
     "scanner":         ("analysis.signal_scanner",  "main"),
     "fvg_backscan":    ("analysis.fvg_backscan",    "main"),
+    "replay_trainer":  ("analysis.replay_trainer",  "main"),
 }
 
 
