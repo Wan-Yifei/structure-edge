@@ -134,6 +134,58 @@ class TestChandelierSimulate:
         )
         assert res is None
 
+    def test_entry_stop_override_covers_entry_and_next_bar(self):
+        """entry_stop_override must replace BOTH the entry bar's candidate
+        AND the very next bar's (both read hh[entry_idx]/atr[entry_idx] under
+        the shift convention -- overriding only position 0 would let bar 1's
+        cummax immediately revert to the un-overridden value one bar later,
+        defeating the point). The ratchet must still trail via HH/LL from the
+        bar after that onward, exactly as without the override -- it's a
+        starting-point fix, not a different trailing algorithm."""
+        highs  = np.array([100.0, 110.0, 106.0])
+        lows   = np.array([99.6,   99.6, 105.0])
+        closes = np.array([99.8,  105.0, 105.5])
+        times  = np.array(["t0", "t1", "t2"])
+        atr    = np.array([0.5, 0.5, 0.5])
+        hh, ll = highs.copy(), lows.copy()   # period=1 stand-in, as in the earlier test
+
+        # Without override: cand[0] = hh[0] - atr[0] = 100 - 0.5 = 99.5 (see the
+        # "no self-stop" test above). Override it to something further below.
+        res = simulate_chandelier_exit(
+            highs, lows, closes, times, atr, hh, ll,
+            entry_idx=0, entry_price=99.8, direction="bull",
+            period=1, multiplier=1.0, risk_unit=1.0, max_bars=200,
+            entry_stop_override=90.0,
+        )
+        assert res is not None
+        assert res.stop_series[0] == pytest.approx(90.0)     # entry bar uses the override
+        assert res.stop_series[1] == pytest.approx(90.0)     # still below bar1's cand (99.5) -> ratchet holds at 90
+        assert res.stop_series[2] == pytest.approx(109.5)    # bar2 still ratchets up via HH exactly as before
+        assert res.cause == "stopped"
+        assert res.exit_price == pytest.approx(109.5)
+
+    def test_no_override_matches_default_hh_anchored_behavior(self):
+        """entry_stop_override=None (the default) must reproduce the exact
+        same result as omitting it entirely -- existing callers (grid_search,
+        calculator.py) are unaffected."""
+        highs  = np.array([100.0, 110.0, 106.0])
+        lows   = np.array([99.6,   99.6, 105.0])
+        closes = np.array([99.8,  105.0, 105.5])
+        times  = np.array(["t0", "t1", "t2"])
+        atr    = np.array([0.5, 0.5, 0.5])
+        hh, ll = highs.copy(), lows.copy()
+
+        kwargs = dict(
+            highs=highs, lows=lows, closes=closes, times=times, atr=atr, hh=hh, ll=ll,
+            entry_idx=0, entry_price=99.8, direction="bull",
+            period=1, multiplier=1.0, risk_unit=1.0, max_bars=200,
+        )
+        baseline = simulate_chandelier_exit(**kwargs)
+        explicit_none = simulate_chandelier_exit(**kwargs, entry_stop_override=None)
+        assert baseline.exit_bar == explicit_none.exit_bar
+        assert baseline.exit_price == pytest.approx(explicit_none.exit_price)
+        assert np.array_equal(baseline.stop_series, explicit_none.stop_series)
+
 
 # ── entries.collect_entries ───────────────────────────────────────────────────
 

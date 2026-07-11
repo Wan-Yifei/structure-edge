@@ -22,8 +22,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
 
 from feeds.fetcher import fetch_klines
-from strategy.chandelier_exit.atr import wilder_atr
-from strategy.chandelier_exit.chandelier import rolling_extremes
+from strategy.chandelier_exit.chandelier import current_stop
 
 
 def _parse_args() -> argparse.Namespace:
@@ -55,43 +54,37 @@ def main() -> None:
     highs  = df["high"].to_numpy(dtype=float)
     lows   = df["low"].to_numpy(dtype=float)
     closes = df["close"].to_numpy(dtype=float)
+    last_time = str(df["time_key"].iloc[-1])
 
-    atr    = wilder_atr(highs, lows, closes, args.period)
-    hh, ll = rolling_extremes(highs, lows, args.period)
+    want_long  = args.direction in ("long", "both")
+    want_short = args.direction in ("short", "both")
+    long_r  = current_stop(highs, lows, closes, args.period, args.multiplier, "bull") if want_long else None
+    short_r = current_stop(highs, lows, closes, args.period, args.multiplier, "bear") if want_short else None
 
-    if len(df) < args.period or (atr[-1] != atr[-1]):  # NaN check without importing numpy here
+    if (want_long and long_r is None) or (want_short and short_r is None):
         raise SystemExit(
             f"Not enough bars for period={args.period}: got {len(df)} bars "
             f"({start}..{end}). Increase --lookback-days or lower --period."
         )
 
-    last_price = closes[-1]
-    last_time  = str(df["time_key"].iloc[-1])
-    atr_val    = float(atr[-1])
-    hh_val     = float(hh[-1])
-    ll_val     = float(ll[-1])
-
+    ref = long_r or short_r
     print(f"{args.code}  {args.tf}  as of {last_time}")
-    print(f"  last close: {last_price:.4f}")
-    print(f"  ATR({args.period}): {atr_val:.4f}")
-    print(f"  HighestHigh({args.period}): {hh_val:.4f}   LowestLow({args.period}): {ll_val:.4f}")
-    print(f"  multiplier: {args.multiplier}   offset (ATR*mult): {atr_val * args.multiplier:.4f}")
+    print(f"  last close: {ref['price']:.4f}")
+    print(f"  ATR({args.period}): {ref['atr']:.4f}")
+    print(f"  HighestHigh({args.period}): {ref['hh']:.4f}   LowestLow({args.period}): {ref['ll']:.4f}")
+    print(f"  multiplier: {args.multiplier}   offset (ATR*mult): {ref['atr'] * args.multiplier:.4f}")
     print()
 
-    def _dist_str(stop: float) -> str:
-        diff = stop - last_price
-        side = "above" if diff >= 0 else "below"
-        pct  = abs(diff) / last_price * 100 if last_price else 0.0
-        return f"({pct:.2f}% {side} last price)"
+    def _dist_str(r: dict) -> str:
+        side = "above" if r["stop"] - r["price"] >= 0 else "below"
+        return f"({r['dist_pct']:.2f}% {side} last price)"
 
-    if args.direction in ("long", "both"):
-        long_stop = hh_val - atr_val * args.multiplier
-        print(f"  LONG  stop = HH - ATR*mult = {hh_val:.4f} - {atr_val * args.multiplier:.4f} "
-              f"= {long_stop:.4f}   {_dist_str(long_stop)}")
-    if args.direction in ("short", "both"):
-        short_stop = ll_val + atr_val * args.multiplier
-        print(f"  SHORT stop = LL + ATR*mult = {ll_val:.4f} + {atr_val * args.multiplier:.4f} "
-              f"= {short_stop:.4f}   {_dist_str(short_stop)}")
+    if long_r is not None:
+        print(f"  LONG  stop = HH - ATR*mult = {long_r['hh']:.4f} - {ref['atr'] * args.multiplier:.4f} "
+              f"= {long_r['stop']:.4f}   {_dist_str(long_r)}")
+    if short_r is not None:
+        print(f"  SHORT stop = LL + ATR*mult = {short_r['ll']:.4f} + {ref['atr'] * args.multiplier:.4f} "
+              f"= {short_r['stop']:.4f}   {_dist_str(short_r)}")
 
     print(
         "\nNote: this is the single latest-bar value, not a ratcheted stop for an "
