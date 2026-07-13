@@ -100,6 +100,7 @@ _OB_BEAR  = "#ef5350"   # bear OB red
 _OB_BREAK = "#9e9e9e"   # breaker OB grey
 _OB_MIT   = "#ffa726"   # mitigation OB amber
 _EMA_COLS = ["#42a5f5", "#ab47bc", "#ffa726"]  # EMA 20/50/200
+_AVWAP_COL = "#ffeb3b"  # anchored VWAP line/label color
 
 def _qc(hex_str: str, alpha: int = 255) -> QColor:
     c = QColor(hex_str)
@@ -1256,6 +1257,7 @@ class TradeViewerQt(QMainWindow):
             ("cvd",       "CVD"),   # Cumulative Volume Delta subplot
             ("adi",       "A/D"),   # Accumulation/Distribution Line subplot
             ("ema",       "EMA"),
+            ("avwap",     "AVWAP"), # Anchored VWAP -- cumulative from a user-picked date
             ("vol",       "MAVOL"), # Volume subplot toggle
             ("chandelier", "Chandelier"), # ATR trailing-stop suggestion, bottom-right corner label
         ]:
@@ -1273,6 +1275,16 @@ class TradeViewerQt(QMainWindow):
                 self._ob_max_count.setToolTip("Max number of recent OBs to display")
                 self._ob_max_count.valueChanged.connect(self._trigger_fetch)
                 tb2.addWidget(self._ob_max_count)
+            if key == "avwap":
+                self._avwap_anchor_edit = QLineEdit()
+                self._avwap_anchor_edit.setPlaceholderText("YYYY-MM-DD")
+                self._avwap_anchor_edit.setFixedWidth(80)
+                self._avwap_anchor_edit.setToolTip(
+                    "Anchor date for the VWAP (blank = start of loaded chart). "
+                    "VWAP accumulates from the first bar on/after this date.")
+                self._avwap_anchor_edit.returnPressed.connect(
+                    lambda: self._render(self._klines, self._ticks) if self._klines is not None else None)
+                tb2.addWidget(self._avwap_anchor_edit)
             if key == "chandelier":
                 chandelier_settings_btn = QPushButton("⚙")
                 chandelier_settings_btn.setFixedWidth(28)
@@ -1536,6 +1548,7 @@ class TradeViewerQt(QMainWindow):
         self._bos_items:     list = []  # PlotCurveItem + TextItem per signal
         self._delta_items:   list = []  # TextItem per candle
         self._ema_items:     list = []  # PlotCurveItem per EMA period
+        self._avwap_items:   list = []  # anchored-VWAP curve + anchor line + label
         self._kd_items:      list = []  # PlotCurveItem + fill for KD subplot
         self._kd_band_items: list = []  # PlotCurveItem + fill for KD band on main chart
         self._cvd_items:     list = []  # PlotCurveItem for CVD subplot
@@ -2168,6 +2181,7 @@ class TradeViewerQt(QMainWindow):
         show_cvd    = self._ind("cvd")
         show_adi    = self._ind("adi")
         show_ema    = self._ind("ema")
+        show_avwap  = self._ind("avwap")
         red_up      = self._ind("red_up")
         bull_col    = _RED   if red_up else _GREEN
         bear_col    = _GREEN if red_up else _RED
@@ -2244,6 +2258,11 @@ class TradeViewerQt(QMainWindow):
         self._clear_ema_items()
         if show_ema:
             self._draw_ema(klines)
+
+        # Anchored VWAP overlay
+        self._clear_avwap_items()
+        if show_avwap:
+            self._draw_avwap(klines)
 
         # KD band overlay on main chart (fast/slow midline ribbon)
         self._clear_kd_band_items()
@@ -2531,6 +2550,59 @@ class TradeViewerQt(QMainWindow):
             lbl.setPos(len(klines) - 1, float(ema[-1]))
             self._plot_c.addItem(lbl, ignoreBounds=True)
             self._ema_items.append(lbl)
+
+    def _clear_avwap_items(self) -> None:
+        for item in self._avwap_items:
+            self._plot_c.removeItem(item)
+        self._avwap_items.clear()
+
+    def _draw_avwap(self, klines: pd.DataFrame) -> None:
+        """Overlay an anchored VWAP: cumulative volume-weighted typical price
+        starting from a user-specified date (self._avwap_anchor_edit), or
+        from the start of the loaded chart if left blank/unparseable.
+        """
+        n = len(klines)
+        if n == 0:
+            return
+
+        anchor_idx = 0
+        anchor_text = self._avwap_anchor_edit.text().strip()
+        if anchor_text:
+            try:
+                anchor_dt = datetime.strptime(anchor_text, "%Y-%m-%d")
+                times = klines["time_key"].astype(str).values
+                anchor_idx = int(np.searchsorted(times, anchor_dt.strftime("%Y-%m-%d"), side="left"))
+                anchor_idx = max(0, min(anchor_idx, n - 1))
+            except ValueError:
+                pass  # unparseable text -- fall back to anchoring at the start of the chart
+
+        sub     = klines.iloc[anchor_idx:]
+        typical = (sub["high"] + sub["low"] + sub["close"]) / 3.0
+        vol     = sub["volume"].fillna(0)
+        cum_v   = vol.cumsum().replace(0, np.nan)   # avoid divide-by-zero before any volume accrues
+        vwap    = ((typical * vol).cumsum() / cum_v).values
+
+        x = np.arange(anchor_idx, n)
+        curve = pg.PlotCurveItem(
+            x=x, y=vwap, pen=pg.mkPen(_AVWAP_COL, width=1.5),
+            name="AVWAP", connect="finite",
+        )
+        self._plot_c.addItem(curve, ignoreBounds=True)
+        self._avwap_items.append(curve)
+
+        anchor_line = pg.InfiniteLine(
+            pos=anchor_idx, angle=90, movable=False,
+            pen=pg.mkPen(_AVWAP_COL, width=1, style=Qt.PenStyle.DashLine),
+        )
+        self._plot_c.addItem(anchor_line, ignoreBounds=True)
+        self._avwap_items.append(anchor_line)
+
+        last_v = float(vwap[-1]) if not np.isnan(vwap[-1]) else float(vwap[np.isfinite(vwap)][-1])
+        lbl = pg.TextItem(text=f"AVWAP {last_v:.2f}", color=_AVWAP_COL, anchor=(0.0, 0.5))
+        lbl.setFont(QFont("Monospace", 6))
+        lbl.setPos(n - 1, last_v)
+        self._plot_c.addItem(lbl, ignoreBounds=True)
+        self._avwap_items.append(lbl)
 
     def _clear_kd_items(self) -> None:
         for item in self._kd_items:
