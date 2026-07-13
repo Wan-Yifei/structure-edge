@@ -1281,7 +1281,10 @@ class TradeViewerQt(QMainWindow):
                 self._avwap_anchor_edit.setFixedWidth(80)
                 self._avwap_anchor_edit.setToolTip(
                     "Anchor date for the VWAP (blank = start of loaded chart). "
-                    "VWAP accumulates from the first bar on/after this date.")
+                    "VWAP accumulates from the first bar on/after this date.\n"
+                    "Accepts YYYY-MM-DD, MM/DD/YYYY, YYYY/MM/DD, or MM-DD-YYYY -- "
+                    "an unrecognised date shows a red warning instead of silently "
+                    "using the whole chart.")
                 self._avwap_anchor_edit.returnPressed.connect(
                     lambda: self._render(self._klines, self._ticks) if self._klines is not None else None)
                 tb2.addWidget(self._avwap_anchor_edit)
@@ -2559,7 +2562,13 @@ class TradeViewerQt(QMainWindow):
     def _draw_avwap(self, klines: pd.DataFrame) -> None:
         """Overlay an anchored VWAP: cumulative volume-weighted typical price
         starting from a user-specified date (self._avwap_anchor_edit), or
-        from the start of the loaded chart if left blank/unparseable.
+        from the start of the loaded chart if left blank.
+
+        An unparseable date is NOT silently treated as "start of chart" --
+        that previously made a mistyped date (e.g. "7/1/2026" instead of the
+        placeholder's "YYYY-MM-DD") draw a plausible-looking but wrong line
+        spanning the whole chart with no indication anything was off. Instead
+        it's flagged with a visible warning label and nothing is drawn.
         """
         n = len(klines)
         if n == 0:
@@ -2568,13 +2577,26 @@ class TradeViewerQt(QMainWindow):
         anchor_idx = 0
         anchor_text = self._avwap_anchor_edit.text().strip()
         if anchor_text:
-            try:
-                anchor_dt = datetime.strptime(anchor_text, "%Y-%m-%d")
-                times = klines["time_key"].astype(str).values
-                anchor_idx = int(np.searchsorted(times, anchor_dt.strftime("%Y-%m-%d"), side="left"))
-                anchor_idx = max(0, min(anchor_idx, n - 1))
-            except ValueError:
-                pass  # unparseable text -- fall back to anchoring at the start of the chart
+            anchor_dt = None
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d", "%m-%d-%Y"):
+                try:
+                    anchor_dt = datetime.strptime(anchor_text, fmt)
+                    break
+                except ValueError:
+                    continue
+            if anchor_dt is None:
+                lbl = pg.TextItem(
+                    text=f"AVWAP: unrecognised date '{anchor_text}' (use YYYY-MM-DD)",
+                    color=_RED, anchor=(0.0, 1.0),
+                )
+                lbl.setFont(QFont("Monospace", 7))
+                lbl.setPos(0, float(klines["high"].max()))
+                self._plot_c.addItem(lbl, ignoreBounds=True)
+                self._avwap_items.append(lbl)
+                return
+            times = klines["time_key"].astype(str).values
+            anchor_idx = int(np.searchsorted(times, anchor_dt.strftime("%Y-%m-%d"), side="left"))
+            anchor_idx = max(0, min(anchor_idx, n - 1))
 
         sub     = klines.iloc[anchor_idx:]
         typical = (sub["high"] + sub["low"] + sub["close"]) / 3.0
@@ -3216,8 +3238,13 @@ class TradeViewerQt(QMainWindow):
 
         # Project the current (latest) price onto the profile -- solid line,
         # distinct from POC/VAH/VAL's dashed style, so it reads as "where
-        # price is now" vs. "where the volume concentrated".
-        last_price = float(klines["close"].iloc[-1])
+        # price is now" vs. "where the volume concentrated". Deliberately
+        # read from self._klines (unfiltered), NOT the session-filtered
+        # `klines` used for the histogram/POC/VAH/VAL -- if e.g. "Night" is
+        # unchecked while price is currently in the overnight session, the
+        # filtered frame's last row is a stale pre-session close, not the
+        # true current price, and this line/label would silently go stale.
+        last_price = float(self._klines["close"].iloc[-1])
         price_line = pg.InfiniteLine(
             pos=last_price, angle=0, movable=False,
             pen=pg.mkPen("#42a5f5", width=1.5),
@@ -3242,8 +3269,13 @@ class TradeViewerQt(QMainWindow):
         max_vol = float(volumes.max())
         vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         vb.setXRange(0, max_vol * 1.15, padding=0)
-        y_pad = (hi - lo) * 0.10
-        vb.setYRange(lo - y_pad, hi + y_pad, padding=0)
+        # Extend the Y-range to cover last_price too -- it can sit outside
+        # the session-filtered histogram's own [lo, hi] (e.g. price moved
+        # further during a session that's excluded from the profile).
+        y_lo = min(lo, last_price)
+        y_hi = max(hi, last_price)
+        y_pad = (y_hi - y_lo) * 0.10
+        vb.setYRange(y_lo - y_pad, y_hi + y_pad, padding=0)
 
     def _filter_sessions(self, klines: pd.DataFrame) -> pd.DataFrame:
         """Keep only rows whose time falls in the active session windows."""
