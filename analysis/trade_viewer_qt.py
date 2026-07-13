@@ -2612,9 +2612,15 @@ class TradeViewerQt(QMainWindow):
         excluded from the delta itself, same caveat as the Range Profile
         Buy/Sell stats -- moomoo's ticker_direction tags a large share of
         same-price prints NEUTRAL, so this only reflects a subset of volume.
-        Resets to 0 at the start of each calendar day (matches TradingView's
+        Resets to 0 at the start of each *trading* day (matches TradingView's
         default CVD session reset) instead of accumulating across the whole
-        loaded range.
+        loaded range. A trading day here runs 20:00 ET -> next 20:00 ET
+        (overnight session start through the following after-hours close,
+        matching the "night" session window used by _filter_sessions() and
+        config/schedule.json) -- resetting on the calendar-date boundary
+        instead would split the continuous 20:00-04:00 overnight session in
+        half at midnight, showing a spurious jump/reset in the middle of a
+        session that never actually paused.
         """
         n = len(klines)
         delta = np.zeros(n, dtype=float)
@@ -2626,7 +2632,7 @@ class TradeViewerQt(QMainWindow):
                 bk = candle_start(bar_end - timedelta(minutes=cm), cm)
             except ValueError:
                 continue
-            day[i] = bk.date()
+            day[i] = bk.date() + timedelta(days=1) if bk.hour >= 20 else bk.date()
             pd_ = buckets.get(bk)
             if not pd_:
                 continue
