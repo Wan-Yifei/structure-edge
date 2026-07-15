@@ -38,6 +38,9 @@ candle.png
 # Runtime / scheduler logs in db/
 db/scheduler.log
 
+# Hang-watchdog thread-dump log (analysis/trade_viewer_qt.py, root dir)
+hang_watchdog.log
+
 # Docker — user secrets and local volume dirs (never commit)
 docker/backtest.env
 docker_db/

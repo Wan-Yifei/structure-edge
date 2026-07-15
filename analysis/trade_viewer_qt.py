@@ -37,12 +37,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import pathlib
 import sqlite3
 import sys
 import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -79,7 +81,18 @@ from moomoo import (
 
 # ── PyQtGraph global config ───────────────────────────────────────────────────
 
-pg.setConfigOptions(antialias=True, useOpenGL=True, enableExperimental=True)
+# useOpenGL/enableExperimental were on since this file's first commit and
+# never revisited. PyQtGraph's experimental OpenGL path is documented
+# upstream as unstable, particularly around widget teardown on Windows --
+# live py-spy dumps of a genuinely hung process (reported: main viewer goes
+# unresponsive after closing the Liquidity Heatmap window, worse the longer
+# it ran) showed the main thread parked in app.exec() with *no* Python frame
+# underneath it at all, i.e. stuck inside native Qt/GL C++ code that never
+# returns control to the interpreter -- exactly this class of bug. The
+# Liquidity Heatmap window (pg.ImageItem, per-tick setImage() on a
+# N_PRICE x max_cols grid) is this process's heaviest GL-texture churn,
+# consistent with "worse the longer the heatmap window ran."
+pg.setConfigOptions(antialias=True)
 
 # ── Colour palette (matches trade_viewer.py) ──────────────────────────────────
 
@@ -306,18 +319,46 @@ def load_order_book_window(code: str, start: datetime, end: datetime) -> list[di
         return []
 
 
-def apply_profile_range(klines: pd.DataFrame, range_val: str) -> pd.DataFrame:
-    """Trim klines to N trading days ending at the last bar."""
+def _trading_day(time_key, cm: int):
+    """Trading-day date for a bar, end-of-bar `time_key`.
+
+    A trading day runs 20:00 ET -> next 20:00 ET (overnight session start
+    through the following after-hours close), matching the "night" session
+    window used by _filter_sessions()/config/schedule.json and the same rule
+    _draw_cvd() resets on. Returns None if `time_key` doesn't parse.
+    """
+    try:
+        bar_end = datetime.strptime(str(time_key)[:16], "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+    bk = candle_start(bar_end - timedelta(minutes=cm), cm)
+    return bk.date() + timedelta(days=1) if bk.hour >= 20 else bk.date()
+
+
+def apply_profile_range(klines: pd.DataFrame, range_val: str, cm: int) -> pd.DataFrame:
+    """Trim klines to N trading days ending at the last bar.
+
+    Uses _trading_day() (20:00 ET boundary), not the calendar date -- the
+    calendar date would split the continuous overnight session in half at
+    midnight, so for a few minutes right after midnight "today" would only
+    contain the handful of bars since 00:00 while the entire evening's
+    overnight-session bars (actually still part of the same still-open
+    trading day) get dropped, leaving the profile empty or near-empty.
+    """
     if klines.empty:
         return klines
     n_days = {"1d": 1, "3d": 3, "7d": 5}.get(range_val)
     if n_days is None:
         return klines
-    times = klines["time_key"].astype(str).str[:10]
-    anchor = times.iloc[-1]
-    dates  = sorted(times[times <= anchor].unique())
-    start  = dates[-n_days] if len(dates) >= n_days else dates[0]
-    return klines[(times >= start) & (times <= anchor)]
+    days  = klines["time_key"].map(lambda tk: _trading_day(tk, cm))
+    valid = days.notna()
+    if not valid.any():
+        return klines.iloc[0:0]
+    anchor = days[valid].iloc[-1]
+    uniq   = sorted(days[valid].unique())
+    start  = uniq[-n_days] if len(uniq) >= n_days else uniq[0]
+    mask   = valid & (days >= start) & (days <= anchor)
+    return klines[mask]
 
 
 def _compute_profile_bins(
@@ -1054,6 +1095,53 @@ class ChandelierParamsDialog(QDialog):
         return self._period_spin.value(), self._mult_spin.value(), direction
 
 
+_HANG_LOG_PATH = pathlib.Path(__file__).parent.parent / "hang_watchdog.log"
+
+
+def _close_with_hang_watchdog(window: QWidget, name: str, timeout: float = 1.0) -> None:
+    """Close a child window, always logging how long close() took; if it
+    doesn't return within `timeout` seconds, also dump every thread's
+    Python stack to hang_watchdog.log.
+
+    Reported symptom: the main viewer stutters/goes unresponsive after
+    closing the Liquidity Heatmap window, more often the longer it had been
+    running. closeEvent()/worker teardown there look non-blocking by design
+    (see _retire_worker in liq_hm_window.py), but nothing here rules out a
+    SQLite lock wait (e.g. contending with tick_collector.py's periodic WAL
+    checkpoint/prune) or a slow Qt/pyqtgraph teardown actually blocking the
+    GUI thread inside close(). A `threading.Timer` runs on its own OS thread
+    independent of the (possibly frozen) Qt event loop, so it still fires and
+    captures real stack frames even while the main thread is stuck.
+    timeout is 1s (not e.g. 3s) because the reported symptom is a stutter,
+    not necessarily a multi-second freeze -- always logging the actual
+    elapsed time (below) means even a sub-threshold stutter leaves a number
+    in the log instead of no evidence at all.
+    """
+    def _dump() -> None:
+        try:
+            with open(_HANG_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"\n=== {datetime.now().isoformat()} "
+                        f"{name}.close() exceeded {timeout}s ===\n")
+                faulthandler.dump_traceback(file=f, all_threads=True)
+        except Exception:
+            pass
+
+    timer = threading.Timer(timeout, _dump)
+    timer.start()
+    t0 = time.monotonic()
+    try:
+        window.close()
+    finally:
+        timer.cancel()
+        elapsed = time.monotonic() - t0
+        try:
+            with open(_HANG_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now().isoformat()} "
+                        f"{name}.close() took {elapsed:.3f}s\n")
+        except Exception:
+            pass
+
+
 # ── Main window ───────────────────────────────────────────────────────────────
 
 class TradeViewerQt(QMainWindow):
@@ -1144,11 +1232,14 @@ class TradeViewerQt(QMainWindow):
             l.setStyleSheet(f"color: {_FG}; font-size: 11px; padding: 0 2px;")
             return l
 
+        toolbar_rows: list[QToolBar] = []
+
         # ── Row 1: core data controls ─────────────────────────────────────────
         tb1 = QToolBar("Controls", self)
         tb1.setMovable(False)
         tb1.setFloatable(False)
         self.addToolBar(tb1)
+        toolbar_rows.append(tb1)
 
         # Code
         tb1.addWidget(_lbl("Code:"))
@@ -1241,6 +1332,7 @@ class TradeViewerQt(QMainWindow):
         tb2.setMovable(False)
         tb2.setFloatable(False)
         self.addToolBar(tb2)
+        toolbar_rows.append(tb2)
 
         self._ind_checks: dict[str, QCheckBox | QRadioButton] = {}
 
@@ -1353,6 +1445,7 @@ class TradeViewerQt(QMainWindow):
         tb3.setMovable(False)
         tb3.setFloatable(False)
         self.addToolBar(tb3)
+        toolbar_rows.append(tb3)
 
         # Tick profile order-size filter
         tb3.addWidget(_lbl("Orders:"))
@@ -1436,6 +1529,7 @@ class TradeViewerQt(QMainWindow):
         tb3.setMovable(False)
         tb3.setFloatable(False)
         self.addToolBar(tb3)
+        toolbar_rows.append(tb3)
 
         tb3.addWidget(_lbl("Trade ID:"))
         self._trade_id_edit = QLineEdit()
@@ -1453,6 +1547,16 @@ class TradeViewerQt(QMainWindow):
         clear_btn.setToolTip("Remove all trade review markers")
         clear_btn.clicked.connect(self._clear_trade_review)
         tb3.addWidget(clear_btn)
+
+        # QToolBar's overflow chevron does not reliably engage for rows built
+        # from addWidget() (checkboxes/combos/line edits) stacked via
+        # addToolBarBreak() -- shrinking the window can silently clip the
+        # widest row's trailing controls off the edge instead of collapsing
+        # them into a popup. Floor the window width at the widest row's
+        # natural size so that state is never reachable.
+        widest = max((tb.sizeHint().width() for tb in toolbar_rows), default=0)
+        if widest:
+            self.setMinimumWidth(widest + 16)
 
     # ── Central widget: chart + profiles ─────────────────────────────────────
 
@@ -2151,6 +2255,19 @@ class TradeViewerQt(QMainWindow):
                 # at padding=0.
                 new_xhi = new_n + 0.5
                 self._plot_c.setXRange(new_xhi - visible, new_xhi, padding=0)
+                # Price (and volume) Y-range was only set once by _reset_view()
+                # at load time and never revisited -- as price drifts away from
+                # that frozen band the candles walk above/below the visible
+                # window over time. Only re-fit while we're also re-centering
+                # X (i.e. the user hasn't panned away to review history) so
+                # this doesn't fight a deliberate manual vertical zoom.
+                self._autorange_price_subplots(new_xhi - visible, new_xhi)
+            # CVD / A-D Line Y-range was only set once by _reset_view() at
+            # load time and never revisited -- refresh it to the current
+            # visible window on every live tick so it doesn't go stale (see
+            # _autorange_cumulative_subplots).
+            xlo2, xhi2 = self._plot_c.vb.viewRange()[0]
+            self._autorange_cumulative_subplots(xlo2, xhi2)
         # Keep DOM window in sync with active code, mode, and timeframe
         if self._dom_window is not None:
             code = self._code_edit.text().strip()
@@ -2517,7 +2634,7 @@ class TradeViewerQt(QMainWindow):
             self._liq_hm_window.show()
         else:
             if self._liq_hm_window is not None:
-                self._liq_hm_window.close()
+                _close_with_hang_watchdog(self._liq_hm_window, "LiqHmWindow")
                 self._liq_hm_window = None
 
     def _on_liq_hm_closed(self) -> None:
@@ -3162,7 +3279,7 @@ class TradeViewerQt(QMainWindow):
         pw.addItem(self._profile_hline, ignoreBounds=True)
 
         range_val = self._get_range_val()
-        klines    = apply_profile_range(self._klines, range_val)
+        klines    = apply_profile_range(self._klines, range_val, self._candle_mins)
         klines    = self._filter_sessions(klines)
         if klines.empty:
             return
@@ -4054,34 +4171,62 @@ class TradeViewerQt(QMainWindow):
             minXRange=5, maxXRange=n_bars + 10,
         )
 
-        # Derive Y range from the actually visible bars
-        if self._klines is not None and not self._klines.empty:
-            vis    = self._klines.iloc[max(0, n_bars - init_bars):]
-            y_lo   = float(vis["low"].min())
-            y_hi   = float(vis["high"].max())
-            margin = (y_hi - y_lo) * 0.08
-            self._plot_c.setXRange(x_start, x_end, padding=0)
-            self._plot_c.setYRange(y_lo - margin, y_hi + margin, padding=0)
-        else:
-            self._plot_c.setXRange(x_start, x_end, padding=0)
-
-        # Volume plot: X is already linked; only need a Y reset
-        if self._klines is not None:
-            vis_v = self._klines.iloc[max(0, n_bars - init_bars):]
-            max_v = float(vis_v["volume"].max()) if not vis_v.empty else 1.0
-            self._plot_v.setYRange(0, max_v * 1.15, padding=0)
+        self._plot_c.setXRange(x_start, x_end, padding=0)
+        # Derive Y range (price + volume) from the actually visible bars
+        vis_start = max(0, n_bars - init_bars)
+        self._autorange_price_subplots(vis_start, n_bars)
 
         # CVD / A-D Line: both are unbounded running cumulative sums, so a
         # plain bounding-rect autorange fits the *entire* loaded history --
         # since the visible init_bars window is a small slice of that, its
         # real variation gets dwarfed and the curve looks like a flat line.
         # Derive Y range from the visible bars only, same fix as Volume above.
-        vis_start = max(0, n_bars - init_bars)
+        self._autorange_cumulative_subplots(vis_start, n_bars)
+
+    def _autorange_price_subplots(self, x_lo: float, x_hi: float) -> None:
+        """Fit main-chart price Y-range (and Volume Y-range) to the given
+        visible X window.
+
+        _reset_view() calls this once at load/TF-change time, but Live mode
+        keeps streaming new bars via _on_data_ready() without ever re-running
+        _reset_view() -- without a second call from there too, this Y-range
+        goes stale and price can drift entirely above/below the frozen
+        window as it moves away from the level it was at on load, making the
+        candles appear to walk off the top/bottom of the chart.
+        """
+        if self._klines is None or self._klines.empty:
+            return
+        i0 = max(0, int(x_lo))
+        i1 = min(int(x_hi) + 1, len(self._klines))
+        vis = self._klines.iloc[i0:i1]
+        if vis.empty:
+            return
+        y_lo   = float(vis["low"].min())
+        y_hi   = float(vis["high"].max())
+        margin = (y_hi - y_lo) * 0.08 or max(abs(y_hi), 1.0) * 0.08
+        self._plot_c.setYRange(y_lo - margin, y_hi + margin, padding=0)
+        max_v = float(vis["volume"].max()) if not vis["volume"].isna().all() else 1.0
+        self._plot_v.setYRange(0, max_v * 1.15, padding=0)
+
+    def _autorange_cumulative_subplots(self, x_lo: float, x_hi: float) -> None:
+        """Fit CVD / A-D Line Y-range to the given visible X window.
+
+        Both are unbounded running cumulative sums, so PyQtGraph's default
+        bounding-rect autorange (fit to the *entire* loaded series) dwarfs
+        the visible window's real variation. _reset_view() calls this once
+        at load/TF-change time, but Live mode keeps streaming new bars via
+        _on_data_ready() without ever re-running _reset_view() -- without a
+        second call from there too, this Y-range goes stale and the curve
+        can drift entirely outside the frozen window (e.g. after a
+        trading-day CVD reset), making the panel look empty.
+        """
+        i0 = max(0, int(x_lo))
         for arr, plot in ((self._cvd_arr, self._plot_cvd),
                           (self._adi_arr, self._plot_adi)):
-            if arr is None or len(arr) != n_bars:
+            if arr is None or len(arr) == 0:
                 continue
-            vis = arr[vis_start:]
+            i1 = min(int(x_hi) + 1, len(arr))
+            vis = arr[i0:i1]
             if len(vis) == 0:
                 continue
             lo, hi = float(vis.min()), float(vis.max())
@@ -4143,7 +4288,7 @@ class TradeViewerQt(QMainWindow):
         # the moomoo context is torn down.  Without this the app event loop keeps
         # running (quitOnLastWindowClosed won't fire while they're still open).
         if self._liq_hm_window is not None:
-            self._liq_hm_window.close()
+            _close_with_hang_watchdog(self._liq_hm_window, "LiqHmWindow")
             self._liq_hm_window = None
         if self._dom_window is not None:
             self._dom_window.close()

@@ -644,6 +644,17 @@ class LiqHmWindow(QWidget):
         tb_lay.addWidget(row1)
         tb_lay.addWidget(row2)
 
+        # row1/row2 are QToolBar instances used purely as a convenient
+        # addWidget()/addSeparator() container here -- they were never docked
+        # via addToolBar(), so Qt's native toolbar overflow chevron (which
+        # only engages for toolbars managed by a QMainWindow toolbar area)
+        # never applies. Without it, shrinking the window just clips the
+        # widest row's trailing controls off the edge with no way to reach
+        # them. Floor the window width at the widest row's natural size so
+        # that state is never reachable.
+        widest = max(row1.sizeHint().width(), row2.sizeHint().width())
+        self.setMinimumWidth(widest + 16)
+
         # Legend bar — separate row below toolbar so it never gets truncated
         self._legend_lbl = QLabel()
         self._legend_lbl.setStyleSheet(
@@ -1058,6 +1069,29 @@ class LiqHmWindow(QWidget):
             self._set_quote_line(self._bid_line, self._bid_label, self._best_bid, "B")
         if self._best_ask is not None:
             self._set_quote_line(self._ask_line, self._ask_label, self._best_ask, "A")
+
+        # Auto-follow: _price_min/_price_max (and the view Y-range set from
+        # them at n<=1) only get refreshed on a full grid rebuild, which is
+        # gated by a 30%-of-band dead zone (see _maybe_init_price_range) --
+        # below that threshold price can already sit outside the still-fixed
+        # view for a while, so the heatmap appears to drift off the top/
+        # bottom of the window well before any rebuild fires. Re-center
+        # (same zoom span, no rebuild) whenever price nears/passes the edge.
+        if n > 1 and self._best_bid is not None and self._best_ask is not None:
+            self._follow_price_view((self._best_bid + self._best_ask) / 2)
+
+    def _follow_price_view(self, price: float) -> None:
+        """Re-center the Y-range around `price` if it has drifted near/past
+        the edge of the current view, preserving the view's zoom span so a
+        manual zoom isn't fought every tick."""
+        ylo, yhi = self._plot_widget.getPlotItem().vb.viewRange()[1]
+        span = yhi - ylo
+        if span <= 0:
+            return
+        margin = span * 0.1
+        if ylo + margin <= price <= yhi - margin:
+            return
+        self._plot_widget.setYRange(price - span / 2, price + span / 2, padding=0)
 
     def set_red_up(self, red_up: bool) -> None:
         """Sync bid/ask line colors with the main chart's red-up convention.
