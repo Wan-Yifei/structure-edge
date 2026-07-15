@@ -60,8 +60,12 @@ _SYM_UP   = _make_triangle(True)   # bid spoof  ▲
 _SYM_DOWN = _make_triangle(False)  # ask spoof  ▼
 
 N_PRICE      = 100   # price bins (y-resolution)
-COL_SECS_DEF = 30    # seconds per column
-MAX_COLS_DEF = 240   # columns kept in memory  (2 h at 30 s/col)
+COL_SECS_DEF = 1     # seconds per column -- ORDER_BOOK is push-driven, not
+                      # polled, so 1s keeps the heatmap visually current;
+                      # adjustable via the "Col(s)" spinbox (range 1-300)
+MAX_COLS_DEF = 240   # columns kept in memory  (4 min at 1 s/col -- raise via
+                      # the "History" spinbox, range 60-1440, for more
+                      # lookback at the cost of a wider/denser grid)
 
 
 # ── data helpers ───────────────────────────────────────────────────────────────
@@ -228,6 +232,31 @@ def _retire_worker(worker: QThread) -> None:
 
 # ── color renderers ────────────────────────────────────────────────────────────
 
+_COLOR_NORM_PCT = 99.0   # brightness reference = this percentile, not the max
+
+
+def _percentile_norm(log_g: np.ndarray, pct: float = _COLOR_NORM_PCT) -> np.ndarray:
+    """Normalize log-volume to [0, 1], clipped, using a high percentile of the
+    nonzero values as the "100% bright" reference instead of the single max.
+
+    Normalizing against grid.max() means one outlier block (a big resting
+    order, an iceberg, a large snapshot elsewhere in the loaded history)
+    sets the brightness ceiling for the *entire* heatmap -- ordinary top-of-
+    book size near the current touch is real and present in the data but
+    renders too dim to see next to it (reported: "no orders near the touch
+    but the order book shows them"). The 99th percentile is still driven by
+    genuinely large levels, just not by a single extreme one; anything above
+    it clips to full brightness rather than desaturating everything below.
+    """
+    nonzero = log_g[log_g > 0]
+    if nonzero.size == 0:
+        return log_g
+    ref = float(np.percentile(nonzero, pct))
+    if ref <= 0:
+        ref = float(log_g.max())
+    return np.clip(log_g / ref, 0.0, 1.0).astype(np.float32)
+
+
 def _hot_rgba(grid: np.ndarray, gamma: float = 1.0) -> np.ndarray | None:
     """Combined bid+ask: black → purple → amber → yellow.
 
@@ -237,7 +266,7 @@ def _hot_rgba(grid: np.ndarray, gamma: float = 1.0) -> np.ndarray | None:
     if grid.max() <= 0:
         return None
     log_g = np.log1p(grid)
-    norm  = (log_g / log_g.max()).astype(np.float32)
+    norm  = _percentile_norm(log_g)
     if gamma != 1.0:
         np.power(norm, gamma, out=norm)
     rgba  = np.zeros((*norm.shape, 4), dtype=np.uint8)
@@ -275,7 +304,7 @@ def _single_rgba(grid: np.ndarray, hex_color: str,
     if grid.max() <= 0:
         return None
     log_g = np.log1p(grid)
-    norm  = (log_g / log_g.max()).astype(np.float32)
+    norm  = _percentile_norm(log_g)
     if gamma != 1.0:
         np.power(norm, gamma, out=norm)
     c     = QColor(hex_color)
@@ -511,6 +540,21 @@ class LiqHmWindow(QWidget):
         self._max_cols_spin.setToolTip("Number of columns kept in memory")
         self._max_cols_spin.valueChanged.connect(self._on_max_cols_changed)
         row1.addWidget(self._max_cols_spin)
+
+        row1.addSeparator()
+        row1.addWidget(_lbl("Bins:"))
+        self._n_price_spin = QSpinBox()
+        self._n_price_spin.setRange(20, 500)
+        self._n_price_spin.setSingleStep(20)
+        self._n_price_spin.setValue(N_PRICE)
+        self._n_price_spin.setFixedWidth(55)
+        self._n_price_spin.setToolTip(
+            "Price-axis resolution: number of bands the current price span is\n"
+            "divided into. Higher = finer bands (each one covers less price\n"
+            "range) at the cost of thinner rows. Current $/band is shown in\n"
+            "the legend below.")
+        self._n_price_spin.valueChanged.connect(self._on_n_price_changed)
+        row1.addWidget(self._n_price_spin)
 
         row1.addSeparator()
         reset_btn = QPushButton("⟲ Reset")
@@ -808,8 +852,9 @@ class LiqHmWindow(QWidget):
 
         self._timer.stop()
         max_cols = self._max_cols_spin.value()
-        self._bid_grid  = np.zeros((max_cols, N_PRICE), dtype=np.float64)
-        self._ask_grid  = np.zeros((max_cols, N_PRICE), dtype=np.float64)
+        n_price  = self._n_price_spin.value()
+        self._bid_grid  = np.zeros((max_cols, n_price), dtype=np.float64)
+        self._ask_grid  = np.zeros((max_cols, n_price), dtype=np.float64)
         self._col_ts      = []
         self._raw_snaps   = []
         self._mid_prices  = []
@@ -833,6 +878,7 @@ class LiqHmWindow(QWidget):
         self._ask_line.setVisible(False)
         self._ask_label.setVisible(False)
         self._clear_overlay_items()
+        self._update_legend()   # bin_size reset to 0 -- drop the stale "$/band" reading
 
     def _depth_to_cursor(self, target: float) -> str:
         """Return depth-to-cursor annotation, or '' when data is unavailable."""
@@ -895,10 +941,39 @@ class LiqHmWindow(QWidget):
         if new_data:
             self._last_snap_ts = snap_ts
             self._maybe_init_price_range(snap)
-        # Always push a column so the time axis keeps advancing.
-        # When data is stale pass an empty snap so no OB grid is painted.
-        self._push_column(snap if new_data else [], ts=snap_ts)
+        prev_n = len(self._col_ts)
+        xlo, xhi = self._plot_widget.getPlotItem().vb.viewRange()[0] if prev_n > 0 else (0, 0)
+        # Always push a column so the time axis keeps advancing. When the
+        # book hasn't actually changed since the last tick (common once
+        # polling faster than ORDER_BOOK pushes arrive, e.g. Col(s)=1 during
+        # a quiet moment), forward-fill with the last known snapshot instead
+        # of an empty one -- otherwise the grid/price-path gets a visible gap
+        # for every tick that landed between two real pushes. is_fill=True
+        # keeps this out of _raw_snaps so iceberg/spoof detection (which
+        # looks for volume *refreshing* at a price) doesn't mistake a
+        # repeated stale snapshot for a genuine refresh.
+        self._push_column(snap if new_data else self._latest_snap,
+                          ts=snap_ts, is_fill=not new_data)
+        new_n = len(self._col_ts)
         self._render()
+        # Auto-follow: while the rolling buffer is still filling up (column
+        # count still growing), the newest column's index keeps advancing,
+        # so a view left at its initial position falls behind and needs a
+        # manual drag to see new data -- keep it pinned to the right edge
+        # as long as it was already there, same as the main chart's
+        # auto-scroll. Once the buffer hits capacity the column count stops
+        # growing (new columns roll in at the same fixed rightmost index),
+        # so this naturally stops firing and a user's manual zoom/pan is
+        # left alone.
+        visible = xhi - xlo
+        max_cols = self._max_cols_spin.value()
+        if new_n > prev_n > 0 and xhi >= prev_n - 2 and visible < max_cols - 1:
+            # visible < max_cols excludes the default full-buffer-width view
+            # (set once at n<=1) -- that already shows every column at once
+            # and never needs to shift; only a genuinely zoomed-in view can
+            # fall behind the newest column.
+            new_xhi = new_n + 0.5
+            self._plot_widget.setXRange(new_xhi - visible, new_xhi, padding=0)
         if new_data:
             self._redraw_orderflow_markers()
             self._load_absorb_ticks()
@@ -914,10 +989,12 @@ class LiqHmWindow(QWidget):
         new_min = lo  - span * 0.5
         new_max = hi  + span * 0.5
 
+        n_price = self._n_price_spin.value()
         if self._bin_size == 0.0:
             self._price_min = new_min
             self._price_max = new_max
-            self._bin_size  = (new_max - new_min) / N_PRICE
+            self._bin_size  = (new_max - new_min) / n_price
+            self._update_legend()   # bin_size just became known -- show it
         else:
             rng = self._price_max - self._price_min
             out_lo = (self._price_min - lo) / rng
@@ -925,20 +1002,27 @@ class LiqHmWindow(QWidget):
             if out_lo > 0.3 or out_hi > 0.3:
                 self._price_min = new_min
                 self._price_max = new_max
-                self._bin_size  = (new_max - new_min) / N_PRICE
+                self._bin_size  = (new_max - new_min) / n_price
                 max_cols = self._max_cols_spin.value()
-                self._bid_grid   = np.zeros((max_cols, N_PRICE), dtype=np.float64)
-                self._ask_grid   = np.zeros((max_cols, N_PRICE), dtype=np.float64)
+                self._bid_grid   = np.zeros((max_cols, n_price), dtype=np.float64)
+                self._ask_grid   = np.zeros((max_cols, n_price), dtype=np.float64)
                 self._col_ts     = []
                 self._raw_snaps  = []
                 self._mid_prices = []
+                self._update_legend()   # bin_size just changed on rebuild
 
     def _push_column(self, snap: list[dict],
-                     ts: datetime | None = None) -> None:
+                     ts: datetime | None = None,
+                     is_fill: bool = False) -> None:
         """Append one OB snapshot as the rightmost column, rolling if full.
 
         *ts*: use for historical pre-fill (DB timestamp); omit for live updates
         (wall-clock time is used).
+        *is_fill*: `snap` is the last known snapshot repeated because the book
+        hasn't actually changed since -- still paints the grid/price-path (so
+        the heatmap stays visually continuous), but does not record entries
+        into _raw_snaps or overwrite _latest_snap, since those feed iceberg/
+        spoof detection which look for volume genuinely refreshing.
         """
         min_vol  = self._min_vol_spin.value()
         max_cols = self._max_cols_spin.value()
@@ -964,7 +1048,7 @@ class LiqHmWindow(QWidget):
             if row["volume"] < min_vol:
                 continue
             p_bin = int((row["price"] - self._price_min) / self._bin_size)
-            if not (0 <= p_bin < N_PRICE):
+            if not (0 <= p_bin < self._bid_grid.shape[1]):
                 continue
             if row["side"] == "BID":
                 self._bid_grid[col, p_bin] = row["volume"]
@@ -981,15 +1065,15 @@ class LiqHmWindow(QWidget):
         self._best_ask = col_ask if col_ask is not None else self._best_ask
         self._mid_prices.append(mid)
 
-        for row in snap:
-            self._raw_snaps.append({
-                "ts":     col_ts,
-                "side":   row["side"],
-                "price":  row["price"],
-                "volume": row["volume"],
-            })
-
-        self._latest_snap = snap   # cache for depth-to-cursor calculation
+        if not is_fill:
+            for row in snap:
+                self._raw_snaps.append({
+                    "ts":     col_ts,
+                    "side":   row["side"],
+                    "price":  row["price"],
+                    "volume": row["volume"],
+                })
+            self._latest_snap = snap   # cache for depth-to-cursor calculation
 
     def _on_bulk_ready(self, snapshots: list) -> None:
         """Push historical pre-fill columns then switch to the normal timer."""
@@ -1193,12 +1277,13 @@ class LiqHmWindow(QWidget):
 
         bucket_to_idx, cm = self._build_bucket_to_idx()
         min_vol = self._min_vol_spin.value()
+        n_price = self._n_price_spin.value()
 
         if self._ice_cb.isChecked():
             from analysis.orderflow_detect import detect_icebergs
             icebergs = detect_icebergs(
                 self._raw_snaps, bucket_to_idx, self._bin_size, self._price_min,
-                N_PRICE, cm,
+                n_price, cm,
                 min_refreshes=self._ice_min_ref_spin.value(),
                 vol_threshold=min_vol,
                 best_bid=self._best_bid,
@@ -1212,7 +1297,7 @@ class LiqHmWindow(QWidget):
             spoofs = detect_spoofs(
                 self._raw_snaps,
                 bucket_to_idx, self._bin_size, self._price_min,
-                N_PRICE, cm,
+                n_price, cm,
                 min_vol=float(min_vol),   # 0 → auto median of latest snapshot
                 max_duration_secs=self._spoof_dur_spin.value(),
             )
@@ -1223,7 +1308,7 @@ class LiqHmWindow(QWidget):
             simbs = detect_stacked_imbalance(
                 self._raw_snaps,
                 bucket_to_idx, self._bin_size, self._price_min,
-                N_PRICE, cm,
+                n_price, cm,
                 min_levels=self._simb_levels_spin.value(),
                 imbalance_ratio=self._simb_ratio_spin.value(),
                 min_vol=float(min_vol),
@@ -1392,7 +1477,7 @@ class LiqHmWindow(QWidget):
                 "size":  size,
                 "pen":   outline,
                 "brush": pg.mkBrush(*color),
-                "data":  {"direction": direction, "vol": vol},
+                "data":  {"direction": direction, "vol": vol, "price": price},
             })
 
         scat = pg.ScatterPlotItem(spots=spots, hoverable=True, tip=None)
@@ -1409,7 +1494,9 @@ class LiqHmWindow(QWidget):
             return
         d = points[0].data()
         label = "BUY aggressor" if d["direction"] == "BUY" else "SELL aggressor"
-        QToolTip.showText(QCursor.pos(), f"{label}\nΔvol: {d['vol']:,.0f}")
+        QToolTip.showText(
+            QCursor.pos(),
+            f"{label}\nPrice: {d['price']:.2f}\nΔvol: {d['vol']:,.0f}")
 
     def _load_absorb_ticks(self) -> None:
         """Trigger background tick load for the current display window."""
@@ -1475,6 +1562,17 @@ class LiqHmWindow(QWidget):
         n = 5
         max_a = 180 / 255
         parts: list[str] = []
+
+        # Price-axis resolution: each band's height in $ (bin_size), so it's
+        # never a mystery how much price range one row of the heatmap covers.
+        # A band spans [price_min + i*bin_size, price_min + (i+1)*bin_size) --
+        # i.e. its *lower* edge is the exact bin boundary; read it as covering
+        # bin_size upward from wherever its bottom edge sits. The crosshair's
+        # own price readout is continuous (not snapped to band edges).
+        if self._bin_size > 0:
+            parts.append(
+                f'<font color="{_FG}">${self._bin_size:.3f}/band</font>&nbsp;&nbsp;'
+            )
 
         # Colormap section — use <font> tags (safest Qt HTML subset)
         if self._bid_ask_cb.isChecked():
@@ -1548,6 +1646,11 @@ class LiqHmWindow(QWidget):
             self._timer.start(self._col_secs_spin.value() * 1000)
 
     def _on_max_cols_changed(self) -> None:
+        self._reset_grid()
+        if self._live and self._code:
+            self.set_live(True)
+
+    def _on_n_price_changed(self) -> None:
         self._reset_grid()
         if self._live and self._code:
             self.set_live(True)

@@ -1472,6 +1472,21 @@ class TradeViewerQt(QMainWindow):
         tb3.addWidget(cb_net)
 
         tb3.addSeparator()
+        tb3.addWidget(_lbl("Imb:"))
+        self._tick_imb_ratio = QDoubleSpinBox()
+        self._tick_imb_ratio.setRange(1.5, 20.0)
+        self._tick_imb_ratio.setSingleStep(0.5)
+        self._tick_imb_ratio.setValue(3.0)
+        self._tick_imb_ratio.setDecimals(1)
+        self._tick_imb_ratio.setFixedWidth(52)
+        self._tick_imb_ratio.setToolTip(
+            "Tick profile: highlight price levels where the dominant side's\n"
+            "volume is at least this many times the opposite side's -- gold\n"
+            "outline on the bar, plus the price printed at its tip.")
+        self._tick_imb_ratio.valueChanged.connect(self._on_tick_size_toggle)
+        tb3.addWidget(self._tick_imb_ratio)
+
+        tb3.addSeparator()
 
         # Liquidity Heatmap floating window
         self._liq_hm_btn = QPushButton("Liquidity Heatmap")
@@ -3502,6 +3517,29 @@ class TradeViewerQt(QMainWindow):
         buy_col  = _RED   if red_up else _GREEN
         sell_col = _GREEN if red_up else _RED
 
+        # Imbalance highlight: price levels where the dominant side's volume
+        # is at least `ratio` times the opposite side's get a gold outline
+        # (instead of no pen) and the price printed above the bar -- makes
+        # the price levels worth noticing pop out of an otherwise dense,
+        # narrow panel without labelling every single level. Capped to the
+        # top 3 qualifying levels by dominant-side volume (not by ratio,
+        # which favours a tiny order with an extreme but visually
+        # insignificant ratio over a much longer bar that's "merely" very
+        # imbalanced) so a busy tick set can't crowd the narrow panel.
+        ratio_thresh = self._tick_imb_ratio.value()
+        dominant     = np.maximum(buys_arr, sells_arr)
+        minor        = np.minimum(buys_arr, sells_arr)
+        ratio        = dominant / np.maximum(minor, 1.0)
+        qualifies    = ratio >= ratio_thresh
+        buy_dom      = buys_arr >= sells_arr
+        pass_idx     = np.where(qualifies)[0]
+        if len(pass_idx) > 3:
+            pass_idx = pass_idx[np.argsort(-dominant[pass_idx])[:3]]
+        imbalanced = np.zeros(len(prices), dtype=bool)
+        imbalanced[pass_idx] = True
+        no_pen       = pg.mkPen(None)
+        hi_pen       = pg.mkPen(_GOLD, width=1.5)
+
         if self._ind("tick_net"):
             # Single net (buy - sell) bar per price level: one-sided, colored
             # by sign, instead of two diverging buy/sell bars.
@@ -3510,25 +3548,48 @@ class TradeViewerQt(QMainWindow):
             net_x0    = np.where(net >= 0, zeros, -net_log)
             net_x1    = np.where(net >= 0, net_log, zeros)
             net_brush = [_qc(buy_col, 180) if d >= 0 else _qc(sell_col, 180) for d in net]
+            net_pens  = [hi_pen if imb else no_pen for imb in imbalanced]
             net_bar = pg.BarGraphItem(
                 x0=net_x0, x1=net_x1,
                 y=prices, height=bin_h,
-                brushes=net_brush, pen=pg.mkPen(None),
+                brushes=net_brush, pens=net_pens,
             )
             pw.addItem(net_bar)
         else:
+            buy_pens  = [hi_pen if (imb and dom) else no_pen
+                         for imb, dom in zip(imbalanced, buy_dom)]
+            sell_pens = [hi_pen if (imb and not dom) else no_pen
+                         for imb, dom in zip(imbalanced, buy_dom)]
             buy_bar = pg.BarGraphItem(
                 x0=zeros, x1=buys_log,
                 y=prices, height=bin_h,
-                brush=_qc(buy_col, 180), pen=pg.mkPen(None),
+                brush=_qc(buy_col, 180), pens=buy_pens,
             )
             sell_bar = pg.BarGraphItem(
                 x0=-sells_log, x1=zeros,
                 y=prices, height=bin_h,
-                brush=_qc(sell_col, 180), pen=pg.mkPen(None),
+                brush=_qc(sell_col, 180), pens=sell_pens,
             )
             pw.addItem(buy_bar)
             pw.addItem(sell_bar)
+
+        # Label above each row's center (not at the bar's tip): a bar's tip
+        # can sit anywhere from near-zero to the panel edge depending on its
+        # own width, so tip-anchored text would either overlap the opposite
+        # bar (wide bars, few rows) or float awkwardly far from a narrow one.
+        # Above-center is stable regardless of bar width/row count.
+        y_off = bin_h * 0.5 * 0.85
+        for i, price in enumerate(prices):
+            if not imbalanced[i]:
+                continue
+            dom_col = buy_col if buys_arr[i] >= sells_arr[i] else sell_col
+            label = pg.TextItem(
+                text=f"{price:.2f}", color=dom_col,
+                fill=pg.mkBrush(_qc(_BG_TIP, 130)), anchor=(0.5, 1.0),
+            )
+            label.setFont(QFont("Monospace", 7))
+            label.setPos(0.0, price + y_off)
+            pw.addItem(label, ignoreBounds=True)
 
         total_buy  = sum(buys)
         total_sell = sum(sells)
