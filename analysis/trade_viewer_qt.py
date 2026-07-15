@@ -1224,7 +1224,7 @@ class TradeViewerQt(QMainWindow):
         if args:
             self._connect_opend(host, port)
 
-    # ── Toolbars (two rows) ───────────────────────────────────────────────────
+    # ── Toolbars (six rows) ───────────────────────────────────────────────────
 
     def _build_toolbar(self, args) -> None:
         def _lbl(text: str) -> QLabel:
@@ -1326,67 +1326,28 @@ class TradeViewerQt(QMainWindow):
         self._conn_btn.clicked.connect(self._on_connect_toggle)
         tb1.addWidget(self._conn_btn)
 
-        # ── Row 2: chart indicators │ session │ profile range │ theme ──────────
-        self.addToolBarBreak()
-        tb2 = QToolBar("Indicators", self)
-        tb2.setMovable(False)
-        tb2.setFloatable(False)
-        self.addToolBar(tb2)
-        toolbar_rows.append(tb2)
-
         self._ind_checks: dict[str, QCheckBox | QRadioButton] = {}
+        _default_checked = ("heatmap", "delta", "bos_choch", "cvd")
 
-        # Chart overlays / subplots
-        tb2.addWidget(_lbl("Indicators:"))
+        # ── Row 2: SMC structural indicators ────────────────────────────────
+        self.addToolBarBreak()
+        tb_smc = QToolBar("SMC", self)
+        tb_smc.setMovable(False)
+        tb_smc.setFloatable(False)
+        self.addToolBar(tb_smc)
+        toolbar_rows.append(tb_smc)
+
+        tb_smc.addWidget(_lbl("SMC:"))
         for key, label in [
-            ("heatmap",   "Heatmap"),
-            ("delta",     "Δ Delta"),
             ("bos_choch", "BOS/CHoCH"),
             ("fvg",       "FVG"),
             ("ob",        "OB"),
-            ("kd_band",   "KD"),    # KD fast/slow midline ribbon on main chart
-            ("kd",        "KDV"),   # KDV = KD spread-width subplot
-            ("cvd",       "CVD"),   # Cumulative Volume Delta subplot
-            ("adi",       "A/D"),   # Accumulation/Distribution Line subplot
-            ("ema",       "EMA"),
-            ("avwap",     "AVWAP"), # Anchored VWAP -- cumulative from a user-picked date
-            ("vol",       "MAVOL"), # Volume subplot toggle
-            ("chandelier", "Chandelier"), # ATR trailing-stop suggestion, bottom-right corner label
         ]:
             cb = QCheckBox(label)
-            cb.setChecked(key in ("heatmap", "delta", "bos_choch", "cvd"))
+            cb.setChecked(key in _default_checked)
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
-            tb2.addWidget(cb)
-            if key == "ob":
-                self._ob_max_count = QSpinBox()
-                self._ob_max_count.setRange(1, 20)
-                self._ob_max_count.setValue(4)
-                self._ob_max_count.setFixedWidth(50)
-                self._ob_max_count.setEnabled(False)
-                self._ob_max_count.setToolTip("Max number of recent OBs to display")
-                self._ob_max_count.valueChanged.connect(self._trigger_fetch)
-                tb2.addWidget(self._ob_max_count)
-            if key == "avwap":
-                self._avwap_anchor_edit = QLineEdit()
-                self._avwap_anchor_edit.setPlaceholderText("YYYY-MM-DD")
-                self._avwap_anchor_edit.setFixedWidth(80)
-                self._avwap_anchor_edit.setToolTip(
-                    "Anchor date for the VWAP (blank = start of loaded chart). "
-                    "VWAP accumulates from the first bar on/after this date.\n"
-                    "Accepts YYYY-MM-DD, MM/DD/YYYY, YYYY/MM/DD, or MM-DD-YYYY -- "
-                    "an unrecognised date shows a red warning instead of silently "
-                    "using the whole chart.")
-                self._avwap_anchor_edit.returnPressed.connect(
-                    lambda: self._render(self._klines, self._ticks) if self._klines is not None else None)
-                tb2.addWidget(self._avwap_anchor_edit)
-            if key == "chandelier":
-                chandelier_settings_btn = QPushButton("⚙")
-                chandelier_settings_btn.setFixedWidth(28)
-                chandelier_settings_btn.setToolTip(
-                    "Chandelier exit parameters (ATR period, multiplier, direction)")
-                chandelier_settings_btn.clicked.connect(self._on_chandelier_settings)
-                tb2.addWidget(chandelier_settings_btn)
+            tb_smc.addWidget(cb)
             if key == "fvg":
                 self._fvg_min_pct = QDoubleSpinBox()
                 self._fvg_min_pct.setRange(0.05, 5.0)
@@ -1398,36 +1359,83 @@ class TradeViewerQt(QMainWindow):
                 self._fvg_min_pct.setEnabled(False)
                 self._fvg_min_pct.setToolTip("FVG minimum gap size (% of price)")
                 self._fvg_min_pct.valueChanged.connect(self._trigger_fetch)
-                tb2.addWidget(self._fvg_min_pct)
+                tb_smc.addWidget(self._fvg_min_pct)
+            if key == "ob":
+                self._ob_max_count = QSpinBox()
+                self._ob_max_count.setRange(1, 20)
+                self._ob_max_count.setValue(4)
+                self._ob_max_count.setFixedWidth(50)
+                self._ob_max_count.setEnabled(False)
+                self._ob_max_count.setToolTip("Max number of recent OBs to display")
+                self._ob_max_count.valueChanged.connect(self._trigger_fetch)
+                tb_smc.addWidget(self._ob_max_count)
 
-        tb2.addSeparator()
+        # ── Row 3: other indicators / overlays ──────────────────────────────
+        self.addToolBarBreak()
+        tb_ind = QToolBar("Indicators", self)
+        tb_ind.setMovable(False)
+        tb_ind.setFloatable(False)
+        self.addToolBar(tb_ind)
+        toolbar_rows.append(tb_ind)
 
-        # Session filters
-        tb2.addWidget(_lbl("Session:"))
+        tb_ind.addWidget(_lbl("Indicators:"))
         for key, label in [
-            ("regular", "Regular"), ("pre", "Pre"),
-            ("post", "Post"),       ("night", "Night"),
+            ("heatmap",   "Heatmap"),
+            ("delta",     "Δ Delta"),
+            ("kd_band",   "KD"),    # KD fast/slow midline ribbon on main chart
+            ("kd",        "KDV"),   # KDV = KD spread-width subplot
+            ("cvd",       "CVD"),   # Cumulative Volume Delta subplot
+            ("adi",       "A/D"),   # Accumulation/Distribution Line subplot
+            ("ema",       "EMA"),
+            ("avwap",     "AVWAP"), # Anchored VWAP -- cumulative from a user-picked date
+            ("vol",       "MAVOL"), # Volume subplot toggle
+            ("chandelier", "Chandelier"), # ATR trailing-stop suggestion, bottom-right corner label
         ]:
             cb = QCheckBox(label)
-            cb.setChecked(key == "regular")
-            cb.stateChanged.connect(self._on_session_toggle)
-            self._ind_checks[f"sess_{key}"] = cb
-            tb2.addWidget(cb)
+            cb.setChecked(key in _default_checked)
+            cb.stateChanged.connect(self._on_indicator_toggle)
+            self._ind_checks[key] = cb
+            tb_ind.addWidget(cb)
+            if key == "avwap":
+                self._avwap_anchor_edit = QLineEdit()
+                self._avwap_anchor_edit.setPlaceholderText("YYYY-MM-DD")
+                self._avwap_anchor_edit.setFixedWidth(80)
+                self._avwap_anchor_edit.setToolTip(
+                    "Anchor date for the VWAP (blank = start of the current trading\n"
+                    "day, 20:00 ET -> next 20:00 ET, same as CVD's reset boundary).\n"
+                    "VWAP accumulates from the first bar on/after this date.\n"
+                    "Accepts YYYY-MM-DD, MM/DD/YYYY, YYYY/MM/DD, or MM-DD-YYYY -- "
+                    "an unrecognised date shows a red warning instead of silently "
+                    "using the whole chart.")
+                self._avwap_anchor_edit.returnPressed.connect(
+                    lambda: self._render(self._klines, self._ticks) if self._klines is not None else None)
+                tb_ind.addWidget(self._avwap_anchor_edit)
+                self._avwap_sigma_spin = QSpinBox()
+                self._avwap_sigma_spin.setRange(0, 3)
+                self._avwap_sigma_spin.setValue(0)
+                self._avwap_sigma_spin.setFixedWidth(36)
+                self._avwap_sigma_spin.setToolTip(
+                    "Number of volume-weighted standard-deviation bands to draw\n"
+                    "around the AVWAP (0 = none). Each band k is AVWAP +-k*stddev,\n"
+                    "stddev computed the same way TradingView's VWAP bands are:\n"
+                    "cumulative volume-weighted variance of typical price from the\n"
+                    "anchor bar forward.\n"
+                    "Under a normal distribution: +-1sigma ~= 68.3%, +-2sigma ~= 95.4%,\n"
+                    "+-3sigma ~= 99.7% of observations fall inside that band --\n"
+                    "approximate, since price returns aren't perfectly normal.")
+                self._avwap_sigma_spin.valueChanged.connect(
+                    lambda: self._render(self._klines, self._ticks) if self._klines is not None else None)
+                tb_ind.addWidget(_lbl("sigma:"))
+                tb_ind.addWidget(self._avwap_sigma_spin)
+            if key == "chandelier":
+                chandelier_settings_btn = QPushButton("⚙")
+                chandelier_settings_btn.setFixedWidth(28)
+                chandelier_settings_btn.setToolTip(
+                    "Chandelier exit parameters (ATR period, multiplier, direction)")
+                chandelier_settings_btn.clicked.connect(self._on_chandelier_settings)
+                tb_ind.addWidget(chandelier_settings_btn)
 
-        tb2.addSeparator()
-
-        # Profile date range
-        tb2.addWidget(_lbl("Range:"))
-        self._range_group = QButtonGroup(self)
-        for val, label in [("1d", "1D"), ("3d", "3D"), ("7d", "1W")]:
-            rb = QRadioButton(label)
-            rb.setChecked(val == "1d")
-            rb.toggled.connect(self._on_range_changed)
-            self._ind_checks[f"range_{val}"] = rb
-            self._range_group.addButton(rb)
-            tb2.addWidget(rb)
-
-        tb2.addSeparator()
+        tb_ind.addSeparator()
 
         # Color scheme toggle
         cb_red_up = QCheckBox("Red Up")
@@ -1437,9 +1445,41 @@ class TradeViewerQt(QMainWindow):
             "Unchecked = green rises, red falls (Western convention)")
         cb_red_up.stateChanged.connect(self._on_indicator_toggle)
         self._ind_checks["red_up"] = cb_red_up
-        tb2.addWidget(cb_red_up)
+        tb_ind.addWidget(cb_red_up)
 
-        # ── Row 3: order flow controls ────────────────────────────────────────
+        # ── Row 4: session filters + profile date range ─────────────────────
+        self.addToolBarBreak()
+        tb_sess = QToolBar("Session", self)
+        tb_sess.setMovable(False)
+        tb_sess.setFloatable(False)
+        self.addToolBar(tb_sess)
+        toolbar_rows.append(tb_sess)
+
+        tb_sess.addWidget(_lbl("Session:"))
+        for key, label in [
+            ("regular", "Regular"), ("pre", "Pre"),
+            ("post", "Post"),       ("night", "Night"),
+        ]:
+            cb = QCheckBox(label)
+            cb.setChecked(key == "regular")
+            cb.stateChanged.connect(self._on_session_toggle)
+            self._ind_checks[f"sess_{key}"] = cb
+            tb_sess.addWidget(cb)
+
+        tb_sess.addSeparator()
+
+        # Profile date range
+        tb_sess.addWidget(_lbl("Range:"))
+        self._range_group = QButtonGroup(self)
+        for val, label in [("1d", "1D"), ("3d", "3D"), ("7d", "1W")]:
+            rb = QRadioButton(label)
+            rb.setChecked(val == "1d")
+            rb.toggled.connect(self._on_range_changed)
+            self._ind_checks[f"range_{val}"] = rb
+            self._range_group.addButton(rb)
+            tb_sess.addWidget(rb)
+
+        # ── Row 5: order flow controls ────────────────────────────────────────
         self.addToolBarBreak()
         tb3 = QToolBar("Order Flow", self)
         tb3.setMovable(False)
@@ -1538,7 +1578,7 @@ class TradeViewerQt(QMainWindow):
         self._scanner_signals_btn.clicked.connect(self._toggle_scanner_signals)
         tb3.addWidget(self._scanner_signals_btn)
 
-        # ── Row 4: trade review ───────────────────────────────────────────────
+        # ── Row 6: trade review ───────────────────────────────────────────────
         self.addToolBarBreak()
         tb3 = QToolBar("Trade Review", self)
         tb3.setMovable(False)
@@ -2694,7 +2734,10 @@ class TradeViewerQt(QMainWindow):
     def _draw_avwap(self, klines: pd.DataFrame) -> None:
         """Overlay an anchored VWAP: cumulative volume-weighted typical price
         starting from a user-specified date (self._avwap_anchor_edit), or
-        from the start of the loaded chart if left blank.
+        from the start of the current *trading* day if left blank (20:00 ET
+        -> next 20:00 ET, the same overnight-session boundary CVD resets on
+        -- see _trading_day() -- not the whole loaded chart and not the
+        calendar date, which would cut the anchor mid-overnight-session).
 
         An unparseable date is NOT silently treated as "start of chart" --
         that previously made a mistyped date (e.g. "7/1/2026" instead of the
@@ -2729,6 +2772,14 @@ class TradeViewerQt(QMainWindow):
             times = klines["time_key"].astype(str).values
             anchor_idx = int(np.searchsorted(times, anchor_dt.strftime("%Y-%m-%d"), side="left"))
             anchor_idx = max(0, min(anchor_idx, n - 1))
+        else:
+            cm = self._candle_mins
+            last_day = _trading_day(klines["time_key"].iloc[-1], cm)
+            if last_day is not None:
+                days    = klines["time_key"].map(lambda tk: _trading_day(tk, cm))
+                matches = np.where(days == last_day)[0]
+                if len(matches):
+                    anchor_idx = int(matches[0])
 
         sub     = klines.iloc[anchor_idx:]
         typical = (sub["high"] + sub["low"] + sub["close"]) / 3.0
@@ -2753,10 +2804,55 @@ class TradeViewerQt(QMainWindow):
 
         last_v = float(vwap[-1]) if not np.isnan(vwap[-1]) else float(vwap[np.isfinite(vwap)][-1])
         lbl = pg.TextItem(text=f"AVWAP {last_v:.2f}", color=_AVWAP_COL, anchor=(0.0, 0.5))
-        lbl.setFont(QFont("Monospace", 6))
+        lbl.setFont(QFont("Monospace", 8))
         lbl.setPos(n - 1, last_v)
         self._plot_c.addItem(lbl, ignoreBounds=True)
         self._avwap_items.append(lbl)
+
+        n_sigma = self._avwap_sigma_spin.value()
+        if n_sigma > 0:
+            self._draw_avwap_bands(x, typical.values, vol.values, cum_v.values, vwap, n_sigma)
+
+    _AVWAP_BAND_ALPHA = {1: 140, 2: 95, 3: 55}   # fainter for wider (less likely) bands
+
+    def _draw_avwap_bands(self, x: np.ndarray, typical: np.ndarray, vol: np.ndarray,
+                          cum_v: np.ndarray, vwap: np.ndarray, n_sigma: int) -> None:
+        """Volume-weighted standard-deviation bands around the AVWAP.
+
+        Same formula TradingView's VWAP indicator uses for its bands:
+        variance = cumsum(vol * (typical_price - running_vwap)^2) / cumsum(vol),
+        i.e. each bar's squared deviation from *that bar's own* running VWAP,
+        volume-weighted and accumulated from the same anchor point as the
+        VWAP itself -- not deviation from the final VWAP value.
+        """
+        dev2      = (typical - vwap) ** 2
+        variance  = (vol * dev2).cumsum() / cum_v
+        stddev    = np.sqrt(np.clip(np.nan_to_num(variance), 0, None))
+
+        for k in range(1, n_sigma + 1):
+            alpha = self._AVWAP_BAND_ALPHA.get(k, 40)
+            pen   = pg.mkPen(_qc(_AVWAP_COL, alpha), width=1, style=Qt.PenStyle.DashLine)
+            for sign, tag in ((1, "+"), (-1, "-")):
+                band = vwap + sign * k * stddev
+                curve = pg.PlotCurveItem(x=x, y=band, pen=pen, connect="finite")
+                self._plot_c.addItem(curve, ignoreBounds=True)
+                self._avwap_items.append(curve)
+                finite_idx = np.where(np.isfinite(band))[0]
+                if finite_idx.size == 0:
+                    continue
+                last_i = finite_idx[-1]
+                # Label text stays fully opaque (with a background fill for
+                # contrast against the candles) even though the band *line*
+                # fades out for wider/less-likely bands -- a faint line is a
+                # tasteful visual hierarchy, faint text is just unreadable.
+                lbl = pg.TextItem(
+                    text=f"{tag}{k}s {band[last_i]:.2f}", color=_AVWAP_COL,
+                    fill=pg.mkBrush(_qc(_BG_TIP, 180)), anchor=(0.0, 0.5),
+                )
+                lbl.setFont(QFont("Monospace", 8))
+                lbl.setPos(x[last_i], band[last_i])
+                self._plot_c.addItem(lbl, ignoreBounds=True)
+                self._avwap_items.append(lbl)
 
     def _clear_kd_items(self) -> None:
         for item in self._kd_items:
