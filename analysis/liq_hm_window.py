@@ -66,6 +66,15 @@ COL_SECS_DEF = 1     # seconds per column -- ORDER_BOOK is push-driven, not
 MAX_COLS_DEF = 240   # columns kept in memory  (4 min at 1 s/col -- raise via
                       # the "History" spinbox, range 60-1440, for more
                       # lookback at the cost of a wider/denser grid)
+_NEAR_TOUCH_MIN_LEVELS = 5    # always keep at least this many levels/side,
+                              # even if the very first gap looks large
+_NEAR_TOUCH_MAX_LEVELS = 60   # hard cap (a full L2 snapshot's per-side depth)
+_NEAR_TOUCH_MAD_MULT   = 8.0  # gap must exceed median + this many MADs to
+                              # count as an outlier -- generous on purpose,
+                              # this only needs to catch a level that's
+                              # dramatically farther out than its neighbours
+                              # (e.g. a stub quote $65 away), not flag normal
+                              # unevenness in real resting-depth spacing
 
 
 # ── data helpers ───────────────────────────────────────────────────────────────
@@ -315,6 +324,45 @@ def _single_rgba(grid: np.ndarray, hex_color: str,
     rgba[..., 3]         = np.clip((norm * 180).astype(np.uint8), 0, 180)
     rgba[norm < 0.02, 3] = 0
     return rgba
+
+
+def _near_touch_cutoff(
+    prices_from_touch: list[float],
+    min_keep: int = _NEAR_TOUCH_MIN_LEVELS,
+    max_keep: int = _NEAR_TOUCH_MAX_LEVELS,
+    mad_mult: float = _NEAR_TOUCH_MAD_MULT,
+) -> list[float]:
+    """Keep consecutive depth levels outward from the touch until a gap that's
+    a clear outlier relative to the typical inter-level spacing seen so far.
+
+    prices_from_touch: one side's levels, nearest-to-touch first (bids sorted
+    descending or asks sorted ascending). Returns a prefix of that list --
+    everything from the first outlier gap onward is dropped.
+
+    Adaptive alternative to a fixed level count: a tightly-clustered book
+    keeps more levels (more of the real depth is visible), a book with a
+    stub/block order sitting far from the touch cuts off right before it,
+    regardless of what position that happened to be at. Median + MAD (not
+    mean/stddev) because a single huge outlier gap would otherwise blow out
+    the very average it's being compared against.
+
+    O(n) on <=60 levels, called only when the price band is first set or
+    rebuilt (not on every tick) -- negligible cost either way.
+    """
+    n = len(prices_from_touch)
+    if n <= min_keep:
+        return prices_from_touch
+    gaps = np.abs(np.diff(prices_from_touch))
+    keep = min_keep
+    for i in range(min_keep - 1, len(gaps)):
+        history = gaps[:i + 1]
+        med = float(np.median(history))
+        mad = float(np.median(np.abs(history - med)))
+        threshold = med + mad_mult * mad if mad > 0 else max(med * 5.0, 0.05)
+        if gaps[i] > threshold:
+            break
+        keep = i + 2   # i+1 gaps examined so far -> i+2 prices included
+    return prices_from_touch[:min(keep, max_keep)]
 
 
 def _calc_col_mid(snap: list[dict]) -> float | None:
@@ -979,11 +1027,29 @@ class LiqHmWindow(QWidget):
             self._load_absorb_ticks()
 
     def _maybe_init_price_range(self, snap: list[dict]) -> None:
-        prices = [r["price"] for r in snap]
-        if not prices:
+        """Set/rebuild the visible price band from the levels *near the touch*.
+
+        A full L2 snapshot can carry up to 60 BID + 60 ASK levels ("120挡").
+        Using min/max over *all* of them lets one deep, far-from-touch resting
+        order (common on a volatile leveraged ETF) blow the window out to
+        cover its entire depth -- e.g. a stock trading at $145 with a lone
+        level down at $80 forces an $80-170 window, crushing all the actually
+        useful near-touch depth into a sliver a few pixels tall. This tool is
+        for watching near-touch depth move, not visualizing a single distant
+        block order, so the window is sized from each side's levels out to
+        the first outlier gap (_near_touch_cutoff) rather than a fixed count
+        -- a tightly-clustered book keeps more of its real depth visible, a
+        book with a stub order far from the touch cuts off right before it.
+        Anything past the cutoff just falls outside the bin range and isn't
+        painted (same as it always has been for out-of-range levels).
+        """
+        bids = sorted((r["price"] for r in snap if r["side"] == "BID"), reverse=True)
+        asks = sorted(r["price"] for r in snap if r["side"] == "ASK")
+        near_prices = _near_touch_cutoff(bids) + _near_touch_cutoff(asks)
+        if not near_prices:
             return
-        lo  = min(prices)
-        hi  = max(prices)
+        lo  = min(near_prices)
+        hi  = max(near_prices)
         mid = (lo + hi) / 2
         span = max(hi - lo, mid * 0.02)   # at least ±1% of mid price
         new_min = lo  - span * 0.5
@@ -1138,7 +1204,7 @@ class LiqHmWindow(QWidget):
         )
 
         if n <= 1:
-            self._plot_widget.setXRange(0, max_cols, padding=0)
+            self._plot_widget.setXRange(0, max_cols + self._right_margin_cols(), padding=0)
             self._plot_widget.setYRange(self._price_min, self._price_max, padding=0)
 
         # Mid-price path line
@@ -1655,12 +1721,26 @@ class LiqHmWindow(QWidget):
         if self._live and self._code:
             self.set_live(True)
 
+    def _right_margin_cols(self) -> float:
+        """Blank columns to leave to the right of the newest data.
+
+        Without this, the rolling buffer's default/reset view spans exactly
+        [0, max_cols] -- since the newest column is always painted at index
+        max_cols-1 once the buffer is full, "now" sits flush against the
+        right edge with nothing to visually mark it as "the current moment"
+        rather than just where the chart happens to stop. 5% of the buffer
+        width (min 5 columns) matches the main K-line chart's own "+3 bars"
+        breathing-room convention.
+        """
+        return max(5, round(self._max_cols_spin.value() * 0.05))
+
     def _reset_view(self) -> None:
         """Restore X/Y ranges to the full data bounds (undo any zoom/pan)."""
         n = len(self._col_ts)
         if n == 0 or self._bin_size == 0.0:
             return
-        self._plot_widget.setXRange(0, self._max_cols_spin.value(), padding=0)
+        self._plot_widget.setXRange(
+            0, self._max_cols_spin.value() + self._right_margin_cols(), padding=0)
         self._plot_widget.setYRange(self._price_min, self._price_max, padding=0)
 
     def _on_pin_toggled(self, checked: bool) -> None:
