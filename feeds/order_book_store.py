@@ -113,14 +113,20 @@ class OrderBookStore:
             "SELECT COUNT(*) FROM order_book_snapshots"
         ).fetchone()[0]
 
-    def prune(self, keep: int = 1000) -> int:
+    def prune(self, keep: int = 1000, codes: list[str] | None = None) -> int:
         """Delete old rows keeping only the most recent *keep* rows per code.
+
+        codes: restrict pruning to this subset (e.g. so a caller can run this
+        twice with different *keep* values per code group, mirroring
+        TickStore.prune_older_than's codes-list pattern). Defaults to every
+        code currently in the table.
 
         Returns total rows deleted.
         """
-        codes = [r[0] for r in self._con.execute(
-            "SELECT DISTINCT code FROM order_book_snapshots"
-        ).fetchall()]
+        if codes is None:
+            codes = [r[0] for r in self._con.execute(
+                "SELECT DISTINCT code FROM order_book_snapshots"
+            ).fetchall()]
         deleted = 0
         for code in codes:
             cur = self._con.execute(

@@ -934,6 +934,40 @@ class LiqHmWindow(QWidget):
             self._latest_snap, self._best_bid, self._best_ask, target
         )
 
+    def _column_tick_delta(self, col: int) -> float | None:
+        """Executed buy_vol - sell_vol from raw ticks belonging to column
+        `col` -- the actual traded delta for that period, projected onto the
+        heatmap's time axis under the cursor. Only depends on which column
+        (time) the cursor is over, not which price row.
+
+        Bucketed the *same way* detect_aggressor_bubbles() assigns ticks to
+        columns -- bisect against the actual recorded column timestamps
+        (col_ts[col] <= tick_ts < col_ts[col+1]), not an assumed fixed
+        Col(s)-second width, which can drift slightly from real column
+        spacing (timer jitter). Matching bucketing means hovering on/near a
+        bubble reads exactly that bubble's own delta.
+
+        Needs _absorb_ticks to be cached -- the same tick cache "Aggressor"
+        bubbles use -- so it returns None until Aggressor has been enabled
+        at least once this session (no extra background load is triggered
+        from mouse-move, which fires far too often for that).
+        """
+        if not self._absorb_ticks or not (0 <= col < len(self._col_ts)):
+            return None
+        col_start = self._col_ts[col]
+        col_end   = self._col_ts[col + 1] if col + 1 < len(self._col_ts) else None
+        ts_list   = [t["ts"] for t in self._absorb_ticks]
+        lo = bisect.bisect_left(ts_list, col_start)
+        hi = bisect.bisect_left(ts_list, col_end) if col_end is not None else len(ts_list)
+        buy = sell = 0.0
+        for tk in self._absorb_ticks[lo:hi]:
+            d = tk.get("direction", "NEUTRAL")
+            if d == "BUY":
+                buy += float(tk["volume"])
+            elif d == "SELL":
+                sell += float(tk["volume"])
+        return buy - sell
+
     def _on_mouse_move(self, pos) -> None:
         """Update local crosshair when cursor is inside the plot."""
         if not self._plot_widget.sceneBoundingRect().contains(pos):
@@ -944,12 +978,17 @@ class LiqHmWindow(QWidget):
 
         pt = self._plot_widget.getPlotItem().vb.mapSceneToView(pos)
         x, y = pt.x(), pt.y()
+        col = int(round(x))
 
-        # Horizontal line + price label (with depth-to-cursor annotation)
+        # Horizontal line + price label (executed tick delta, bucketed the
+        # same way as aggressor bubbles so it matches a bubble's own delta
+        # when hovering on/near it, + depth-to-cursor annotation)
         self._hline.setPos(y)
         self._hline.setVisible(True)
-        depth_str = self._depth_to_cursor(y)
-        lbl_text  = f"{y:.2f}  {depth_str}" if depth_str else f"{y:.2f}"
+        tick_delta  = self._column_tick_delta(col)
+        delta_str   = f"  Δ{tick_delta:+,.0f}" if tick_delta is not None else ""
+        depth_str   = self._depth_to_cursor(y)
+        lbl_text    = f"{y:.2f}{delta_str}  {depth_str}" if depth_str else f"{y:.2f}{delta_str}"
         self._price_lbl.setText(lbl_text)
         xlo, xhi = self._plot_widget.getPlotItem().vb.viewRange()[0]
         ylo, yhi = self._plot_widget.getPlotItem().vb.viewRange()[1]
@@ -959,7 +998,6 @@ class LiqHmWindow(QWidget):
         # Vertical line + time label (local mouse — independent of main chart sync)
         self._vline.setPos(x)
         self._vline.setVisible(True)
-        col = int(round(x))
         if 0 <= col < len(self._col_ts):
             ts_str = self._col_ts[col].strftime("%H:%M:%S")
         else:
@@ -1060,10 +1098,38 @@ class LiqHmWindow(QWidget):
             self._bin_size  = (new_max - new_min) / n_price
             self._update_legend()   # bin_size just became known -- show it
         else:
-            rng = self._price_max - self._price_min
-            out_lo = (self._price_min - lo) / rng
-            out_hi = (hi - self._price_max) / rng
-            if out_lo > 0.3 or out_hi > 0.3:
+            # Rebuild trigger threshold is a fraction of *price* (mid), not
+            # of the current window's own width. It used to be the latter
+            # (out_lo/out_hi as a fraction of price_max - price_min) --
+            # harmless back when the window always covered full 120-level
+            # depth (tens of dollars wide, so 30% of it was a large, rare
+            # move), but the near-touch-only window above is deliberately
+            # tight (a few dollars), so that same 30%-of-window math now
+            # trips on a ~1% price move -- reported as the heatmap
+            # constantly wiping and losing history on completely ordinary
+            # intraday movement. A window this tight for resolution and a
+            # trigger this sensitive for stability can't both be relative
+            # to the same (now-tiny) number.
+            out_lo = (self._price_min - lo) / mid
+            out_hi = (hi - self._price_max) / mid
+            # A sharp, fast move (e.g. an aggressive sweep consuming several
+            # levels at once) can push the touch itself completely outside
+            # the window in a single tick, before cumulative drift crosses
+            # the 5% threshold above -- the swept side then renders as
+            # "missing" only because it no longer has any bin to land in,
+            # not because the data is actually gone (reported: bid vanished
+            # right where a large sell aggressor hit, recovered once a
+            # reset happened to catch up). Force a rebuild immediately
+            # whenever the *current* best bid/ask itself is unrenderable,
+            # regardless of the 5% drift check, so a fast move never has to
+            # wait for the next unrelated rebuild to become visible again.
+            cur_best_bid = bids[0] if bids else None
+            cur_best_ask = asks[0] if asks else None
+            touch_outside = (
+                (cur_best_bid is not None and cur_best_bid < self._price_min) or
+                (cur_best_ask is not None and cur_best_ask > self._price_max)
+            )
+            if out_lo > 0.05 or out_hi > 0.05 or touch_outside:
                 self._price_min = new_min
                 self._price_max = new_max
                 self._bin_size  = (new_max - new_min) / n_price

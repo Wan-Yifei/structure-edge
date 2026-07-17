@@ -146,6 +146,80 @@ class TestQuery(unittest.TestCase):
         self.assertEqual(len(rows_date), len(rows_range))
 
 
+class TestPrune(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = _make_store(self._tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self._tmp.cleanup()
+
+    def _insert_n(self, code: str, n: int) -> None:
+        for i in range(n):
+            self.store.insert_snapshot(
+                code, T0 + timedelta(seconds=i), [(100.0, 100)], [(101.0, 50)]
+            )
+
+    def test_keeps_most_recent_rows_per_code(self):
+        self._insert_n(CODE, 10)   # 20 rows (2 levels/snapshot)
+        deleted = self.store.prune(keep=6)
+        self.assertEqual(deleted, 14)   # 20 - 6
+        self.assertEqual(self.store.row_count(CODE), 6)
+
+    def test_keeps_newest_not_oldest(self):
+        # 3 snapshots = 6 rows; keep=2 *rows* -> only the newest snapshot's
+        # 2 rows survive (T0+2s) -- T0 and T0+1s must both be gone.
+        self._insert_n(CODE, 3)
+        self.store.prune(keep=2)
+        rows = self.store.query_snapshots(CODE, T0, T0 + timedelta(seconds=2))
+        self.assertEqual(rows, [])   # T0 and T0+1s rows were pruned
+        rows = self.store.query_snapshots(CODE, T0 + timedelta(seconds=2),
+                                          T0 + timedelta(seconds=3))
+        self.assertEqual(len(rows), 2)   # only the newest snapshot remains
+
+    def test_under_keep_threshold_deletes_nothing(self):
+        self._insert_n(CODE, 3)
+        deleted = self.store.prune(keep=1000)
+        self.assertEqual(deleted, 0)
+        self.assertEqual(self.store.row_count(CODE), 6)
+
+    def test_codes_param_scopes_to_subset(self):
+        # Mirrors order_book_collector.py's per-code retention override: a
+        # single call must only touch the codes passed in, leaving others
+        # completely alone regardless of their own row count.
+        self._insert_n(CODE, 10)
+        self._insert_n("US.TSLA", 10)
+        deleted = self.store.prune(keep=2, codes=[CODE])
+        self.assertEqual(self.store.row_count(CODE), 2)
+        self.assertEqual(self.store.row_count("US.TSLA"), 20)   # untouched
+
+    def test_different_keep_per_code_via_two_calls(self):
+        # The actual pattern _watchdog uses: a low default keep for most
+        # codes, a higher override keep for specific ones (e.g. SOXL).
+        # keep is a *row* count, not a snapshot count.
+        self._insert_n(CODE, 10)
+        self._insert_n("US.SOXL", 10)
+        self.store.prune(keep=8, codes=["US.SOXL"])
+        self.store.prune(keep=2, codes=[CODE])
+        self.assertEqual(self.store.row_count("US.SOXL"), 8)
+        self.assertEqual(self.store.row_count(CODE), 2)
+
+    def test_no_codes_arg_defaults_to_all(self):
+        self._insert_n(CODE, 10)
+        self._insert_n("US.TSLA", 10)
+        self.store.prune(keep=2)
+        self.assertEqual(self.store.row_count(CODE), 2)
+        self.assertEqual(self.store.row_count("US.TSLA"), 2)
+
+    def test_empty_codes_list_deletes_nothing(self):
+        self._insert_n(CODE, 10)
+        deleted = self.store.prune(keep=1, codes=[])
+        self.assertEqual(deleted, 0)
+        self.assertEqual(self.store.row_count(CODE), 20)
+
+
 class TestAvailableDates(unittest.TestCase):
 
     def setUp(self):

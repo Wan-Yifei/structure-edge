@@ -58,6 +58,15 @@ def _parse_side(items) -> list[tuple[float, int]]:
 
 _MIN_WRITE_INTERVAL = 2.0  # seconds — minimum gap between DB writes per code
 
+# Row-count retention (see _watchdog's prune call) -- same "give this one
+# symbol more history" intent as tick_collector.py's _RETENTION_EXEMPT, but
+# order_book_snapshots is pruned by row count, not age, and a full L2
+# snapshot writes ~60-120 rows at once (one per depth level), so an
+# unbounded exemption (like ticks.db's) isn't appropriate here -- it would
+# grow without limit over a trading day. A higher keep count instead.
+_RETENTION_KEEP_DEFAULT = 1000
+_RETENTION_KEEP_OVERRIDE = {"US.SOXL": 5000}
+
 
 def _make_handler(store, state: dict):
     """Return an OrderBookHandlerBase subclass that writes snapshots to *store*.
@@ -198,9 +207,17 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
 
         if store is not None:
             try:
-                deleted = store.prune(keep=1000)
+                override_codes = [c for c in codes if c in _RETENTION_KEEP_OVERRIDE]
+                default_codes  = [c for c in codes if c not in _RETENTION_KEEP_OVERRIDE]
+                deleted = 0
+                for c in override_codes:
+                    deleted += store.prune(keep=_RETENTION_KEEP_OVERRIDE[c], codes=[c])
+                if default_codes:
+                    deleted += store.prune(keep=_RETENTION_KEEP_DEFAULT, codes=default_codes)
                 if deleted:
-                    log.info("Pruned %d old rows (keeping ≤1000 per code)", deleted)
+                    log.info("Pruned %d old rows (keeping <=%d per code, %s)",
+                             deleted, _RETENTION_KEEP_DEFAULT,
+                             ", ".join(f"{c}<={k}" for c, k in _RETENTION_KEEP_OVERRIDE.items()))
             except Exception as exc:
                 log.warning("Prune failed: %s", exc)
 

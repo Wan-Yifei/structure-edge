@@ -2832,10 +2832,10 @@ class TradeViewerQt(QMainWindow):
         for k in range(1, n_sigma + 1):
             alpha = self._AVWAP_BAND_ALPHA.get(k, 40)
             pen   = pg.mkPen(_qc(_AVWAP_COL, alpha), width=1, style=Qt.PenStyle.DashLine)
-            # Half-sigma reference line (k - 0.5) -- fainter, no label; purely
-            # a visual midpoint between this band and the one inside it.
-            half_alpha = max(alpha - 40, 25)
-            half_pen   = pg.mkPen(_qc(_AVWAP_COL, half_alpha), width=1, style=Qt.PenStyle.DashLine)
+            # Half-sigma reference line (k - 0.5) -- same opacity as the
+            # integer band it precedes, no label (label-free is the only
+            # thing that distinguishes it visually now).
+            half_pen = pg.mkPen(_qc(_AVWAP_COL, alpha), width=1, style=Qt.PenStyle.DashLine)
             for sign in (1, -1):
                 half_band  = vwap + sign * (k - 0.5) * stddev
                 half_curve = pg.PlotCurveItem(x=x, y=half_band, pen=half_pen, connect="finite")
