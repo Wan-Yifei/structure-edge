@@ -30,8 +30,6 @@ from PyQt6.QtWidgets import (
 )
 import pyqtgraph as pg
 
-from core.time_utils import candle_start
-
 # ── palette (matches trade_viewer_qt) ──────────────────────────────────────────
 _BG   = "#0d1117"
 _FG   = "#b0bec5"
@@ -1321,27 +1319,31 @@ class LiqHmWindow(QWidget):
 
     # ── iceberg / spoof detection and drawing ──────────────────────────────────
 
-    def _build_bucket_to_idx(self) -> tuple[dict, int]:
-        """Build candle_start → column_index mapping from col_ts.
+    def _build_bucket_to_idx(self) -> dict:
+        """Map each column's exact timestamp to its column index.
 
-        Returns (bucket_to_idx, cm) where cm is the effective candle duration.
-        Uses 1-minute buckets (col_secs < 60) or col_secs//60 minute buckets.
+        Detection functions place an event at the exact column it occurred
+        in. This used to go through candle_start(ts, cm) with cm floored to
+        1 minute -- fine when each column spanned tens of seconds, but at
+        Col(s)=1 a single minute covers 60 actual columns, so every event
+        detected anywhere within that minute got pinned to the *first* of
+        those 60 columns regardless of when within that minute it actually
+        happened. Two genuinely different moments (price having moved
+        substantially between them) would then be drawn at the same
+        x-position (reported: two imbalance markers, one at an ask price one
+        at a bid price, both appearing at the same column). _raw_snaps
+        entries are always tagged with the exact column timestamp they were
+        recorded under (see _push_column), so a direct dict lookup gives
+        exact per-column placement regardless of col_secs -- no coarsening.
         """
-        col_secs = self._col_secs_spin.value()
-        cm = max(1, col_secs // 60)
-        bucket_to_idx: dict[datetime, int] = {}
-        for i, ts in enumerate(self._col_ts):
-            bk = candle_start(ts, cm)
-            if bk not in bucket_to_idx:
-                bucket_to_idx[bk] = i
-        return bucket_to_idx, cm
+        return {ts: i for i, ts in enumerate(self._col_ts)}
 
     def _redraw_orderflow_markers(self) -> None:
         self._clear_overlay_items()
         if not self._raw_snaps or self._bin_size == 0.0:
             return
 
-        bucket_to_idx, cm = self._build_bucket_to_idx()
+        bucket_to_idx = self._build_bucket_to_idx()
         min_vol = self._min_vol_spin.value()
         n_price = self._n_price_spin.value()
 
@@ -1349,7 +1351,7 @@ class LiqHmWindow(QWidget):
             from analysis.orderflow_detect import detect_icebergs
             icebergs = detect_icebergs(
                 self._raw_snaps, bucket_to_idx, self._bin_size, self._price_min,
-                n_price, cm,
+                n_price,
                 min_refreshes=self._ice_min_ref_spin.value(),
                 vol_threshold=min_vol,
                 best_bid=self._best_bid,
@@ -1363,7 +1365,7 @@ class LiqHmWindow(QWidget):
             spoofs = detect_spoofs(
                 self._raw_snaps,
                 bucket_to_idx, self._bin_size, self._price_min,
-                n_price, cm,
+                n_price,
                 min_vol=float(min_vol),   # 0 → auto median of latest snapshot
                 max_duration_secs=self._spoof_dur_spin.value(),
             )
@@ -1374,7 +1376,7 @@ class LiqHmWindow(QWidget):
             simbs = detect_stacked_imbalance(
                 self._raw_snaps,
                 bucket_to_idx, self._bin_size, self._price_min,
-                n_price, cm,
+                n_price,
                 min_levels=self._simb_levels_spin.value(),
                 imbalance_ratio=self._simb_ratio_spin.value(),
                 min_vol=float(min_vol),

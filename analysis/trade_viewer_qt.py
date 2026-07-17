@@ -2832,6 +2832,16 @@ class TradeViewerQt(QMainWindow):
         for k in range(1, n_sigma + 1):
             alpha = self._AVWAP_BAND_ALPHA.get(k, 40)
             pen   = pg.mkPen(_qc(_AVWAP_COL, alpha), width=1, style=Qt.PenStyle.DashLine)
+            # Half-sigma reference line (k - 0.5) -- fainter, no label; purely
+            # a visual midpoint between this band and the one inside it.
+            half_alpha = max(alpha - 40, 25)
+            half_pen   = pg.mkPen(_qc(_AVWAP_COL, half_alpha), width=1, style=Qt.PenStyle.DashLine)
+            for sign in (1, -1):
+                half_band  = vwap + sign * (k - 0.5) * stddev
+                half_curve = pg.PlotCurveItem(x=x, y=half_band, pen=half_pen, connect="finite")
+                self._plot_c.addItem(half_curve, ignoreBounds=True)
+                self._avwap_items.append(half_curve)
+
             for sign, tag in ((1, "+"), (-1, "-")):
                 band = vwap + sign * k * stddev
                 curve = pg.PlotCurveItem(x=x, y=band, pen=pen, connect="finite")

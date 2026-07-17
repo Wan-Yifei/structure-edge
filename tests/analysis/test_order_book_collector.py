@@ -219,5 +219,96 @@ class TestMakeHandler(unittest.TestCase):
         self.assertEqual(args[2], [(100.0, 500), (99.5, 300)])   # bids positional arg
 
 
+# ── _make_handler partial-push merge (bid/ask carry-forward) ──────────────────
+
+class TestMakeHandlerPartialUpdateMerge(unittest.TestCase):
+    """ORDER_BOOK pushes can be partial: Qot_GetOrderBook.proto documents
+    svrRecvTimeBid/svrRecvTimeAsk as separate fields precisely because a push
+    can carry a fresh update for one side while the other is stale/unchanged.
+    Treating each push as a complete snapshot would make the untouched side
+    vanish from the stored "latest" row until the next push that happens to
+    include it -- these tests cover the merge-cache that keeps it carried
+    forward instead.
+    """
+
+    def setUp(self):
+        self._moomoo_mock = MagicMock()
+        self._moomoo_mock.RET_OK = 0
+
+        class FakeBase:
+            def on_recv_rsp(self, rsp_pb):
+                return 0, rsp_pb
+
+        self._moomoo_mock.OrderBookHandlerBase = FakeBase
+        self._patcher = patch.dict(sys.modules, {"moomoo": self._moomoo_mock})
+        self._patcher.start()
+        from analysis.order_book_collector import _make_handler
+        self._make_handler = _make_handler
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def _make_store_mock(self):
+        store = MagicMock()
+        store.insert_snapshot.return_value = 1
+        return store
+
+    def test_bid_only_push_carries_forward_last_known_asks(self):
+        store = self._make_store_mock()
+        state = {"last_update_time": None, "first_update_done": False, "session_count": 0}
+        HandlerClass = self._make_handler(store, state)
+        h = HandlerClass()
+
+        with patch("analysis.order_book_collector.time.time", side_effect=[100.0, 110.0]):
+            h.on_recv_rsp({"code": "US.SOXL",
+                          "Bid": [{"price": 100.0, "volume": 500}],
+                          "Ask": [{"price": 101.0, "volume": 300}]})
+            # Partial push: only Bid changed, Ask omitted (empty) this time.
+            h.on_recv_rsp({"code": "US.SOXL",
+                          "Bid": [{"price": 100.1, "volume": 600}],
+                          "Ask": []})
+
+        self.assertEqual(store.insert_snapshot.call_count, 2)
+        bids_arg, asks_arg = store.insert_snapshot.call_args_list[1][0][2:4]
+        self.assertEqual(bids_arg, [(100.1, 600)])
+        self.assertEqual(asks_arg, [(101.0, 300)])   # carried forward, not blanked
+
+    def test_ask_only_push_carries_forward_last_known_bids(self):
+        store = self._make_store_mock()
+        state = {"last_update_time": None, "first_update_done": False, "session_count": 0}
+        HandlerClass = self._make_handler(store, state)
+        h = HandlerClass()
+
+        with patch("analysis.order_book_collector.time.time", side_effect=[100.0, 110.0]):
+            h.on_recv_rsp({"code": "US.SOXL",
+                          "Bid": [{"price": 100.0, "volume": 500}],
+                          "Ask": [{"price": 101.0, "volume": 300}]})
+            h.on_recv_rsp({"code": "US.SOXL",
+                          "Bid": [],
+                          "Ask": [{"price": 101.2, "volume": 250}]})
+
+        bids_arg, asks_arg = store.insert_snapshot.call_args_list[1][0][2:4]
+        self.assertEqual(bids_arg, [(100.0, 500)])   # carried forward, not blanked
+        self.assertEqual(asks_arg, [(101.2, 250)])
+
+    def test_merge_cache_is_per_code(self):
+        store = self._make_store_mock()
+        state = {"last_update_time": None, "first_update_done": False, "session_count": 0}
+        HandlerClass = self._make_handler(store, state)
+        h = HandlerClass()
+
+        with patch("analysis.order_book_collector.time.time", side_effect=[100.0, 110.0]):
+            h.on_recv_rsp({"code": "US.SOXL",
+                          "Bid": [{"price": 100.0, "volume": 500}], "Ask": []})
+            # A different code's partial push must not pull in SOXL's cached bids.
+            h.on_recv_rsp({"code": "US.AAPL",
+                          "Bid": [], "Ask": [{"price": 200.0, "volume": 10}]})
+
+        self.assertEqual(store.insert_snapshot.call_count, 2)
+        aapl_bids, aapl_asks = store.insert_snapshot.call_args_list[1][0][2:4]
+        self.assertEqual(aapl_bids, [])   # not contaminated by SOXL's cached bids
+        self.assertEqual(aapl_asks, [(200.0, 10)])
+
+
 if __name__ == "__main__":
     unittest.main()

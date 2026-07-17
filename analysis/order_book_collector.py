@@ -68,10 +68,25 @@ def _make_handler(store, state: dict):
         session_count     int            — total rows inserted this session
     Writes are rate-limited to _MIN_WRITE_INTERVAL seconds per code to prevent
     WAL runaway growth on high-frequency ORDER_BOOK pushes.
+
+    ORDER_BOOK pushes can be *partial*: Qot_GetOrderBook.proto documents
+    svrRecvTimeBid/svrRecvTimeAsk as separate per-side fields precisely
+    because a given push can carry a fresh update for one side while the
+    other is stale/cached (its recv time reads zero) -- e.g. right after a
+    reconnect, or just because that side simply hasn't changed since the
+    last push. Treating each push as a complete two-sided snapshot means a
+    bid-only push overwrites the stored "latest" row and makes the ask side
+    vanish from every reader (the Liquidity Heatmap, depth-to-cursor, etc.)
+    until the next push that happens to include asks -- reported as the ask
+    (or bid) side going completely blank for stretches, then reappearing.
+    Cache the last non-empty list per side per code and always write the
+    merged, complete state instead of whatever this one push happened to
+    contain.
     """
     from moomoo import OrderBookHandlerBase, RET_OK
 
     last_write: dict[str, float] = {}  # code -> time.time() of last DB write
+    last_side:  dict[str, dict]  = {}  # code -> {"bids": [...], "asks": [...]}
 
     class _Handler(OrderBookHandlerBase):
         def on_recv_rsp(self, rsp_pb):
@@ -79,9 +94,15 @@ def _make_handler(store, state: dict):
             if ret != RET_OK or data is None:
                 return ret, data
 
-            code = data.get("code", "")
-            bids = _parse_side(data.get("Bid", []))
-            asks = _parse_side(data.get("Ask", []))
+            code  = data.get("code", "")
+            cache = last_side.setdefault(code, {"bids": [], "asks": []})
+            new_bids = _parse_side(data.get("Bid", []))
+            new_asks = _parse_side(data.get("Ask", []))
+            if new_bids:
+                cache["bids"] = new_bids
+            if new_asks:
+                cache["asks"] = new_asks
+            bids, asks = cache["bids"], cache["asks"]
             if not bids and not asks:
                 return ret, data
 

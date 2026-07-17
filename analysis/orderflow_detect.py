@@ -12,8 +12,6 @@ from datetime import datetime
 
 import numpy as np
 
-from core.time_utils import candle_start
-
 
 def detect_icebergs(
     snaps: list[dict],
@@ -21,7 +19,6 @@ def detect_icebergs(
     bin_size: float,
     price_min: float,
     N_PRICE: int,
-    cm: int,
     min_refreshes: int,
     vol_threshold: float,
     best_bid: float | None = None,
@@ -44,11 +41,10 @@ def detect_icebergs(
 
     Args:
         snaps:           Order book snapshots {ts, side, price, volume}.
-        bucket_to_idx:   bar-start datetime -> column index.
+        bucket_to_idx:   exact snapshot timestamp -> column index.
         bin_size:        Price bin width in dollars.
         price_min:       Bottom of the price range.
         N_PRICE:         Number of price bins.
-        cm:              Candle duration in minutes.
         min_refreshes:   Minimum refresh count to classify as iceberg.
         vol_threshold:   Minimum volume per snapshot to include.
         best_bid:        Current best bid price.
@@ -63,14 +59,25 @@ def detect_icebergs(
     """
     DROP_FRAC    = 0.25
     RECOVER_FRAC = 0.40
-    GAP_SECS     = col_secs * 1.5   # gap larger than this → level vanished
+    # Gap larger than this -> level vanished (segment resets). Floored at 5s:
+    # col_secs is purely the heatmap's display/column granularity (as low as
+    # 1s), but genuine order-book snapshots never arrive faster than the
+    # collector's own write throttle (order_book_collector.py's
+    # _MIN_WRITE_INTERVAL = 2.0s per code) -- if GAP_SECS were allowed to
+    # drop below that floor (col_secs=1 -> 1.5s), *every* consecutive
+    # genuine snapshot pair would exceed it, resetting the segment on every
+    # single push and permanently blocking detection (every segment stays
+    # length 1, never reaching min_refreshes*2+1). Reported as "iceberg
+    # detection stopped working entirely" after Col(s)'s default dropped
+    # from 30 to 1.
+    GAP_SECS     = max(col_secs * 1.5, 5.0)
 
     # Group by (side, price_bin) — sides must not be mixed
     groups: dict[tuple, list] = defaultdict(list)
     for s in snaps:
         if s["volume"] < vol_threshold:
             continue
-        bar_idx = bucket_to_idx.get(candle_start(s["ts"], cm), -1)
+        bar_idx = bucket_to_idx.get(s["ts"], -1)
         if bar_idx < 0:
             continue
         p_bin = int((s["price"] - price_min) / bin_size)
@@ -144,7 +151,6 @@ def detect_spoofs(
     bin_size: float,
     price_min: float,
     N_PRICE: int,
-    cm: int,
     min_vol: float,
     max_duration_secs: float,
 ) -> list[tuple]:
@@ -159,11 +165,10 @@ def detect_spoofs(
 
     Args:
         ob_data:           Order book snapshots {ts, side, price, volume}.
-        bucket_to_idx:     Bar-start datetime -> column index.
+        bucket_to_idx:     exact snapshot timestamp -> column index.
         bin_size:          Price bin width.
         price_min:         Bottom of price range.
         N_PRICE:           Number of price bins.
-        cm:                Candle duration in minutes.
         min_vol:           Min volume to be considered a large order.
                            Pass 0 to auto-set to median of the latest snapshot.
         max_duration_secs: Max lifetime (seconds) of a genuine order; faster
@@ -221,7 +226,7 @@ def detect_spoofs(
     # Group by (side, price_bin)
     groups: dict[tuple, list] = defaultdict(list)
     for s in ob_data:
-        bar_idx = bucket_to_idx.get(candle_start(s["ts"], cm), -1)
+        bar_idx = bucket_to_idx.get(s["ts"], -1)
         if bar_idx < 0:
             continue
         p_bin = int((s["price"] - price_min) / bin_size)
@@ -385,7 +390,6 @@ def detect_stacked_imbalance(
     bin_size: float,
     price_min: float,
     N_PRICE: int,
-    cm: int,
     min_levels: int = 3,
     imbalance_ratio: float = 3.0,
     min_vol: float = 0.0,
@@ -411,11 +415,10 @@ def detect_stacked_imbalance(
 
     Args:
         snaps:            Order book snapshots {ts, side, price, volume}.
-        bucket_to_idx:    Bar-start datetime -> column index.
+        bucket_to_idx:    exact snapshot timestamp -> column index.
         bin_size:         Price bin width.
         price_min:        Bottom of price range.
         N_PRICE:          Number of price bins.
-        cm:               Candle duration in minutes.
         min_levels:       Minimum consecutive imbalanced depth levels.
         imbalance_ratio:  bid/ask (or ask/bid) threshold per level.
         min_vol:          Levels below this volume are treated as absent (0).
@@ -440,7 +443,7 @@ def detect_stacked_imbalance(
 
     results = []
     for ts, sides in by_ts.items():
-        bar_idx = bucket_to_idx.get(candle_start(ts, cm), -1)
+        bar_idx = bucket_to_idx.get(ts, -1)
         if bar_idx < 0:
             continue
 

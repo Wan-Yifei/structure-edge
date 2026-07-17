@@ -14,13 +14,11 @@ from analysis.orderflow_detect import (
     detect_stacked_imbalance,
     detect_absorption_bubbles,
 )
-from core.time_utils import candle_start
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-CM = 1   # 1-minute candles throughout
 T0 = datetime(2026, 5, 15, 9, 30, 0)   # base timestamp
 
 PRICE_MIN = 100.0
@@ -28,9 +26,21 @@ BIN_SIZE  = 1.0
 N_PRICE   = 50
 
 
-def _bucket_to_idx(n_bars: int) -> dict:
-    """Build a bucket_to_idx for n_bars consecutive 1-minute bars from T0."""
-    return {candle_start(T0 + timedelta(minutes=i), CM): i for i in range(n_bars)}
+def _bucket_to_idx(snaps=None, known_ts=None) -> dict:
+    """Map exact timestamps to sequential column indices in chronological
+    order -- mirrors production's exact per-column indexing
+    (_build_bucket_to_idx in liq_hm_window.py maps self._col_ts 1:1, and
+    _raw_snaps entries always carry an exact column timestamp; see that
+    function's docstring for why this replaced the old candle_start(cm)
+    coarse-minute bucketing).
+
+    By default derives the known timestamp set directly from the given
+    snaps (every timestamp used by the test is "known"). Pass known_ts
+    explicitly to simulate a different/narrower set of known columns, e.g.
+    to test a timestamp that falls outside what's currently buffered.
+    """
+    uniq = sorted(known_ts) if known_ts is not None else sorted({s["ts"] for s in (snaps or [])})
+    return {ts: i for i, ts in enumerate(uniq)}
 
 
 def _snap(ts: datetime, price: float, volume: int, side: str = "ASK") -> dict:
@@ -48,17 +58,16 @@ def _tick(ts: datetime, price: float, volume: int,
 
 class TestDetectIcebergs(unittest.TestCase):
 
-    def _run(self, snaps, min_refreshes=2, vol_threshold=0.0, n_bars=20,
-             col_secs=300):
+    def _run(self, snaps, min_refreshes=2, vol_threshold=0.0, col_secs=300,
+             known_ts=None):
         # col_secs=300 keeps gap threshold large so tests with sparse snapshots
         # do not get falsely split into separate segments.
         return detect_icebergs(
             snaps,
-            bucket_to_idx=_bucket_to_idx(n_bars),
+            bucket_to_idx=_bucket_to_idx(snaps, known_ts),
             bin_size=BIN_SIZE,
             price_min=PRICE_MIN,
             N_PRICE=N_PRICE,
-            cm=CM,
             min_refreshes=min_refreshes,
             vol_threshold=vol_threshold,
             col_secs=col_secs,
@@ -73,7 +82,10 @@ class TestDetectIcebergs(unittest.TestCase):
         self.assertEqual(self._run(snaps), [])
 
     def test_single_refresh_detected(self):
-        # 1000 → 50 → 900 → 50 → 900: two refreshes at bar 0
+        # 1000 → 50 → 900 → 50 → 900: two refreshes.
+        # 5 distinct timestamps -> exact per-column indices 0..4; the
+        # refreshes are detected at entries[2] (900 recovering) and
+        # entries[4] (950 recovering), so first/last_bar are 2 and 4.
         snaps = [
             _snap(T0 + timedelta(seconds=0),  110.0, 1000),
             _snap(T0 + timedelta(seconds=5),  110.0,   50),
@@ -84,8 +96,8 @@ class TestDetectIcebergs(unittest.TestCase):
         result = self._run(snaps, min_refreshes=2)
         self.assertEqual(len(result), 1)
         first_bar, last_bar, price, n_ref = result[0]
-        self.assertEqual(first_bar, 0)
-        self.assertEqual(last_bar, 0)
+        self.assertEqual(first_bar, 2)
+        self.assertEqual(last_bar, 4)
         self.assertEqual(n_ref, 2)
         self.assertAlmostEqual(price, 110.5, places=1)
 
@@ -113,19 +125,22 @@ class TestDetectIcebergs(unittest.TestCase):
         self.assertEqual(len(result), 1)
 
     def test_span_across_bars(self):
-        # Refreshes in bar 0 and bar 2
+        # Refreshes span a large time gap (10s -> 120s) but stay under
+        # GAP_SECS (col_secs=300 -> 450s), so it's still one segment. With
+        # 5 distinct timestamps, exact per-column indices are 0..4; the
+        # refresh recoveries land at entries[2] (10s) and entries[4] (125s).
         snaps = [
-            _snap(T0 + timedelta(seconds=0),   110.0, 1000),   # bar 0
+            _snap(T0 + timedelta(seconds=0),   110.0, 1000),
             _snap(T0 + timedelta(seconds=5),   110.0,   40),
-            _snap(T0 + timedelta(seconds=10),  110.0,  900),   # refresh 1 → bar 0
-            _snap(T0 + timedelta(minutes=2),   110.0,   20),   # bar 2
-            _snap(T0 + timedelta(minutes=2, seconds=5), 110.0, 950),  # refresh 2 → bar 2
+            _snap(T0 + timedelta(seconds=10),  110.0,  900),   # refresh 1
+            _snap(T0 + timedelta(minutes=2),   110.0,   20),
+            _snap(T0 + timedelta(minutes=2, seconds=5), 110.0, 950),  # refresh 2
         ]
         result = self._run(snaps, min_refreshes=2)
         self.assertEqual(len(result), 1)
         first_bar, last_bar, _, _ = result[0]
-        self.assertEqual(first_bar, 0)
-        self.assertEqual(last_bar, 2)
+        self.assertEqual(first_bar, 2)
+        self.assertEqual(last_bar, 4)
 
     def test_two_independent_price_levels(self):
         # Refreshes at 110 and 115 → two independent icebergs
@@ -162,6 +177,31 @@ class TestDetectIcebergs(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0][3], 4)
 
+    def test_detected_at_col_secs_1_with_realistic_snapshot_spacing(self):
+        """Regression test: Col(s)=1 (the Liquidity Heatmap's current default)
+        must not silently disable iceberg detection entirely.
+
+        GAP_SECS = col_secs * 1.5 used to have no floor, so at col_secs=1 it
+        was 1.5s -- shorter than order_book_collector.py's own
+        _MIN_WRITE_INTERVAL=2.0s write throttle. Since genuine snapshots
+        never arrive faster than that throttle, every consecutive pair would
+        exceed the (too-tight) gap threshold, splitting every single
+        snapshot into its own length-1 segment and permanently blocking
+        detection. Snapshots here are spaced exactly 2.2s apart -- realistic
+        for the collector's throttle, and would have failed detection
+        entirely under the old unfloored formula.
+        """
+        snaps = [
+            _snap(T0 + timedelta(seconds=0.0),  110.0, 1000),
+            _snap(T0 + timedelta(seconds=2.2),  110.0,   50),
+            _snap(T0 + timedelta(seconds=4.4),  110.0,  900),
+            _snap(T0 + timedelta(seconds=6.6),  110.0,   30),
+            _snap(T0 + timedelta(seconds=8.8),  110.0,  950),
+        ]
+        result = self._run(snaps, min_refreshes=2, col_secs=1)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][3], 2)   # 2 refreshes, one contiguous segment
+
 
 # ---------------------------------------------------------------------------
 # detect_spoofs
@@ -169,14 +209,13 @@ class TestDetectIcebergs(unittest.TestCase):
 
 class TestDetectSpoofs(unittest.TestCase):
 
-    def _run(self, ob_data, min_vol=100.0, max_duration_secs=30.0, n_bars=20):
+    def _run(self, ob_data, min_vol=100.0, max_duration_secs=30.0, known_ts=None):
         return detect_spoofs(
             ob_data,
-            bucket_to_idx=_bucket_to_idx(n_bars),
+            bucket_to_idx=_bucket_to_idx(ob_data, known_ts),
             bin_size=BIN_SIZE,
             price_min=PRICE_MIN,
             N_PRICE=N_PRICE,
-            cm=CM,
             min_vol=min_vol,
             max_duration_secs=max_duration_secs,
         )
@@ -185,7 +224,8 @@ class TestDetectSpoofs(unittest.TestCase):
         self.assertEqual(self._run([]), [])
 
     def test_clean_spoof_detected(self):
-        # Large ASK appears at t=0, vanishes at t=10s; spread stays below level → spoof
+        # Large ASK appears at t=0, vanishes at t=10s; spread stays below level → spoof.
+        # 3 distinct timestamps -> exact per-column indices 0(0s),1(10s),2(20s).
         ob = [
             _snap(T0,                          110.0, 5000, "ASK"),
             _snap(T0 + timedelta(seconds=10),  110.0,   50, "ASK"),
@@ -196,7 +236,7 @@ class TestDetectSpoofs(unittest.TestCase):
         appear_bar, disappear_bar, price, side = result[0]
         self.assertEqual(side, "ASK")
         self.assertEqual(appear_bar, 0)
-        self.assertEqual(disappear_bar, 0)
+        self.assertEqual(disappear_bar, 1)
 
     def test_bid_spoof_side_correct(self):
         ob = [
@@ -482,14 +522,13 @@ class TestDetectAbsorption(unittest.TestCase):
 class TestDetectStackedImbalance(unittest.TestCase):
 
     def _run(self, snaps, min_levels=3, imbalance_ratio=3.0,
-             min_vol=0.0, max_depth=10, n_bars=20):
+             min_vol=0.0, max_depth=10, known_ts=None):
         return detect_stacked_imbalance(
             snaps,
-            bucket_to_idx=_bucket_to_idx(n_bars),
+            bucket_to_idx=_bucket_to_idx(snaps, known_ts),
             bin_size=BIN_SIZE,
             price_min=PRICE_MIN,
             N_PRICE=N_PRICE,
-            cm=CM,
             min_levels=min_levels,
             imbalance_ratio=imbalance_ratio,
             min_vol=min_vol,
@@ -514,12 +553,13 @@ class TestDetectStackedImbalance(unittest.TestCase):
         self.assertEqual(self._run(snaps, imbalance_ratio=3.0), [])
 
     def test_unknown_bar_idx_skipped(self):
-        ts = T0 + timedelta(hours=2)   # outside the 20-bar window
+        # ts is not among the known column timestamps -> bucket lookup misses
+        ts = T0 + timedelta(hours=2)
         snaps = self._ob(ts, [
             ("BID", 115.0, 600), ("BID", 114.0, 500), ("BID", 113.0, 400),
             ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
         ])
-        self.assertEqual(self._run(snaps), [])
+        self.assertEqual(self._run(snaps, known_ts=[T0]), [])
 
     # ── bullish detection ─────────────────────────────────────────────────────
 
@@ -639,12 +679,15 @@ class TestDetectStackedImbalance(unittest.TestCase):
     # ── bar_idx assignment ────────────────────────────────────────────────────
 
     def test_bar_idx_assigned_from_timestamp(self):
+        # Explicit known_ts simulating 5 known columns (T0..T0+4min); the
+        # snapshot's timestamp is the 4th of those (index 3).
+        known_ts = [T0 + timedelta(minutes=i) for i in range(5)]
         ts = T0 + timedelta(minutes=3)
         snaps = self._ob(ts, [
             ("BID", 115.0, 600), ("BID", 114.0, 500), ("BID", 113.0, 400),
             ("ASK", 116.0, 100), ("ASK", 117.0,  80), ("ASK", 118.0,  60),
         ])
-        self.assertEqual(self._run(snaps)[0][0], 3)
+        self.assertEqual(self._run(snaps, known_ts=known_ts)[0][0], 3)
 
     # ── multiple snapshots ────────────────────────────────────────────────────
 
