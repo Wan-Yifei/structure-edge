@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>凯利仓位计算器</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f5f4f0;
+    --surface: #ffffff;
+    --surface-2: #f9f8f5;
+    --border: rgba(11,11,11,0.10);
+    --border-strong: rgba(11,11,11,0.18);
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --text-muted: #898781;
+    --accent: #2a78d6;
+    --accent-bg: #e6f1fb;
+    --accent-text: #185fa5;
+    --success: #3b6d11;
+    --success-bg: #eaf3de;
+    --warning: #854f0b;
+    --warning-bg: #faeeda;
+    --danger: #a32d2d;
+    --danger-bg: #fcebeb;
+    --radius: 8px;
+    --grid: #e1e0d9;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413;
+      --surface: #1e1e1c;
+      --surface-2: #252523;
+      --border: rgba(255,255,255,0.10);
+      --border-strong: rgba(255,255,255,0.18);
+      --text: #f0efe8;
+      --text-2: #c3c2b7;
+      --text-muted: #898781;
+      --accent: #3987e5;
+      --accent-bg: #0c2a4a;
+      --accent-text: #85b7eb;
+      --success: #c0dd97;
+      --success-bg: #173404;
+      --warning: #fac775;
+      --warning-bg: #412402;
+      --danger: #f09595;
+      --danger-bg: #501313;
+      --grid: #2c2c2a;
+    }
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  .app { max-width: 860px; margin: 0 auto; padding: 28px 20px 40px; }
+
+  .header { margin-bottom: 24px; }
+  .header h1 { font-size: 20px; font-weight: 500; margin-bottom: 4px; }
+  .header p { font-size: 13px; color: var(--text-muted); }
+
+  .metrics-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .metric {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+  .metric-label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .metric-value { font-size: 24px; font-weight: 500; }
+  .metric-value.blue { color: var(--accent); }
+  .metric-value.green { color: var(--success); }
+  .metric-value.sub { font-size: 20px; }
+
+  .layout { display: grid; grid-template-columns: 260px 1fr; gap: 16px; }
+
+  .panel {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .panel-title {
+    font-size: 11px; font-weight: 500; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 14px;
+  }
+
+  .control { margin-bottom: 16px; }
+  .control-label {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 13px; color: var(--text-2); margin-bottom: 6px;
+  }
+  .control-label strong { color: var(--text); font-weight: 500; }
+  .control-hint { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+
+  input[type=range] {
+    width: 100%; height: 4px; appearance: none; -webkit-appearance: none;
+    background: var(--border-strong); border-radius: 2px; outline: none; cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--accent); cursor: pointer;
+    box-shadow: 0 0 0 2px var(--surface);
+  }
+
+  .divider { border: none; border-top: 0.5px solid var(--border); margin: 14px 0; }
+
+  textarea {
+    width: 100%; background: var(--surface-2); border: 0.5px solid var(--border-strong);
+    border-radius: var(--radius); padding: 10px 12px; font-size: 13px;
+    font-family: "SF Mono", "Cascadia Code", monospace; color: var(--text);
+    resize: vertical; min-height: 200px; outline: none; line-height: 1.7;
+  }
+  textarea:focus { border-color: var(--accent); }
+  textarea::placeholder { color: var(--text-muted); }
+
+  .btn-row { display: flex; gap: 8px; margin-top: 10px; }
+  button {
+    padding: 7px 14px; border-radius: var(--radius); border: 0.5px solid var(--border-strong);
+    background: transparent; color: var(--text); font-size: 13px; cursor: pointer;
+    font-family: inherit; transition: background 0.1s;
+  }
+  button:hover { background: var(--surface-2); }
+  button.primary {
+    background: var(--accent); color: #fff; border-color: transparent; font-weight: 500;
+  }
+  button.primary:hover { opacity: 0.88; }
+  button.ghost { border-color: var(--border); color: var(--text-2); }
+
+  .charts { display: flex; flex-direction: column; gap: 14px; }
+  .chart-card {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+  }
+  .chart-card-title {
+    font-size: 11px; font-weight: 500; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;
+  }
+  .legend { display: flex; gap: 14px; margin-bottom: 8px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2); }
+  .legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+  .legend-dash { width: 14px; height: 2px; flex-shrink: 0; background: transparent;
+    border-top: 2px dashed var(--text-muted); }
+
+  .chart-wrap { position: relative; width: 100%; }
+
+  .kelly-bar-section { margin-top: 10px; }
+  .bar-track {
+    height: 20px; background: var(--surface-2); border-radius: 4px;
+    overflow: hidden; border: 0.5px solid var(--border); margin-bottom: 6px;
+  }
+  .bar-fill {
+    height: 100%; border-radius: 4px; transition: width 0.4s ease;
+    background: var(--accent);
+  }
+  .bar-labels {
+    display: flex; justify-content: space-between;
+    font-size: 11px; color: var(--text-muted);
+  }
+
+  .result-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .result-table td { padding: 6px 0; }
+  .result-table td:last-child { text-align: right; font-weight: 500; }
+  .result-table tr + tr td { border-top: 0.5px solid var(--border); }
+
+  .badge {
+    display: inline-block; font-size: 11px; padding: 2px 7px;
+    border-radius: 4px; font-weight: 500;
+  }
+  .badge.green { background: var(--success-bg); color: var(--success); }
+  .badge.blue { background: var(--accent-bg); color: var(--accent-text); }
+  .badge.warn { background: var(--warning-bg); color: var(--warning); }
+  .badge.red { background: var(--danger-bg); color: var(--danger); }
+
+  .empty-state {
+    text-align: center; padding: 40px 20px;
+    color: var(--text-muted); font-size: 13px;
+  }
+
+  .history-row {
+    display: flex; gap: 6px; align-items: center;
+    font-size: 12px; color: var(--text-muted);
+    margin-top: 8px; flex-wrap: wrap;
+  }
+  .history-tag {
+    background: var(--surface-2); border: 0.5px solid var(--border);
+    border-radius: 4px; padding: 2px 8px; cursor: pointer; color: var(--text-2);
+  }
+  .history-tag:hover { border-color: var(--accent); color: var(--accent); }
+
+  @media (max-width: 680px) {
+    .layout { grid-template-columns: 1fr; }
+    .metrics-row { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <h1>凯利仓位计算器</h1>
+    <p>基于每日胜率和盈亏比的 EWMA 时间加权（越近期权重越高），输出凯利公式仓位建议</p>
+  </div>
+
+  <div class="metrics-row">
+    <div class="metric">
+      <div class="metric-label">EWMA 胜率</div>
+      <div class="metric-value blue" id="m-wr">—</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">全凯利</div>
+      <div class="metric-value" id="m-kelly">—</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">半凯利（推荐）</div>
+      <div class="metric-value green" id="m-half">—</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">有效样本天数</div>
+      <div class="metric-value sub" id="m-days">0 天</div>
+    </div>
+  </div>
+
+  <div class="layout">
+    <div>
+      <div class="panel" style="margin-bottom:14px;">
+        <div class="panel-title">参数设置</div>
+
+        <div class="control">
+          <div class="control-label">衰减因子 λ <strong id="lbl-lambda">0.05</strong></div>
+          <input type="range" id="sl-lambda" min="0.01" max="0.30" step="0.01" value="0.05">
+          <div class="control-hint">越大 → 越重视近期 | 推荐 0.03–0.10</div>
+        </div>
+
+        <div class="control">
+          <div class="control-label">盈亏比 b <strong id="lbl-b">2.0</strong></div>
+          <input type="range" id="sl-b" min="0.5" max="6.0" step="0.1" value="2.0">
+          <div class="control-hint" id="hint-b">平均盈利 ÷ 平均亏损 · 从CSV加载后自动按日期加权计算，仍可手动微调</div>
+        </div>
+
+        <div class="control">
+          <div class="control-label">分数凯利系数 <strong id="lbl-frac">0.50</strong></div>
+          <input type="range" id="sl-frac" min="0.25" max="1.00" step="0.05" value="0.50">
+          <div class="control-hint">建议 0.5（半凯利）保守风控</div>
+        </div>
+
+        <hr class="divider">
+
+        <div style="font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">初始资金</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+          <span style="font-size:14px;color:var(--text-2)">¥</span>
+          <input type="number" id="capital-input" min="0" step="1000" placeholder="100000"
+            style="flex:1;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:14px;color:var(--text);outline:none;font-family:inherit;"
+            oninput="calculate()" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border-strong)'">
+        </div>
+        <div class="control-hint">输入金额后显示每档实际投入</div>
+
+        <hr class="divider">
+
+        <div style="font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">每日风控</div>
+        <div class="control" style="margin-bottom:0;">
+          <div class="control-label">每日最大亏损比例 <strong id="lbl-maxloss">2.0%</strong></div>
+          <input type="range" id="sl-maxloss" min="0.5" max="10" step="0.5" value="2">
+          <div class="control-hint">按初始资金的百分比计算当日最大允许亏损额度</div>
+        </div>
+        <div style="margin-top:10px;font-size:13px;display:flex;justify-content:space-between;align-items:center;">
+          <span style="color:var(--text-2)">每日最大亏损额度</span>
+          <strong id="max-loss-amount" style="color:var(--danger)">—</strong>
+        </div>
+
+        <hr class="divider">
+
+        <div style="font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">凯利仓位参考</div>
+        <table class="result-table" id="result-table">
+          <tr><td style="color:var(--text-muted)">全凯利</td><td>—</td></tr>
+          <tr><td style="color:var(--text-muted)">¾ 凯利</td><td>—</td></tr>
+          <tr><td style="color:var(--text-muted)">½ 凯利</td><td>—</td></tr>
+          <tr><td style="color:var(--text-muted)">¼ 凯利</td><td>—</td></tr>
+        </table>
+
+        <hr class="divider">
+
+        <div style="font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">仓位评级</div>
+        <div id="rating-badge"><span class="badge blue">输入数据后显示</span></div>
+
+        <hr class="divider">
+
+        <div style="font-size:11px;font-weight:500;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;">预设标的可用股数</div>
+        <div class="control">
+          <div class="control-label"><span>SOXL 当前价</span></div>
+          <input type="number" id="price-SOXL" min="0" step="0.01" placeholder="例如 45.20"
+            oninput="calculate()"
+            style="width:100%;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:13px;color:var(--text);outline:none;font-family:inherit;">
+          <div class="control-hint" id="shares-SOXL">输入当前价后计算可用股数</div>
+        </div>
+        <div class="control" style="margin-bottom:0;">
+          <div class="control-label"><span>SOXS 当前价</span></div>
+          <input type="number" id="price-SOXS" min="0" step="0.01" placeholder="例如 12.30"
+            oninput="calculate()"
+            style="width:100%;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:13px;color:var(--text);outline:none;font-family:inherit;">
+          <div class="control-hint" id="shares-SOXS">输入当前价后计算可用股数</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">每日胜率输入</div>
+        <textarea id="rate-input" placeholder="每行一个胜率，0–1 之间&#10;例如：&#10;0.55&#10;0.62&#10;0.48&#10;0.60&#10;..."></textarea>
+        <div class="btn-row">
+          <button class="primary" onclick="calculate()">计算</button>
+          <button class="ghost" onclick="pickCSVFile()">从CSV加载</button>
+          <button class="ghost" onclick="loadDemo()">示例数据</button>
+          <button class="ghost" onclick="clearAll()">清空</button>
+          <input type="file" id="csv-file" accept=".csv" style="display:none" onchange="handleCSVFile(this.files[0])">
+        </div>
+        <div class="control-hint" id="csv-status"></div>
+        <div class="history-row" id="history-row" style="display:none;">
+          <span>历史：</span>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:14px;">
+        <div class="panel-title">录入 / 修改当日数据</div>
+        <div class="control">
+          <div class="control-label"><span>日期</span></div>
+          <input type="date" id="entry-date"
+            style="width:100%;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:13px;color:var(--text);outline:none;font-family:inherit;">
+        </div>
+        <div class="control">
+          <div class="control-label"><span>胜率（0–1）</span></div>
+          <input type="number" id="entry-winrate" min="0" max="1" step="0.01" placeholder="例如 0.65"
+            style="width:100%;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:13px;color:var(--text);outline:none;font-family:inherit;">
+        </div>
+        <div class="control">
+          <div class="control-label"><span>当日盈亏 %</span></div>
+          <input type="number" id="entry-pnl" step="0.01" placeholder="例如 1.38 或 -0.49"
+            style="width:100%;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:13px;color:var(--text);outline:none;font-family:inherit;">
+        </div>
+        <div class="control" style="margin-bottom:0;">
+          <div class="control-label"><span>交易笔数（0 = 当天未交易）</span></div>
+          <input type="number" id="entry-trades" min="0" step="1" placeholder="0"
+            style="width:100%;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:13px;color:var(--text);outline:none;font-family:inherit;">
+        </div>
+        <div class="btn-row">
+          <button class="primary" onclick="saveEntry()">保存到CSV（覆盖当日）</button>
+          <button class="ghost" onclick="loadEntryForDate()">读取该日期数据</button>
+        </div>
+        <div class="control-hint" id="entry-status"></div>
+      </div>
+    </div>
+
+    <div class="charts">
+      <div class="chart-card">
+        <div class="chart-card-title">胜率走势 & EWMA</div>
+        <div class="legend">
+          <div class="legend-item"><div class="legend-dot" style="background:#2a78d6"></div>每日胜率</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#e34948"></div>EWMA 均值</div>
+          <div class="legend-item"><div class="legend-dash"></div>50% 线</div>
+        </div>
+        <div class="chart-wrap" style="height:210px;">
+          <canvas id="chart-trend" role="img" aria-label="每日胜率和EWMA走势"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-card-title">权重分布（近期 → 更高权重）</div>
+        <div class="chart-wrap" style="height:130px;">
+          <canvas id="chart-weight" role="img" aria-label="各天权重分布"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-card-title">仓位建议区间</div>
+        <div id="kelly-bars">
+          <div class="empty-state">输入数据后显示</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let chart1 = null, chart2 = null;
+let savedSessions = JSON.parse(localStorage.getItem('kelly_sessions') || '[]');
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+const GRID = isDark ? '#2c2c2a' : '#e1e0d9';
+const TICK = isDark ? '#898781' : '#898781';
+
+function calcEWMA(rates, lam) {
+  const n = rates.length;
+  const w = rates.map((_, i) => Math.pow(1 - lam, n - 1 - i));
+  const sw = w.reduce((a, b) => a + b, 0);
+  const nw = w.map(x => x / sw);
+  let cumW = 0, cumWR = 0;
+  const series = [];
+  for (let i = 0; i < n; i++) {
+    cumW += nw[i]; cumWR += nw[i] * rates[i];
+    series.push(cumWR / cumW);
+  }
+  return { final: series[n - 1], series, weights: nw };
+}
+
+function getRating(kelly) {
+  if (kelly <= 0) return ['空仓（胜率不足）', 'red'];
+  if (kelly < 0.1) return ['轻仓', 'blue'];
+  if (kelly < 0.2) return ['标准仓', 'green'];
+  if (kelly < 0.35) return ['重仓', 'warn'];
+  return ['超高仓（谨慎）', 'red'];
+}
+
+function pct(v) { return (v * 100).toFixed(1) + '%'; }
+
+function fmt(amount) {
+  if (amount >= 10000) return '¥' + (amount / 10000).toFixed(2) + ' 万';
+  return '¥' + Math.round(amount).toLocaleString('zh-CN');
+}
+
+// -- CSV loading & editing ----------------------------------------------------
+// Expects the daily_win_rate.csv format: Date,Win Rate,Daily PnL %,Trades,
+// Profit/Loss Ratio,Comment -- rows marked N/A/NA in a column are skipped for
+// that column (e.g. an all-win day contributes its win rate but not a ratio,
+// since the ratio is undefined that day). csvRows/csvHeader hold the full
+// parsed table (all columns, as strings) so saveEntry() can upsert a single
+// day's row and write the whole table back without losing other columns.
+
+const CSV_HEADER_DEFAULT = ['Date', 'Win Rate', 'Daily PnL %', 'Trades', 'Profit/Loss Ratio', 'Comment'];
+const supportsFSAccess = 'showOpenFilePicker' in window;
+
+let csvFileHandle = null;   // FileSystemFileHandle when picked via showOpenFilePicker (Chromium) -- enables write-back
+let csvHeader = CSV_HEADER_DEFAULT.slice();
+let csvRows = [];           // [{Date, 'Win Rate', 'Daily PnL %', Trades, 'Profit/Loss Ratio', Comment}, ...]
+
+function parseCSVLine(line) {
+  const out = [];
+  let cur = '', inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') { inQuotes = !inQuotes; continue; }
+    if (c === ',' && !inQuotes) { out.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+function parseCSVFull(text) {
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim().length > 0);
+  if (lines.length < 1) return { header: CSV_HEADER_DEFAULT.slice(), rows: [] };
+  const header = parseCSVLine(lines[0]).map(h => h.trim());
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i]);
+    const row = {};
+    header.forEach((h, idx) => { row[h] = (cols[idx] || '').trim(); });
+    rows.push(row);
+  }
+  return { header, rows };
+}
+
+function rowsToWinRatesAndRatios(rows) {
+  const winRates = [], ratios = [];
+  for (const row of rows) {
+    const wr = (row['Win Rate'] || '').trim();
+    const ratio = (row['Profit/Loss Ratio'] || '').trim();
+    if (wr && wr !== 'NA' && !isNaN(parseFloat(wr))) winRates.push(parseFloat(wr));
+    if (ratio && ratio !== 'N/A' && !isNaN(parseFloat(ratio))) ratios.push(parseFloat(ratio));
+  }
+  return { winRates, ratios };
+}
+
+function csvField(v) {
+  v = v == null ? '' : String(v);
+  return v.includes(',') ? `"${v}"` : v;
+}
+
+function serializeCSV(header, rows) {
+  const lines = [header.join(',')];
+  for (const row of rows) lines.push(header.map(h => csvField(row[h])).join(','));
+  return lines.join('\n') + '\n';
+}
+
+function applyCSVData(text, sourceLabel) {
+  const { header, rows } = parseCSVFull(text);
+  csvHeader = header.length ? header : CSV_HEADER_DEFAULT.slice();
+  csvRows = rows;
+  const { winRates, ratios } = rowsToWinRatesAndRatios(rows);
+  const statusEl = document.getElementById('csv-status');
+  if (winRates.length < 2) {
+    statusEl.textContent = `${sourceLabel}: 未能解析出足够的胜率数据`;
+    return;
+  }
+  document.getElementById('rate-input').value = winRates.join('\n');
+
+  const writeSuffix = csvFileHandle ? ' · 可在下方录入并写回该文件' : (supportsFSAccess ? '' : ' · 当前浏览器不支持写回，保存时将改为下载新文件');
+  if (ratios.length > 0) {
+    const lam = parseFloat(document.getElementById('sl-lambda').value);
+    const { final: bEwma } = calcEWMA(ratios, lam);
+    const bClamped = Math.min(6.0, Math.max(0.5, bEwma));
+    document.getElementById('sl-b').value = bClamped.toFixed(1);
+    document.getElementById('lbl-b').textContent = bClamped.toFixed(2);
+    statusEl.textContent =
+      `${sourceLabel}: 已加载 ${winRates.length} 天胜率、${ratios.length} 天有效盈亏比 ` +
+      `→ 日期加权盈亏比 b=${bEwma.toFixed(2)}${writeSuffix}`;
+  } else {
+    statusEl.textContent = `${sourceLabel}: 已加载 ${winRates.length} 天胜率（无有效盈亏比数据，b 需手动设置）${writeSuffix}`;
+  }
+  calculate();
+}
+
+function handleCSVFile(file) {
+  if (!file) return;
+  csvFileHandle = null;   // plain <input type=file> read never yields a writable handle
+  const reader = new FileReader();
+  reader.onload = e => applyCSVData(e.target.result, file.name);
+  reader.onerror = () => {
+    document.getElementById('csv-status').textContent = '读取文件失败';
+  };
+  reader.readAsText(file);
+}
+
+// Primary "从CSV加载" action. Chromium (Chrome/Edge) supports the File System
+// Access API even under file://, which yields a handle we can later write
+// back to via saveEntry() -- so opening through here is what makes in-place
+// overwrite possible. Firefox/Safari lack this API; fall back to the plain
+// read-only file picker (saveEntry() then downloads a new file instead).
+async function pickCSVFile() {
+  if (!supportsFSAccess) {
+    document.getElementById('csv-file').click();
+    return;
+  }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }],
+    });
+    csvFileHandle = handle;
+    const file = await handle.getFile();
+    applyCSVData(await file.text(), handle.name);
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      document.getElementById('csv-status').textContent = '打开文件失败: ' + err.message;
+    }
+  }
+}
+
+// Best-effort auto-load if the tool is served over http(s) from the same
+// folder as daily_win_rate.csv -- silently does nothing under file://,
+// where fetch() can't read local files (use the "从CSV加载" button instead).
+window.addEventListener('DOMContentLoaded', () => {
+  fetch('./daily_win_rate.csv')
+    .then(r => r.ok ? r.text() : Promise.reject())
+    .then(text => applyCSVData(text, 'daily_win_rate.csv'))
+    .catch(() => {});
+  const dateEl = document.getElementById('entry-date');
+  if (dateEl && !dateEl.value) dateEl.valueAsDate = new Date();
+});
+
+// -- Daily entry: derive Profit/Loss Ratio the same way the CSV was built --
+// N trades/day, W=round(winRate*N) wins, L=N-W losses; assumes each loss is
+// a uniform "1 unit" so avgWin = (dailyPnL% + L) / W. Breaks down (negative
+// avgWin) for small/atypical samples -- flagged as N/A rather than reported.
+function deriveRatio(winRate, pnl, trades) {
+  const N = trades;
+  const W = Math.round(winRate * N);
+  const L = N - W;
+  if (W === 0) return { ratioStr: 'N/A', comment: 'All losses -- no winning trades to average' };
+  if (L === 0) return { ratioStr: 'N/A', comment: 'All wins -- no losing trades to compare against' };
+  const avgWin = (pnl + L) / W;
+  if (avgWin < 0) return { ratioStr: 'N/A', comment: 'Derived ratio negative -- small-sample loss assumption breaks down, unreliable' };
+  return { ratioStr: avgWin.toFixed(2), comment: '' };
+}
+
+function upsertRow(newRow) {
+  const idx = csvRows.findIndex(r => r.Date === newRow.Date);
+  if (idx >= 0) csvRows[idx] = newRow;
+  else { csvRows.push(newRow); csvRows.sort((a, b) => a.Date.localeCompare(b.Date)); }
+}
+
+function downloadText(text, filename) {
+  const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function loadEntryForDate() {
+  const dateVal = document.getElementById('entry-date').value;
+  const statusEl = document.getElementById('entry-status');
+  if (!dateVal) { statusEl.textContent = '请先选择日期'; return; }
+  const row = csvRows.find(r => r.Date === dateVal);
+  if (!row) { statusEl.textContent = `${dateVal} 暂无数据，可直接填写后保存`; return; }
+  document.getElementById('entry-winrate').value = row['Win Rate'] === 'NA' ? '' : row['Win Rate'];
+  document.getElementById('entry-pnl').value = row['Daily PnL %'] === 'NA' ? '' : row['Daily PnL %'];
+  document.getElementById('entry-trades').value = row['Trades'] || '0';
+  statusEl.textContent = `已读取 ${dateVal} 的现有数据，可修改后保存覆盖`;
+}
+
+async function saveEntry() {
+  const statusEl = document.getElementById('entry-status');
+  const dateVal = document.getElementById('entry-date').value;
+  if (!dateVal) { statusEl.textContent = '请先选择日期'; return; }
+  if (csvRows.length === 0 && !csvFileHandle) {
+    statusEl.textContent = '请先通过"从CSV加载"打开 daily_win_rate.csv';
+    return;
+  }
+
+  const tradesRaw = document.getElementById('entry-trades').value;
+  const trades = tradesRaw === '' ? 0 : parseInt(tradesRaw, 10);
+
+  let newRow;
+  if (!trades || trades <= 0) {
+    newRow = { Date: dateVal, 'Win Rate': 'NA', 'Daily PnL %': 'NA', Trades: '', 'Profit/Loss Ratio': 'N/A', Comment: 'No trading data that day' };
+  } else {
+    const winRate = parseFloat(document.getElementById('entry-winrate').value);
+    const pnl = parseFloat(document.getElementById('entry-pnl').value);
+    if (isNaN(winRate) || winRate < 0 || winRate > 1) { statusEl.textContent = '胜率需在 0–1 之间'; return; }
+    if (isNaN(pnl)) { statusEl.textContent = '请输入当日盈亏 %'; return; }
+    const { ratioStr, comment } = deriveRatio(winRate, pnl, trades);
+    newRow = {
+      Date: dateVal,
+      'Win Rate': winRate.toFixed(2),
+      'Daily PnL %': pnl.toFixed(2),
+      Trades: String(trades),
+      'Profit/Loss Ratio': ratioStr,
+      Comment: comment,
+    };
+  }
+
+  upsertRow(newRow);
+  const text = serializeCSV(csvHeader, csvRows);
+
+  if (csvFileHandle) {
+    try {
+      const writable = await csvFileHandle.createWritable();
+      await writable.write(text);
+      await writable.close();
+      statusEl.textContent = `已保存 ${dateVal} → ${csvFileHandle.name}`;
+    } catch (err) {
+      statusEl.textContent = '写入文件失败: ' + err.message;
+      return;
+    }
+  } else {
+    downloadText(text, 'daily_win_rate.csv');
+    statusEl.textContent = `已保存 ${dateVal}（当前浏览器不支持直接写回，已下载更新后的 daily_win_rate.csv，请手动替换原文件）`;
+  }
+
+  applyCSVData(text, csvFileHandle ? csvFileHandle.name : 'daily_win_rate.csv');
+}
+
+function updateSymbolShares(priceId, outId, capital, hasCapital, fracKelly) {
+  const price = parseFloat(document.getElementById(priceId).value);
+  const outEl = document.getElementById(outId);
+  if (!hasCapital) {
+    outEl.textContent = '需要先输入初始资金';
+    return;
+  }
+  if (isNaN(price) || price <= 0) {
+    outEl.textContent = '输入当前价后计算可用股数';
+    return;
+  }
+  const positionValue = Math.max(0, capital * fracKelly);
+  const maxShares = Math.floor(positionValue / price);
+  outEl.innerHTML = `建议投入 ${fmt(positionValue)} → 最多 <strong>${maxShares.toLocaleString('zh-CN')}</strong> 股`;
+}
+
+function calculate() {
+  const raw = document.getElementById('rate-input').value.trim().split('\n')
+    .map(s => parseFloat(s.trim())).filter(v => !isNaN(v) && v >= 0 && v <= 1);
+
+  const lam = parseFloat(document.getElementById('sl-lambda').value);
+  const b = parseFloat(document.getElementById('sl-b').value);
+  const frac = parseFloat(document.getElementById('sl-frac').value);
+
+  document.getElementById('m-days').textContent = raw.length + ' 天';
+
+  const capital = parseFloat(document.getElementById('capital-input').value);
+  const hasCapital = !isNaN(capital) && capital > 0;
+  const maxLossPct = parseFloat(document.getElementById('sl-maxloss').value);
+  document.getElementById('max-loss-amount').textContent =
+    hasCapital ? fmt(capital * maxLossPct / 100) : '—';
+
+  if (raw.length < 2) {
+    ['m-wr','m-kelly','m-half'].forEach(id => document.getElementById(id).textContent = '—');
+    document.getElementById('kelly-bars').innerHTML = '<div class="empty-state">请输入至少 2 天数据</div>';
+    ['shares-SOXL','shares-SOXS'].forEach(id =>
+      document.getElementById(id).textContent = '输入当前价后计算可用股数');
+    return;
+  }
+
+  const { final: p, series, weights } = calcEWMA(raw, lam);
+  const kelly = Math.max(0, p - (1 - p) / b);
+  const fracKelly = kelly * frac;
+
+  document.getElementById('m-wr').textContent = pct(p);
+  document.getElementById('m-kelly').textContent = pct(kelly);
+  document.getElementById('m-half').textContent = pct(fracKelly);
+
+  updateSymbolShares('price-SOXL', 'shares-SOXL', capital, hasCapital, fracKelly);
+  updateSymbolShares('price-SOXS', 'shares-SOXS', capital, hasCapital, fracKelly);
+
+  const tbl = document.getElementById('result-table');
+  const fracs = [[1,'全凯利'],[0.75,'¾ 凯利'],[0.5,'½ 凯利'],[0.25,'¼ 凯利']];
+  tbl.innerHTML = fracs.map(([f, label]) => {
+    const ratio = kelly * f;
+    const moneyStr = hasCapital
+      ? `<div style="font-size:11px;color:var(--text-muted);margin-top:1px;">${fmt(capital * ratio)}</div>`
+      : '';
+    return `<tr>
+      <td style="color:var(--text-muted);vertical-align:top;padding:7px 0;">${label}</td>
+      <td style="text-align:right;padding:7px 0;"><div>${pct(ratio)}</div>${moneyStr}</td>
+    </tr>`;
+  }).join('');
+
+  const [ratingText, ratingClass] = getRating(fracKelly);
+  document.getElementById('rating-badge').innerHTML =
+    `<span class="badge ${ratingClass}">${ratingText}</span>
+     <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">分数系数 ${(frac*100).toFixed(0)}% → 建议仓位 <strong>${pct(fracKelly)}</strong></div>`;
+
+  renderKellyBars(kelly);
+  renderCharts(raw, series, weights);
+}
+
+function renderKellyBars(kelly) {
+  const bars = [
+    ['全凯利', kelly, 'var(--danger)'],
+    ['¾ 凯利', kelly * 0.75, 'var(--warning)'],
+    ['½ 凯利（推荐）', kelly * 0.5, 'var(--accent)'],
+    ['¼ 凯利', kelly * 0.25, 'var(--success)'],
+  ];
+  document.getElementById('kelly-bars').innerHTML = bars.map(([label, val, color]) => `
+    <div style="margin-bottom:12px;">
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-2);margin-bottom:4px;">
+        <span>${label}</span><span style="font-weight:500">${pct(val)}</span>
+      </div>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:${Math.min(100, val * 100 * 2)}%;background:${color}"></div>
+      </div>
+    </div>`).join('') +
+    `<div class="bar-labels"><span>0%</span><span>50%+</span></div>`;
+}
+
+function renderCharts(raw, ewmaSeries, weights) {
+  const labels = raw.map((_, i) => 'D' + (i + 1));
+
+  if (chart1) chart1.destroy();
+  chart1 = new Chart(document.getElementById('chart-trend'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: '每日胜率',
+          data: raw.map(v => +(v * 100).toFixed(2)),
+          borderColor: '#2a78d6',
+          backgroundColor: 'rgba(42,120,214,0.07)',
+          borderWidth: 1.5,
+          pointRadius: raw.length > 30 ? 0 : 3,
+          pointHoverRadius: 4,
+          fill: false, tension: 0.2,
+        },
+        {
+          label: 'EWMA',
+          data: ewmaSeries.map(v => +(v * 100).toFixed(2)),
+          borderColor: '#e34948',
+          borderWidth: 2,
+          pointRadius: 0,
+          fill: false, tension: 0.3,
+        },
+        {
+          label: '50% 线',
+          data: raw.map(() => 50),
+          borderColor: GRID,
+          borderWidth: 1,
+          borderDash: [4, 4],
+          pointRadius: 0, fill: false,
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}%` } }
+      },
+      scales: {
+        x: { ticks: { color: TICK, font: { size: 11 }, maxTicksLimit: 15 }, grid: { color: GRID } },
+        y: { ticks: { color: TICK, font: { size: 11 }, callback: v => v + '%' }, grid: { color: GRID }, min: 25, max: 80 }
+      }
+    }
+  });
+
+  if (chart2) chart2.destroy();
+  const n = weights.length;
+  chart2 = new Chart(document.getElementById('chart-weight'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data: weights.map(w => +(w * 100).toFixed(3)),
+        backgroundColor: weights.map((_, i) => `rgba(42,120,214,${(0.12 + 0.75 * (i / (n - 1))).toFixed(2)})`),
+        borderRadius: 2,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ` 权重: ${ctx.parsed.y.toFixed(3)}%` } }
+      },
+      scales: {
+        x: { ticks: { color: TICK, font: { size: 11 }, maxTicksLimit: 15 }, grid: { display: false } },
+        y: { ticks: { color: TICK, font: { size: 11 }, callback: v => v + '%' }, grid: { color: GRID } }
+      }
+    }
+  });
+}
+
+function loadDemo() {
+  const demo = [0.52,0.58,0.61,0.55,0.63,0.49,0.60,0.57,0.64,0.53,
+                0.59,0.66,0.50,0.62,0.55,0.68,0.58,0.65,0.60,0.70,
+                0.56,0.63,0.61,0.58,0.66,0.72,0.59,0.68,0.64,0.71];
+  document.getElementById('rate-input').value = demo.join('\n');
+  calculate();
+}
+
+function clearAll() {
+  document.getElementById('rate-input').value = '';
+  ['m-wr','m-kelly','m-half'].forEach(id => document.getElementById(id).textContent = '—');
+  document.getElementById('m-days').textContent = '0 天';
+  if (chart1) { chart1.destroy(); chart1 = null; }
+  if (chart2) { chart2.destroy(); chart2 = null; }
+  document.getElementById('kelly-bars').innerHTML = '<div class="empty-state">输入数据后显示</div>';
+  document.getElementById('rating-badge').innerHTML = '<span class="badge blue">输入数据后显示</span>';
+  document.getElementById('result-table').innerHTML =
+    ['全凯利','¾ 凯利','½ 凯利','¼ 凯利'].map(l =>
+      `<tr><td style="color:var(--text-muted)">${l}</td><td>—</td></tr>`).join('');
+  ['shares-SOXL','shares-SOXS'].forEach(id =>
+    document.getElementById(id).textContent = '输入当前价后计算可用股数');
+  document.getElementById('max-loss-amount').textContent = '—';
+  document.getElementById('csv-status').textContent = '';
+}
+
+['sl-lambda','sl-b','sl-frac','sl-maxloss'].forEach(id => {
+  document.getElementById(id).addEventListener('input', function() {
+    if (id === 'sl-lambda') document.getElementById('lbl-lambda').textContent = parseFloat(this.value).toFixed(2);
+    if (id === 'sl-b') document.getElementById('lbl-b').textContent = parseFloat(this.value).toFixed(1);
+    if (id === 'sl-frac') document.getElementById('lbl-frac').textContent = parseFloat(this.value).toFixed(2);
+    if (id === 'sl-maxloss') document.getElementById('lbl-maxloss').textContent = parseFloat(this.value).toFixed(1) + '%';
+    calculate();
+  });
+});
+</script>
+</body>
+</html>
