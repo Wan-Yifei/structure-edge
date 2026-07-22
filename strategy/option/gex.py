@@ -32,6 +32,8 @@ from moomoo import AuType, KLType, OpenQuoteContext, RET_OK  # noqa: F401 (AuTyp
 SHARES_PER_CONTRACT = 100  # US standard
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 11111
+RISK_FREE_RATE = 0.045  # approx. short-term T-bill; gamma is only weakly sensitive to r
+ZERO_GAMMA_GRID_POINTS = 300
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -175,14 +177,61 @@ def _compute(df: pd.DataFrame, spot: float) -> tuple[pd.DataFrame, pd.DataFrame]
     return df, by_strike
 
 
-def _zero_gamma(by_strike: pd.DataFrame) -> float | None:
-    """Interpolate the strike where cumulative GEX crosses zero (gamma flip point)."""
-    strikes = by_strike["option_strike_price"].values
-    cum     = by_strike["cum_gex"].values
-    for i in range(len(strikes) - 1):
-        y1, y2 = float(cum[i]), float(cum[i + 1])
+def _bs_gamma(S: np.ndarray, K: np.ndarray, T: np.ndarray, sigma: np.ndarray, r: float) -> np.ndarray:
+    """Black-Scholes gamma, vectorized over broadcastable arrays."""
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    return np.exp(-0.5 * d1 ** 2) / (np.sqrt(2 * np.pi) * S * sigma * np.sqrt(T))
+
+
+def _zero_gamma(df: pd.DataFrame) -> float | None:
+    """Find the hypothetical spot price where total dealer GEX flips sign.
+
+    This mirrors how brokers (e.g. moomoo's own Gamma Exposure chart) define
+    "Zero Gamma": reprice every option's gamma via Black-Scholes at a grid of
+    hypothetical spot prices (gamma itself changes as spot moves -- it peaks
+    ATM), sum signed dealer GEX at each hypothetical spot, and interpolate
+    where that curve crosses zero. This is NOT the same as a cumulative sum
+    of today's-spot GEX ordered by strike (by_strike["cum_gex"], used for the
+    blue cumulative-by-strike line in the chart) -- that simpler quantity
+    answers a different question and can land far from the true flip point.
+    """
+    rows = df[
+        (df["option_implied_volatility"] > 0) & (df["option_strike_price"] > 0)
+    ].copy()
+    if rows.empty:
+        return None
+
+    today = date.today()
+
+    def _t_years(strike_time) -> float:
+        try:
+            exp = date.fromisoformat(str(strike_time)[:10])
+        except ValueError:
+            return float("nan")
+        days = (exp - today).days
+        return max(days, 0.5) / 365.0  # floor so same-day expiry doesn't divide by zero
+
+    rows["t_years"] = rows["strike_time"].map(_t_years)
+    rows = rows.dropna(subset=["t_years"])
+    if rows.empty:
+        return None
+
+    K     = rows["option_strike_price"].to_numpy()
+    T     = rows["t_years"].to_numpy()
+    sigma = rows["option_implied_volatility"].to_numpy() / 100.0  # moomoo reports IV in percent
+    oi    = rows["option_open_interest"].to_numpy()
+    sign  = rows["option_type"].map({"CALL": 1.0, "PUT": -1.0}).fillna(0.0).to_numpy()
+
+    grid = np.linspace(float(K.min()), float(K.max()), ZERO_GAMMA_GRID_POINTS)
+    S = grid[:, None]  # (grid_points, 1) broadcasts against (1, n_options)
+
+    gamma = _bs_gamma(S, K[None, :], T[None, :], sigma[None, :], RISK_FREE_RATE)
+    total = (sign[None, :] * gamma * oi[None, :] * SHARES_PER_CONTRACT * S).sum(axis=1)
+
+    for i in range(len(grid) - 1):
+        y1, y2 = float(total[i]), float(total[i + 1])
         if y1 * y2 <= 0 and y1 != y2:
-            x1, x2 = float(strikes[i]), float(strikes[i + 1])
+            x1, x2 = float(grid[i]), float(grid[i + 1])
             return x1 - y1 * (x2 - x1) / (y2 - y1)
     return None
 
@@ -227,7 +276,7 @@ def _build_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
         "total_pct": _pct(total_sh),
         "net_gex": net_gex,
         "stable": net_gex >= 0,
-        "zero_gamma": _zero_gamma(by_strike),
+        "zero_gamma": _zero_gamma(df),
         "call_wall": call_wall,
         "call_wall_v": call_wall_v,
         "put_wall": put_wall,
@@ -418,7 +467,7 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
     _txt(COL[3], V3_Y,   f"% 20d Avg Vol: {stats['put_pct']:.1f}%",  color=TEXT_SEC, fontsize=9)
 
     ax2.text(0.99, 0.02,
-             "Dealers assumed net short  ·  GEX = γ × OI × 100 × spot  ·  Zero Gamma = cumulative GEX flip point",
+             "Dealers assumed net short  ·  GEX = γ × OI × 100 × spot  ·  Zero Gamma = BS-repriced dealer GEX flips sign vs. hypothetical spot",
              color=TEXT_MUTED, fontsize=7, transform=ax2.transAxes,
              va="bottom", ha="right", style="italic")
 

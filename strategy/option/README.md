@@ -41,6 +41,40 @@ Net GEX  =  Σ GEX_calls  −  Σ GEX_puts
 | **Positive** | Net long gamma | MMs sell rallies, buy dips → **suppresses volatility**, mean-reversion |
 | **Negative** | Net short gamma | MMs buy rallies, sell dips → **amplifies moves**, trending / volatile |
 
+### What is Zero Gamma (the "gamma flip" price)?
+
+Zero Gamma is the hypothetical **spot price** at which total dealer GEX would
+flip sign. Gamma is not a fixed per-option number — it changes as the
+underlying moves (it peaks ATM and decays away from the strike), so finding
+this price requires **repricing every option's gamma at a range of
+hypothetical spot levels**, not just reading gamma at today's price:
+
+```
+for each hypothetical spot S in a price grid:
+    gamma_i(S)  =  Black-Scholes gamma of option i, repriced at S
+                   (using that option's own strike, DTE, implied vol)
+    GEX(S)      =  Σ_i  sign_i × gamma_i(S) × open_interest_i × 100 × S
+
+Zero Gamma  =  the S where GEX(S) crosses zero (interpolated)
+```
+
+`gex.py` implements this in `_zero_gamma()`, using each option's own
+`option_implied_volatility` (moomoo reports this in **percent**, e.g. `241.3`
+→ divide by 100 for the BS formula) and `strike_time` to get time-to-expiry.
+It was validated against moomoo's own in-app Gamma Exposure chart for
+`US.SOXL` (2026-07-19, 2026-07-24 expiry): computed $194.70 vs. moomoo's
+$194.15 — within 0.3%.
+
+> **Common pitfall** — it's tempting to instead take each option's gamma
+> *at today's spot price* (already provided by the broker), sort by strike,
+> and find where the running cumulative sum crosses zero. This is cheap to
+> compute (no repricing needed) and is shown in the chart as the blue
+> "Cumulative GEX" line, but it answers a different question — "how is GEX
+> distributed across strikes right now" — and its zero-crossing is **not**
+> the same price as the true Zero Gamma above. On SOXL the two disagreed by
+> over $100 (a naive cumulative-sum implementation gave $79 vs. the correct
+> $194.70).
+
 ### What is ITM?
 
 **In The Money (ITM)** means the option has intrinsic value right now:
