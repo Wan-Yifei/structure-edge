@@ -131,21 +131,34 @@ def _fmt_vol_short(v: float) -> str:
     return f"{v:.0f}"
 
 
-class _VolumeAxisItem(pg.AxisItem):
-    """Bottom axis with K/M-abbreviated tick labels, for the profile panels.
+def _fmt_signed_short(v: float) -> str:
+    """Abbreviate a signed value: -45_000 -> '-45K', 1_234_567 -> '1.2M'."""
+    sign = "-" if v < 0 else ""
+    v = abs(v)
+    if v >= 1_000_000:
+        return f"{sign}{v/1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"{sign}{v/1_000:.0f}K"
+    return f"{sign}{v:.0f}"
 
-    Their volume axis carries raw values up to the hundreds of thousands;
-    pyqtgraph's default tick formatting (and enableAutoSIPrefix, which
-    doesn't reliably kick in once the ViewBox's X range is set manually
+
+class _VolumeAxisItem(pg.AxisItem):
+    """Axis with K/M-abbreviated tick labels, for the profile/CVD panels.
+
+    Their volume/CVD axis carries raw values up to the hundreds of
+    thousands; pyqtgraph's default tick formatting (and enableAutoSIPrefix,
+    which doesn't reliably kick in once the ViewBox's range is set manually
     rather than left on auto-range) renders these as unabbreviated 6-digit
-    numbers that visually run together in a ~200-300px-wide panel.
+    numbers that either run together in a narrow panel or just clutter the
+    axis unnecessarily.
     """
 
-    def __init__(self) -> None:
-        super().__init__(orientation="bottom")
+    def __init__(self, orientation: str = "bottom", signed: bool = False) -> None:
+        super().__init__(orientation=orientation)
+        self._fmt = _fmt_signed_short if signed else _fmt_vol_short
 
     def tickStrings(self, values, scale, spacing):
-        return [_fmt_vol_short(v * scale) for v in values]
+        return [self._fmt(v * scale) for v in values]
 
 # ── Timeframe / BOS config (mirrors trade_viewer.py) ─────────────────────────
 
@@ -1697,7 +1710,8 @@ class TradeViewerQt(QMainWindow):
 
         # CVD subplot (row 3) — hidden until CVD indicator enabled
         self._chart_widget.nextRow()
-        self._plot_cvd: pg.PlotItem = self._chart_widget.addPlot(row=3, col=0)
+        self._plot_cvd: pg.PlotItem = self._chart_widget.addPlot(
+            row=3, col=0, axisItems={"left": _VolumeAxisItem(orientation="left", signed=True)})
         self._plot_cvd.showGrid(x=True, y=True, alpha=0.10)
         self._plot_cvd.setLabel("left", "CVD", **{"color": _FG})
         self._plot_cvd.getAxis("left").setTextPen(_qc(_FG))
@@ -3042,12 +3056,31 @@ class TradeViewerQt(QMainWindow):
         self._cvd_arr = cvd
 
         x = np.arange(n)
-        line = pg.PlotCurveItem(
-            x=x, y=cvd,
-            pen=pg.mkPen("#42a5f5", width=1),
+
+        # Zero-referenced green/red fill (buy-/sell-pressure bias readable at
+        # a glance) plus a crisp outline on top for the precise curve shape --
+        # a plain single-color 1px line made the trend hard to read. Each
+        # fill curve pins to 0 on the opposite side of zero from its own
+        # sign, matching the pattern of a signed histogram/area chart rather
+        # than drawing two overlapping flat-at-zero pens (which would leave
+        # a visible seam line cutting across the other side's fill).
+        cvd_pos = np.where(cvd >= 0, cvd, 0.0)
+        cvd_neg = np.where(cvd < 0, cvd, 0.0)
+        pos_fill = pg.PlotCurveItem(
+            x=x, y=cvd_pos, pen=None,
+            fillLevel=0.0, brush=_qc(_GREEN, 55),
         )
-        self._plot_cvd.addItem(line)
-        self._cvd_items.append(line)
+        neg_fill = pg.PlotCurveItem(
+            x=x, y=cvd_neg, pen=None,
+            fillLevel=0.0, brush=_qc(_RED, 55),
+        )
+        outline = pg.PlotCurveItem(
+            x=x, y=cvd,
+            pen=pg.mkPen("#42a5f5", width=1.3),
+        )
+        for item in (pos_fill, neg_fill, outline):
+            self._plot_cvd.addItem(item)
+            self._cvd_items.append(item)
 
     def _clear_adi_items(self) -> None:
         for item in self._adi_items:
