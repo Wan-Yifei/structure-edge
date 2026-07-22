@@ -57,6 +57,18 @@ def _parse_side(items) -> list[tuple[float, int]]:
 # ── Order book handler ─────────────────────────────────────────────────────────
 
 _MIN_WRITE_INTERVAL = 2.0  # seconds — minimum gap between DB writes per code
+_SIDE_STALE_SECS = 10.0  # drop a cached side once it's gone this long without a
+                          # fresh (non-empty) push. The push protocol omits a
+                          # side when it's simply *unchanged*, which is the
+                          # normal case the merge cache below exists for -- but
+                          # if a side goes dark far longer than that (feed
+                          # hiccup, subscription issue), re-writing the same
+                          # increasingly-old snapshot forever turns one stale
+                          # push into an indefinitely-persisting phantom price
+                          # level (reported: a frozen bid band sitting for
+                          # minutes in the Liquidity Heatmap, priced well above
+                          # the live ask -- structurally impossible for a real
+                          # resting order, since it would just cross and fill).
 
 # Row-count retention (see _watchdog's prune call) -- same "give this one
 # symbol more history" intent as tick_collector.py's _RETENTION_EXEMPT, but
@@ -95,7 +107,7 @@ def _make_handler(store, state: dict):
     from moomoo import OrderBookHandlerBase, RET_OK
 
     last_write: dict[str, float] = {}  # code -> time.time() of last DB write
-    last_side:  dict[str, dict]  = {}  # code -> {"bids": [...], "asks": [...]}
+    last_side:  dict[str, dict]  = {}  # code -> {"bids": [...], "asks": [...], "bids_ts": float, "asks_ts": float}
 
     class _Handler(OrderBookHandlerBase):
         def on_recv_rsp(self, rsp_pb):
@@ -104,18 +116,27 @@ def _make_handler(store, state: dict):
                 return ret, data
 
             code  = data.get("code", "")
-            cache = last_side.setdefault(code, {"bids": [], "asks": []})
+            cache = last_side.setdefault(
+                code, {"bids": [], "asks": [], "bids_ts": 0.0, "asks_ts": 0.0})
             new_bids = _parse_side(data.get("Bid", []))
             new_asks = _parse_side(data.get("Ask", []))
+            now = time.time()
             if new_bids:
-                cache["bids"] = new_bids
+                cache["bids"], cache["bids_ts"] = new_bids, now
+            elif cache["bids"] and now - cache["bids_ts"] > _SIDE_STALE_SECS:
+                log.warning("%s bid side stale for >%.0fs, dropping %d cached level(s)",
+                            code, _SIDE_STALE_SECS, len(cache["bids"]))
+                cache["bids"] = []
             if new_asks:
-                cache["asks"] = new_asks
+                cache["asks"], cache["asks_ts"] = new_asks, now
+            elif cache["asks"] and now - cache["asks_ts"] > _SIDE_STALE_SECS:
+                log.warning("%s ask side stale for >%.0fs, dropping %d cached level(s)",
+                            code, _SIDE_STALE_SECS, len(cache["asks"]))
+                cache["asks"] = []
             bids, asks = cache["bids"], cache["asks"]
             if not bids and not asks:
                 return ret, data
 
-            now = time.time()
             if now - last_write.get(code, 0.0) < _MIN_WRITE_INTERVAL:
                 return ret, data  # skip — too soon since last write for this code
 
