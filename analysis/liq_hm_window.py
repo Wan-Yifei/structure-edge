@@ -73,6 +73,17 @@ _NEAR_TOUCH_MAD_MULT   = 8.0  # gap must exceed median + this many MADs to
                               # dramatically farther out than its neighbours
                               # (e.g. a stub quote $65 away), not flag normal
                               # unevenness in real resting-depth spacing
+_WINDOW_SHRINK_FACTOR  = 0.5  # rebuild (tighten) if the freshly-computed
+                              # near-touch band is narrower than this
+                              # fraction of the current window -- otherwise
+                              # a window only ever grows: once an early wide
+                              # snapshot (e.g. a stub order that has since
+                              # been cancelled) sets a wide band, the book
+                              # can stay genuinely tight forever after while
+                              # price never drifts close enough to the old
+                              # band's edges to trigger the grow-only checks
+                              # below, leaving most of the view permanently
+                              # empty around a thin sliver of real depth
 
 
 # ── data helpers ───────────────────────────────────────────────────────────────
@@ -1129,7 +1140,10 @@ class LiqHmWindow(QWidget):
                 (cur_best_bid is not None and cur_best_bid < self._price_min) or
                 (cur_best_ask is not None and cur_best_ask > self._price_max)
             )
-            if out_lo > 0.05 or out_hi > 0.05 or touch_outside:
+            cur_width = self._price_max - self._price_min
+            new_width = new_max - new_min
+            too_wide = cur_width > 0 and new_width < cur_width * _WINDOW_SHRINK_FACTOR
+            if out_lo > 0.05 or out_hi > 0.05 or touch_outside or too_wide:
                 self._price_min = new_min
                 self._price_max = new_max
                 self._bin_size  = (new_max - new_min) / n_price
