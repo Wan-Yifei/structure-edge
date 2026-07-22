@@ -120,6 +120,33 @@ def _qc(hex_str: str, alpha: int = 255) -> QColor:
     c.setAlpha(alpha)
     return c
 
+
+def _fmt_vol_short(v: float) -> str:
+    """Abbreviate a volume value: 1_234_567 -> '1.2M', 250_000 -> '250K'."""
+    v = abs(v)
+    if v >= 1_000_000:
+        return f"{v/1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"{v/1_000:.0f}K"
+    return f"{v:.0f}"
+
+
+class _VolumeAxisItem(pg.AxisItem):
+    """Bottom axis with K/M-abbreviated tick labels, for the profile panels.
+
+    Their volume axis carries raw values up to the hundreds of thousands;
+    pyqtgraph's default tick formatting (and enableAutoSIPrefix, which
+    doesn't reliably kick in once the ViewBox's X range is set manually
+    rather than left on auto-range) renders these as unabbreviated 6-digit
+    numbers that visually run together in a ~200-300px-wide panel.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(orientation="bottom")
+
+    def tickStrings(self, values, scale, spacing):
+        return [_fmt_vol_short(v * scale) for v in values]
+
 # ── Timeframe / BOS config (mirrors trade_viewer.py) ─────────────────────────
 
 TIMEFRAME_MAP: dict[str, tuple[KLType, int]] = {
@@ -928,6 +955,15 @@ class DataFetcher(QThread):
             # In Live mode, supplement with get_cur_kline so that bars from the
             # current session (which request_history_kline may not yet include)
             # are also visible.  Requires that the symbol is already subscribed.
+            #
+            # This call was observed silently failing (bare except: pass) for
+            # long stretches -- the chart would then miss newly-completed
+            # bars entirely until the user manually disconnected and
+            # reconnected (which re-subscribes and appears to restore it).
+            # Surface ret!=RET_OK / exceptions as a warning (not fatal --
+            # request_history_kline's own data is still usable) so the next
+            # occurrence is diagnosable from the log instead of just "chart
+            # stopped updating, no idea why".
             if not historical:
                 try:
                     r2, cur_df = self._ctx.get_cur_kline(
@@ -940,8 +976,10 @@ class DataFetcher(QThread):
                             cur_new = cur_new.reindex(columns=df.columns)
                             df = pd.concat([df, cur_new], ignore_index=True)
                             df = df.sort_values("time_key").reset_index(drop=True)
-                except Exception:
-                    pass  # non-fatal — historical data still usable
+                    elif r2 != RET_OK:
+                        self.error.emit(f"get_cur_kline warning: {cur_df}")
+                except Exception as exc:
+                    self.error.emit(f"get_cur_kline warning: {exc}")
 
             # K_DAY time_key arrives as "YYYY-MM-DD" (no time component).
             # Normalise to "YYYY-MM-DD 00:00:00" so all downstream [:16] slices
@@ -1865,7 +1903,8 @@ class TradeViewerQt(QMainWindow):
         right_layout.setSpacing(0)
 
         # Single-candle tick profile (top-right, shown on hover)
-        self._tick_profile_widget = pg.PlotWidget()
+        self._tick_profile_widget = pg.PlotWidget(
+            axisItems={"bottom": _VolumeAxisItem()})
         self._tick_profile_widget.setBackground(_BG)
         self._tick_profile_widget.setMinimumWidth(200)
         self._tick_profile_widget.setMaximumWidth(300)
@@ -1873,6 +1912,13 @@ class TradeViewerQt(QMainWindow):
         self._tick_profile_widget.getPlotItem().setMenuEnabled(False)
         self._tick_profile_widget.getPlotItem().getAxis("left").setStyle(
             autoReduceTextSpace=True, tickTextOffset=2)
+        # setLabel("top", ...) (used for the buy/sell/delta title) implicitly
+        # shows the top axis -- with no style of its own it renders default,
+        # unabbreviated tick numbers that visually run together in this
+        # narrow (200-300px) panel. The top axis exists here only to host
+        # that title text, so hide its tick values entirely (bottom already
+        # shows the volume scale).
+        self._tick_profile_widget.getPlotItem().getAxis("top").setStyle(showValues=False)
         # Add crosshair line (survives until next pw.clear() call; restored in _show_tick_profile)
         self._tick_profile_widget.addItem(self._tick_profile_hline)
         right_layout.addWidget(self._tick_profile_widget, 1)
@@ -1928,7 +1974,8 @@ class TradeViewerQt(QMainWindow):
         self._plot_c.vb.sigRangeChanged.connect(self._pin_chandelier_label)
 
         # Session vol profile (bottom-right)
-        self._profile_widget = pg.PlotWidget()
+        self._profile_widget = pg.PlotWidget(
+            axisItems={"bottom": _VolumeAxisItem()})
         self._profile_widget.setBackground(_BG)
         self._profile_widget.setMinimumWidth(200)
         self._profile_widget.setMaximumWidth(300)
@@ -1938,7 +1985,18 @@ class TradeViewerQt(QMainWindow):
             autoReduceTextSpace=True, tickTextOffset=2)
         self._profile_widget.getPlotItem().getAxis("bottom").setStyle(
             autoReduceTextSpace=True, tickTextOffset=2)
-        self._profile_widget.getPlotItem().getAxis("bottom").enableAutoSIPrefix(True)
+        # Disabled (not just left alone) so `scale` passed into
+        # _VolumeAxisItem.tickStrings is always 1.0 -- _fmt_vol_short does
+        # its own K/M abbreviation and would otherwise double up with
+        # whatever prefix auto-SI-scaling decides to apply.
+        self._profile_widget.getPlotItem().getAxis("bottom").enableAutoSIPrefix(False)
+        # setLabel("top", ...) (used for the range-mode title, e.g. "1D")
+        # implicitly shows the top axis -- with no style of its own it
+        # renders default, unabbreviated tick numbers ("200000400000...")
+        # that visually run together in this narrow (200-300px) panel. The
+        # top axis exists here only to host that title text, so hide its
+        # tick values entirely (bottom already shows the volume scale).
+        self._profile_widget.getPlotItem().getAxis("top").setStyle(showValues=False)
         # Add the crosshair sync line here so it persists across pw.clear() calls
         self._profile_widget.addItem(self._profile_hline)
         right_layout.addWidget(self._profile_widget, 2)
@@ -3482,7 +3540,16 @@ class TradeViewerQt(QMainWindow):
         # unchecked while price is currently in the overnight session, the
         # filtered frame's last row is a stale pre-session close, not the
         # true current price, and this line/label would silently go stale.
+        #
+        # In Live mode, prefer the tick stream's last trade price over the
+        # kline close: self._klines only refreshes once per _trigger_fetch
+        # cycle (the "Refresh(s)" interval, e.g. every 5-30s), while
+        # _last_tick_price updates on every push from moomoo -- reading the
+        # kline close here made this line visibly lag moomoo's own
+        # real-time price between refreshes.
         last_price = float(self._klines["close"].iloc[-1])
+        if self._mode_combo.currentText() == "Live" and self._last_tick_price > 0:
+            last_price = self._last_tick_price
         price_line = pg.InfiniteLine(
             pos=last_price, angle=0, movable=False,
             pen=pg.mkPen("#42a5f5", width=1.5),
