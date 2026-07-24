@@ -2030,8 +2030,16 @@ class TradeViewerQt(QMainWindow):
         self._log("Ready.")
 
     def _log(self, msg: str) -> None:
-        ts = datetime.now().strftime("%H:%M:%S")
-        self._status.showMessage(f"{ts}  {msg}")
+        ts   = datetime.now().strftime("%H:%M:%S")
+        line = f"{ts}  {msg}"
+        self._status.showMessage(line)
+        # The status bar only ever shows the latest message -- the next
+        # periodic log call (e.g. "Fetching K-lines...", every refresh tick)
+        # overwrites it within seconds, so an intermittent warning (like a
+        # get_cur_kline failure) flashes and is gone before it can even be
+        # read, let alone screenshotted. Also print to the console the app
+        # was launched from so there's a scrollable, copyable record.
+        print(line, flush=True)
 
     # ── OpenD connection ──────────────────────────────────────────────────────
 
@@ -2170,6 +2178,25 @@ class TradeViewerQt(QMainWindow):
         # start time happens to coincide with an old bucket key.
         with self._tick_lock:
             self._live_ticks.clear()
+        if self._mode_combo.currentText() == "Live" and self._live_code:
+            # _start_live() subscribes to the K-line SubType matching the
+            # *current* timeframe -- without re-subscribing here, switching
+            # TF while live leaves the old timeframe's K-line subscription
+            # active (or none) while get_cur_kline is now asked for the new
+            # one, which moomoo rejects with "please subscribe to KL_*Min
+            # data first" (visible as a get_cur_kline warning in the log)
+            # and the newest bar for that TF never appears until a manual
+            # disconnect/reconnect forces a fresh subscribe.
+            try:
+                if self._ctx:
+                    unsub = [SubType.TICKER, SubType.QUOTE]
+                    if self._live_kl_sub is not None:
+                        unsub.append(self._live_kl_sub)
+                    self._ctx.unsubscribe(self._live_code, unsub)
+            except Exception:
+                pass
+            self._live_code = ""
+            self._start_live()
         self._trigger_fetch()
 
     def _on_mode_changed(self, mode: str) -> None:
