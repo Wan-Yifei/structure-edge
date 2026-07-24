@@ -137,6 +137,40 @@ def _make_handler(store, state: dict):
             if not bids and not asks:
                 return ret, data
 
+            if bids and asks:
+                best_bid = max(p for p, _ in bids)
+                best_ask = min(p for p, _ in asks)
+                if best_bid >= best_ask:
+                    # A sustained crossed top-of-book isn't physically valid --
+                    # a real cross gets arbitraged away in microseconds. Seen
+                    # in practice: bid frozen at one price for 60+ seconds
+                    # while ask legitimately moved below it -- moomoo's feed
+                    # kept re-sending that bid level as a "fresh" (non-empty)
+                    # push the whole time, so the >0s cache-staleness check
+                    # above never triggers (it only measures time since the
+                    # last push, not whether the reported *value* actually
+                    # changed). Trust whichever side genuinely refreshed this
+                    # push and drop the other; if both (or neither) refreshed
+                    # and it's still crossed, there's no way to tell which
+                    # side is bad -- skip writing rather than persist an
+                    # impossible snapshot.
+                    if new_bids and not new_asks:
+                        log.warning("%s crossed book bid=%.2f >= ask=%.2f, "
+                                    "dropping stale ask cache", code, best_bid, best_ask)
+                        cache["asks"] = []
+                    elif new_asks and not new_bids:
+                        log.warning("%s crossed book bid=%.2f >= ask=%.2f, "
+                                    "dropping stale bid cache", code, best_bid, best_ask)
+                        cache["bids"] = []
+                    else:
+                        log.warning("%s crossed book bid=%.2f >= ask=%.2f "
+                                    "(both/neither side fresh), skipping write",
+                                    code, best_bid, best_ask)
+                        return ret, data
+                    bids, asks = cache["bids"], cache["asks"]
+                    if not bids and not asks:
+                        return ret, data
+
             if now - last_write.get(code, 0.0) < _MIN_WRITE_INTERVAL:
                 return ret, data  # skip — too soon since last write for this code
 
