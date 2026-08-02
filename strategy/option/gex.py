@@ -70,7 +70,7 @@ def _get_spot_and_avg_vol(ctx: OpenQuoteContext, code: str, days: int = 20) -> t
     return spot, avg_vol
 
 
-def _get_near_expiry_dates(ctx: OpenQuoteContext, code: str, dte_limit: int) -> list[str]:
+def get_near_expiry_dates(ctx: OpenQuoteContext, code: str, dte_limit: int) -> list[str]:
     """Return list of expiry date strings (YYYY-MM-DD) within dte_limit calendar days."""
     ret, data = ctx.get_option_expiration_date(code)
     if ret != RET_OK:
@@ -96,7 +96,7 @@ def _get_near_expiry_dates(ctx: OpenQuoteContext, code: str, dte_limit: int) -> 
     return sorted(set(results))
 
 
-def _fetch_option_data(ctx: OpenQuoteContext, code: str, expiries: list[str]) -> pd.DataFrame:
+def fetch_option_data(ctx: OpenQuoteContext, code: str, expiries: list[str]) -> pd.DataFrame:
     """Fetch option chain and greeks for the given expiry dates via market snapshot."""
     chain_frames = []
     for expiry in expiries:
@@ -128,7 +128,7 @@ def _fetch_option_data(ctx: OpenQuoteContext, code: str, expiries: list[str]) ->
     needed = [
         "code", "option_type", "option_strike_price",
         "option_open_interest", "option_delta", "option_gamma",
-        "option_implied_volatility", "strike_time",
+        "option_implied_volatility", "strike_time", "volume",
     ]
     available = [c for c in needed if c in snap.columns]
     return snap[available].copy()
@@ -136,7 +136,7 @@ def _fetch_option_data(ctx: OpenQuoteContext, code: str, expiries: list[str]) ->
 
 # ── GEX computation ────────────────────────────────────────────────────────────
 
-def _compute(df: pd.DataFrame, spot: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+def compute_gex(df: pd.DataFrame, spot: float) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Add per-row GEX, ITM flag; return enriched df and per-strike aggregate.
 
     by_strike columns: option_strike_price, call_gex, put_gex, net_gex, cum_gex
@@ -183,7 +183,7 @@ def _bs_gamma(S: np.ndarray, K: np.ndarray, T: np.ndarray, sigma: np.ndarray, r:
     return np.exp(-0.5 * d1 ** 2) / (np.sqrt(2 * np.pi) * S * sigma * np.sqrt(T))
 
 
-def _zero_gamma(df: pd.DataFrame) -> float | None:
+def zero_gamma(df: pd.DataFrame) -> float | None:
     """Find the hypothetical spot price where total dealer GEX flips sign.
 
     This mirrors how brokers (e.g. moomoo's own Gamma Exposure chart) define
@@ -236,7 +236,7 @@ def _zero_gamma(df: pd.DataFrame) -> float | None:
     return None
 
 
-def _build_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
+def build_gex_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
                  spot: float, avg_vol: float, expiries: list[str]) -> dict:
     itm_calls = df[(df["option_type"] == "CALL") & df["itm"]]
     itm_puts  = df[(df["option_type"] == "PUT")  & df["itm"]]
@@ -276,7 +276,7 @@ def _build_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
         "total_pct": _pct(total_sh),
         "net_gex": net_gex,
         "stable": net_gex >= 0,
-        "zero_gamma": _zero_gamma(df),
+        "zero_gamma": zero_gamma(df),
         "call_wall": call_wall,
         "call_wall_v": call_wall_v,
         "put_wall": put_wall,
@@ -490,17 +490,17 @@ def main() -> None:
         spot, avg_vol = _get_spot_and_avg_vol(ctx, args.code)
         print(f"  Spot: ${spot:.2f}   20d avg vol: {avg_vol:,.0f} sh", flush=True)
 
-        expiries = _get_near_expiry_dates(ctx, args.code, args.dte)
+        expiries = get_near_expiry_dates(ctx, args.code, args.dte)
         if not expiries:
             print(f"  No expiries found within {args.dte} DTE. Try --dte 14 or 30.", flush=True)
             return
         print(f"  Expiries: {expiries}", flush=True)
 
-        df = _fetch_option_data(ctx, args.code, expiries)
+        df = fetch_option_data(ctx, args.code, expiries)
         print(f"  Options loaded: {len(df)}", flush=True)
 
-        df, by_strike = _compute(df, spot)
-        stats = _build_stats(df, by_strike, spot, avg_vol, expiries)
+        df, by_strike = compute_gex(df, spot)
+        stats = build_gex_stats(df, by_strike, spot, avg_vol, expiries)
 
         zg_str = f"${stats['zero_gamma']:.2f}" if stats["zero_gamma"] else "none in range"
         print(f"\n  Net GEX    : {_fmt(stats['net_gex'])} sh  "
