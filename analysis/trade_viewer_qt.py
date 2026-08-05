@@ -55,13 +55,14 @@ from PyQt6.QtCore import (
     Qt, QThread, QTimer, pyqtSignal, QRectF, QPointF, QMetaObject, Q_ARG,
 )
 from PyQt6.QtGui import (
-    QColor, QPainter, QPicture, QPen, QBrush, QFont,
+    QColor, QPainter, QPicture, QPen, QBrush, QFont, QIcon, QPixmap,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QSplitter, QToolBar, QLabel, QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox,
     QPushButton, QCheckBox, QButtonGroup, QRadioButton, QSizePolicy,
     QFrame, QStatusBar, QMessageBox, QDialog, QDialogButtonBox, QFormLayout,
+    QSystemTrayIcon,
 )
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -73,6 +74,10 @@ from strategy.smc.fvg import detect_fvg
 from strategy.smc.order_blocks import detect_order_blocks
 from strategy.smc.kd_trend import compute_kd
 from strategy.chandelier_exit.chandelier import current_stop
+from strategy.option.gex import (
+    get_near_expiry_dates, fetch_option_data as fetch_option_chain_data,
+    compute_gex, build_gex_stats,
+)
 from ta.volume import AccDistIndexIndicator
 from moomoo import (
     OpenQuoteContext, SubType, KLType, AuType, Session,
@@ -114,6 +119,7 @@ _OB_BREAK = "#9e9e9e"   # breaker OB grey
 _OB_MIT   = "#ffa726"   # mitigation OB amber
 _EMA_COLS = ["#42a5f5", "#ab47bc", "#ffa726"]  # EMA 20/50/200
 _AVWAP_COL = "#ffeb3b"  # anchored VWAP line/label color
+_ZERO_GAMMA_COL = "#ff8c00"  # option Zero Gamma line -- matches gex.py's own matplotlib chart
 
 def _qc(hex_str: str, alpha: int = 255) -> QColor:
     c = QColor(hex_str)
@@ -1100,6 +1106,92 @@ class DataFetcher(QThread):
             self.error.emit(str(exc))
 
 
+# ── Background option-chain fetch worker ────────────────────────────────────────
+
+class OptionChainFetcher(QThread):
+    """Fetches near-expiry option chain data, computes GEX walls, and detects
+    single-contract volume spikes since the last poll.
+
+    prev_volumes is a read-only snapshot passed in by the caller -- diffing
+    happens entirely inside this thread so there is no shared mutable state
+    between this worker and the main-thread cache it will replace on ready.
+    """
+
+    ready = pyqtSignal(object)   # emits a dict of results
+    error = pyqtSignal(str)
+
+    def __init__(self, ctx, code: str, dte: int, threshold: int,
+                 prev_volumes: dict[str, int]):
+        super().__init__()
+        self._ctx          = ctx
+        self._code         = code
+        self._dte          = dte
+        self._threshold    = threshold
+        self._prev_volumes = prev_volumes
+
+    def run(self) -> None:
+        try:
+            expiries = get_near_expiry_dates(self._ctx, self._code, self._dte)
+            if not expiries:
+                self.error.emit(
+                    f"No option expiries within {self._dte} DTE for {self._code}.")
+                return
+
+            df = fetch_option_chain_data(self._ctx, self._code, expiries)
+
+            ret, snap = self._ctx.get_market_snapshot([self._code])
+            if ret != RET_OK or snap is None or snap.empty:
+                self.error.emit(f"Failed to fetch spot price for {self._code}: {snap}")
+                return
+            spot = float(snap.iloc[0]["last_price"])
+
+            df, by_strike = compute_gex(df, spot)
+            # build_gex_stats() computes zero_gamma internally (it's part of
+            # the returned stats dict) -- calling it separately here would
+            # just redo the same BS-repricing grid search a second time.
+            stats = build_gex_stats(df, by_strike, spot, 0.0, expiries)
+
+            # Large-trade detection: diff this poll's per-contract volume
+            # against the previous poll's. A contract missing from
+            # prev_volumes (first poll after enabling/symbol change) has no
+            # baseline -- never alert on it, that would just be "today's
+            # entire volume so far", not a spike.
+            large_trades: list[dict] = []
+            volumes: dict[str, int] = {}
+            if "volume" in df.columns:
+                for _, row in df.iterrows():
+                    code    = row["code"]
+                    vol_raw = pd.to_numeric(row["volume"], errors="coerce")
+                    vol     = int(vol_raw) if pd.notna(vol_raw) else 0
+                    volumes[code] = vol
+                    prev = self._prev_volumes.get(code)
+                    if prev is None:
+                        continue
+                    delta = vol - prev
+                    if delta >= self._threshold:
+                        large_trades.append({
+                            "code":         code,
+                            "strike":       float(row["option_strike_price"]),
+                            "option_type":  row["option_type"],
+                            "volume_delta": delta,
+                            "computed_at":  datetime.now(),
+                        })
+
+            self.ready.emit({
+                "call_wall":    stats["call_wall"],
+                "put_wall":     stats["put_wall"],
+                "zero_gamma":   stats["zero_gamma"],
+                "net_gex":      stats["net_gex"],
+                "expiries":     expiries,
+                "spot":         spot,
+                "computed_at":  datetime.now(),
+                "large_trades": large_trades,
+                "volumes":      volumes,
+            })
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 class ChandelierParamsDialog(QDialog):
     """ATR period / multiplier / direction for the chandelier-exit corner label.
 
@@ -1236,6 +1328,20 @@ class TradeViewerQt(QMainWindow):
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
         # from resetting the user's manual pan/zoom on every tick.
         self._last_chart_key: tuple             = ("", "")
+
+        # Option Walls / Option Alerts: own OpenQuoteContext (avoids
+        # concurrent-access uncertainty on self._ctx, which DataFetcher's
+        # background thread also calls into) and own poll timer, decoupled
+        # from the K-line refresh cycle since option-chain fetches are much
+        # slower and only need to run every several seconds, not per tick.
+        self._option_ctx: OpenQuoteContext | None = None
+        self._option_fetcher: OptionChainFetcher | None = None
+        self._option_timer = QTimer(self)
+        self._option_timer.timeout.connect(self._trigger_option_fetch)
+        self._option_wall_data: dict | None = None
+        self._option_prev_volumes: dict[str, int] = {}
+        self._option_code: str = ""   # symbol the cached option state belongs to
+        self._tray: QSystemTrayIcon | None = None   # built lazily on first alert
 
         # Range Profile state
         self._range_region:          pg.LinearRegionItem | None = None
@@ -1629,6 +1735,78 @@ class TradeViewerQt(QMainWindow):
         self._scanner_signals_btn.clicked.connect(self._toggle_scanner_signals)
         tb3.addWidget(self._scanner_signals_btn)
 
+        # ── Row: options (Call/Put Wall + Zero Gamma, large-trade alerts) ────
+        self.addToolBarBreak()
+        tb_opt = QToolBar("Options", self)
+        tb_opt.setMovable(False)
+        tb_opt.setFloatable(False)
+        self.addToolBar(tb_opt)
+        toolbar_rows.append(tb_opt)
+
+        tb_opt.addWidget(_lbl("Options:"))
+        for key, label in [
+            ("option_walls",  "Option Walls"),
+            ("option_alerts", "Option Alerts"),
+        ]:
+            cb = QCheckBox(label)
+            cb.setChecked(False)
+            cb.stateChanged.connect(self._on_option_indicator_toggle)
+            self._ind_checks[key] = cb
+            tb_opt.addWidget(cb)
+
+        tb_opt.addSeparator()
+
+        # Shared controls -- both indicators come from the same poll cycle.
+        tb_opt.addWidget(_lbl("DTE:"))
+        self._option_dte_spin = QSpinBox()
+        self._option_dte_spin.setRange(0, 30)
+        self._option_dte_spin.setValue(7)
+        self._option_dte_spin.setFixedWidth(40)
+        self._option_dte_spin.setToolTip("Max days-to-expiry for the option chain polled")
+        tb_opt.addWidget(self._option_dte_spin)
+
+        self._option_0dte_cb = QCheckBox("0DTE")
+        self._option_0dte_cb.setToolTip(
+            "Force DTE=0 (today's expiry only) -- ignores the DTE spinbox\n"
+            "while checked. Useful for watching same-day option structure,\n"
+            "which shifts much faster intraday than further-dated expiries.")
+        self._option_0dte_cb.stateChanged.connect(self._on_option_0dte_toggle)
+        tb_opt.addWidget(self._option_0dte_cb)
+
+        tb_opt.addSeparator()
+        tb_opt.addWidget(_lbl("Poll(s):"))
+        self._option_interval_spin = QSpinBox()
+        self._option_interval_spin.setRange(5, 300)
+        self._option_interval_spin.setValue(15)
+        self._option_interval_spin.setFixedWidth(45)
+        self._option_interval_spin.setToolTip(
+            "Seconds between option-chain polls -- drives both Option Walls\n"
+            "refresh and Option Alerts detection latency.")
+        self._option_interval_spin.valueChanged.connect(self._on_option_interval_changed)
+        tb_opt.addWidget(self._option_interval_spin)
+
+        tb_opt.addSeparator()
+        tb_opt.addWidget(_lbl("Threshold:"))
+        self._option_threshold_spin = QSpinBox()
+        self._option_threshold_spin.setRange(1, 100_000)
+        self._option_threshold_spin.setValue(500)
+        self._option_threshold_spin.setFixedWidth(65)
+        self._option_threshold_spin.setToolTip(
+            "Option Alerts: minimum single-contract volume increase between\n"
+            "two polls to fire an alert (contracts, not dollars).")
+        tb_opt.addWidget(self._option_threshold_spin)
+
+        tb_opt.addSeparator()
+        option_refresh_btn = QPushButton("↻")
+        option_refresh_btn.setFixedWidth(28)
+        option_refresh_btn.setToolTip("Refresh option data now, without waiting for the next poll")
+        option_refresh_btn.clicked.connect(self._trigger_option_fetch)
+        tb_opt.addWidget(option_refresh_btn)
+
+        self._option_status_lbl = QLabel("")
+        self._option_status_lbl.setStyleSheet("color: #888;")
+        tb_opt.addWidget(self._option_status_lbl)
+
         # ── Row 6: trade review ───────────────────────────────────────────────
         self.addToolBarBreak()
         tb3 = QToolBar("Trade Review", self)
@@ -1763,6 +1941,8 @@ class TradeViewerQt(QMainWindow):
         self._delta_items:   list = []  # TextItem per candle
         self._ema_items:     list = []  # PlotCurveItem per EMA period
         self._avwap_items:   list = []  # anchored-VWAP curve + anchor line + label
+        self._option_wall_items: list = []  # Call/Put Wall + Zero Gamma lines -- cleared+redrawn each update
+        self._option_alert_items: list = []  # large-trade markers -- accumulate, not cleared each update
         self._kd_items:      list = []  # PlotCurveItem + fill for KD subplot
         self._kd_band_items: list = []  # PlotCurveItem + fill for KD band on main chart
         self._cvd_items:     list = []  # PlotCurveItem for CVD subplot
@@ -2436,6 +2616,114 @@ class TradeViewerQt(QMainWindow):
             self._liq_hm_window.set_code(code)
             self._liq_hm_window.set_live(live)
 
+    # ── Option Walls / Option Alerts ──────────────────────────────────────────
+    # Shared poll: one OptionChainFetcher run serves both indicators. Uses its
+    # own OpenQuoteContext (self._option_ctx), separate from self._ctx, so its
+    # background-thread network calls never run concurrently against the same
+    # context DataFetcher uses on the K-line refresh cycle.
+
+    def _ensure_option_ctx(self) -> None:
+        if self._option_ctx is not None:
+            return
+        try:
+            self._option_ctx = OpenQuoteContext(host="127.0.0.1", port=11111)
+        except Exception as exc:
+            self._log(f"Option context connect failed: {exc}")
+            self._option_ctx = None
+
+    def _on_option_indicator_toggle(self) -> None:
+        walls_on  = self._ind("option_walls")
+        alerts_on = self._ind("option_alerts")
+        if walls_on or alerts_on:
+            self._ensure_option_ctx()
+            if not self._option_timer.isActive():
+                self._option_timer.start(self._option_interval_spin.value() * 1000)
+            self._trigger_option_fetch()
+        else:
+            self._option_timer.stop()
+        if not walls_on:
+            self._clear_option_wall_items()
+        if not alerts_on:
+            self._clear_option_alert_items()
+
+    def _on_option_0dte_toggle(self) -> None:
+        self._option_dte_spin.setEnabled(not self._option_0dte_cb.isChecked())
+        if self._ind("option_walls") or self._ind("option_alerts"):
+            self._trigger_option_fetch()
+
+    def _on_option_interval_changed(self, value: int) -> None:
+        if self._option_timer.isActive():
+            self._option_timer.start(value * 1000)
+
+    def _trigger_option_fetch(self) -> None:
+        if not (self._ind("option_walls") or self._ind("option_alerts")):
+            return
+        self._ensure_option_ctx()
+        if self._option_ctx is None:
+            return
+        if self._option_fetcher is not None and self._option_fetcher.isRunning():
+            return  # previous poll still in flight -- skip this tick
+        code = self._code_edit.text().strip()
+        if not code:
+            return
+        if code != self._option_code:
+            # Symbol changed since the last poll -- no volume baseline for
+            # the new symbol yet (would falsely compare against the old
+            # symbol's last-known volumes), and any drawn walls/alerts
+            # belong to the old symbol.
+            self._option_prev_volumes = {}
+            self._option_code = code
+            self._clear_option_wall_items()
+            self._clear_option_alert_items()
+        dte = 0 if self._option_0dte_cb.isChecked() else self._option_dte_spin.value()
+        threshold = self._option_threshold_spin.value()
+        self._option_status_lbl.setText("options: fetching…")
+        self._option_fetcher = OptionChainFetcher(
+            self._option_ctx, code, dte, threshold, dict(self._option_prev_volumes))
+        self._option_fetcher.ready.connect(self._on_option_fetch_ready)
+        self._option_fetcher.error.connect(self._on_option_fetch_error)
+        self._option_fetcher.start()
+
+    def _on_option_fetch_error(self, msg: str) -> None:
+        self._log(f"Option fetch: {msg}")
+        self._option_status_lbl.setText("options: no data")
+
+    def _on_option_fetch_ready(self, result: dict) -> None:
+        self._option_wall_data     = result
+        self._option_prev_volumes  = result["volumes"]
+        ts_str = result["computed_at"].strftime("%H:%M:%S")
+        self._option_status_lbl.setText(f"options: updated {ts_str}")
+        if self._ind("option_walls") and self._klines is not None:
+            self._clear_option_wall_items()
+            self._draw_option_walls(self._klines)
+        if self._ind("option_alerts"):
+            for entry in result["large_trades"]:
+                self._fire_option_alert(entry)
+
+    def _fire_option_alert(self, entry: dict) -> None:
+        code   = self._code_edit.text().strip()
+        title  = f"{code} large option trade"
+        msg    = f"{entry['option_type']} ${entry['strike']:.0f}  +{entry['volume_delta']} contracts"
+        self._show_option_tray_message(title, msg)
+        self._add_option_alert_marker(entry)
+
+    def _build_option_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray = None
+            return
+        pix = QPixmap(16, 16)
+        pix.fill(QColor(_RED))
+        self._tray = QSystemTrayIcon(QIcon(pix), self)
+        self._tray.setToolTip("Trade Viewer — Option Alerts")
+        self._tray.show()
+
+    def _show_option_tray_message(self, title: str, msg: str) -> None:
+        if self._tray is None:
+            self._build_option_tray()
+        if self._tray is not None:
+            self._tray.showMessage(
+                title, msg, QSystemTrayIcon.MessageIcon.Information, 8000)
+
     # ── Chart rendering ───────────────────────────────────────────────────────
 
     def _render(self, klines: pd.DataFrame | None, ticks: dict | None) -> None:
@@ -2537,6 +2825,14 @@ class TradeViewerQt(QMainWindow):
         self._clear_avwap_items()
         if show_avwap:
             self._draw_avwap(klines)
+
+        # Option Walls (Call/Put Wall + Zero Gamma) -- re-renders from the
+        # already-cached self._option_wall_data only; never triggers a new
+        # option-chain fetch (that's solely _trigger_option_fetch's job, on
+        # its own poll timer, decoupled from this per-tick chart redraw).
+        self._clear_option_wall_items()
+        if self._ind("option_walls"):
+            self._draw_option_walls(klines)
 
         # KD band overlay on main chart (fast/slow midline ribbon)
         self._clear_kd_band_items()
@@ -2962,6 +3258,80 @@ class TradeViewerQt(QMainWindow):
                 lbl.setPos(x[last_i], band[last_i])
                 self._plot_c.addItem(lbl, ignoreBounds=True)
                 self._avwap_items.append(lbl)
+
+    def _clear_option_wall_items(self) -> None:
+        for item in self._option_wall_items:
+            self._plot_c.removeItem(item)
+        self._option_wall_items.clear()
+
+    def _draw_option_walls(self, klines: pd.DataFrame) -> None:
+        """Overlay Call Wall / Put Wall / Zero Gamma as horizontal price
+        levels from the latest cached option-chain poll
+        (self._option_wall_data). Only re-renders already-fetched data --
+        never triggers a new fetch itself (see _trigger_option_fetch)."""
+        data = self._option_wall_data
+        if not data:
+            return
+        n = len(klines)
+        if n == 0:
+            return
+
+        for price, color, label in (
+            (data.get("call_wall"),  _RED,            "Call Wall"),
+            (data.get("put_wall"),   _GREEN,           "Put Wall"),
+            (data.get("zero_gamma"), _ZERO_GAMMA_COL, "Zero Gamma"),
+        ):
+            if price is None:
+                continue
+            line = pg.InfiniteLine(
+                pos=price, angle=0, movable=False,
+                pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
+            )
+            self._plot_c.addItem(line, ignoreBounds=True)
+            self._option_wall_items.append(line)
+
+            lbl = pg.TextItem(
+                text=f"{label} {price:.2f}", color=color, anchor=(0.0, 1.0),
+            )
+            lbl.setFont(QFont("Monospace", 7))
+            lbl.setPos(n - 1, price)
+            self._plot_c.addItem(lbl, ignoreBounds=True)
+            self._option_wall_items.append(lbl)
+
+    def _clear_option_alert_items(self) -> None:
+        for item in self._option_alert_items:
+            self._plot_c.removeItem(item)
+        self._option_alert_items.clear()
+
+    def _add_option_alert_marker(self, entry: dict) -> None:
+        """Add one large-trade marker at the latest bar -- this is a live
+        "just happened" event, not a historical timestamp needing a
+        searchsorted lookup like other overlays use. Appended to
+        self._option_alert_items without clearing previous markers: each
+        alert is a discrete past event that should stay visible, unlike the
+        walls (current state, cleared+redrawn every poll)."""
+        if self._klines is None or self._klines.empty:
+            return
+        x       = len(self._klines) - 1
+        is_call = entry["option_type"] == "CALL"
+        color   = _RED if is_call else _GREEN
+        marker = pg.ScatterPlotItem(
+            x=[x], y=[entry["strike"]], size=12,
+            symbol="o" if is_call else "s",
+            brush=pg.mkBrush(color), pen=pg.mkPen("#ffffff", width=0.5),
+        )
+        self._plot_c.addItem(marker, ignoreBounds=True)
+        self._option_alert_items.append(marker)
+
+        tag = "C" if is_call else "P"
+        lbl = pg.TextItem(
+            text=f"{tag}{entry['strike']:.0f} +{entry['volume_delta']}",
+            color=color, anchor=(0.0, 0.5 if is_call else 1.0),
+        )
+        lbl.setFont(QFont("Monospace", 7))
+        lbl.setPos(x, entry["strike"])
+        self._plot_c.addItem(lbl, ignoreBounds=True)
+        self._option_alert_items.append(lbl)
 
     def _clear_kd_items(self) -> None:
         for item in self._kd_items:
@@ -4590,6 +4960,21 @@ class TradeViewerQt(QMainWindow):
 
         # Stop the live refresh timer and unsubscribe tickers.
         self._stop_live()
+
+        # Stop the option-chain poll timer and its context/fetcher, mirroring
+        # the main ctx/fetcher teardown below (own connection, own thread).
+        self._option_timer.stop()
+        if self._option_ctx is not None:
+            try:
+                self._option_ctx.close()
+            except Exception:
+                pass
+            self._option_ctx = None
+        if self._option_fetcher and self._option_fetcher.isRunning():
+            self._option_fetcher.quit()
+            if not self._option_fetcher.wait(2000):
+                self._option_fetcher.terminate()
+                self._option_fetcher.wait(500)
 
         # Close the moomoo context BEFORE asking the fetcher thread to stop.
         # Closing the socket unblocks any in-flight request_history_kline call
