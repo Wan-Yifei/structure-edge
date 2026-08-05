@@ -377,6 +377,19 @@
       </div>
 
       <div class="chart-card">
+        <div class="chart-card-title">盈亏比走势 & EWMA</div>
+        <div class="legend">
+          <div class="legend-item"><div class="legend-dot" style="background:#2a78d6"></div>每日盈亏比</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#e34948"></div>EWMA 均值</div>
+          <div class="legend-item"><div class="legend-dash"></div>1.0 线</div>
+        </div>
+        <div class="chart-wrap" style="height:210px;">
+          <canvas id="chart-ratio" role="img" aria-label="每日盈亏比和EWMA走势" style="display:none;"></canvas>
+        </div>
+        <div class="control-hint" id="ratio-chart-hint">从CSV加载后显示（需要有效的每日盈亏比数据）</div>
+      </div>
+
+      <div class="chart-card">
         <div class="chart-card-title">权重分布（近期 → 更高权重）</div>
         <div class="chart-wrap" style="height:130px;">
           <canvas id="chart-weight" role="img" aria-label="各天权重分布"></canvas>
@@ -394,7 +407,7 @@
 </div>
 
 <script>
-let chart1 = null, chart2 = null;
+let chart1 = null, chart2 = null, chart3 = null;
 let savedSessions = JSON.parse(localStorage.getItem('kelly_sessions') || '[]');
 
 const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
@@ -444,6 +457,7 @@ const supportsFSAccess = 'showOpenFilePicker' in window;
 let csvFileHandle = null;   // FileSystemFileHandle when picked via showOpenFilePicker (Chromium) -- enables write-back
 let csvHeader = CSV_HEADER_DEFAULT.slice();
 let csvRows = [];           // [{Date, 'Win Rate', 'Daily PnL %', Trades, 'Profit/Loss Ratio', Comment}, ...]
+let csvRatios = [];         // valid daily Profit/Loss Ratio values only (N/A days excluded) -- for the ratio trend chart
 
 function parseCSVLine(line) {
   const out = [];
@@ -499,6 +513,7 @@ function applyCSVData(text, sourceLabel) {
   csvHeader = header.length ? header : CSV_HEADER_DEFAULT.slice();
   csvRows = rows;
   const { winRates, ratios } = rowsToWinRatesAndRatios(rows);
+  csvRatios = ratios;
   const statusEl = document.getElementById('csv-status');
   if (winRates.length < 2) {
     statusEl.textContent = `${sourceLabel}: 未能解析出足够的胜率数据`;
@@ -734,6 +749,7 @@ function calculate() {
 
   renderKellyBars(kelly);
   renderCharts(raw, series, weights);
+  renderRatioChart(lam);
 }
 
 function renderKellyBars(kelly) {
@@ -753,6 +769,69 @@ function renderKellyBars(kelly) {
       </div>
     </div>`).join('') +
     `<div class="bar-labels"><span>0%</span><span>50%+</span></div>`;
+}
+
+function renderRatioChart(lam) {
+  const hint   = document.getElementById('ratio-chart-hint');
+  const canvas = document.getElementById('chart-ratio');
+  if (csvRatios.length < 2) {
+    if (chart3) { chart3.destroy(); chart3 = null; }
+    hint.style.display = '';
+    canvas.style.display = 'none';
+    return;
+  }
+  hint.style.display = 'none';
+  canvas.style.display = '';
+
+  const { series: ratioEwma } = calcEWMA(csvRatios, lam);
+  const ratioLabels = csvRatios.map((_, i) => 'D' + (i + 1));
+
+  if (chart3) chart3.destroy();
+  chart3 = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: ratioLabels,
+      datasets: [
+        {
+          label: '每日盈亏比',
+          data: csvRatios.map(v => +v.toFixed(2)),
+          borderColor: '#2a78d6',
+          backgroundColor: 'rgba(42,120,214,0.07)',
+          borderWidth: 1.5,
+          pointRadius: csvRatios.length > 30 ? 0 : 3,
+          pointHoverRadius: 4,
+          fill: false, tension: 0.2,
+        },
+        {
+          label: 'EWMA',
+          data: ratioEwma.map(v => +v.toFixed(2)),
+          borderColor: '#e34948',
+          borderWidth: 2,
+          pointRadius: 0,
+          fill: false, tension: 0.3,
+        },
+        {
+          label: '1.0 线',
+          data: csvRatios.map(() => 1.0),
+          borderColor: GRID,
+          borderWidth: 1,
+          borderDash: [4, 4],
+          pointRadius: 0, fill: false,
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)}` } }
+      },
+      scales: {
+        x: { ticks: { color: TICK, font: { size: 11 }, maxTicksLimit: 15 }, grid: { color: GRID } },
+        y: { ticks: { color: TICK, font: { size: 11 } }, grid: { color: GRID }, beginAtZero: true }
+      }
+    }
+  });
 }
 
 function renderCharts(raw, ewmaSeries, weights) {
@@ -846,6 +925,10 @@ function clearAll() {
   document.getElementById('m-days').textContent = '0 天';
   if (chart1) { chart1.destroy(); chart1 = null; }
   if (chart2) { chart2.destroy(); chart2 = null; }
+  if (chart3) { chart3.destroy(); chart3 = null; }
+  csvRatios = [];
+  document.getElementById('ratio-chart-hint').style.display = '';
+  document.getElementById('chart-ratio').style.display = 'none';
   document.getElementById('kelly-bars').innerHTML = '<div class="empty-state">输入数据后显示</div>';
   document.getElementById('rating-badge').innerHTML = '<span class="badge blue">输入数据后显示</span>';
   document.getElementById('result-table').innerHTML =
