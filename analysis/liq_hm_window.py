@@ -1153,6 +1153,18 @@ class LiqHmWindow(QWidget):
                 self._col_ts     = []
                 self._raw_snaps  = []
                 self._mid_prices = []
+                # _absorb_ticks feeds detect_aggressor_bubbles() with column
+                # indices relative to self._col_ts; wiping col_ts above
+                # without also wiping this leaves stale (tick, old-col-index)
+                # entries whose index no longer means anything once columns
+                # renumber from 0 again. Worse, the bubble markers already
+                # drawn from those stale entries are never removed either
+                # (only _redraw_orderflow_markers()'s own clear-then-draw
+                # does that, and a rebuild doesn't call it) -- they just sit
+                # at their old data-coordinate position forever, reported as
+                # "aggressor bubbles stuck on screen, not moving/updating".
+                self._absorb_ticks = []
+                self._clear_overlay_items()
                 self._update_legend()   # bin_size just changed on rebuild
 
     def _push_column(self, snap: list[dict],
