@@ -284,6 +284,27 @@ def build_gex_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
     }
 
 
+def top_gex_walls(by_strike: pd.DataFrame, n: int) -> tuple[list[dict], list[dict]]:
+    """Return the top *n* Call Wall / Put Wall candidates, strongest first.
+
+    build_gex_stats()'s call_wall/put_wall are just this with n=1 (idxmax/
+    idxmin) -- this generalizes to "top N" for callers that want to show
+    more than the single strongest strike per side (e.g. a multi-wall
+    chart overlay). Each entry is {"strike": float, "gex": float}.
+    """
+    calls = by_strike.nlargest(n, "call_gex")
+    puts  = by_strike.nsmallest(n, "put_gex")
+    call_walls = [
+        {"strike": float(r["option_strike_price"]), "gex": float(r["call_gex"])}
+        for _, r in calls.iterrows()
+    ]
+    put_walls = [
+        {"strike": float(r["option_strike_price"]), "gex": float(r["put_gex"])}
+        for _, r in puts.iterrows()
+    ]
+    return call_walls, put_walls
+
+
 # ── Formatting helpers ─────────────────────────────────────────────────────────
 
 def _fmt(n: float) -> str:

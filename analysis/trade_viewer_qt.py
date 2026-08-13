@@ -76,7 +76,7 @@ from strategy.smc.kd_trend import compute_kd
 from strategy.chandelier_exit.chandelier import current_stop
 from strategy.option.gex import (
     get_near_expiry_dates, fetch_option_data as fetch_option_chain_data,
-    compute_gex, build_gex_stats,
+    compute_gex, build_gex_stats, top_gex_walls,
 )
 from ta.volume import AccDistIndexIndicator
 from moomoo import (
@@ -1121,13 +1121,14 @@ class OptionChainFetcher(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, ctx, code: str, dte: int, threshold: int,
-                 prev_volumes: dict[str, int]):
+                 prev_volumes: dict[str, int], wall_count: int = 1):
         super().__init__()
         self._ctx          = ctx
         self._code         = code
         self._dte          = dte
         self._threshold    = threshold
         self._prev_volumes = prev_volumes
+        self._wall_count   = wall_count
 
     def run(self) -> None:
         try:
@@ -1150,6 +1151,7 @@ class OptionChainFetcher(QThread):
             # the returned stats dict) -- calling it separately here would
             # just redo the same BS-repricing grid search a second time.
             stats = build_gex_stats(df, by_strike, spot, 0.0, expiries)
+            call_walls, put_walls = top_gex_walls(by_strike, self._wall_count)
 
             # Large-trade detection: diff this poll's per-contract volume
             # against the previous poll's. A contract missing from
@@ -1178,8 +1180,8 @@ class OptionChainFetcher(QThread):
                         })
 
             self.ready.emit({
-                "call_wall":    stats["call_wall"],
-                "put_wall":     stats["put_wall"],
+                "call_walls":   call_walls,   # [{"strike":, "gex":}, ...] strongest first
+                "put_walls":    put_walls,
                 "zero_gamma":   stats["zero_gamma"],
                 "net_gex":      stats["net_gex"],
                 "expiries":     expiries,
@@ -1772,6 +1774,19 @@ class TradeViewerQt(QMainWindow):
             "which shifts much faster intraday than further-dated expiries.")
         self._option_0dte_cb.stateChanged.connect(self._on_option_0dte_toggle)
         tb_opt.addWidget(self._option_0dte_cb)
+
+        tb_opt.addSeparator()
+        tb_opt.addWidget(_lbl("Walls:"))
+        self._option_wall_count_spin = QSpinBox()
+        self._option_wall_count_spin.setRange(1, 10)
+        self._option_wall_count_spin.setValue(1)
+        self._option_wall_count_spin.setFixedWidth(36)
+        self._option_wall_count_spin.setToolTip(
+            "Number of Call Wall / Put Wall lines to draw per side, strongest\n"
+            "GEX first (1 = just the single strongest wall each side, matching\n"
+            "the original behavior).")
+        self._option_wall_count_spin.valueChanged.connect(self._on_option_wall_count_changed)
+        tb_opt.addWidget(self._option_wall_count_spin)
 
         tb_opt.addSeparator()
         tb_opt.addWidget(_lbl("Poll(s):"))
@@ -2655,6 +2670,14 @@ class TradeViewerQt(QMainWindow):
         if self._option_timer.isActive():
             self._option_timer.start(value * 1000)
 
+    def _on_option_wall_count_changed(self) -> None:
+        # Cached self._option_wall_data only ever holds as many walls per
+        # side as the *previous* fetch was asked for -- redrawing from cache
+        # alone can't show more than that, so a count increase needs a fresh
+        # fetch (not just a re-render) to actually have the extra strikes.
+        if self._ind("option_walls") or self._ind("option_alerts"):
+            self._trigger_option_fetch()
+
     def _trigger_option_fetch(self) -> None:
         if not (self._ind("option_walls") or self._ind("option_alerts")):
             return
@@ -2676,10 +2699,11 @@ class TradeViewerQt(QMainWindow):
             self._clear_option_wall_items()
             self._clear_option_alert_items()
         dte = 0 if self._option_0dte_cb.isChecked() else self._option_dte_spin.value()
-        threshold = self._option_threshold_spin.value()
+        threshold  = self._option_threshold_spin.value()
+        wall_count = self._option_wall_count_spin.value()
         self._option_status_lbl.setText("options: fetching…")
         self._option_fetcher = OptionChainFetcher(
-            self._option_ctx, code, dte, threshold, dict(self._option_prev_volumes))
+            self._option_ctx, code, dte, threshold, dict(self._option_prev_volumes), wall_count)
         self._option_fetcher.ready.connect(self._on_option_fetch_ready)
         self._option_fetcher.error.connect(self._on_option_fetch_error)
         self._option_fetcher.start()
@@ -3264,11 +3288,36 @@ class TradeViewerQt(QMainWindow):
             self._plot_c.removeItem(item)
         self._option_wall_items.clear()
 
+    def _draw_option_wall_line(self, price: float, color: str, label: str,
+                               n: int, alpha: int = 255) -> None:
+        line = pg.InfiniteLine(
+            pos=price, angle=0, movable=False,
+            pen=pg.mkPen(_qc(color, alpha), width=1, style=Qt.PenStyle.DashLine),
+        )
+        self._plot_c.addItem(line, ignoreBounds=True)
+        self._option_wall_items.append(line)
+
+        lbl = pg.TextItem(
+            text=f"{label} {price:.2f}", color=_qc(color, alpha), anchor=(0.0, 1.0),
+        )
+        lbl.setFont(QFont("Monospace", 7))
+        lbl.setPos(n - 1, price)
+        self._plot_c.addItem(lbl, ignoreBounds=True)
+        self._option_wall_items.append(lbl)
+
     def _draw_option_walls(self, klines: pd.DataFrame) -> None:
-        """Overlay Call Wall / Put Wall / Zero Gamma as horizontal price
+        """Overlay Call Wall(s) / Put Wall(s) / Zero Gamma as horizontal price
         levels from the latest cached option-chain poll
         (self._option_wall_data). Only re-renders already-fetched data --
-        never triggers a new fetch itself (see _trigger_option_fetch)."""
+        never triggers a new fetch itself (see _trigger_option_fetch).
+
+        call_walls/put_walls are lists, strongest GEX first (see
+        top_gex_walls() in strategy/option/gex.py) -- the "Walls" spinbox
+        controls how many per side get requested/drawn. Weaker (later-rank)
+        walls fade out, same visual-hierarchy idiom as the AVWAP sigma bands
+        (_AVWAP_BAND_ALPHA): still visible, but clearly secondary to the
+        single strongest wall on each side.
+        """
         data = self._option_wall_data
         if not data:
             return
@@ -3276,27 +3325,19 @@ class TradeViewerQt(QMainWindow):
         if n == 0:
             return
 
-        for price, color, label in (
-            (data.get("call_wall"),  _RED,            "Call Wall"),
-            (data.get("put_wall"),   _GREEN,           "Put Wall"),
-            (data.get("zero_gamma"), _ZERO_GAMMA_COL, "Zero Gamma"),
-        ):
-            if price is None:
-                continue
-            line = pg.InfiniteLine(
-                pos=price, angle=0, movable=False,
-                pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
-            )
-            self._plot_c.addItem(line, ignoreBounds=True)
-            self._option_wall_items.append(line)
+        for rank, wall in enumerate(data.get("call_walls") or []):
+            alpha = max(60, 255 - rank * 40)
+            label = "Call Wall" if rank == 0 else f"Call Wall #{rank + 1}"
+            self._draw_option_wall_line(wall["strike"], _RED, label, n, alpha)
 
-            lbl = pg.TextItem(
-                text=f"{label} {price:.2f}", color=color, anchor=(0.0, 1.0),
-            )
-            lbl.setFont(QFont("Monospace", 7))
-            lbl.setPos(n - 1, price)
-            self._plot_c.addItem(lbl, ignoreBounds=True)
-            self._option_wall_items.append(lbl)
+        for rank, wall in enumerate(data.get("put_walls") or []):
+            alpha = max(60, 255 - rank * 40)
+            label = "Put Wall" if rank == 0 else f"Put Wall #{rank + 1}"
+            self._draw_option_wall_line(wall["strike"], _GREEN, label, n, alpha)
+
+        zero_gamma = data.get("zero_gamma")
+        if zero_gamma is not None:
+            self._draw_option_wall_line(zero_gamma, _ZERO_GAMMA_COL, "Zero Gamma", n)
 
     def _clear_option_alert_items(self) -> None:
         for item in self._option_alert_items:
