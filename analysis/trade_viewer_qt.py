@@ -1638,6 +1638,18 @@ class TradeViewerQt(QMainWindow):
             self._range_group.addButton(rb)
             tb_sess.addWidget(rb)
 
+        tb_sess.addSeparator()
+        tb_sess.addWidget(_lbl("Bins:"))
+        self._profile_bins_spin = QSpinBox()
+        self._profile_bins_spin.setRange(20, 300)
+        self._profile_bins_spin.setValue(60)
+        self._profile_bins_spin.setFixedWidth(48)
+        self._profile_bins_spin.setToolTip(
+            "Number of price bins in the session volume profile (right panel) --\n"
+            "higher = thinner bars, finer price resolution.")
+        self._profile_bins_spin.valueChanged.connect(self._on_range_changed)
+        tb_sess.addWidget(self._profile_bins_spin)
+
         # ── Row 5: order flow controls ────────────────────────────────────────
         self.addToolBarBreak()
         tb3 = QToolBar("Order Flow", self)
@@ -3938,15 +3950,42 @@ class TradeViewerQt(QMainWindow):
         hi   = float(klines["high"].max())
         if hi <= lo:
             return
-        n_bins  = 60
+        n_bins  = self._profile_bins_spin.value()
         bins    = np.linspace(lo, hi, n_bins + 1)
         centers = (bins[:-1] + bins[1:]) / 2
         volumes = np.zeros(n_bins)
+        # Tick-first, OHLCV-fallback -- same hybrid _compute_profile_bins()
+        # uses for the Range Volume Profile. Bars with real tick coverage
+        # place volume at its actual traded price via np.digitize; only
+        # bars with no tick data for their bucket fall back to spreading
+        # the bar's volume evenly across every bin its high-low range
+        # touches. That uniform-spread approximation is what produced
+        # "many equal-height bars" when applied to every bar -- similar
+        # per-bar volume and range meant similar flat per-bin contributions
+        # everywhere, not a reflection of real intrabar price concentration.
+        cm = self._candle_mins
         for _, row in klines.iterrows():
-            mask = (centers >= float(row["low"])) & (centers <= float(row["high"]))
-            n = int(mask.sum())
-            if n:
-                volumes[mask] += float(row["volume"]) / n
+            bar_ticks_used = False
+            if self._ticks:
+                try:
+                    bar_end = datetime.strptime(str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                    bk = candle_start(bar_end - timedelta(minutes=cm), cm)
+                except ValueError:
+                    bk = None
+                pd_ = self._ticks.get(bk) if bk is not None else None
+                if pd_:
+                    for price, counts in pd_.items():
+                        total = counts.get("buy", 0) + counts.get("sell", 0) + counts.get("neutral", 0)
+                        if total > 0 and lo <= float(price) <= hi:
+                            bi = int(np.clip(np.digitize(float(price), bins) - 1, 0, n_bins - 1))
+                            volumes[bi] += total
+                            bar_ticks_used = True
+
+            if not bar_ticks_used:
+                mask = (centers >= float(row["low"])) & (centers <= float(row["high"]))
+                n = int(mask.sum())
+                if n:
+                    volumes[mask] += float(row["volume"]) / n
 
         # Horizontal bars: x0=0 (left edge), x1=volume (right edge), y=price centre
         bar = pg.BarGraphItem(
