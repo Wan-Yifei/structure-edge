@@ -262,7 +262,16 @@ def main(argv=None):
     state = {"last_tick_time": None, "first_tick_done": False, "session_count": 0}
 
     # ── open moomoo quote context ──────────────────────────────────────────
-    from moomoo import OpenQuoteContext, SubType, RET_OK, Session
+    from moomoo import OpenQuoteContext, SubType, RET_OK, Session, set_futu_debug_model
+
+    # See the matching comment in order_book_collector.py: moomoo's SDK
+    # logger defaults to DEBUG-level file logging into a single shared,
+    # date-named file under %APPDATA%\com.moomoo.OpenD\Log used by every
+    # moomoo-connected process at once, whose TimedRotatingFileHandler can
+    # then collide across processes on rollover (PermissionError WinError
+    # 32, re-firing on every push until resolved). Turning off the SDK's
+    # "debug model" keeps it from writing those routine per-push messages.
+    set_futu_debug_model(False)
 
     HandlerClass = _make_handler(store, state)
     ctx          = OpenQuoteContext(host=args.host, port=args.port)

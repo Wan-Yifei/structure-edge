@@ -360,7 +360,22 @@ def main(argv=None):
 
     state = {"last_update_time": None, "first_update_done": False, "session_count": 0}
 
-    from moomoo import OpenQuoteContext, SubType, RET_OK
+    from moomoo import OpenQuoteContext, SubType, RET_OK, set_futu_debug_model
+
+    # moomoo's own internal SDK logger defaults to DEBUG-level file logging,
+    # writing every single push message to a shared, date-named log file
+    # under %APPDATA%\com.moomoo.OpenD\Log -- the *same* file for every
+    # moomoo-connected process on the machine (this collector, tick_collector,
+    # the main viewer, etc). Its TimedRotatingFileHandler tries to os.rename()
+    # that file when the rotation window rolls over; with multiple processes
+    # all holding it open for concurrent writes, that rename intermittently
+    # collides with Windows' exclusive lock and fails with PermissionError
+    # (WinError 32) -- once triggered it re-fires on every subsequent push
+    # until something releases the lock, flooding this collector's own log.
+    # Dropping the SDK's file/console log level to WARNING (its documented
+    # "debug model" toggle) stops it from writing these routine per-push
+    # acknowledgements at all, which avoids hitting that race in practice.
+    set_futu_debug_model(False)
 
     HandlerClass = _make_handler(store, state)
     ctx          = OpenQuoteContext(host=args.host, port=args.port)
