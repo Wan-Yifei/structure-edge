@@ -393,7 +393,7 @@ def apply_profile_range(klines: pd.DataFrame, range_val: str, cm: int) -> pd.Dat
     """
     if klines.empty:
         return klines
-    n_days = {"1d": 1, "3d": 3, "7d": 5}.get(range_val)
+    n_days = {"1d": 1, "2d": 2, "3d": 3, "7d": 5}.get(range_val)
     if n_days is None:
         return klines
     days  = klines["time_key"].map(lambda tk: _trading_day(tk, cm))
@@ -1630,7 +1630,7 @@ class TradeViewerQt(QMainWindow):
         # Profile date range
         tb_sess.addWidget(_lbl("Range:"))
         self._range_group = QButtonGroup(self)
-        for val, label in [("1d", "1D"), ("3d", "3D"), ("7d", "1W")]:
+        for val, label in [("1d", "1D"), ("2d", "2D"), ("3d", "3D"), ("7d", "1W")]:
             rb = QRadioButton(label)
             rb.setChecked(val == "1d")
             rb.toggled.connect(self._on_range_changed)
@@ -2483,7 +2483,7 @@ class TradeViewerQt(QMainWindow):
         self._rebuild_session_profile()
 
     def _get_range_val(self) -> str:
-        for val in ("1d", "3d", "7d"):
+        for val in ("1d", "2d", "3d", "7d"):
             rb = self._ind_checks.get(f"range_{val}")
             if rb and rb.isChecked():
                 return val
