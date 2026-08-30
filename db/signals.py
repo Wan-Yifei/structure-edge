@@ -52,6 +52,29 @@ CREATE TABLE IF NOT EXISTS fvg_watch_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_fvgw_symbol_tf ON fvg_watch_signals(symbol, tf, formed_time DESC);
 CREATE INDEX IF NOT EXISTS idx_fvgw_status    ON fvg_watch_signals(status);
+
+-- One row PER RULE, continuously upserted -- not an event stream like the
+-- two tables above. "indicator"/"params_json"/"field" together describe
+-- "which indicator, what params, which output series to compare" so this
+-- one schema covers RSI, MACD, KD, or anything else registered into
+-- analysis/indicator_alert_watcher.py's INDICATOR_REGISTRY without a
+-- migration -- no column here is RSI-specific.
+CREATE TABLE IF NOT EXISTS indicator_alert_state (
+    rule_id       TEXT PRIMARY KEY,
+    symbol        TEXT NOT NULL,
+    tf            TEXT NOT NULL,
+    indicator     TEXT NOT NULL,
+    params_json   TEXT NOT NULL,
+    field         TEXT NOT NULL,
+    condition     TEXT NOT NULL,
+    threshold     REAL NOT NULL,
+    value         REAL,
+    is_positive   INTEGER NOT NULL DEFAULT 0,
+    is_muted      INTEGER NOT NULL DEFAULT 0,
+    last_bar_time TEXT,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_indalert_symbol ON indicator_alert_state(symbol);
 """
 
 
@@ -268,3 +291,64 @@ class SignalsDB:
                 (symbol, since_dt),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── indicator_alert_state (one row per rule, continuously upserted) ────────
+
+    def upsert_indicator_alert_state(self, state: dict) -> None:
+        """Insert or refresh a rule's current reading.
+
+        `is_muted` is deliberately NOT taken from the caller: on conflict it
+        resolves to 0 whenever the new reading is negative (auto-unmute), or
+        to whatever is already in the table when the new reading is positive
+        (so a user's mute click -- a separate UPDATE via set_indicator_alert_muted
+        -- from the main thread can never be raced/overwritten by the scan
+        worker's next upsert on the same rule).
+        """
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        self._conn.execute(
+            """
+            INSERT INTO indicator_alert_state (
+                rule_id, symbol, tf, indicator, params_json, field,
+                condition, threshold, value, is_positive, is_muted,
+                last_bar_time, updated_at
+            ) VALUES (?,?,?,?,?,?,  ?,?,?,?,0,  ?,?)
+            ON CONFLICT(rule_id) DO UPDATE SET
+                value         = excluded.value,
+                is_positive   = excluded.is_positive,
+                is_muted      = CASE WHEN excluded.is_positive = 0
+                                     THEN 0
+                                     ELSE indicator_alert_state.is_muted END,
+                last_bar_time = excluded.last_bar_time,
+                updated_at    = excluded.updated_at
+            """,
+            (
+                state["rule_id"], state["symbol"], state["tf"], state["indicator"],
+                state["params_json"], state["field"], state["condition"], state["threshold"],
+                state.get("value"), int(bool(state.get("is_positive"))),
+                state.get("last_bar_time"), now,
+            ),
+        )
+        self._conn.commit()
+
+    def get_all_indicator_alert_state(self) -> list[dict]:
+        """Return every configured rule's current state, newest-updated first."""
+        rows = self._conn.execute(
+            "SELECT * FROM indicator_alert_state ORDER BY updated_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_indicator_alert_state(self, rule_id: str) -> Optional[dict]:
+        """Return one rule's current state (e.g. to check is_muted right after
+        an upsert), or None if it doesn't exist yet."""
+        row = self._conn.execute(
+            "SELECT * FROM indicator_alert_state WHERE rule_id=?", (rule_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def set_indicator_alert_muted(self, rule_id: str, muted: bool) -> None:
+        """Explicit user action (the Mute button) -- independent of upsert_indicator_alert_state."""
+        self._conn.execute(
+            "UPDATE indicator_alert_state SET is_muted=? WHERE rule_id=?",
+            (int(bool(muted)), rule_id),
+        )
+        self._conn.commit()

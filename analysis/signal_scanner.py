@@ -223,12 +223,16 @@ class ScanWorker(QThread):
         log(str)             — status / error messages
         new_signal(dict)     — a freshly detected entry signal dict
         new_fvg_watch_signal(dict) — a freshly detected lightweight FVG-formed signal
+        new_indicator_alert(dict) — a rule's refreshed reading (emitted every cycle
+                                     the rule is scanned, positive or not -- the UI
+                                     decides whether that's worth a notification)
         status_update(symbol, status_str)  — per-symbol last-scan status
     """
 
     log                  = pyqtSignal(str)
     new_signal           = pyqtSignal(dict)
     new_fvg_watch_signal = pyqtSignal(dict)
+    new_indicator_alert  = pyqtSignal(dict)
     status_update        = pyqtSignal(str, str)
 
     def __init__(self, cfg: dict, parent=None) -> None:
@@ -267,6 +271,14 @@ class ScanWorker(QThread):
                         self._scan_symbol(symbol, sym_cfg, scanner_cfg)
                     if overrides.get("fvg_watch_enabled", default.get("fvg_watch_enabled", False)):
                         self._scan_symbol_fvg_watch(symbol, scanner_cfg)
+                    if overrides.get("session_vp_enabled", default.get("session_vp_enabled", False)):
+                        self._scan_symbol_session_vp(symbol, scanner_cfg)
+                    if overrides.get("vah_soxs_enabled", default.get("vah_soxs_enabled", False)):
+                        self._scan_symbol_vah_soxs(symbol, scanner_cfg)
+                    if overrides.get("val_kd_tp_enabled", default.get("val_kd_tp_enabled", False)):
+                        self._scan_symbol_val_kd_tp(symbol, scanner_cfg)
+                    if overrides.get("indicator_alert_enabled", default.get("indicator_alert_enabled", False)):
+                        self._scan_symbol_indicator_alert(symbol, scanner_cfg)
                 except Exception as exc:
                     import traceback
                     self.log.emit(f"[{symbol}] scan error: {exc}\n{traceback.format_exc()}")
@@ -434,6 +446,238 @@ class ScanWorker(QThread):
             except Exception as exc:
                 self.log.emit(f"[{symbol} {tf}] fvg_watch DB write error: {exc}")
 
+    def _scan_symbol_session_vp(self, symbol: str, scanner_cfg: dict) -> None:
+        """Session Value-Area reversal watch -- writes into the same `signals`
+        table as _scan_symbol (strategy="session_vp"), since its schema
+        (symbol/direction/sl_price/tp_price/rr_ratio/...) is generic enough
+        to cover this strategy too -- no new table, no new UI needed, the
+        existing signals table view / tray notification path displays it
+        automatically. Per-(symbol, session) params come from
+        config/scanner/session_vp_params.json, hand-picked from
+        backtest/results/session_vp_v1_review/REVIEW.md's out-of-sample
+        validation (see that file's "validated" field per entry).
+        """
+        from analysis.session_vp_watcher import load_session_vp_config, scan_symbol_session_vp
+        from db.signals import SignalsDB
+
+        watch_cfg = load_session_vp_config().get(symbol, [])
+        if not watch_cfg:
+            return
+
+        end_dt   = datetime.now()
+        start_dt = end_dt - timedelta(days=3)  # same rolling window as _scan_symbol/_scan_symbol_fvg_watch
+        start    = start_dt.strftime("%Y-%m-%d")
+        end      = end_dt.strftime("%Y-%m-%d")
+
+        with open(_CFG_PATH, encoding="utf-8") as f:
+            schedule_sessions = json.load(f)["sessions"]
+
+        for entry_cfg in watch_cfg:
+            session = entry_cfg["session"]
+            try:
+                sigs = scan_symbol_session_vp(
+                    symbol, entry_cfg, start, end, schedule_sessions, force_refresh=True,
+                )
+            except Exception as exc:
+                self.log.emit(f"[{symbol} {session}] session_vp error: {exc}")
+                continue
+
+            if not sigs:
+                continue
+
+            try:
+                with SignalsDB(_SIGNALS_DB_PATH) as db:
+                    open_sigs = db.get_open_signals(symbol)
+                    open_keys = {round(s["entry_zone_top"], 4) for s in open_sigs}
+                    for sig in sigs:
+                        if round(sig["entry_zone_top"], 4) in open_keys:
+                            continue
+                        sig["signal_id"] = str(uuid.uuid4())
+                        db.insert_signal(sig)
+                        self.new_signal.emit(sig)
+                        validated = entry_cfg.get("validated", False)
+                        tag = "" if validated else " [UNVALIDATED]"
+                        self.log.emit(
+                            f"[{symbol} {session}] session_vp signal{tag} "
+                            f"entry {sig['entry_zone_top']:.2f} "
+                            f"SL {sig['sl_price']:.2f} TP {sig['tp_price']:.2f} "
+                            f"RR {sig['rr_ratio']:.2f}"
+                        )
+                        self._alert(sig, scanner_cfg)
+            except Exception as exc:
+                self.log.emit(f"[{symbol} {session}] session_vp DB write error: {exc}")
+
+    def _scan_symbol_vah_soxs(self, symbol: str, scanner_cfg: dict) -> None:
+        """Cross-asset VAH-short-proxy watch -- the signal comes from another
+        symbol's (e.g. SOXL) VAH+RSI-overbought reversal, but the executable
+        trade is a LONG on `symbol` here (e.g. SOXS), since the signal
+        symbol can't be shorted directly. Writes into the same `signals`
+        table (strategy="vah_soxs_proxy"). Per-(symbol, session) params come
+        from config/scanner/vah_soxs_params.json -- see
+        backtest/results/session_vp_v1_review/REVIEW.md section 8 for the
+        full research trail (why this exists, the beta price translation,
+        and the ATR noise filter).
+        """
+        from analysis.vah_soxs_watcher import load_vah_soxs_config, scan_vah_soxs
+        from db.signals import SignalsDB
+
+        watch_cfg = load_vah_soxs_config().get(symbol, [])
+        if not watch_cfg:
+            return
+
+        end_dt   = datetime.now()
+        start_dt = end_dt - timedelta(days=3)  # same rolling window as the other watches
+        start    = start_dt.strftime("%Y-%m-%d")
+        end      = end_dt.strftime("%Y-%m-%d")
+
+        with open(_CFG_PATH, encoding="utf-8") as f:
+            schedule_sessions = json.load(f)["sessions"]
+
+        for entry_cfg in watch_cfg:
+            session = entry_cfg["session"]
+            signal_symbol = entry_cfg["signal_symbol"]
+            try:
+                sigs = scan_vah_soxs(
+                    symbol, entry_cfg, start, end, schedule_sessions, force_refresh=True,
+                )
+            except Exception as exc:
+                self.log.emit(f"[{symbol} {session}] vah_soxs error: {exc}")
+                continue
+
+            if not sigs:
+                continue
+
+            try:
+                with SignalsDB(_SIGNALS_DB_PATH) as db:
+                    open_sigs = db.get_open_signals(symbol)
+                    open_keys = {round(s["entry_zone_top"], 4) for s in open_sigs}
+                    for sig in sigs:
+                        if round(sig["entry_zone_top"], 4) in open_keys:
+                            continue
+                        sig["signal_id"] = str(uuid.uuid4())
+                        db.insert_signal(sig)
+                        self.new_signal.emit(sig)
+                        validated = entry_cfg.get("validated", False)
+                        tag = "" if validated else " [UNVALIDATED]"
+                        self.log.emit(
+                            f"[{symbol} {session}] vah_soxs signal{tag} (from {signal_symbol}) "
+                            f"entry {sig['entry_zone_top']:.2f} "
+                            f"SL {sig['sl_price']:.2f} TP {sig['tp_price']:.2f} "
+                            f"RR {sig['rr_ratio']:.2f}"
+                        )
+                        self._alert(sig, scanner_cfg)
+            except Exception as exc:
+                self.log.emit(f"[{symbol} {session}] vah_soxs DB write error: {exc}")
+
+    def _scan_symbol_val_kd_tp(self, symbol: str, scanner_cfg: dict) -> None:
+        """VAL-entry / KD-channel-TP watch -- same VAL+RSI-oversold+reversal
+        entry as _scan_symbol_session_vp, but TP = up1 (fast EMA-channel
+        upper band) instead of the session's frozen POC. Outperforms the
+        POC-based TP on the regular session specifically -- see
+        backtest/results/session_vp_v1_review/REVIEW.md section 9. Writes
+        into the same `signals` table (strategy="val_kd_tp"). Per-(symbol,
+        session) params come from config/scanner/val_kd_tp_params.json.
+        """
+        from analysis.val_kd_tp_watcher import load_val_kd_tp_config, scan_val_kd_tp
+        from db.signals import SignalsDB
+
+        watch_cfg = load_val_kd_tp_config().get(symbol, [])
+        if not watch_cfg:
+            return
+
+        end_dt   = datetime.now()
+        start_dt = end_dt - timedelta(days=3)  # same rolling window as the other watches
+        start    = start_dt.strftime("%Y-%m-%d")
+        end      = end_dt.strftime("%Y-%m-%d")
+
+        with open(_CFG_PATH, encoding="utf-8") as f:
+            schedule_sessions = json.load(f)["sessions"]
+
+        for entry_cfg in watch_cfg:
+            session = entry_cfg["session"]
+            try:
+                sigs = scan_val_kd_tp(
+                    symbol, entry_cfg, start, end, schedule_sessions, force_refresh=True,
+                )
+            except Exception as exc:
+                self.log.emit(f"[{symbol} {session}] val_kd_tp error: {exc}")
+                continue
+
+            if not sigs:
+                continue
+
+            try:
+                with SignalsDB(_SIGNALS_DB_PATH) as db:
+                    open_sigs = db.get_open_signals(symbol)
+                    open_keys = {round(s["entry_zone_top"], 4) for s in open_sigs}
+                    for sig in sigs:
+                        if round(sig["entry_zone_top"], 4) in open_keys:
+                            continue
+                        sig["signal_id"] = str(uuid.uuid4())
+                        db.insert_signal(sig)
+                        self.new_signal.emit(sig)
+                        validated = entry_cfg.get("validated", False)
+                        tag = "" if validated else " [UNVALIDATED]"
+                        self.log.emit(
+                            f"[{symbol} {session}] val_kd_tp signal{tag} "
+                            f"entry {sig['entry_zone_top']:.2f} "
+                            f"SL {sig['sl_price']:.2f} TP {sig['tp_price']:.2f} "
+                            f"RR {sig['rr_ratio']:.2f}"
+                        )
+                        self._alert(sig, scanner_cfg)
+            except Exception as exc:
+                self.log.emit(f"[{symbol} {session}] val_kd_tp DB write error: {exc}")
+
+    def _scan_symbol_indicator_alert(self, symbol: str, scanner_cfg: dict) -> None:
+        """Open-ended indicator threshold watch -- a continuous status
+        monitor, not an event-stream detector like the other _scan_symbolX
+        methods: every rule is upserted every cycle (see
+        db.signals.SignalsDB.upsert_indicator_alert_state), positive or not,
+        so the UI table always reflects the latest reading. Rules come from
+        config/scanner/indicator_alert_params.json; see
+        analysis/indicator_alert_watcher.py's INDICATOR_REGISTRY for how a
+        new indicator (MACD, classic KDJ, ...) gets added later without
+        touching this method, the DB schema, or the UI.
+        """
+        from analysis.indicator_alert_watcher import load_indicator_alert_config, scan_indicator_alert
+        from db.signals import SignalsDB
+
+        rules = load_indicator_alert_config().get(symbol, [])
+        if not rules:
+            return
+
+        end_dt   = datetime.now()
+        start_dt = end_dt - timedelta(days=3)  # same rolling window as the other watches
+        start    = start_dt.strftime("%Y-%m-%d")
+        end      = end_dt.strftime("%Y-%m-%d")
+
+        for rule in rules:
+            try:
+                result = scan_indicator_alert(symbol, rule, start, end, force_refresh=True)
+            except Exception as exc:
+                self.log.emit(f"[{symbol}] indicator_alert error ({rule.get('indicator')}): {exc}")
+                continue
+            if result is None:
+                continue
+
+            try:
+                with SignalsDB(_SIGNALS_DB_PATH) as db:
+                    db.upsert_indicator_alert_state(result)
+                    current = db.get_indicator_alert_state(result["rule_id"])
+            except Exception as exc:
+                self.log.emit(f"[{symbol}] indicator_alert DB write error: {exc}")
+                continue
+
+            is_muted = bool(current["is_muted"]) if current else False
+            self.new_indicator_alert.emit({**result, "is_muted": is_muted})
+
+            if result["is_positive"] and not is_muted:
+                self.log.emit(
+                    f"[{symbol}] indicator_alert {rule['indicator']}.{rule['field']} "
+                    f"= {result['value']:.2f}  {result['condition']} {result['threshold']}"
+                )
+                self._alert(result, scanner_cfg)
+
 
 # ── backscan worker ────────────────────────────────────────────────────────────
 
@@ -493,8 +737,28 @@ class ParamsDialog(QDialog):
         self._fvg_watch_enabled_cb.setChecked(
             bool(override.get("fvg_watch_enabled", default.get("fvg_watch_enabled", False)))
         )
+        self._session_vp_enabled_cb = QCheckBox("Session-VP (Value-Area reversal, config/scanner/session_vp_params.json)")
+        self._session_vp_enabled_cb.setChecked(
+            bool(override.get("session_vp_enabled", default.get("session_vp_enabled", False)))
+        )
+        self._vah_soxs_enabled_cb = QCheckBox("VAH-SOXS proxy (cross-asset, config/scanner/vah_soxs_params.json)")
+        self._vah_soxs_enabled_cb.setChecked(
+            bool(override.get("vah_soxs_enabled", default.get("vah_soxs_enabled", False)))
+        )
+        self._val_kd_tp_enabled_cb = QCheckBox("VAL+KD-TP (config/scanner/val_kd_tp_params.json)")
+        self._val_kd_tp_enabled_cb.setChecked(
+            bool(override.get("val_kd_tp_enabled", default.get("val_kd_tp_enabled", False)))
+        )
+        self._indicator_alert_enabled_cb = QCheckBox("Indicator Alert (RSI/MACD/KD…, config/scanner/indicator_alert_params.json)")
+        self._indicator_alert_enabled_cb.setChecked(
+            bool(override.get("indicator_alert_enabled", default.get("indicator_alert_enabled", False)))
+        )
         toggle_lay.addWidget(self._entry_enabled_cb)
         toggle_lay.addWidget(self._fvg_watch_enabled_cb)
+        toggle_lay.addWidget(self._session_vp_enabled_cb)
+        toggle_lay.addWidget(self._vah_soxs_enabled_cb)
+        toggle_lay.addWidget(self._val_kd_tp_enabled_cb)
+        toggle_lay.addWidget(self._indicator_alert_enabled_cb)
         layout.addWidget(toggle_box)
 
         # Mode
@@ -616,6 +880,10 @@ class ParamsDialog(QDialog):
             "auto_params": auto,
             "entry_signal_enabled": self._entry_enabled_cb.isChecked(),
             "fvg_watch_enabled":    self._fvg_watch_enabled_cb.isChecked(),
+            "session_vp_enabled":   self._session_vp_enabled_cb.isChecked(),
+            "vah_soxs_enabled":     self._vah_soxs_enabled_cb.isChecked(),
+            "val_kd_tp_enabled":    self._val_kd_tp_enabled_cb.isChecked(),
+            "indicator_alert_enabled": self._indicator_alert_enabled_cb.isChecked(),
         }
         if auto:
             out["lookback_months"] = self._lookback_sp.value()
@@ -658,6 +926,7 @@ class SignalScanner(QMainWindow):
         self._refresh_targets_table()
         self._refresh_signals_table()
         self._refresh_fvg_watch_table()
+        self._refresh_indicator_alert_table()
 
     # ── config ────────────────────────────────────────────────────────────────
 
@@ -693,6 +962,10 @@ class SignalScanner(QMainWindow):
                     "min_pf": 1.5,
                     "entry_signal_enabled": True,
                     "fvg_watch_enabled": False,
+                    "session_vp_enabled": False,
+                    "vah_soxs_enabled": False,
+                    "val_kd_tp_enabled": False,
+                    "indicator_alert_enabled": False,
                 },
                 "overrides": {},
             }
@@ -834,7 +1107,26 @@ class SignalScanner(QMainWindow):
         fvg_watch_lay.addWidget(self._fvg_watch_tbl)
         splitter.addWidget(fvg_watch_widget)
 
-        splitter.setSizes([250, 250, 250])
+        # Indicator alerts panel — a continuous status monitor (one row per rule,
+        # upserted every scan cycle), not an event list like the panels above.
+        indicator_alert_widget = QWidget()
+        indicator_alert_lay = QVBoxLayout(indicator_alert_widget)
+        indicator_alert_lay.setContentsMargins(0, 0, 0, 0)
+        indicator_alert_header = QHBoxLayout()
+        indicator_alert_header.addWidget(QLabel("Indicator alerts"))
+        indicator_alert_header.addStretch()
+        indicator_alert_lay.addLayout(indicator_alert_header)
+        self._indicator_alert_tbl = QTableWidget(0, 9)
+        self._indicator_alert_tbl.setHorizontalHeaderLabels(
+            ["Symbol", "TF", "Indicator", "Params", "Condition", "Value", "Status", "Updated", ""]
+        )
+        self._indicator_alert_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._indicator_alert_tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._indicator_alert_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        indicator_alert_lay.addWidget(self._indicator_alert_tbl)
+        splitter.addWidget(indicator_alert_widget)
+
+        splitter.setSizes([250, 250, 250, 250])
         return tab
 
     def _build_backscan_tab(self) -> QWidget:
@@ -978,6 +1270,7 @@ class SignalScanner(QMainWindow):
         self._worker.log.connect(self._log)
         self._worker.new_signal.connect(self._on_new_signal)
         self._worker.new_fvg_watch_signal.connect(self._on_new_fvg_watch)
+        self._worker.new_indicator_alert.connect(self._on_new_indicator_alert)
         self._worker.status_update.connect(self._on_status_update)
         self._worker.start()
         self._scan_btn.setText("⏹ Stop")
@@ -1186,6 +1479,61 @@ class SignalScanner(QMainWindow):
                 db.delete_fvg_watch(sid)
         self._refresh_fvg_watch_table()
 
+    def _refresh_indicator_alert_table(self) -> None:
+        try:
+            from db.signals import SignalsDB
+            with SignalsDB(_SIGNALS_DB_PATH, read_only=False) as db:
+                rows = db.get_all_indicator_alert_state()
+        except Exception:
+            rows = []
+        self._populate_indicator_alert_table(rows)
+
+    def _populate_indicator_alert_table(self, rows: list[dict]) -> None:
+        self._indicator_alert_tbl.setRowCount(len(rows))
+        for row, st in enumerate(rows):
+            is_positive = bool(st.get("is_positive"))
+            is_muted    = bool(st.get("is_muted"))
+            try:
+                params = json.loads(st.get("params_json") or "{}")
+            except Exception:
+                params = {}
+            params_str = ", ".join(f"{k}={v}" for k, v in params.items())
+            value = st.get("value")
+            status = "MUTED" if (is_positive and is_muted) else ("ALERT" if is_positive else "—")
+            items = [
+                st.get("symbol", ""),
+                st.get("tf", ""),
+                st.get("indicator", ""),
+                params_str,
+                f"{st.get('field', '')} {st.get('condition', '')} {st.get('threshold', '')}",
+                f"{value:.2f}" if value is not None else "—",
+                status,
+                (st.get("updated_at") or "")[:16],
+            ]
+            for col, text in enumerate(items):
+                item = QTableWidgetItem(text)
+                if is_positive and not is_muted:
+                    item.setBackground(QColor("#ef5350"))
+                elif is_positive and is_muted:
+                    item.setBackground(QColor("#555555"))
+                self._indicator_alert_tbl.setItem(row, col, item)
+
+            rule_id = st.get("rule_id", "")
+            btn = QPushButton("Muted" if is_muted else "Mute")
+            btn.clicked.connect(
+                lambda _checked=False, rid=rule_id, muted=is_muted: self._on_mute_indicator_alert(rid, not muted)
+            )
+            self._indicator_alert_tbl.setCellWidget(row, 8, btn)
+
+    def _on_mute_indicator_alert(self, rule_id: str, muted: bool) -> None:
+        try:
+            from db.signals import SignalsDB
+            with SignalsDB(_SIGNALS_DB_PATH) as db:
+                db.set_indicator_alert_muted(rule_id, muted)
+        except Exception as exc:
+            self._log(f"indicator_alert mute error: {exc}")
+        self._refresh_indicator_alert_table()
+
     # ── worker callbacks ──────────────────────────────────────────────────────
 
     def _on_new_signal(self, sig: dict) -> None:
@@ -1218,6 +1566,26 @@ class SignalScanner(QMainWindow):
                 f"FVG formed  {sig['formed_time'][:16]}",
                 summary,
                 QSystemTrayIcon.MessageIcon.Information,
+                8000,
+            )
+
+    def _on_new_indicator_alert(self, payload: dict) -> None:
+        """Fires every scan cycle for every rule (positive, negative, or muted) so
+        the table always reflects the latest reading; only pop a notification when
+        the rule is currently positive AND not muted."""
+        self._refresh_indicator_alert_table()
+        if not payload.get("is_positive") or payload.get("is_muted"):
+            return
+        summary = (
+            f"{payload['symbol']}  {payload['indicator']}.{payload['field']} "
+            f"{payload['value']:.2f} {payload['condition']} {payload['threshold']}"
+        )
+        self._status_bar.showMessage(f"Indicator alert: {summary}")
+        if self._tray is not None:
+            self._tray.showMessage(
+                f"Indicator alert  {(payload.get('last_bar_time') or '')[:16]}",
+                summary,
+                QSystemTrayIcon.MessageIcon.Warning,
                 8000,
             )
 

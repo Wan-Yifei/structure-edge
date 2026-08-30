@@ -1,0 +1,11 @@
+{
+    "_note": "Per-symbol list of indicator threshold rules for analysis/indicator_alert_watcher.py. `indicator` selects a compute function from INDICATOR_REGISTRY (rsi/kd/... -- extend by registering a new function there, no schema change needed); `field` picks which output series of that indicator to compare against `threshold`. Each rule fires (repeatedly, once per scan cycle, not just on the edge crossing) whenever the latest closed bar's value satisfies condition+threshold -- mute a noisy rule from the scanner UI to pause it until it goes negative again.",
+    "US.SOXL": [
+        {"indicator": "rsi", "tf": "1m", "params": {"period": 6}, "field": "value", "condition": "below", "threshold": 30},
+        {"indicator": "rsi", "tf": "1m", "params": {"period": 6}, "field": "value", "condition": "above", "threshold": 70}
+    ],
+    "US.SOXS": [
+        {"indicator": "rsi", "tf": "1m", "params": {"period": 6}, "field": "value", "condition": "below", "threshold": 30},
+        {"indicator": "rsi", "tf": "1m", "params": {"period": 6}, "field": "value", "condition": "above", "threshold": 70}
+    ]
+}
