@@ -408,14 +408,20 @@ def apply_profile_range(klines: pd.DataFrame, range_val: str, cm: int) -> pd.Dat
 
 
 def _compute_profile_bins(
-    klines: pd.DataFrame,
+    kl: pd.DataFrame,
     ticks: dict | None,
     candle_mins: int,
-    i0: int,
-    i1: int,
     n_bins: int = 60,
 ) -> tuple[np.ndarray, np.ndarray, bool, dict]:
-    """Volume profile bins for klines[i0..i1].
+    """Volume profile bins for the given klines rows.
+
+    `kl` is whatever slice of bars the caller wants a profile over -- a
+    contiguous chart-index range (Range Profile) or a session-filtered,
+    possibly non-contiguous subset (Session Volume Profile). Either way
+    this function just iterates the rows it's given; it no longer assumes
+    they're a contiguous slice of some larger frame, which is what let the
+    Session Volume Profile share this instead of keeping its own inlined
+    copy of the same tick/OHLCV hybrid logic.
 
     Prefers tick data (exact price levels via np.digitize); falls back to OHLCV
     proportional distribution.  Returns (centers, volumes, used_ticks, stats).
@@ -430,7 +436,6 @@ def _compute_profile_bins(
     three.  "medium" is a size breakdown *within* buy + sell (buy_m + sell_m),
     not a fourth additive bucket -- it will always be <= buy + sell.
     """
-    kl = klines.iloc[i0 : i1 + 1]
     lo = float(kl["low"].min())
     hi = float(kl["high"].max())
     empty_stats = {"total": 0.0, "buy": 0.0, "sell": 0.0, "neutral": 0.0, "medium": 0.0}
@@ -450,13 +455,12 @@ def _compute_profile_bins(
     klo  = kl["low"].values.astype(float)
     khi  = kl["high"].values.astype(float)
     kvol = kl["volume"].fillna(0).values.astype(float)
-    for j, idx in enumerate(range(i0, i1 + 1)):
+    kt   = kl["time_key"].values
+    for j in range(len(kl)):
         bar_ticks_used = False
         if ticks:
-            row = klines.iloc[idx]
             try:
-                bar_end = datetime.strptime(
-                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                bar_end = datetime.strptime(str(kt[j])[:16], "%Y-%m-%d %H:%M")
                 bk = candle_start(
                     bar_end - timedelta(minutes=candle_mins), candle_mins)
             except ValueError:
@@ -521,14 +525,21 @@ def _compute_poc_vah_val(
         return poc, poc, poc
 
     # Expand VA outward from POC; at each step pick the side that adds more volume.
+    # A zero-volume neighbor must still be stepped through (not treated as a
+    # wall) -- with tick-placed volume the profile can be spiky/sparse (a
+    # bin's ticks landing in one narrow bin with genuinely empty bins right
+    # next to it), so stopping at the first zero-volume neighbor on both
+    # sides gave up immediately at POC itself, leaving VAH == VAL == POC
+    # even though non-zero bins existed further out. Use -1 (not 0) as the
+    # "no bins left on this side" sentinel so a real zero bin still loses to
+    # -1 and keeps expansion moving until bins are truly exhausted on both
+    # sides or va_pct is reached.
     lo_idx = poc_idx
     hi_idx = poc_idx
     cumvol = float(volumes[poc_idx])
-    while cumvol / total < va_pct:
-        above = float(volumes[hi_idx + 1]) if hi_idx + 1 < len(volumes) else 0.0
-        below = float(volumes[lo_idx - 1]) if lo_idx - 1 >= 0 else 0.0
-        if above == 0.0 and below == 0.0:
-            break
+    while cumvol / total < va_pct and (hi_idx + 1 < len(volumes) or lo_idx - 1 >= 0):
+        above = float(volumes[hi_idx + 1]) if hi_idx + 1 < len(volumes) else -1.0
+        below = float(volumes[lo_idx - 1]) if lo_idx - 1 >= 0 else -1.0
         if above >= below:
             hi_idx += 1
             cumvol += float(volumes[hi_idx])
@@ -3946,51 +3957,25 @@ class TradeViewerQt(QMainWindow):
         if klines.empty:
             return
 
-        lo   = float(klines["low"].min())
-        hi   = float(klines["high"].max())
-        if hi <= lo:
+        lo = float(klines["low"].min())
+        hi = float(klines["high"].max())
+        n_bins = self._profile_bins_spin.value()
+        # Tick-first, OHLCV-fallback -- shared with the Range Volume Profile
+        # via _compute_profile_bins() (used to be its own inlined copy of the
+        # same hybrid logic; unified so the two panels can't quietly drift
+        # apart). Bars with real tick coverage place volume at its actual
+        # traded price via np.digitize; only bars with no tick data for their
+        # bucket fall back to spreading the bar's volume evenly across every
+        # bin its high-low range touches.
+        centers, volumes, _used_ticks, _stats = _compute_profile_bins(
+            klines, self._ticks, self._candle_mins, n_bins=n_bins)
+        if centers.size == 0:
             return
-        n_bins  = self._profile_bins_spin.value()
-        bins    = np.linspace(lo, hi, n_bins + 1)
-        centers = (bins[:-1] + bins[1:]) / 2
-        volumes = np.zeros(n_bins)
-        # Tick-first, OHLCV-fallback -- same hybrid _compute_profile_bins()
-        # uses for the Range Volume Profile. Bars with real tick coverage
-        # place volume at its actual traded price via np.digitize; only
-        # bars with no tick data for their bucket fall back to spreading
-        # the bar's volume evenly across every bin its high-low range
-        # touches. That uniform-spread approximation is what produced
-        # "many equal-height bars" when applied to every bar -- similar
-        # per-bar volume and range meant similar flat per-bin contributions
-        # everywhere, not a reflection of real intrabar price concentration.
-        cm = self._candle_mins
-        for _, row in klines.iterrows():
-            bar_ticks_used = False
-            if self._ticks:
-                try:
-                    bar_end = datetime.strptime(str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-                    bk = candle_start(bar_end - timedelta(minutes=cm), cm)
-                except ValueError:
-                    bk = None
-                pd_ = self._ticks.get(bk) if bk is not None else None
-                if pd_:
-                    for price, counts in pd_.items():
-                        total = counts.get("buy", 0) + counts.get("sell", 0) + counts.get("neutral", 0)
-                        if total > 0 and lo <= float(price) <= hi:
-                            bi = int(np.clip(np.digitize(float(price), bins) - 1, 0, n_bins - 1))
-                            volumes[bi] += total
-                            bar_ticks_used = True
-
-            if not bar_ticks_used:
-                mask = (centers >= float(row["low"])) & (centers <= float(row["high"]))
-                n = int(mask.sum())
-                if n:
-                    volumes[mask] += float(row["volume"]) / n
 
         # Horizontal bars: x0=0 (left edge), x1=volume (right edge), y=price centre
         bar = pg.BarGraphItem(
             x0=np.zeros(n_bins), x1=volumes,
-            y=centers, height=(bins[1] - bins[0]) * 0.9,
+            y=centers, height=(centers[1] - centers[0]) * 0.9,
             brush=_qc(_GOLD, 80), pen=pg.mkPen(None),
         )
         pw.addItem(bar)
@@ -4111,12 +4096,25 @@ class TradeViewerQt(QMainWindow):
                 return True
             for s in active:
                 lo, hi = sessions.get(s, (0, 1440))
-                if lo < hi:
-                    if lo <= mins < hi:
-                        return True
-                else:
+                # "night" is stored as (1200, 1680) -- 20:00 through the
+                # next day's 04:00 -- so hi > 24*60 marks a window that
+                # crosses midnight. mins is always a raw hour*60+minute
+                # (0-1439, no next-day concept), so it can never reach a
+                # hi of 1680 on its own: checking lo <= mins < hi directly
+                # would only ever match 20:00-23:59 and silently exclude
+                # every post-midnight timestamp (00:00-03:59) from "night"
+                # -- reported as the session volume profile's POC/VAH/VAL
+                # freezing at whatever they were right before midnight
+                # instead of covering the rest of the still-ongoing
+                # overnight session. The previous `if lo < hi / else` split
+                # used lo >= hi as the "wraps" signal, which is never true
+                # for (1200, 1680) even though it does wrap -- checking
+                # hi > 24*60 instead is what actually identifies it.
+                if hi > 24 * 60:
                     if mins >= lo or mins < (hi - 24 * 60):
                         return True
+                elif lo <= mins < hi:
+                    return True
             return False
         mask = klines["time_key"].astype(str).apply(_in_session)
         return klines[mask]
@@ -4414,7 +4412,7 @@ class TradeViewerQt(QMainWindow):
         self, i0: int, i1: int
     ) -> tuple[np.ndarray, np.ndarray, bool, dict]:
         return _compute_profile_bins(
-            self._klines, self._ticks, self._candle_mins, i0, i1)
+            self._klines.iloc[i0 : i1 + 1], self._ticks, self._candle_mins)
 
     def _rebuild_range_profile(self) -> None:
         if self._range_region is None or self._klines is None:
