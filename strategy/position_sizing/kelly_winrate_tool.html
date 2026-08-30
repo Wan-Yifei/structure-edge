@@ -156,7 +156,7 @@
   .legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2); }
   .legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
   .legend-dash { width: 14px; height: 2px; flex-shrink: 0; background: transparent;
-    border-top: 2px dashed var(--text-muted); }
+    border-top: 2.5px dashed var(--text); }
 
   .chart-wrap { position: relative; width: 100%; }
 
@@ -319,7 +319,7 @@
 
       <div class="panel">
         <div class="panel-title">每日胜率输入</div>
-        <textarea id="rate-input" placeholder="每行一个胜率，0–1 之间&#10;例如：&#10;0.55&#10;0.62&#10;0.48&#10;0.60&#10;..."></textarea>
+        <textarea id="rate-input" placeholder="每行一个胜率，0–1 之间，可选在前面加日期&#10;例如：&#10;2026-06-01&#9;0.55&#10;2026-06-02&#9;0.62&#10;0.48&#10;0.60&#10;..."></textarea>
         <div class="btn-row">
           <button class="primary" onclick="calculate()">计算</button>
           <button class="ghost" onclick="pickCSVFile()">从CSV加载</button>
@@ -413,6 +413,10 @@ let savedSessions = JSON.parse(localStorage.getItem('kelly_sessions') || '[]');
 const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
 const GRID = isDark ? '#2c2c2a' : '#e1e0d9';
 const TICK = isDark ? '#898781' : '#898781';
+// High-contrast color for the 50%/1.0 reference lines -- GRID (used for the
+// axis gridlines) is deliberately faint, which made these lines almost
+// invisible against it. This matches --text's max-contrast value per theme.
+const REF_LINE = isDark ? '#f0efe8' : '#0b0b0b';
 
 function calcEWMA(rates, lam) {
   const n = rates.length;
@@ -458,6 +462,7 @@ let csvFileHandle = null;   // FileSystemFileHandle when picked via showOpenFile
 let csvHeader = CSV_HEADER_DEFAULT.slice();
 let csvRows = [];           // [{Date, 'Win Rate', 'Daily PnL %', Trades, 'Profit/Loss Ratio', Comment}, ...]
 let csvRatios = [];         // valid daily Profit/Loss Ratio values only (N/A days excluded) -- for the ratio trend chart
+let csvRatioDates = [];     // Date strings aligned 1:1 with csvRatios, NA days excluded
 
 function parseCSVLine(line) {
   const out = [];
@@ -487,14 +492,22 @@ function parseCSVFull(text) {
 }
 
 function rowsToWinRatesAndRatios(rows) {
-  const winRates = [], ratios = [];
+  const winRates = [], ratios = [], winRateDates = [], ratioDates = [];
   for (const row of rows) {
     const wr = (row['Win Rate'] || '').trim();
     const ratio = (row['Profit/Loss Ratio'] || '').trim();
-    if (wr && wr !== 'NA' && !isNaN(parseFloat(wr))) winRates.push(parseFloat(wr));
-    if (ratio && ratio !== 'N/A' && !isNaN(parseFloat(ratio))) ratios.push(parseFloat(ratio));
+    const date = (row['Date'] || '').trim();
+    if (wr && wr !== 'NA' && !isNaN(parseFloat(wr))) { winRates.push(parseFloat(wr)); winRateDates.push(date); }
+    if (ratio && ratio !== 'N/A' && !isNaN(parseFloat(ratio))) { ratios.push(parseFloat(ratio)); ratioDates.push(date); }
   }
-  return { winRates, ratios };
+  return { winRates, ratios, winRateDates, ratioDates };
+}
+
+// "2026-06-01" -> "06-01" for compact x-axis labels; falls back to the raw
+// string for anything that isn't the expected YYYY-MM-DD shape.
+function formatDateLabel(dateStr) {
+  const m = /^\d{4}-(\d{2}-\d{2})$/.exec(dateStr || '');
+  return m ? m[1] : (dateStr || '');
 }
 
 function csvField(v) {
@@ -512,14 +525,20 @@ function applyCSVData(text, sourceLabel) {
   const { header, rows } = parseCSVFull(text);
   csvHeader = header.length ? header : CSV_HEADER_DEFAULT.slice();
   csvRows = rows;
-  const { winRates, ratios } = rowsToWinRatesAndRatios(rows);
+  const { winRates, ratios, winRateDates, ratioDates } = rowsToWinRatesAndRatios(rows);
   csvRatios = ratios;
+  csvRatioDates = ratioDates;
   const statusEl = document.getElementById('csv-status');
   if (winRates.length < 2) {
     statusEl.textContent = `${sourceLabel}: 未能解析出足够的胜率数据`;
     return;
   }
-  document.getElementById('rate-input').value = winRates.join('\n');
+  // Prefix each line with its date (tab-separated) so the textarea itself
+  // shows which win rate belongs to which day -- parseRateInputLine() below
+  // reads the LAST whitespace-separated token as the rate, so this stays
+  // compatible with plain numbers-only input (manual paste, loadDemo()).
+  document.getElementById('rate-input').value =
+    winRates.map((r, i) => (winRateDates[i] ? winRateDates[i] + '\t' : '') + r).join('\n');
 
   const writeSuffix = csvFileHandle ? ' · 可在下方录入并写回该文件' : (supportsFSAccess ? '' : ' · 当前浏览器不支持写回，保存时将改为下载新文件');
   if (ratios.length > 0) {
@@ -530,11 +549,14 @@ function applyCSVData(text, sourceLabel) {
     document.getElementById('lbl-b').textContent = bClamped.toFixed(2);
     statusEl.textContent =
       `${sourceLabel}: 已加载 ${winRates.length} 天胜率、${ratios.length} 天有效盈亏比 ` +
-      `→ 日期加权盈亏比 b=${bEwma.toFixed(2)}${writeSuffix}`;
+      `→ 日期加权盈亏比 b=${bEwma.toFixed(2)}${writeSuffix} · 点击"计算"查看结果`;
   } else {
-    statusEl.textContent = `${sourceLabel}: 已加载 ${winRates.length} 天胜率（无有效盈亏比数据，b 需手动设置）${writeSuffix}`;
+    statusEl.textContent = `${sourceLabel}: 已加载 ${winRates.length} 天胜率（无有效盈亏比数据，b 需手动设置）${writeSuffix} · 点击"计算"查看结果`;
   }
-  calculate();
+  // Deliberately does NOT call calculate() -- loading/saving data should only
+  // populate the textarea, not force a recompute on every keystroke's worth
+  // of CSV I/O. The user clicks "计算" (the button next to rate-input) when
+  // they're ready to see the table/charts, same as manual textarea edits.
 }
 
 function handleCSVFile(file) {
@@ -588,12 +610,16 @@ window.addEventListener('DOMContentLoaded', () => {
 // N trades/day, W=round(winRate*N) wins, L=N-W losses; assumes each loss is
 // a uniform "1 unit" so avgWin = (dailyPnL% + L) / W. Breaks down (negative
 // avgWin) for small/atypical samples -- flagged as N/A rather than reported.
+// All-win / all-loss days have no opposite-outcome trades to compare against,
+// so the ratio can't be derived at all -- rather than dropping the day
+// entirely (which used to exclude it from the ratio EWMA), default it to a
+// neutral 1:1 so it still contributes a data point.
 function deriveRatio(winRate, pnl, trades) {
   const N = trades;
   const W = Math.round(winRate * N);
   const L = N - W;
-  if (W === 0) return { ratioStr: 'N/A', comment: 'All losses -- no winning trades to average' };
-  if (L === 0) return { ratioStr: 'N/A', comment: 'All wins -- no losing trades to compare against' };
+  if (W === 0) return { ratioStr: '1.00', comment: 'All losses -- no winning trades to average, defaulted to 1:1' };
+  if (L === 0) return { ratioStr: '1.00', comment: 'All wins -- no losing trades to compare against, defaulted to 1:1' };
   const avgWin = (pnl + L) / W;
   if (avgWin < 0) return { ratioStr: 'N/A', comment: 'Derived ratio negative -- small-sample loss assumption breaks down, unreliable' };
   return { ratioStr: avgWin.toFixed(2), comment: '' };
@@ -665,14 +691,14 @@ async function saveEntry() {
       const writable = await csvFileHandle.createWritable();
       await writable.write(text);
       await writable.close();
-      statusEl.textContent = `已保存 ${dateVal} → ${csvFileHandle.name}`;
+      statusEl.textContent = `已保存 ${dateVal} → ${csvFileHandle.name} · 点击上方"计算"刷新表格`;
     } catch (err) {
       statusEl.textContent = '写入文件失败: ' + err.message;
       return;
     }
   } else {
     downloadText(text, 'daily_win_rate.csv');
-    statusEl.textContent = `已保存 ${dateVal}（当前浏览器不支持直接写回，已下载更新后的 daily_win_rate.csv，请手动替换原文件）`;
+    statusEl.textContent = `已保存 ${dateVal}（当前浏览器不支持直接写回，已下载更新后的 daily_win_rate.csv，请手动替换原文件）· 点击上方"计算"刷新表格`;
   }
 
   applyCSVData(text, csvFileHandle ? csvFileHandle.name : 'daily_win_rate.csv');
@@ -694,9 +720,26 @@ function updateSymbolShares(priceId, outId, capital, hasCapital, fracKelly) {
   outEl.innerHTML = `建议投入 ${fmt(positionValue)} → 最多 <strong>${maxShares.toLocaleString('zh-CN')}</strong> 股`;
 }
 
+// A rate-input line is either a bare number ("0.83", from manual paste or
+// loadDemo()) or "<date>\t0.83" (written by applyCSVData()). Reading the
+// LAST whitespace-separated token as the rate keeps both forms working;
+// whatever precedes it (if anything) is the date, joined back in case it
+// itself contains internal whitespace.
+function parseRateInputLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const parts = trimmed.split(/\s+/);
+  const rate = parseFloat(parts[parts.length - 1]);
+  const date = parts.length > 1 ? parts.slice(0, -1).join(' ') : '';
+  return { date, rate };
+}
+
 function calculate() {
-  const raw = document.getElementById('rate-input').value.trim().split('\n')
-    .map(s => parseFloat(s.trim())).filter(v => !isNaN(v) && v >= 0 && v <= 1);
+  const parsedLines = document.getElementById('rate-input').value.trim().split('\n')
+    .map(parseRateInputLine)
+    .filter(p => p && !isNaN(p.rate) && p.rate >= 0 && p.rate <= 1);
+  const raw = parsedLines.map(p => p.rate);
+  const rateDates = parsedLines.map(p => p.date);
 
   const lam = parseFloat(document.getElementById('sl-lambda').value);
   const b = parseFloat(document.getElementById('sl-b').value);
@@ -748,7 +791,7 @@ function calculate() {
      <div style="font-size:12px;color:var(--text-muted);margin-top:6px;">分数系数 ${(frac*100).toFixed(0)}% → 建议仓位 <strong>${pct(fracKelly)}</strong></div>`;
 
   renderKellyBars(kelly);
-  renderCharts(raw, series, weights);
+  renderCharts(raw, series, weights, rateDates);
   renderRatioChart(lam);
 }
 
@@ -784,7 +827,11 @@ function renderRatioChart(lam) {
   canvas.style.display = '';
 
   const { series: ratioEwma } = calcEWMA(csvRatios, lam);
-  const ratioLabels = csvRatios.map((_, i) => 'D' + (i + 1));
+  // Real dates only when csvRatioDates still lines up 1:1 with csvRatios --
+  // it can drift out of sync if the user hand-edits data after a CSV load.
+  const ratioLabels = csvRatioDates.length === csvRatios.length
+    ? csvRatioDates.map(formatDateLabel)
+    : csvRatios.map((_, i) => 'D' + (i + 1));
 
   if (chart3) chart3.destroy();
   chart3 = new Chart(canvas, {
@@ -793,14 +840,14 @@ function renderRatioChart(lam) {
       labels: ratioLabels,
       datasets: [
         {
+          type: 'bar',
           label: '每日盈亏比',
           data: csvRatios.map(v => +v.toFixed(2)),
-          borderColor: '#2a78d6',
-          backgroundColor: 'rgba(42,120,214,0.07)',
-          borderWidth: 1.5,
-          pointRadius: csvRatios.length > 30 ? 0 : 3,
-          pointHoverRadius: 4,
-          fill: false, tension: 0.2,
+          backgroundColor: 'rgba(42,120,214,0.45)',
+          borderColor: 'rgba(42,120,214,0.8)',
+          borderWidth: 1,
+          borderRadius: 2,
+          order: 2,
         },
         {
           label: 'EWMA',
@@ -809,14 +856,16 @@ function renderRatioChart(lam) {
           borderWidth: 2,
           pointRadius: 0,
           fill: false, tension: 0.3,
+          order: 1,
         },
         {
           label: '1.0 线',
           data: csvRatios.map(() => 1.0),
-          borderColor: GRID,
-          borderWidth: 1,
-          borderDash: [4, 4],
+          borderColor: REF_LINE,
+          borderWidth: 2,
+          borderDash: [6, 4],
           pointRadius: 0, fill: false,
+          order: 1,
         }
       ]
     },
@@ -834,8 +883,14 @@ function renderRatioChart(lam) {
   });
 }
 
-function renderCharts(raw, ewmaSeries, weights) {
-  const labels = raw.map((_, i) => 'D' + (i + 1));
+function renderCharts(raw, ewmaSeries, weights, rateDates) {
+  // rateDates comes straight from parsing rate-input itself now (see
+  // parseRateInputLine), so it's always 1:1 with raw by construction --
+  // only fall back to plain day numbers when a line had no date at all
+  // (manual paste, loadDemo()).
+  const labels = (rateDates && rateDates.every(d => d))
+    ? rateDates.map(formatDateLabel)
+    : raw.map((_, i) => 'D' + (i + 1));
 
   if (chart1) chart1.destroy();
   chart1 = new Chart(document.getElementById('chart-trend'), {
@@ -844,14 +899,14 @@ function renderCharts(raw, ewmaSeries, weights) {
       labels,
       datasets: [
         {
+          type: 'bar',
           label: '每日胜率',
           data: raw.map(v => +(v * 100).toFixed(2)),
-          borderColor: '#2a78d6',
-          backgroundColor: 'rgba(42,120,214,0.07)',
-          borderWidth: 1.5,
-          pointRadius: raw.length > 30 ? 0 : 3,
-          pointHoverRadius: 4,
-          fill: false, tension: 0.2,
+          backgroundColor: 'rgba(42,120,214,0.45)',
+          borderColor: 'rgba(42,120,214,0.8)',
+          borderWidth: 1,
+          borderRadius: 2,
+          order: 2,
         },
         {
           label: 'EWMA',
@@ -860,14 +915,16 @@ function renderCharts(raw, ewmaSeries, weights) {
           borderWidth: 2,
           pointRadius: 0,
           fill: false, tension: 0.3,
+          order: 1,
         },
         {
           label: '50% 线',
           data: raw.map(() => 50),
-          borderColor: GRID,
-          borderWidth: 1,
-          borderDash: [4, 4],
+          borderColor: REF_LINE,
+          borderWidth: 2,
+          borderDash: [6, 4],
           pointRadius: 0, fill: false,
+          order: 1,
         }
       ]
     },
@@ -879,7 +936,11 @@ function renderCharts(raw, ewmaSeries, weights) {
       },
       scales: {
         x: { ticks: { color: TICK, font: { size: 11 }, maxTicksLimit: 15 }, grid: { color: GRID } },
-        y: { ticks: { color: TICK, font: { size: 11 }, callback: v => v + '%' }, grid: { color: GRID }, min: 25, max: 80 }
+        // beginAtZero (not a fixed min:25) -- a bar's height must be proportional
+        // to its value, so any bar below a nonzero min gets clipped to invisible
+        // (this is what hid the 0.23 day). max stays a *suggestion* so a single
+        // 100% day doesn't force everything else down near the axis.
+        y: { ticks: { color: TICK, font: { size: 11 }, callback: v => v + '%' }, grid: { color: GRID }, beginAtZero: true, suggestedMax: 80 }
       }
     }
   });
@@ -927,6 +988,7 @@ function clearAll() {
   if (chart2) { chart2.destroy(); chart2 = null; }
   if (chart3) { chart3.destroy(); chart3 = null; }
   csvRatios = [];
+  csvRatioDates = [];
   document.getElementById('ratio-chart-hint').style.display = '';
   document.getElementById('chart-ratio').style.display = 'none';
   document.getElementById('kelly-bars').innerHTML = '<div class="empty-state">输入数据后显示</div>';
