@@ -1,0 +1,20 @@
+{
+    "code": "US.SOXL",
+    "entry_tf": "1m",
+    "start": "2025-06-01",
+    "end": "2026-01-31",
+    "workers": -1,
+    "top_n": 30,
+    "param_grid": {
+        "warmup_minutes": [45, 60],
+        "va_pct": [0.65, 0.70],
+        "n_bins": [60, 80],
+        "rsi_period": [6],
+        "rsi_threshold": [16, 20],
+        "tradeable_sessions": [["overnight"], ["regular"]],
+        "max_bars": [120],
+        "min_val_poc_dist_pct": [0.0025, 0.003],
+        "target_rr": [1.0],
+        "val_proximity_pct": [0.0, 0.0005, 0.001, 0.0015, 0.002, 0.003, 0.005]
+    }
+}

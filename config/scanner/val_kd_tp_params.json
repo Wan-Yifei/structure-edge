@@ -1,0 +1,14 @@
+{
+    "_note": "Per-(symbol, session) params for the VAL-entry / KD-channel-TP watch (analysis/val_kd_tp_watcher.py). TP = up1 (fast EMA-channel upper band from strategy/smc/kd_trend.py's compute_kd), snapshotted at entry and held fixed -- NOT the session's frozen POC (that's session_vp_watcher.py's job). Outperforms the POC-based TP on the regular session specifically (see backtest/results/session_vp_v1_review/REVIEW.md section 9): out-of-sample validation 10/10 candidates positive, smooth parameter sensitivity. kd_slow has no effect on up1 (only feeds up2/mid2, unused here) -- kept for config-shape symmetry only. Hand-picked from that review's validation -- not GUI-editable, changes should go through the backtest -> validation -> update-this-file loop.",
+    "US.SOXL": [
+        {
+            "session": "regular",
+            "warmup_minutes": 40, "va_pct": 0.65, "n_bins": 80,
+            "rsi_period": 6, "rsi_threshold": 14,
+            "max_bars": 180, "min_val_poc_dist_pct": 0.0010,
+            "target_rr": 1.0, "kd_fast": 25, "kd_slow": 90,
+            "validated": true,
+            "note": "Out-of-sample validated with healthy (non-spiky) parameter sensitivity: train PF=3.00 (n=8) -> validation PF=3.50 (n=9), same direction. All 10 top training candidates stayed positive out-of-sample -- the cleanest result of this whole research pass."
+        }
+    ]
+}

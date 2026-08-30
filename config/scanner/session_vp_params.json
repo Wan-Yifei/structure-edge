@@ -1,0 +1,13 @@
+{
+    "_note": "Per-(symbol, session) params for the Session Value-Area Reversal scanner watch (analysis/session_vp_watcher.py / backtest/session_vp_engine.py). Hand-picked from backtest/results/session_vp_v1_review/REVIEW.md's out-of-sample validation, not GUI-editable by design -- changes should go through the backtest -> out-of-sample-validation -> update-this-file loop, same philosophy as fvg_watch_params.json. Keys match SessionVPParams' field names verbatim, plus 'session' (which of the 4 sessions this entry applies to) and 'validated' (whether this combo passed out-of-sample validation -- false means 'observe only, not a trading recommendation').",
+    "US.SOXL": [
+        {
+            "session": "overnight",
+            "warmup_minutes": 45, "va_pct": 0.70, "n_bins": 80,
+            "rsi_period": 6, "rsi_threshold": 20,
+            "max_bars": 120, "min_val_poc_dist_pct": 0.003, "target_rr": 1.0,
+            "validated": true,
+            "note": "Out-of-sample validated: train PF=7.61 (n=11) -> validation PF=2.50 (n=7), same direction."
+        }
+    ]
+}

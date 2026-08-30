@@ -1,0 +1,25 @@
+{
+    "_note": "Per-(exec_symbol, session) params for the cross-asset VAH-short-proxy watch (analysis/vah_soxs_watcher.py). Signal comes from `signal_symbol`'s VAH/POC + RSI-overbought reversal (the mirror of session_vp's VAL long signal); the executable trade is a LONG on this entry's key (`exec_symbol`), since SOXL can't be shorted directly. SL/TP are translated from the signal symbol's price move via `beta` (regressed SOXL/SOXS 1m pct_change relationship) and floored by `min_atr_multiple * exec_symbol's own ATR` so a target smaller than the asset's own noise never counts as a real signal. Hand-picked from backtest/results/session_vp_v1_review/REVIEW.md section 8's out-of-sample validation -- not GUI-editable, changes should go through that backtest -> validation -> update-this-file loop.",
+    "US.SOXS": [
+        {
+            "signal_symbol": "US.SOXL",
+            "session": "afterhours",
+            "warmup_minutes": 60, "va_pct": 0.80, "n_bins": 30,
+            "rsi_period": 6, "rsi_threshold": 66,
+            "max_bars": 360, "min_val_poc_dist_pct": 0.0010,
+            "target_rr": 1.0, "min_atr_multiple": 1.0, "beta": -0.991,
+            "validated": true,
+            "note": "Out-of-sample validated with a reasonably-sized sample: train PF=3.15 (n=12) -> validation PF=2.77 (n=12), same direction."
+        },
+        {
+            "signal_symbol": "US.SOXL",
+            "session": "premarket",
+            "warmup_minutes": 45, "va_pct": 0.70, "n_bins": 50,
+            "rsi_period": 6, "rsi_threshold": 73,
+            "max_bars": 90, "min_val_poc_dist_pct": 0.0020,
+            "target_rr": 1.0, "min_atr_multiple": 2.0, "beta": -0.991,
+            "validated": false,
+            "note": "Training PF looked extreme (inf, n=10) but validation sample is far too small (n=3) to mean anything -- observe only, not a trading recommendation."
+        }
+    ]
+}

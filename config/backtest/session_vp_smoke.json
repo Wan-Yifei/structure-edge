@@ -1,0 +1,18 @@
+{
+    "code": "US.SOXL",
+    "entry_tf": "1m",
+    "start": "2025-11-01",
+    "end": "2025-11-30",
+    "workers": -1,
+    "top_n": 10,
+    "param_grid": {
+        "warmup_minutes": [30, 45, 60],
+        "va_pct": [0.70],
+        "n_bins": [60],
+        "rsi_period": [6],
+        "rsi_threshold": [25, 30],
+        "tradeable_sessions": [["premarket"], ["regular"], ["afterhours"], ["overnight"]],
+        "max_bars": [120],
+        "min_val_poc_dist_pct": [0.001]
+    }
+}

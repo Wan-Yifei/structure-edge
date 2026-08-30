@@ -342,6 +342,8 @@ def _pick_axes(df: pd.DataFrame) -> tuple[str, str]:
             and c not in ("n_trades", "win_rate", "total_r", "avg_r", "profit_factor",
                           "max_drawdown_r", "max_loss_r", "sharpe", "sortino", "final_value")
         ]
+    if not candidates:
+        return "n_trades", "n_trades"  # fully degenerate (e.g. single-combo run) -- always present
     if len(candidates) < 2:
         return candidates[0], candidates[0]  # degenerate fallback
     variances = {}
@@ -358,6 +360,8 @@ def _heatmap_fig(df: pd.DataFrame) -> go.Figure:
 
     capped = _cap_inf_pf(df)
     row_col, col_col = _pick_axes(capped)
+    if row_col == col_col:
+        return go.Figure()  # degenerate: no second varying column to pivot against (e.g. single-combo run)
     pivot = capped.pivot_table(
         values="profit_factor",
         index=row_col, columns=col_col,
@@ -400,6 +404,8 @@ def _surface_fig(df: pd.DataFrame, metric: str = "total_r") -> go.Figure:
         return go.Figure()
 
     x_col, y_col = _pick_axes(active)
+    if x_col == y_col:
+        return go.Figure()  # degenerate: no second varying column (e.g. single-combo run)
     grp = active.groupby([x_col, y_col])[metric].mean().reset_index()
 
     fig = go.Figure(go.Scatter3d(
@@ -445,11 +451,23 @@ def _importance_fig(df: pd.DataFrame) -> go.Figure:
     """Variance of group-mean profit_factor for each parameter (higher = more impact)."""
     capped = _cap_inf_pf(df)
     candidates = [c for c in _PARAM_COLS if c in capped.columns and capped[c].nunique() >= 2]
+    if not candidates:
+        # _PARAM_COLS is the SMC strategy's own field names -- a differently
+        # shaped strategy (e.g. session_vp) has none of them, so fall back to
+        # any numeric param-like column, mirroring _pick_axes's same fallback.
+        candidates = [
+            c for c in capped.columns
+            if pd.api.types.is_numeric_dtype(capped[c]) and capped[c].nunique() >= 2
+            and c not in _METRIC_COLS and c != "final_value"
+        ]
     records = []
     for col in candidates:
         gm = capped.groupby(col)["profit_factor"].mean()
         records.append({"param": col, "variance": float(gm.var(ddof=0)),
                         "range": float(gm.max() - gm.min())})
+
+    if not records:
+        return go.Figure()  # no varying param columns to compare (e.g. single-combo run)
 
     imp = pd.DataFrame(records).sort_values("range", ascending=True)
     colours = [_GREEN if v > imp["range"].median() else _BLUE for v in imp["range"]]

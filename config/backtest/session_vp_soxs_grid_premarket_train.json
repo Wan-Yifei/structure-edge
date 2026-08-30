@@ -1,0 +1,18 @@
+{
+    "code": "US.SOXS",
+    "entry_tf": "1m",
+    "start": "2025-06-01",
+    "end": "2026-01-31",
+    "workers": -1,
+    "top_n": 30,
+    "param_grid": {
+        "warmup_minutes": [35, 45, 60, 70, 80, 90],
+        "va_pct": [0.65, 0.70, 0.75, 0.80],
+        "n_bins": [30, 50],
+        "rsi_period": [6],
+        "rsi_threshold": [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+        "tradeable_sessions": [["premarket"]],
+        "max_bars": [90, 120, 180, 240],
+        "min_val_poc_dist_pct": [0.001, 0.0015, 0.002, 0.0025, 0.003]
+    }
+}
