@@ -15,6 +15,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -241,6 +242,7 @@ class ScanWorker(QThread):
         self._cfg     = cfg
         self._running = False
         self._bar_cache: dict[str, str] = {}  # symbol → last bar time_key
+        self._indicator_alert_last_notify: dict[str, float] = {}  # rule_id → time.time() of last beep/tray notify
 
     def stop(self) -> None:
         self._running = False
@@ -387,7 +389,18 @@ class ScanWorker(QThread):
             return BacktestParams()
 
     def _alert(self, sig: dict, scanner_cfg: dict) -> None:
-        if scanner_cfg.get("alert_sound", True):
+        if not scanner_cfg.get("alert_sound", True):
+            return
+        # QApplication.beep() is frequently silent on Windows -- it depends on
+        # the app having a mapped "beep" sound in the current sound scheme,
+        # which many schemes leave unset. winsound.MessageBeep() instead plays
+        # a real system sound event (SystemExclamation), audible under the
+        # default Windows sound scheme; QApplication.beep() is the fallback for
+        # non-Windows platforms.
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except Exception:
             QApplication.beep()
 
     def _scan_symbol_fvg_watch(self, symbol: str, scanner_cfg: dict) -> None:
@@ -670,9 +683,23 @@ class ScanWorker(QThread):
                 continue
 
             is_muted = bool(current["is_muted"]) if current else False
-            self.new_indicator_alert.emit({**result, "is_muted": is_muted})
 
-            if result["is_positive"] and not is_muted:
+            # A level-triggered rule stays positive for as long as the condition
+            # holds, so without this throttle it would beep/notify every single
+            # scan cycle (as often as every scan_interval_s) for as long as
+            # it's positive -- indicator_alert_repeat_s lets the user space
+            # repeat notifications out (default: same as scan_interval_s, i.e.
+            # no throttle beyond the scan cadence itself).
+            repeat_s  = float(scanner_cfg.get("indicator_alert_repeat_s", scanner_cfg.get("scan_interval_s", 60)))
+            now_ts    = time.time()
+            last_ts   = self._indicator_alert_last_notify.get(result["rule_id"], 0.0)
+            should_notify = bool(result["is_positive"]) and not is_muted and (now_ts - last_ts >= repeat_s)
+            if should_notify:
+                self._indicator_alert_last_notify[result["rule_id"]] = now_ts
+
+            self.new_indicator_alert.emit({**result, "is_muted": is_muted, "should_notify": should_notify})
+
+            if should_notify:
                 self.log.emit(
                     f"[{symbol}] indicator_alert {rule['indicator']}.{rule['field']} "
                     f"= {result['value']:.2f}  {result['condition']} {result['threshold']}"
@@ -1088,6 +1115,7 @@ class SignalScanner(QMainWindow):
                 "enabled": [],
                 "scan_interval_s": 60,
                 "alert_sound": True,
+                "indicator_alert_repeat_s": 60,
                 "default": {
                     "strategy": "smc",
                     "auto_params": True,
@@ -1253,6 +1281,21 @@ class SignalScanner(QMainWindow):
         indicator_alert_header = QHBoxLayout()
         indicator_alert_header.addWidget(QLabel("Indicator alerts"))
         indicator_alert_header.addStretch()
+        indicator_alert_header.addWidget(QLabel("Repeat sound every (s):"))
+        self._indicator_alert_repeat_sp = QSpinBox()
+        self._indicator_alert_repeat_sp.setRange(10, 3600)
+        self._indicator_alert_repeat_sp.setValue(int(self._scanner_cfg().get(
+            "indicator_alert_repeat_s", self._scanner_cfg().get("scan_interval_s", 60)
+        )))
+        self._indicator_alert_repeat_sp.setToolTip(
+            "A rule that stays positive keeps its status but doesn't stop being\n"
+            "positive -- without this throttle it would beep/notify every single\n"
+            "scan cycle. Raise this to space out repeat notifications for the\n"
+            "same rule (takes effect on the next Scan start, like the main\n"
+            "Interval spinbox)."
+        )
+        self._indicator_alert_repeat_sp.valueChanged.connect(self._on_indicator_alert_repeat_changed)
+        indicator_alert_header.addWidget(self._indicator_alert_repeat_sp)
         self._hide_muted_alerts_cb = QCheckBox("Hide muted")
         self._hide_muted_alerts_cb.setToolTip(
             "A muted row keeps updating its value every scan cycle (it doesn't\n"
@@ -1442,6 +1485,10 @@ class SignalScanner(QMainWindow):
 
     def _on_interval_changed(self, value: int) -> None:
         self._scanner_cfg()["scan_interval_s"] = value
+        self._save_cfg()
+
+    def _on_indicator_alert_repeat_changed(self, value: int) -> None:
+        self._scanner_cfg()["indicator_alert_repeat_s"] = value
         self._save_cfg()
 
     def _on_sound_changed(self, state: int) -> None:
@@ -1760,9 +1807,10 @@ class SignalScanner(QMainWindow):
     def _on_new_indicator_alert(self, payload: dict) -> None:
         """Fires every scan cycle for every rule (positive, negative, or muted) so
         the table always reflects the latest reading; only pop a notification when
-        the rule is currently positive AND not muted."""
+        the worker's should_notify says this cycle passed the positive+unmuted+
+        indicator_alert_repeat_s throttle check (see _scan_symbol_indicator_alert)."""
         self._refresh_indicator_alert_table()
-        if not payload.get("is_positive") or payload.get("is_muted"):
+        if not payload.get("should_notify"):
             return
         summary = (
             f"{payload['symbol']}  {payload['indicator']}.{payload['field']} "
