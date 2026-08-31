@@ -352,3 +352,11 @@ class SignalsDB:
             (int(bool(muted)), rule_id),
         )
         self._conn.commit()
+
+    def delete_indicator_alert_state(self, rule_id: str) -> None:
+        """Remove one rule's row. If the rule is still listed in
+        indicator_alert_params.json, the next scan cycle's upsert re-inserts it --
+        this clears rows orphaned by an edited/removed rule, it doesn't suppress
+        a still-active one (that's set_indicator_alert_muted's job)."""
+        self._conn.execute("DELETE FROM indicator_alert_state WHERE rule_id=?", (rule_id,))
+        self._conn.commit()

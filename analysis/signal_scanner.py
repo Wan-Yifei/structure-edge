@@ -1051,6 +1051,7 @@ class SignalScanner(QMainWindow):
 
         self._signal_data: list[dict] = []   # mirrors signals table rows (full dicts)
         self._fvg_watch_data: list[dict] = []  # mirrors fvg watch table rows (full dicts)
+        self._indicator_alert_data: list[dict] = []  # mirrors indicator alert table rows (full dicts)
         self._last_new_signal: Optional[dict] = None  # most recent signal for tray click
         self._backscan_worker: Optional["BackscanWorker"] = None
 
@@ -1252,6 +1253,16 @@ class SignalScanner(QMainWindow):
         indicator_alert_header = QHBoxLayout()
         indicator_alert_header.addWidget(QLabel("Indicator alerts"))
         indicator_alert_header.addStretch()
+        del_indicator_alert_btn = QPushButton("Delete")
+        del_indicator_alert_btn.setToolTip(
+            "Remove selected row(s). If the rule is still active in\n"
+            "indicator_alert_params.json it will reappear on the next scan\n"
+            "cycle -- use this to clear stale rows left over from a rule\n"
+            "you've since edited or removed, not to silence an active one\n"
+            "(use Mute for that)."
+        )
+        del_indicator_alert_btn.clicked.connect(self._on_delete_indicator_alert)
+        indicator_alert_header.addWidget(del_indicator_alert_btn)
         indicator_alert_lay.addLayout(indicator_alert_header)
         self._indicator_alert_tbl = QTableWidget(0, 9)
         self._indicator_alert_tbl.setHorizontalHeaderLabels(
@@ -1631,6 +1642,7 @@ class SignalScanner(QMainWindow):
         self._populate_indicator_alert_table(rows)
 
     def _populate_indicator_alert_table(self, rows: list[dict]) -> None:
+        self._indicator_alert_data = list(rows)
         self._indicator_alert_tbl.setRowCount(len(rows))
         for row, st in enumerate(rows):
             is_positive = bool(st.get("is_positive"))
@@ -1674,6 +1686,30 @@ class SignalScanner(QMainWindow):
                 db.set_indicator_alert_muted(rule_id, muted)
         except Exception as exc:
             self._log(f"indicator_alert mute error: {exc}")
+        self._refresh_indicator_alert_table()
+
+    def _on_delete_indicator_alert(self) -> None:
+        """Remove selected row(s) from indicator_alert_state. If the rule is still
+        listed in indicator_alert_params.json it reappears on the next scan cycle
+        (upsert re-inserts it) -- this is for clearing rows left behind by a rule
+        that's since been edited (a threshold/condition change makes a new
+        rule_id, orphaning the old row) or removed, not for silencing a live one."""
+        rows = sorted({i.row() for i in self._indicator_alert_tbl.selectedItems()})
+        rule_ids = [
+            self._indicator_alert_data[r]["rule_id"]
+            for r in rows
+            if r < len(self._indicator_alert_data)
+        ]
+        if not rule_ids:
+            return
+        if QMessageBox.question(
+            self, "Delete indicator alert(s)", f"Delete {len(rule_ids)} row(s)?",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        from db.signals import SignalsDB
+        with SignalsDB(_SIGNALS_DB_PATH) as db:
+            for rid in rule_ids:
+                db.delete_indicator_alert_state(rid)
         self._refresh_indicator_alert_table()
 
     # ── worker callbacks ──────────────────────────────────────────────────────
