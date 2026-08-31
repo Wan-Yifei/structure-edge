@@ -1253,6 +1253,14 @@ class SignalScanner(QMainWindow):
         indicator_alert_header = QHBoxLayout()
         indicator_alert_header.addWidget(QLabel("Indicator alerts"))
         indicator_alert_header.addStretch()
+        self._hide_muted_alerts_cb = QCheckBox("Hide muted")
+        self._hide_muted_alerts_cb.setToolTip(
+            "A muted row keeps updating its value every scan cycle (it doesn't\n"
+            "expire or disappear on its own) -- check this to hide muted rows\n"
+            "from the table instead. Uncheck to see and unmute them again."
+        )
+        self._hide_muted_alerts_cb.stateChanged.connect(lambda _: self._refresh_indicator_alert_table())
+        indicator_alert_header.addWidget(self._hide_muted_alerts_cb)
         del_indicator_alert_btn = QPushButton("Delete")
         del_indicator_alert_btn.setToolTip(
             "Remove selected row(s). If the rule is still active in\n"
@@ -1639,6 +1647,8 @@ class SignalScanner(QMainWindow):
                 rows = db.get_all_indicator_alert_state()
         except Exception:
             rows = []
+        if self._hide_muted_alerts_cb.isChecked():
+            rows = [r for r in rows if not r.get("is_muted")]
         self._populate_indicator_alert_table(rows)
 
     def _populate_indicator_alert_table(self, rows: list[dict]) -> None:
