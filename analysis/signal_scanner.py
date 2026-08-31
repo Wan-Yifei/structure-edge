@@ -60,6 +60,7 @@ from strategy.smc.fvg import detect_fvg
 
 _ROOT = pathlib.Path(__file__).parent.parent
 _CFG_PATH = _ROOT / "config" / "schedule.json"
+_INDICATOR_ALERT_CFG_PATH = _ROOT / "config" / "scanner" / "indicator_alert_params.json"
 _SIGNALS_DB_PATH = _ROOT / "db" / "signals.db"
 
 # ── tf mapping (fetcher uses "60m" key, viewer uses "1h") ────────────────────
@@ -903,6 +904,138 @@ class ParamsDialog(QDialog):
         return out
 
 
+# ── indicator alert config dialog ───────────────────────────────────────────
+
+class IndicatorAlertConfigDialog(QDialog):
+    """Table editor for config/scanner/indicator_alert_params.json -- lets the
+    user add/edit/delete per-symbol indicator threshold rules without hand-
+    editing JSON. Deliberately generic (Indicator/Params/Field are free text,
+    not RSI-specific widgets) so it stays usable once MACD/KD-style indicators
+    are registered in analysis/indicator_alert_watcher.py's INDICATOR_REGISTRY.
+    """
+
+    _COLUMNS = ["Symbol", "Indicator", "TF", "Params (JSON)", "Field", "Condition", "Threshold"]
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Indicator Alert Rules — config/scanner/indicator_alert_params.json")
+        self.setMinimumSize(760, 420)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "One row per rule. A rule fires every scan cycle (not just on the edge\n"
+            "crossing) while its condition holds -- mute a noisy rule from the Live tab's\n"
+            "Indicator Alerts panel instead of deleting it here.\n"
+            "Condition must be \"above\" or \"below\"; Params must be a JSON object, e.g. {\"period\": 6}."
+        ))
+
+        self._tbl = QTableWidget(0, len(self._COLUMNS))
+        self._tbl.setHorizontalHeaderLabels(self._COLUMNS)
+        self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self._tbl)
+
+        rows_btns = QHBoxLayout()
+        add_btn = QPushButton("Add Rule")
+        add_btn.clicked.connect(self._on_add_row)
+        rows_btns.addWidget(add_btn)
+        del_btn = QPushButton("Delete Selected")
+        del_btn.clicked.connect(self._on_delete_rows)
+        rows_btns.addWidget(del_btn)
+        rows_btns.addStretch()
+        layout.addLayout(rows_btns)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        from analysis.indicator_alert_watcher import load_indicator_alert_config
+        config = load_indicator_alert_config(_INDICATOR_ALERT_CFG_PATH)
+        for symbol, rules in config.items():
+            for rule in rules:
+                self._append_row(symbol, rule)
+
+    def _append_row(self, symbol: str = "", rule: Optional[dict] = None) -> None:
+        rule = rule or {}
+        row = self._tbl.rowCount()
+        self._tbl.insertRow(row)
+        self._tbl.setItem(row, 0, QTableWidgetItem(symbol))
+        self._tbl.setItem(row, 1, QTableWidgetItem(rule.get("indicator", "rsi")))
+        self._tbl.setItem(row, 2, QTableWidgetItem(rule.get("tf", "1m")))
+        self._tbl.setItem(row, 3, QTableWidgetItem(json.dumps(rule.get("params", {}))))
+        self._tbl.setItem(row, 4, QTableWidgetItem(rule.get("field", "value")))
+        self._tbl.setItem(row, 5, QTableWidgetItem(rule.get("condition", "below")))
+        self._tbl.setItem(row, 6, QTableWidgetItem(str(rule.get("threshold", 30))))
+
+    def _on_add_row(self) -> None:
+        self._append_row()
+
+    def _on_delete_rows(self) -> None:
+        for row in sorted({i.row() for i in self._tbl.selectedItems()}, reverse=True):
+            self._tbl.removeRow(row)
+
+    def _on_save(self) -> None:
+        def cell(row: int, col: int) -> str:
+            item = self._tbl.item(row, col)
+            return item.text().strip() if item else ""
+
+        config: dict[str, list[dict]] = {}
+        for row in range(self._tbl.rowCount()):
+            symbol = cell(row, 0)
+            if not symbol:
+                continue
+            try:
+                params = json.loads(cell(row, 3) or "{}")
+            except Exception as exc:
+                QMessageBox.warning(self, "Invalid params", f"Row {row + 1}: params must be valid JSON ({exc})")
+                return
+            condition = cell(row, 5)
+            if condition not in ("above", "below"):
+                QMessageBox.warning(self, "Invalid condition", f"Row {row + 1}: condition must be \"above\" or \"below\"")
+                return
+            try:
+                threshold = float(cell(row, 6))
+            except ValueError:
+                QMessageBox.warning(self, "Invalid threshold", f"Row {row + 1}: threshold must be a number")
+                return
+
+            rule = {
+                "indicator": cell(row, 1),
+                "tf":        cell(row, 2),
+                "params":    params,
+                "field":     cell(row, 4),
+                "condition": condition,
+                "threshold": threshold,
+            }
+            config.setdefault(symbol, []).append(rule)
+
+        out = {
+            "_note": (
+                "Per-symbol list of indicator threshold rules for "
+                "analysis/indicator_alert_watcher.py. `indicator` selects a compute "
+                "function from INDICATOR_REGISTRY (rsi/kd/... -- extend by registering "
+                "a new function there, no schema change needed); `field` picks which "
+                "output series of that indicator to compare against `threshold`. Each "
+                "rule fires (repeatedly, once per scan cycle, not just on the edge "
+                "crossing) whenever the latest closed bar's value satisfies "
+                "condition+threshold -- mute a noisy rule from the scanner UI to pause "
+                "it until it goes negative again."
+            ),
+            **config,
+        }
+        try:
+            _INDICATOR_ALERT_CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _INDICATOR_ALERT_CFG_PATH.write_text(
+                json.dumps(out, indent=4, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self.accept()
+
+
 # ── main window ───────────────────────────────────────────────────────────────
 
 class SignalScanner(QMainWindow):
@@ -1020,6 +1153,10 @@ class SignalScanner(QMainWindow):
         edit_btn = QPushButton("Edit Params")
         edit_btn.clicked.connect(self._on_edit_params)
         tb.addWidget(edit_btn)
+
+        indicator_rules_btn = QPushButton("Indicator Alert Rules...")
+        indicator_rules_btn.clicked.connect(self._on_edit_indicator_alert_rules)
+        tb.addWidget(indicator_rules_btn)
 
         tabs = QTabWidget()
         main_lay.addWidget(tabs)
@@ -1332,6 +1469,11 @@ class SignalScanner(QMainWindow):
             overrides[symbol] = result
             self._save_cfg()
             self._refresh_targets_table()
+
+    def _on_edit_indicator_alert_rules(self) -> None:
+        dlg = IndicatorAlertConfigDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._log("Indicator alert rules saved to config/scanner/indicator_alert_params.json")
 
     # ── table refresh ─────────────────────────────────────────────────────────
 
