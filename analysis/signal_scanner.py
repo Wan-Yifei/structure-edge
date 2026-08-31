@@ -391,15 +391,20 @@ class ScanWorker(QThread):
     def _alert(self, sig: dict, scanner_cfg: dict) -> None:
         if not scanner_cfg.get("alert_sound", True):
             return
-        # QApplication.beep() is frequently silent on Windows -- it depends on
-        # the app having a mapped "beep" sound in the current sound scheme,
-        # which many schemes leave unset. winsound.MessageBeep() instead plays
-        # a real system sound event (SystemExclamation), audible under the
-        # default Windows sound scheme; QApplication.beep() is the fallback for
-        # non-Windows platforms.
+        # winsound.MessageBeep()/Beep() depend on the Windows sound scheme having
+        # a file mapped to the event, or the legacy beep.sys driver being
+        # enabled -- both can be silent no-ops even on a machine where ordinary
+        # media/notification audio plays fine (confirmed: MessageBeep, all its
+        # icon variants, and the raw Beep() tone were all silent here, but
+        # winsound.PlaySound() with a real wav file was audible). PlaySound goes
+        # through the same playback path as normal audio instead of relying on
+        # either of those. SND_ASYNC so a beep can't stall the scan thread.
         try:
             import winsound
-            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            winsound.PlaySound(
+                r"C:\Windows\Media\Windows Notify System Generic.wav",
+                winsound.SND_FILENAME | winsound.SND_ASYNC,
+            )
         except Exception:
             QApplication.beep()
 
