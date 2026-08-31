@@ -41,6 +41,9 @@ db/scheduler.log
 # Hang-watchdog thread-dump log (analysis/trade_viewer_qt.py, root dir)
 hang_watchdog.log
 
+# Output redirected by scripts/launch_*.vbs (hidden-window launchers)
+scripts/*.log
+
 # Docker — user secrets and local volume dirs (never commit)
 docker/backtest.env
 docker_db/

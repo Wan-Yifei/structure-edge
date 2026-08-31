@@ -3860,6 +3860,9 @@ class TradeViewerQt(QMainWindow):
             self._log(f"Scanner signals load error: {exc}")
             return
 
+        if not sigs:
+            self._log(f"Scanner Signals: no open entry signals for {code} in db/signals.db")
+            return
         for sig in sigs:
             self._render_scanner_signal(sig, klines)
 
