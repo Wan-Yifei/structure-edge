@@ -44,5 +44,53 @@
     "tick_db": "db/ticks.db",
     "order_book_db": "db/order_book.db"
   },
-  "autostart": true
+  "autostart": true,
+  "scanner": {
+    "enabled": [
+      "US.SOXL",
+      "US.SOXS"
+    ],
+    "scan_interval_s": 60,
+    "alert_sound": true,
+    "indicator_alert_repeat_s": 10,
+    "default": {
+      "strategy": "smc",
+      "auto_params": true,
+      "lookback_months": 3,
+      "min_n_trades": 5,
+      "min_pf": 1.5,
+      "entry_signal_enabled": true,
+      "fvg_watch_enabled": false,
+      "session_vp_enabled": false,
+      "vah_soxs_enabled": false,
+      "val_kd_tp_enabled": false,
+      "indicator_alert_enabled": false
+    },
+    "overrides": {
+      "US.SOXL": {
+        "auto_params": true,
+        "entry_signal_enabled": false,
+        "fvg_watch_enabled": false,
+        "session_vp_enabled": false,
+        "vah_soxs_enabled": false,
+        "val_kd_tp_enabled": false,
+        "indicator_alert_enabled": true,
+        "lookback_months": 3,
+        "min_n_trades": 5,
+        "min_pf": 1.5
+      },
+      "US.SOXS": {
+        "auto_params": true,
+        "entry_signal_enabled": false,
+        "fvg_watch_enabled": false,
+        "session_vp_enabled": false,
+        "vah_soxs_enabled": false,
+        "val_kd_tp_enabled": false,
+        "indicator_alert_enabled": true,
+        "lookback_months": 3,
+        "min_n_trades": 5,
+        "min_pf": 1.5
+      }
+    }
+  }
 }

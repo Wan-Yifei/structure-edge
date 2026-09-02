@@ -568,8 +568,27 @@ class SchedulerApp(tk.Tk):
         rb["aws_profile"]      = self.backup_profile_var.get().strip()
         rb["aws_endpoint_url"] = self.backup_endpoint_var.get().strip()
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # config/schedule.json is also written by analysis/signal_scanner.py,
+        # under its own "scanner" key -- self.cfg was loaded once at this
+        # process's startup, so its copy of "scanner" is whatever the Signal
+        # Scanner had (if anything) at that moment. Writing self.cfg verbatim
+        # would silently roll "scanner" back to that stale snapshot, discarding
+        # any rules/targets set through that window since (confirmed: this is
+        # what wiped the scanner's enabled/overrides to empty). Re-read what's
+        # on disk right now and keep its "scanner" value untouched.
+        on_disk = {}
+        if CONFIG_PATH.exists():
+            try:
+                with open(CONFIG_PATH, encoding="utf-8") as f:
+                    on_disk = json.load(f)
+            except Exception:
+                pass
+        merged = {**on_disk, **self.cfg}
+        if "scanner" in on_disk:
+            merged["scanner"] = on_disk["scanner"]
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(self.cfg, f, indent=2, ensure_ascii=False)
+            json.dump(merged, f, indent=2, ensure_ascii=False)
+        self.cfg = merged
         self._log("Config saved.")
 
     # ── UI builders ───────────────────────────────────────────────────────────

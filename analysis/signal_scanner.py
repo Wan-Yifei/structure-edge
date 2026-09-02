@@ -1105,12 +1105,31 @@ class SignalScanner(QMainWindow):
         return {}
 
     def _save_cfg(self) -> None:
+        """config/schedule.json is shared with analysis/scheduler.py, which owns
+        every other top-level key in it (sessions, targets, remote_backup, ...)
+        and holds its own in-memory copy loaded once at its startup. Writing
+        self._cfg verbatim would blast that copy's *current* values for those
+        keys back to whatever this SignalScanner window's stale in-memory copy
+        had at ITS startup -- and conversely, without this, the scheduler's own
+        blind overwrite can wipe out "scanner" (confirmed: an empty enabled +
+        overrides showed up here after the scheduler saved, discarding rules
+        that had been set through this window since scheduler startup).
+        Re-read what's actually on disk and touch only the "scanner" key.
+        """
         try:
             _CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            on_disk = {}
+            if _CFG_PATH.exists():
+                try:
+                    on_disk = json.loads(_CFG_PATH.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            on_disk["scanner"] = self._cfg.get("scanner", {})
             _CFG_PATH.write_text(
-                json.dumps(self._cfg, indent=2, ensure_ascii=False),
+                json.dumps(on_disk, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
+            self._cfg = on_disk
         except Exception as exc:
             self._log(f"Config save error: {exc}")
 
