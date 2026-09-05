@@ -28,6 +28,7 @@ just imports its already-decoupled rendering primitives and dialog.
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import random
 import sys
@@ -58,6 +59,7 @@ from strategy.chandelier_exit.chandelier import (
 )
 from backtest.engine import _find_exit
 from db.sim_trades import SimTradesDB
+from core.time_utils import session_for_timestamp
 from analysis.trade_viewer_qt import (
     CandlestickItem, FvgItem, ObItem, ChandelierParamsDialog,
     _compute_profile_bins, _compute_poc_vah_val,
@@ -65,6 +67,36 @@ from analysis.trade_viewer_qt import (
 )
 
 _TF_CHOICES = ["1m", "3m", "5m", "15m", "30m", "60m", "1d"]
+
+_SESSION_CFG_PATH = pathlib.Path(__file__).parent.parent / "config" / "schedule.json"
+# Same four session windows as config/schedule.json's "sessions" block -- used
+# as a fallback if that file is missing or doesn't have a "sessions" key.
+_DEFAULT_SESSIONS = {
+    "overnight":  {"start": "20:00", "end": "04:00", "enabled": True},
+    "premarket":  {"start": "04:00", "end": "09:30", "enabled": True},
+    "regular":    {"start": "09:30", "end": "16:00", "enabled": True},
+    "afterhours": {"start": "16:00", "end": "20:00", "enabled": True},
+}
+# (checkbox attribute name, session key) -- session key must match config/schedule.json's
+# "sessions" dict keys (and core.time_utils.session_for_timestamp's expected keys).
+_SESSION_FILTER_CBS = [
+    ("_sess_overnight_cb",  "overnight"),
+    ("_sess_premarket_cb",  "premarket"),
+    ("_sess_regular_cb",    "regular"),
+    ("_sess_afterhours_cb", "afterhours"),
+]
+
+
+def _load_sessions_config() -> dict:
+    if _SESSION_CFG_PATH.exists():
+        try:
+            cfg = json.loads(_SESSION_CFG_PATH.read_text(encoding="utf-8"))
+            sessions = cfg.get("sessions")
+            if sessions:
+                return sessions
+        except Exception:
+            pass
+    return _DEFAULT_SESSIONS
 _MAX_BARS_IN_TRADE = 300   # cap on how far a trade can run before forced timeout
 _MIN_LOOKBACK       = 60   # bars of history required before a Jump/Random point (indicator warmup)
 _MIN_TRAILING        = 20   # bars required after a Jump/Random point (room for a trade to play out)
@@ -232,6 +264,17 @@ class ReplayTrainerWindow(QMainWindow):
         self._trade_items: list = []                 # chart items for the trade overlay
         self._profile_render_items: list = []          # chart items for the volume-profile bars/POC/VAH/VAL
 
+        # Range Profile: a draggable region on the main chart whose bar span
+        # feeds the same side-panel profile instead of the whole visible
+        # history -- lets you isolate e.g. a session's initial volume build
+        # (IVB) or any other sub-range, mirroring trade_viewer_qt.py's Range
+        # Profile feature (same _compute_profile_bins/_compute_poc_vah_val).
+        self._range_region: pg.LinearRegionItem | None = None
+        self._range_profile_timer = QTimer(self)
+        self._range_profile_timer.setSingleShot(True)
+        self._range_profile_timer.timeout.connect(self._rebuild_range_profile)
+        self._range_last_indices: tuple[int, int] = (-1, -1)
+
         self._chandelier_period     = 20
         self._chandelier_multiplier = 2.0
 
@@ -298,6 +341,22 @@ class ReplayTrainerWindow(QMainWindow):
         random_btn = QPushButton("🎲 Random")
         random_btn.clicked.connect(self._on_random)
         tb2.addWidget(random_btn)
+        tb2.addWidget(QLabel("  session:"))
+        self._sess_overnight_cb  = QCheckBox("Overnight")
+        self._sess_premarket_cb  = QCheckBox("Premarket")
+        self._sess_regular_cb    = QCheckBox("Regular")
+        self._sess_afterhours_cb = QCheckBox("Afterhours")
+        for attr, _key in _SESSION_FILTER_CBS:
+            cb = getattr(self, attr)
+            cb.setChecked(True)
+            cb.setToolTip(
+                "Restricts \U0001F3B2 Random to bars whose time falls in the "
+                "checked session(s) -- uncheck the ones you don't want to "
+                "practice (e.g. only Premarket for IVB drills). Manual "
+                "\"Jump to\" is unaffected -- typing an exact time already "
+                "gives full control over which session you land in."
+            )
+            tb2.addWidget(cb)
         tb2.addSeparator()
         step_btn = QPushButton("Step ▶")
         step_btn.clicked.connect(self._on_step)
@@ -356,6 +415,17 @@ class ReplayTrainerWindow(QMainWindow):
         self._profile_cb.setChecked(True)
         self._profile_cb.stateChanged.connect(self._render)
         tb3.addWidget(self._profile_cb)
+        self._range_profile_btn = QPushButton("Range Profile")
+        self._range_profile_btn.setCheckable(True)
+        self._range_profile_btn.setChecked(False)
+        self._range_profile_btn.setToolTip(
+            "Drag the shaded region on the chart to compute the volume profile "
+            "for just that bar range instead of the whole visible history -- "
+            "e.g. isolate a session's initial volume build (IVB) or any other "
+            "sub-range you want to inspect. Overrides Volume Profile while active."
+        )
+        self._range_profile_btn.clicked.connect(self._toggle_range_profile)
+        tb3.addWidget(self._range_profile_btn)
         self._vol_cb = QCheckBox("Volume")
         self._vol_cb.setChecked(True)
         self._vol_cb.stateChanged.connect(self._render)
@@ -636,6 +706,9 @@ class ReplayTrainerWindow(QMainWindow):
         self._code    = code
         self._replay_idx = min(_MIN_LOOKBACK, len(self._klines) - 1)
         self._clear_open_trade_state()
+        if self._range_profile_btn.isChecked():
+            self._range_profile_btn.setChecked(False)   # old bar indices are meaningless against fresh data
+            self._toggle_range_profile(False)
         self._render()
         self._reset_view()
         self._trade_status_lbl.setText("No open trade")
@@ -688,6 +761,22 @@ class ReplayTrainerWindow(QMainWindow):
         self._render()
         self._reset_view()
 
+    def _active_session_filter(self) -> set[str]:
+        return {key for attr, key in _SESSION_FILTER_CBS if getattr(self, attr).isChecked()}
+
+    def _session_filtered_indices(self, lo: int, hi: int, active: set[str]) -> list[int]:
+        sessions_cfg = _load_sessions_config()
+        times = self._klines["time_key"].iloc[lo : hi + 1].astype(str)
+        result = []
+        for i, ts in zip(range(lo, hi + 1), times):
+            try:
+                dt = datetime.strptime(ts[:16], "%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
+            if session_for_timestamp(dt, sessions_cfg) in active:
+                result.append(i)
+        return result
+
     def _on_random(self) -> None:
         if self._klines is None or self._klines.empty:
             return
@@ -695,8 +784,23 @@ class ReplayTrainerWindow(QMainWindow):
         hi = len(self._klines) - 1 - _MIN_TRAILING
         if hi <= lo:
             self._replay_idx = len(self._klines) - 1
-        else:
+            self._render()
+            self._reset_view()
+            return
+
+        active = self._active_session_filter()
+        if len(active) == len(_SESSION_FILTER_CBS):
+            # All sessions checked -- no filtering needed, matches prior behavior.
             self._replay_idx = random.randint(lo, hi)
+        else:
+            candidates = self._session_filtered_indices(lo, hi, active)
+            if not candidates:
+                QMessageBox.warning(
+                    self, "No matching bars",
+                    "No bars in the loaded range fall in the checked session(s). "
+                    "Check a different session or load a wider date range.")
+                return
+            self._replay_idx = random.choice(candidates)
         self._render()
         self._reset_view()
 
@@ -740,8 +844,10 @@ class ReplayTrainerWindow(QMainWindow):
         else:
             self._ob_item.set_data([], n)
 
-        if self._profile_cb.isChecked():
-            self._update_volume_profile(visible)
+        if self._range_profile_btn.isChecked() and self._range_region is not None:
+            self._rebuild_range_profile()
+        elif self._profile_cb.isChecked():
+            self._update_volume_profile(visible, label=f"Visible {n}b")
         else:
             for item in self._profile_render_items:
                 self._profile_widget.removeItem(item)
@@ -765,7 +871,7 @@ class ReplayTrainerWindow(QMainWindow):
                 f"K-line Replay Trainer  —  {self._code}  "
                 f"{str(visible['time_key'].iloc[-1])}  ({n} bars visible)")
 
-    def _update_volume_profile(self, visible: pd.DataFrame) -> None:
+    def _update_volume_profile(self, visible: pd.DataFrame, label: str | None = None) -> None:
         # NOTE: PlotWidget.clear() would wipe every item in the scene, including
         # self._profile_hline (the crosshair line added once in _build_ui) --
         # only remove this method's own previously-added items instead.
@@ -775,11 +881,14 @@ class ReplayTrainerWindow(QMainWindow):
 
         n = len(visible)
         if n < 2:
+            self._profile_widget.getPlotItem().setLabel("top", "")
             return
-        centers, volumes, _, _ = _compute_profile_bins(visible, None, 1, 0, n - 1, n_bins=60)
+        centers, volumes, _, _ = _compute_profile_bins(visible, None, 1, n_bins=60)
         if centers.size == 0:
             return
         poc, vah, val = _compute_poc_vah_val(centers, volumes)
+        self._profile_widget.getPlotItem().setLabel(
+            "top", label or "", **{"color": "#42a5f5", "size": "7pt"})
         bin_h = (centers[1] - centers[0]) if len(centers) > 1 else 1.0
         bars = pg.BarGraphItem(
             x0=np.zeros_like(volumes), x1=volumes, y=centers, height=bin_h * 0.9,
@@ -787,11 +896,11 @@ class ReplayTrainerWindow(QMainWindow):
         )
         self._profile_widget.addItem(bars)
         self._profile_render_items.append(bars)
-        for price, color, label in ((poc, "#ffee58", "POC"), (vah, "#ef5350", "VAH"), (val, "#26a69a", "VAL")):
+        for price, color, tag in ((poc, "#ffee58", "POC"), (vah, "#ef5350", "VAH"), (val, "#26a69a", "VAL")):
             line = pg.InfiniteLine(
                 pos=price, angle=0, movable=False,
                 pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
-                label=f"{label} {price:.2f}", labelOpts={"color": color, "position": 0.02},
+                label=f"{tag} {price:.2f}", labelOpts={"color": color, "position": 0.02},
             )
             self._profile_widget.addItem(line)
             self._profile_render_items.append(line)
@@ -809,6 +918,57 @@ class ReplayTrainerWindow(QMainWindow):
         self._profile_render_items.append(price_line)
 
         self._profile_widget.setYRange(float(visible["low"].min()), float(visible["high"].max()), padding=0.02)
+
+    # ── Range Profile ────────────────────────────────────────────────────────
+
+    def _toggle_range_profile(self, checked: bool) -> None:
+        if checked:
+            if self._klines is None or self._klines.empty:
+                self._range_profile_btn.setChecked(False)
+                return
+            # Default span: middle 40% of the currently visible X range,
+            # same convention as trade_viewer_qt.py's Range Profile.
+            xlo, xhi = self._plot_c.vb.viewRange()[0]
+            span = xhi - xlo
+            x0 = xlo + span * 0.30
+            x1 = xlo + span * 0.70
+            self._range_region = pg.LinearRegionItem(
+                values=[x0, x1],
+                orientation="vertical",
+                movable=True,
+                brush=pg.mkBrush(_qc("#1565c0", 40)),
+                pen=pg.mkPen(_qc("#42a5f5", 180), width=1),
+            )
+            self._range_region.setZValue(10)
+            self._plot_c.addItem(self._range_region)
+            self._range_region.sigRegionChanged.connect(self._on_range_region_changed)
+            self._range_last_indices = (-1, -1)
+            self._rebuild_range_profile()
+        else:
+            self._range_profile_timer.stop()
+            if self._range_region is not None:
+                self._plot_c.removeItem(self._range_region)
+                self._range_region = None
+            self._range_last_indices = (-1, -1)
+            self._render()   # restores the whole-visible-history profile, if checked
+
+    def _on_range_region_changed(self) -> None:
+        self._range_profile_timer.start(150)
+
+    def _rebuild_range_profile(self) -> None:
+        if self._range_region is None or self._klines is None:
+            return
+        n = self._replay_idx + 1   # can't select bars not yet revealed
+        if n == 0:
+            return
+        rx0, rx1 = self._range_region.getRegion()
+        i0 = max(0, min(n - 1, int(round(min(rx0, rx1)))))
+        i1 = max(0, min(n - 1, int(round(max(rx0, rx1)))))
+        if (i0, i1) == self._range_last_indices:
+            return
+        self._range_last_indices = (i0, i1)
+        klines_slice = self._klines.iloc[i0 : i1 + 1].reset_index(drop=True)
+        self._update_volume_profile(klines_slice, label=f"Range {i1 - i0 + 1}b")
 
     def _update_volume(self, visible: pd.DataFrame, red_up: bool) -> None:
         n     = len(visible)
