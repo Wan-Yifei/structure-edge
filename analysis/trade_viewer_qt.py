@@ -3159,9 +3159,13 @@ class TradeViewerQt(QMainWindow):
             self._plot_c.addItem(curve, ignoreBounds=True)
             self._ema_items.append(curve)
 
-            # Label at right end
+            # Label at right end -- anchor=(1.0, 0.5) (right-anchored, text grows
+            # leftward from the last bar) so it stays within the already-visible/
+            # pannable chart area instead of extending into the empty margin past
+            # the last candle, where it can end up beyond the view's xMax pan
+            # limit at typical zoom and only become reachable by zooming in.
             lbl = pg.TextItem(
-                text=f"EMA{period}", color=color, anchor=(0.0, 0.5),
+                text=f"EMA{period}", color=color, anchor=(1.0, 0.5),
             )
             lbl.setFont(QFont("Monospace", 6))
             lbl.setPos(len(klines) - 1, float(ema[-1]))
@@ -3245,7 +3249,9 @@ class TradeViewerQt(QMainWindow):
         self._avwap_items.append(anchor_line)
 
         last_v = float(vwap[-1]) if not np.isnan(vwap[-1]) else float(vwap[np.isfinite(vwap)][-1])
-        lbl = pg.TextItem(text=f"AVWAP {last_v:.2f}", color=_AVWAP_COL, anchor=(0.0, 0.5))
+        # anchor=(1.0, 0.5): right-anchored so the label grows leftward from the
+        # last bar, staying within the pannable range (see EMA label comment above).
+        lbl = pg.TextItem(text=f"AVWAP {last_v:.2f}", color=_AVWAP_COL, anchor=(1.0, 0.5))
         lbl.setFont(QFont("Monospace", 8))
         lbl.setPos(n - 1, last_v)
         self._plot_c.addItem(lbl, ignoreBounds=True)
@@ -3297,9 +3303,11 @@ class TradeViewerQt(QMainWindow):
                 # contrast against the candles) even though the band *line*
                 # fades out for wider/less-likely bands -- a faint line is a
                 # tasteful visual hierarchy, faint text is just unreadable.
+                # anchor=(1.0, 0.5): right-anchored, grows leftward from the last
+                # bar (see EMA label comment above).
                 lbl = pg.TextItem(
                     text=f"{tag}{k}s {band[last_i]:.2f}", color=_AVWAP_COL,
-                    fill=pg.mkBrush(_qc(_BG_TIP, 180)), anchor=(0.0, 0.5),
+                    fill=pg.mkBrush(_qc(_BG_TIP, 180)), anchor=(1.0, 0.5),
                 )
                 lbl.setFont(QFont("Monospace", 8))
                 lbl.setPos(x[last_i], band[last_i])
@@ -3320,8 +3328,13 @@ class TradeViewerQt(QMainWindow):
         self._plot_c.addItem(line, ignoreBounds=True)
         self._option_wall_items.append(line)
 
+        # anchor=(1.0, 1.0): right-anchored, grows leftward from the last bar --
+        # was (0.0, 1.0) (left-anchored, extending rightward past the last
+        # candle into the empty margin), which at typical zoom levels put the
+        # label beyond the view's xMax pan limit, only reachable by zooming in
+        # first (reported: Call/Put Wall labels drifting off the right edge).
         lbl = pg.TextItem(
-            text=f"{label} {price:.2f}", color=_qc(color, alpha), anchor=(0.0, 1.0),
+            text=f"{label} {price:.2f}", color=_qc(color, alpha), anchor=(1.0, 1.0),
         )
         lbl.setFont(QFont("Monospace", 7))
         lbl.setPos(n - 1, price)
