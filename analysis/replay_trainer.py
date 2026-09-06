@@ -477,6 +477,17 @@ class ReplayTrainerWindow(QMainWindow):
         self._plot_c.addItem(self._chandelier_label, ignoreBounds=True)
         self._plot_c.vb.sigRangeChanged.connect(self._pin_chandelier_label)
 
+        # Current price, top-right corner (anchor=(1.0, 0.0): right/top, so
+        # the text grows leftward/downward into the chart -- see
+        # _pin_current_price_label).
+        self._current_price_label = pg.TextItem(
+            anchor=(1.0, 0.0), color=_GOLD, fill=pg.mkBrush(_qc(_BG_TIP, 200)))
+        self._current_price_label.setFont(QFont("Monospace", 9))
+        self._current_price_label.setZValue(60)
+        self._current_price_label.setVisible(False)
+        self._plot_c.addItem(self._current_price_label, ignoreBounds=True)
+        self._plot_c.vb.sigRangeChanged.connect(self._pin_current_price_label)
+
         # Volume subplot (row 1)
         self._chart_widget.nextRow()
         self._plot_vol: pg.PlotItem = self._chart_widget.addPlot(row=1, col=0)
@@ -594,6 +605,7 @@ class ReplayTrainerWindow(QMainWindow):
         dir_row.addWidget(self._long_radio)
         dir_row.addWidget(self._short_radio)
         side.addLayout(dir_row)
+        self._long_radio.toggled.connect(self._on_slptp_changed)
 
         shares_row = QHBoxLayout()
         shares_row.addWidget(QLabel("Shares:"))
@@ -602,6 +614,26 @@ class ReplayTrainerWindow(QMainWindow):
         self._shares_spin.setValue(100)
         shares_row.addWidget(self._shares_spin)
         side.addLayout(shares_row)
+
+        risk_row = QHBoxLayout()
+        self._risk_mode_cb = QCheckBox("Size by risk %:")
+        self._risk_mode_cb.setToolTip(
+            "When checked, Shares is computed automatically from Risk % of "
+            "your current balance divided by the per-share stop distance "
+            "(SL for Fixed mode, previewed Chandelier stop for trail mode), "
+            "instead of being typed manually.")
+        self._risk_mode_cb.stateChanged.connect(self._on_risk_mode_toggled)
+        risk_row.addWidget(self._risk_mode_cb)
+        self._risk_pct_spin = QDoubleSpinBox()
+        self._risk_pct_spin.setRange(0.01, 100.0)
+        self._risk_pct_spin.setDecimals(2)
+        self._risk_pct_spin.setSingleStep(0.1)
+        self._risk_pct_spin.setValue(1.0)
+        self._risk_pct_spin.setSuffix("%")
+        self._risk_pct_spin.setEnabled(False)
+        self._risk_pct_spin.valueChanged.connect(self._update_risk_sized_shares)
+        risk_row.addWidget(self._risk_pct_spin)
+        side.addLayout(risk_row)
 
         order_type_row = QHBoxLayout()
         self._market_radio = QRadioButton("Market")
@@ -624,6 +656,7 @@ class ReplayTrainerWindow(QMainWindow):
         self._limit_price_spin.setToolTip(
             "Order sits PENDING until price trades through this level, then "
             "fills at exactly this price -- not an immediate market fill.")
+        self._limit_price_spin.valueChanged.connect(self._on_slptp_changed)
         limit_row.addWidget(self._limit_price_spin)
         side.addLayout(limit_row)
 
@@ -637,12 +670,22 @@ class ReplayTrainerWindow(QMainWindow):
         exit_mode_row.addWidget(self._fixed_radio)
         exit_mode_row.addWidget(self._chandelier_radio)
         side.addLayout(exit_mode_row)
+        self._fixed_radio.toggled.connect(self._on_slptp_changed)
+
+        self._pct_mode_cb = QCheckBox("SL/TP as % from entry")
+        self._pct_mode_cb.setToolTip(
+            "When checked, SL/TP below are a percent distance from the entry/"
+            "limit price instead of an absolute price (e.g. SL=1.00 means 1% "
+            "below entry for a long, 1% above for a short).")
+        self._pct_mode_cb.stateChanged.connect(self._on_pct_mode_toggled)
+        side.addWidget(self._pct_mode_cb)
 
         sl_row = QHBoxLayout()
         sl_row.addWidget(QLabel("SL:"))
         self._sl_spin = QDoubleSpinBox()
         self._sl_spin.setRange(0.0, 1_000_000.0)
         self._sl_spin.setDecimals(4)
+        self._sl_spin.valueChanged.connect(self._on_slptp_changed)
         sl_row.addWidget(self._sl_spin)
         side.addLayout(sl_row)
 
@@ -651,8 +694,13 @@ class ReplayTrainerWindow(QMainWindow):
         self._tp_spin = QDoubleSpinBox()
         self._tp_spin.setRange(0.0, 1_000_000.0)
         self._tp_spin.setDecimals(4)
+        self._tp_spin.valueChanged.connect(self._on_slptp_changed)
         tp_row.addWidget(self._tp_spin)
         side.addLayout(tp_row)
+
+        self._slptp_preview_lbl = QLabel("")
+        self._slptp_preview_lbl.setWordWrap(True)
+        side.addWidget(self._slptp_preview_lbl)
 
         self._place_trade_btn = QPushButton("Place Trade")
         self._place_trade_btn.clicked.connect(self._on_place_trade)
@@ -870,6 +918,28 @@ class ReplayTrainerWindow(QMainWindow):
             self.setWindowTitle(
                 f"K-line Replay Trainer  —  {self._code}  "
                 f"{str(visible['time_key'].iloc[-1])}  ({n} bars visible)")
+
+        self._pin_current_price_label()
+        self._update_slptp_preview()
+        self._update_risk_sized_shares()
+
+    def _pin_current_price_label(self, *_) -> None:
+        """Current (latest revealed) price, pinned to the top-right corner of
+        the main chart. anchor=(1.0, 0.0) (right/top) so it grows leftward/
+        downward from that corner into the already-visible chart area,
+        staying reachable at any zoom -- see the Call/Put Wall label fix for
+        why a corner label must grow inward, not outward past the edge."""
+        if self._klines is None or self._klines.empty:
+            self._current_price_label.setVisible(False)
+            return
+        xlo, xhi = self._plot_c.vb.viewRange()[0]
+        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        x_pad = (xhi - xlo) * 0.01
+        y_pad = (yhi - ylo) * 0.015
+        price = float(self._klines["close"].iloc[self._replay_idx])
+        self._current_price_label.setPos(xhi - x_pad, yhi - y_pad)
+        self._current_price_label.setText(f"{price:.4f}")
+        self._current_price_label.setVisible(True)
 
     def _update_volume_profile(self, visible: pd.DataFrame, label: str | None = None) -> None:
         # NOTE: PlotWidget.clear() would wipe every item in the scene, including
@@ -1112,6 +1182,110 @@ class ReplayTrainerWindow(QMainWindow):
 
     def _on_order_type_toggled(self, market_checked: bool) -> None:
         self._limit_price_spin.setEnabled(not market_checked)
+        self._on_slptp_changed()
+
+    def _current_ref_price(self) -> float | None:
+        """The price SL/TP-as-% and risk-based sizing are computed against:
+        the pending limit price if a limit order is being staged, else the
+        latest revealed close (what a market order would fill at now)."""
+        if self._limit_radio.isChecked():
+            price = self._limit_price_spin.value()
+            return price if price > 0 else None
+        if self._klines is None or self._klines.empty:
+            return None
+        return float(self._klines["close"].iloc[self._replay_idx])
+
+    def _slptp_prices(self, direction: str, ref_price: float) -> tuple[float | None, float | None]:
+        """Convert the SL/TP spinbox values to absolute prices, honoring
+        _pct_mode_cb. Returns (sl, tp), either of which is None if that
+        spinbox is still at its 0.0 default (nothing entered yet)."""
+        sl_in, tp_in = self._sl_spin.value(), self._tp_spin.value()
+        if not self._pct_mode_cb.isChecked():
+            return (sl_in or None), (tp_in or None)
+        sl = tp = None
+        if sl_in:
+            sl = ref_price * (1 - sl_in / 100) if direction == "bull" else ref_price * (1 + sl_in / 100)
+        if tp_in:
+            tp = ref_price * (1 + tp_in / 100) if direction == "bull" else ref_price * (1 - tp_in / 100)
+        return sl, tp
+
+    def _on_slptp_changed(self, *_) -> None:
+        self._update_slptp_preview()
+        self._update_risk_sized_shares()
+
+    def _update_slptp_preview(self) -> None:
+        if not self._pct_mode_cb.isChecked():
+            self._slptp_preview_lbl.setText("")
+            return
+        ref_price = self._current_ref_price()
+        if ref_price is None:
+            self._slptp_preview_lbl.setText("SL/TP price: (need a price to preview against)")
+            return
+        direction = "bull" if self._long_radio.isChecked() else "bear"
+        sl, tp = self._slptp_prices(direction, ref_price)
+        sl_txt = f"{sl:.4f}" if sl is not None else "--"
+        tp_txt = f"{tp:.4f}" if tp is not None else "--"
+        self._slptp_preview_lbl.setText(f"SL price: {sl_txt}   TP price: {tp_txt}")
+
+    def _on_risk_mode_toggled(self, state) -> None:
+        on = bool(state)
+        self._risk_pct_spin.setEnabled(on)
+        self._shares_spin.setEnabled(not on)
+        self._update_risk_sized_shares()
+
+    def _update_risk_sized_shares(self) -> None:
+        """Auto-set Shares from Risk % of balance / per-share stop distance.
+        Fixed mode uses the entered SL (converted from % if _pct_mode_cb is
+        checked); Chandelier mode previews current_stop() -- the same calc
+        driving the Chandelier info label -- since the real stop isn't fixed
+        until entry_idx/ATR are known at fill time."""
+        if not self._risk_mode_cb.isChecked():
+            return
+        if self._klines is None or self._klines.empty:
+            return
+        ref_price = self._current_ref_price()
+        if ref_price is None:
+            return
+        direction = "bull" if self._long_radio.isChecked() else "bear"
+
+        if self._fixed_radio.isChecked():
+            sl, _tp = self._slptp_prices(direction, ref_price)
+            if sl is None:
+                return
+            risk_per_share = abs(ref_price - sl)
+        else:
+            highs  = self._klines["high"].to_numpy(dtype=float)[: self._replay_idx + 1]
+            lows   = self._klines["low"].to_numpy(dtype=float)[: self._replay_idx + 1]
+            closes = self._klines["close"].to_numpy(dtype=float)[: self._replay_idx + 1]
+            r = current_stop(highs, lows, closes, self._chandelier_period, self._chandelier_multiplier, direction)
+            if r is None:
+                return
+            risk_per_share = r["dist"]
+
+        if risk_per_share <= 0:
+            return
+        risk_amount = self._current_balance() * (self._risk_pct_spin.value() / 100.0)
+        shares = max(1, int(risk_amount / risk_per_share))
+        self._shares_spin.blockSignals(True)
+        self._shares_spin.setValue(min(shares, self._shares_spin.maximum()))
+        self._shares_spin.blockSignals(False)
+
+    def _on_pct_mode_toggled(self, state) -> None:
+        pct = bool(state)
+        for spin in (self._sl_spin, self._tp_spin):
+            spin.blockSignals(True)
+            if pct:
+                spin.setRange(0.0, 50.0)
+                spin.setDecimals(2)
+                spin.setSuffix("%")
+                spin.setValue(0.0)
+            else:
+                spin.setRange(0.0, 1_000_000.0)
+                spin.setDecimals(4)
+                spin.setSuffix("")
+                spin.setValue(0.0)
+            spin.blockSignals(False)
+        self._on_slptp_changed()
 
     def _build_exit_config(self, direction: str, ref_price: float, warmup_idx: int | None) -> dict | None:
         """Validate + build the exit-mode fields of a trade/pending-order dict.
@@ -1124,9 +1298,9 @@ class ReplayTrainerWindow(QMainWindow):
         Shows a warning + returns None on invalid input.
         """
         if self._fixed_radio.isChecked():
-            sl, tp = self._sl_spin.value(), self._tp_spin.value()
-            if sl <= 0 or tp <= 0:
-                QMessageBox.warning(self, "Missing SL/TP", "Enter both SL and TP prices.")
+            sl, tp = self._slptp_prices(direction, ref_price)
+            if sl is None or tp is None or sl <= 0 or tp <= 0:
+                QMessageBox.warning(self, "Missing SL/TP", "Enter both SL and TP (price or %, per SL/TP as % checkbox).")
                 return None
             if direction == "bull" and not (sl < ref_price < tp):
                 QMessageBox.warning(self, "Invalid SL/TP", "For a long: SL must be below entry, TP above.")
