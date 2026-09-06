@@ -610,7 +610,7 @@ class ReplayTrainerWindow(QMainWindow):
         shares_row = QHBoxLayout()
         shares_row.addWidget(QLabel("Shares:"))
         self._shares_spin = QSpinBox()
-        self._shares_spin.setRange(1, 1_000_000)
+        self._shares_spin.setRange(0, 1_000_000)   # 0 = risk-based sizing hasn't computed a value yet
         self._shares_spin.setValue(100)
         shares_row.addWidget(self._shares_spin)
         side.addLayout(shares_row)
@@ -1339,24 +1339,40 @@ class ReplayTrainerWindow(QMainWindow):
         self._shares_spin.setEnabled(not on)
         self._update_risk_sized_shares()
 
+    def _set_shares_spin(self, value: int) -> None:
+        self._shares_spin.blockSignals(True)
+        self._shares_spin.setValue(max(0, min(value, self._shares_spin.maximum())))
+        self._shares_spin.blockSignals(False)
+
     def _update_risk_sized_shares(self) -> None:
         """Auto-set Shares from Risk % of balance / per-share stop distance.
         Fixed mode uses the entered SL (converted from % if _pct_mode_cb is
         checked); Chandelier mode previews current_stop() -- the same calc
         driving the Chandelier info label -- since the real stop isn't fixed
-        until entry_idx/ATR are known at fill time."""
+        until entry_idx/ATR are known at fill time.
+
+        Every early-return path below explicitly zeroes Shares rather than
+        leaving whatever manual value happened to be sitting there before Size
+        by risk % was checked -- otherwise a stale, unrelated number (e.g. the
+        default 100) sits in a *disabled* Shares box looking exactly like a
+        real computed answer, when nothing has actually been computed yet
+        (reported: Shares wasn't updating -- SL hadn't been entered yet, so
+        it was just showing the old manual value with no way to tell)."""
         if not self._risk_mode_cb.isChecked():
             return
         if self._klines is None or self._klines.empty:
+            self._set_shares_spin(0)
             return
         ref_price = self._current_ref_price()
         if ref_price is None:
+            self._set_shares_spin(0)
             return
         direction = "bull" if self._long_radio.isChecked() else "bear"
 
         if self._fixed_radio.isChecked():
             sl, _tp = self._slptp_prices(direction, ref_price)
             if sl is None:
+                self._set_shares_spin(0)
                 return
             risk_per_share = abs(ref_price - sl)
         else:
@@ -1365,16 +1381,15 @@ class ReplayTrainerWindow(QMainWindow):
             closes = self._klines["close"].to_numpy(dtype=float)[: self._replay_idx + 1]
             r = current_stop(highs, lows, closes, self._chandelier_period, self._chandelier_multiplier, direction)
             if r is None:
+                self._set_shares_spin(0)
                 return
             risk_per_share = r["dist"]
 
         if risk_per_share <= 0:
+            self._set_shares_spin(0)
             return
         risk_amount = self._current_balance() * (self._risk_pct_spin.value() / 100.0)
-        shares = max(1, int(risk_amount / risk_per_share))
-        self._shares_spin.blockSignals(True)
-        self._shares_spin.setValue(min(shares, self._shares_spin.maximum()))
-        self._shares_spin.blockSignals(False)
+        self._set_shares_spin(max(1, int(risk_amount / risk_per_share)))
 
     def _on_pct_mode_toggled(self, state) -> None:
         pct = bool(state)
@@ -1458,6 +1473,16 @@ class ReplayTrainerWindow(QMainWindow):
 
         direction = "bull" if self._long_radio.isChecked() else "bear"
         shares    = self._shares_spin.value()
+        if shares <= 0:
+            # Shares is 0 either because Size by risk % hasn't computed a
+            # value yet (see _update_risk_sized_shares), or someone typed 0
+            # manually now that the spinbox allows it.
+            QMessageBox.warning(
+                self, "No shares",
+                "Shares is 0 -- if Size by risk % is checked, enter SL (or "
+                "wait for a valid Chandelier preview) first; otherwise set "
+                "Shares manually.")
+            return
         if self._limit_radio.isChecked():
             self._place_limit_order(direction, shares)
         else:
