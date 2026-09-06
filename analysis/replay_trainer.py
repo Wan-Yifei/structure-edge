@@ -60,6 +60,7 @@ from strategy.chandelier_exit.chandelier import (
 from backtest.engine import _find_exit
 from db.sim_trades import SimTradesDB
 from core.time_utils import session_for_timestamp
+from strategy.session_vp.reversal import compute_rsi
 from analysis.trade_viewer_qt import (
     CandlestickItem, FvgItem, ObItem, ChandelierParamsDialog,
     _compute_profile_bins, _compute_poc_vah_val,
@@ -448,6 +449,17 @@ class ReplayTrainerWindow(QMainWindow):
         chandelier_settings_btn.setToolTip("Chandelier ATR period / multiplier")
         chandelier_settings_btn.clicked.connect(self._on_chandelier_settings)
         tb3.addWidget(chandelier_settings_btn)
+        self._rsi_cb = QCheckBox("RSI")
+        self._rsi_cb.setChecked(False)
+        self._rsi_cb.stateChanged.connect(self._render)
+        tb3.addWidget(self._rsi_cb)
+        self._rsi_period_spin = QSpinBox()
+        self._rsi_period_spin.setRange(2, 100)
+        self._rsi_period_spin.setValue(6)   # matches the RSI period used elsewhere for IVB (session_vp)
+        self._rsi_period_spin.setFixedWidth(50)
+        self._rsi_period_spin.setToolTip("RSI period (bars)")
+        self._rsi_period_spin.valueChanged.connect(self._render)
+        tb3.addWidget(self._rsi_period_spin)
 
         # Main body: chart | side panel (order entry + profile + stats)
         body = QHBoxLayout()
@@ -520,9 +532,30 @@ class ReplayTrainerWindow(QMainWindow):
         self._dv_item = pg.BarGraphItem(x=[0], height=[0], width=0.7, brush=_qc(_GREY))
         self._plot_dv.addItem(self._dv_item)
 
+        # RSI subplot (row 3) -- 30/70 reference lines (the oversold/overbought
+        # levels IVB's indicator-alert rules use elsewhere in this repo), off
+        # by default like the other secondary overlays.
+        self._chart_widget.nextRow()
+        self._plot_rsi: pg.PlotItem = self._chart_widget.addPlot(row=3, col=0)
+        self._plot_rsi.showGrid(x=True, y=True, alpha=0.10)
+        self._plot_rsi.setLabel("left", "RSI", **{"color": _FG})
+        self._plot_rsi.getAxis("left").setTextPen(_qc(_FG))
+        self._plot_rsi.getAxis("bottom").setTextPen(_qc(_FG))
+        self._plot_rsi.setMenuEnabled(False)
+        self._plot_rsi.setXLink(self._plot_c)
+        self._plot_rsi.setYRange(0, 100, padding=0)
+        for level, color in ((30, _GREEN), (70, _RED)):
+            self._plot_rsi.addItem(pg.InfiniteLine(
+                pos=level, angle=0, movable=False,
+                pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
+            ))
+        self._rsi_curve = pg.PlotCurveItem(pen=pg.mkPen("#42a5f5", width=1.5))
+        self._plot_rsi.addItem(self._rsi_curve)
+
         self._chart_widget.ci.layout.setRowStretchFactor(0, 5)
         self._set_subplot_row_visible(self._plot_vol, 1, True)
         self._set_subplot_row_visible(self._plot_dv, 2, True)
+        self._set_subplot_row_visible(self._plot_rsi, 3, False)
 
         # Volume profile side panel
         self._profile_widget = pg.PlotWidget()
@@ -552,6 +585,10 @@ class ReplayTrainerWindow(QMainWindow):
         self._vline_dv = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
         self._vline_dv.setVisible(False)
         self._plot_dv.addItem(self._vline_dv, ignoreBounds=True)
+
+        self._vline_rsi = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._vline_rsi.setVisible(False)
+        self._plot_rsi.addItem(self._vline_rsi, ignoreBounds=True)
 
         self._profile_hline = pg.InfiniteLine(angle=0, movable=False, pen=cross_pen)
         self._profile_hline.setVisible(False)
@@ -934,6 +971,10 @@ class ReplayTrainerWindow(QMainWindow):
         if self._dv_cb.isChecked():
             self._update_dv(visible, red_up)
 
+        self._set_subplot_row_visible(self._plot_rsi, 3, self._rsi_cb.isChecked())
+        if self._rsi_cb.isChecked():
+            self._update_rsi(visible)
+
         if self._chandelier_cb.isChecked():
             self._update_chandelier_label(visible)
         else:
@@ -980,6 +1021,7 @@ class ReplayTrainerWindow(QMainWindow):
         pos_only = [(i, "") for i, _ in ticks]
         self._plot_vol.getAxis("bottom").setTicks([pos_only])
         self._plot_dv.getAxis("bottom").setTicks([pos_only])
+        self._plot_rsi.getAxis("bottom").setTicks([pos_only])
 
     def _pin_current_price_label(self, *_) -> None:
         """Current (latest revealed) price, pinned to the top-right corner of
@@ -1147,6 +1189,13 @@ class ReplayTrainerWindow(QMainWindow):
         colors = [_qc(bull_col, 180) if v >= 0 else _qc(bear_col, 180) for v in dv]
         self._dv_item.setOpts(x=x, height=dv, width=0.7, brushes=colors)
 
+    def _update_rsi(self, visible: pd.DataFrame) -> None:
+        n = len(visible)
+        rsi = compute_rsi(visible["close"], period=self._rsi_period_spin.value())
+        x = np.arange(n)
+        mask = ~np.isnan(rsi)
+        self._rsi_curve.setData(x[mask], rsi[mask])
+
     def _update_chandelier_label(self, visible: pd.DataFrame) -> None:
         highs  = visible["high"].to_numpy(dtype=float)
         lows   = visible["low"].to_numpy(dtype=float)
@@ -1197,10 +1246,11 @@ class ReplayTrainerWindow(QMainWindow):
         in_candle = self._plot_c.sceneBoundingRect().contains(pos)
         in_vol    = self._plot_vol.isVisible() and self._plot_vol.sceneBoundingRect().contains(pos)
         in_dv     = self._plot_dv.isVisible()  and self._plot_dv.sceneBoundingRect().contains(pos)
-        in_any    = in_candle or in_vol or in_dv
+        in_rsi    = self._plot_rsi.isVisible() and self._plot_rsi.sceneBoundingRect().contains(pos)
+        in_any    = in_candle or in_vol or in_dv or in_rsi
 
         if not in_any:
-            for line in (self._vline, self._hline, self._vline_vol, self._vline_dv,
+            for line in (self._vline, self._hline, self._vline_vol, self._vline_dv, self._vline_rsi,
                          self._price_label, self._ohlcv_label, self._profile_hline):
                 line.setVisible(False)
             return
@@ -1209,8 +1259,10 @@ class ReplayTrainerWindow(QMainWindow):
             mouse_pt = self._plot_c.vb.mapSceneToView(pos)
         elif in_vol:
             mouse_pt = self._plot_vol.vb.mapSceneToView(pos)
-        else:
+        elif in_dv:
             mouse_pt = self._plot_dv.vb.mapSceneToView(pos)
+        else:
+            mouse_pt = self._plot_rsi.vb.mapSceneToView(pos)
         x = mouse_pt.x()
         y = mouse_pt.y() if in_candle else self._plot_c.vb.mapSceneToView(pos).y()
 
@@ -1219,6 +1271,8 @@ class ReplayTrainerWindow(QMainWindow):
             self._vline_vol.setPos(x); self._vline_vol.setVisible(True)
         if self._plot_dv.isVisible():
             self._vline_dv.setPos(x); self._vline_dv.setVisible(True)
+        if self._plot_rsi.isVisible():
+            self._vline_rsi.setPos(x); self._vline_rsi.setVisible(True)
         self._hline.setPos(y); self._hline.setVisible(in_candle)
 
         self._profile_hline.setPos(y)
