@@ -348,7 +348,7 @@ class ReplayTrainerWindow(QMainWindow):
         self._sess_afterhours_cb = QCheckBox("Afterhours")
         for attr, _key in _SESSION_FILTER_CBS:
             cb = getattr(self, attr)
-            cb.setChecked(True)
+            cb.setChecked(_key == "regular")
             cb.setToolTip(
                 "Restricts \U0001F3B2 Random to bars whose time falls in the "
                 "checked session(s) -- uncheck the ones you don't want to "
@@ -386,7 +386,7 @@ class ReplayTrainerWindow(QMainWindow):
         self.addToolBar(tb3)
         tb3.addWidget(QLabel("Overlays:"))
         self._fvg_cb = QCheckBox("FVG")
-        self._fvg_cb.setChecked(True)
+        self._fvg_cb.setChecked(False)
         self._fvg_cb.stateChanged.connect(self._render)
         tb3.addWidget(self._fvg_cb)
         self._fvg_min_pct = QDoubleSpinBox()
@@ -401,7 +401,7 @@ class ReplayTrainerWindow(QMainWindow):
         tb3.addWidget(self._fvg_min_pct)
 
         self._ob_cb = QCheckBox("OB")
-        self._ob_cb.setChecked(True)
+        self._ob_cb.setChecked(False)
         self._ob_cb.stateChanged.connect(self._render)
         tb3.addWidget(self._ob_cb)
         self._ob_max_count = QSpinBox()
