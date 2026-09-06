@@ -91,6 +91,13 @@ class SimTradesDB:
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
+    def clear_all(self) -> int:
+        """Permanently delete every stored trade. Returns the number of rows
+        removed. Irreversible -- callers should confirm with the user first."""
+        n = self._conn.execute("SELECT COUNT(*) FROM sim_trades").fetchone()[0]
+        self._conn.execute("DELETE FROM sim_trades")
+        return n
+
     def session_stats(self) -> dict:
         """Aggregate stats over ALL stored trades (not scoped to one process's
         session -- the DB itself IS the cross-session history)."""

@@ -777,7 +777,16 @@ class ReplayTrainerWindow(QMainWindow):
         self._trade_status_lbl.setWordWrap(True)
         side.addWidget(self._trade_status_lbl)
 
-        side.addWidget(QLabel("<b>Session Stats (all-time)</b>"))
+        stats_header = QHBoxLayout()
+        stats_header.addWidget(QLabel("<b>Session Stats (all-time)</b>"))
+        stats_header.addStretch()
+        reset_stats_btn = QPushButton("Reset Stats")
+        reset_stats_btn.setToolTip(
+            "Permanently deletes every saved trade in db/sim_trades.duckdb. "
+            "Cannot be undone.")
+        reset_stats_btn.clicked.connect(self._on_reset_stats)
+        stats_header.addWidget(reset_stats_btn)
+        side.addLayout(stats_header)
         self._stats_lbl = QLabel("")
         self._stats_lbl.setWordWrap(True)
         side.addWidget(self._stats_lbl)
@@ -2009,6 +2018,17 @@ class ReplayTrainerWindow(QMainWindow):
         IS the cross-session history, so this is a running "career" balance,
         not reset per app restart)."""
         return self._starting_capital_spin.value() + self._db.session_stats()["total_pnl_usd"]
+
+    def _on_reset_stats(self) -> None:
+        if QMessageBox.question(
+            self, "Reset Stats",
+            "Permanently delete every saved trade in db/sim_trades.duckdb? "
+            "This cannot be undone.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        n = self._db.clear_all()
+        self._refresh_session_stats()
+        self._trade_status_lbl.setText(f"Reset Stats: deleted {n} saved trade(s).")
 
     def _refresh_session_stats(self) -> None:
         stats   = self._db.session_stats()
