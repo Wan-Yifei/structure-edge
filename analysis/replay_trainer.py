@@ -680,6 +680,30 @@ class ReplayTrainerWindow(QMainWindow):
         self._pct_mode_cb.stateChanged.connect(self._on_pct_mode_toggled)
         side.addWidget(self._pct_mode_cb)
 
+        rr_row = QHBoxLayout()
+        rr_row.addWidget(QLabel("RR (TP:SL):"))
+        self._rr_spin = QDoubleSpinBox()
+        self._rr_spin.setRange(0.1, 20.0)
+        self._rr_spin.setDecimals(2)
+        self._rr_spin.setSingleStep(0.1)
+        self._rr_spin.setValue(1.0)
+        self._rr_spin.setToolTip(
+            "Target reward:risk ratio -- the disabled SL/TP field below (see "
+            "Define via:) is derived from this and the one you're setting.")
+        self._rr_spin.valueChanged.connect(self._on_slptp_changed)
+        rr_row.addWidget(self._rr_spin)
+        rr_row.addWidget(QLabel("Define via:"))
+        self._rr_via_sl_radio = QRadioButton("SL")
+        self._rr_via_tp_radio = QRadioButton("TP")
+        self._rr_via_sl_radio.setChecked(True)
+        self._rr_via_group = QButtonGroup(self)
+        self._rr_via_group.addButton(self._rr_via_sl_radio)
+        self._rr_via_group.addButton(self._rr_via_tp_radio)
+        self._rr_via_sl_radio.toggled.connect(self._on_rr_via_toggled)
+        rr_row.addWidget(self._rr_via_sl_radio)
+        rr_row.addWidget(self._rr_via_tp_radio)
+        side.addLayout(rr_row)
+
         sl_row = QHBoxLayout()
         sl_row.addWidget(QLabel("SL:"))
         self._sl_spin = QDoubleSpinBox()
@@ -695,6 +719,7 @@ class ReplayTrainerWindow(QMainWindow):
         self._tp_spin.setRange(0.0, 1_000_000.0)
         self._tp_spin.setDecimals(4)
         self._tp_spin.valueChanged.connect(self._on_slptp_changed)
+        self._tp_spin.setEnabled(False)   # default "Define via: SL" -- TP is RR-derived
         tp_row.addWidget(self._tp_spin)
         side.addLayout(tp_row)
 
@@ -1247,8 +1272,52 @@ class ReplayTrainerWindow(QMainWindow):
         return sl, tp
 
     def _on_slptp_changed(self, *_) -> None:
+        self._update_rr_derived()
         self._update_slptp_preview()
         self._update_risk_sized_shares()
+
+    def _on_rr_via_toggled(self, _checked=None) -> None:
+        via_sl = self._rr_via_sl_radio.isChecked()
+        self._sl_spin.setEnabled(via_sl)
+        self._tp_spin.setEnabled(not via_sl)
+        self._on_slptp_changed()
+
+    def _update_rr_derived(self) -> None:
+        """Derive the disabled SL/TP field (see "Define via:") from the one
+        you're setting plus the target RR -- TP distance from entry always
+        equals SL distance * RR, in whichever unit the fields are currently
+        in (price, or % if _pct_mode_cb is checked). Setting the derived
+        field programmatically is signal-blocked so it can't re-trigger this
+        (and the rest of the _on_slptp_changed chain) recursively."""
+        ref_price = self._current_ref_price()
+        if ref_price is None:
+            return
+        direction = "bull" if self._long_radio.isChecked() else "bear"
+        rr  = self._rr_spin.value()
+        pct = self._pct_mode_cb.isChecked()
+
+        if self._rr_via_sl_radio.isChecked():
+            sl_in = self._sl_spin.value()
+            if not sl_in:
+                return
+            sl_dist = sl_in if pct else abs(ref_price - sl_in)
+            tp_dist = sl_dist * rr
+            derived = tp_dist if pct else (
+                ref_price + tp_dist if direction == "bull" else ref_price - tp_dist)
+            target_spin = self._tp_spin
+        else:
+            tp_in = self._tp_spin.value()
+            if not tp_in or rr <= 0:
+                return
+            tp_dist = tp_in if pct else abs(ref_price - tp_in)
+            sl_dist = tp_dist / rr
+            derived = sl_dist if pct else (
+                ref_price - sl_dist if direction == "bull" else ref_price + sl_dist)
+            target_spin = self._sl_spin
+
+        target_spin.blockSignals(True)
+        target_spin.setValue(derived)
+        target_spin.blockSignals(False)
 
     def _update_slptp_preview(self) -> None:
         if not self._pct_mode_cb.isChecked():
@@ -1557,12 +1626,26 @@ class ReplayTrainerWindow(QMainWindow):
     def _update_order_panel_enabled(self, mode: str) -> None:
         """mode: 'idle' (can place a new order), 'pending' (limit order
         waiting to fill, can only Cancel), 'open' (trade live, can only
-        Step/Play/Skip)."""
+        Step/Play/Skip).
+
+        Shares and one of SL/TP have a *second*, independent reason to be
+        disabled -- Size by risk % (Shares) and Define via: SL/TP (whichever
+        field is RR-derived) -- so they're excluded from the blanket idle/
+        not-idle loop below and instead re-derived from those modes'own
+        toggle handlers, which already know which field(s) should stay
+        disabled even while idle."""
         idle = mode == "idle"
-        for w in (self._long_radio, self._short_radio, self._shares_spin,
-                  self._fixed_radio, self._chandelier_radio, self._sl_spin, self._tp_spin,
+        for w in (self._long_radio, self._short_radio,
+                  self._fixed_radio, self._chandelier_radio,
                   self._market_radio, self._limit_radio, self._place_trade_btn):
             w.setEnabled(idle)
+        if idle:
+            self._on_risk_mode_toggled(self._risk_mode_cb.isChecked())
+            self._on_rr_via_toggled()
+        else:
+            self._shares_spin.setEnabled(False)
+            self._sl_spin.setEnabled(False)
+            self._tp_spin.setEnabled(False)
         self._limit_price_spin.setEnabled(idle and self._limit_radio.isChecked())
         self._cancel_order_btn.setEnabled(mode == "pending")
 
