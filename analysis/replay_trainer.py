@@ -551,6 +551,16 @@ class ReplayTrainerWindow(QMainWindow):
             ))
         self._rsi_curve = pg.PlotCurveItem(pen=pg.mkPen("#42a5f5", width=1.5))
         self._plot_rsi.addItem(self._rsi_curve)
+        # Current RSI reading, top-right corner of the RSI subplot -- same
+        # treatment as _current_price_label on the main chart (anchor=(1.0,
+        # 0.0): right/top, grows leftward/downward into the plot).
+        self._rsi_value_label = pg.TextItem(
+            anchor=(1.0, 0.0), color="#42a5f5", fill=pg.mkBrush(_qc(_BG_TIP, 200)))
+        self._rsi_value_label.setFont(QFont("Monospace", 9))
+        self._rsi_value_label.setZValue(60)
+        self._rsi_value_label.setVisible(False)
+        self._plot_rsi.addItem(self._rsi_value_label, ignoreBounds=True)
+        self._plot_rsi.vb.sigRangeChanged.connect(self._pin_rsi_value_label)
 
         self._chart_widget.ci.layout.setRowStretchFactor(0, 5)
         self._set_subplot_row_visible(self._plot_vol, 1, True)
@@ -1204,6 +1214,21 @@ class ReplayTrainerWindow(QMainWindow):
         x = np.arange(n)
         mask = ~np.isnan(rsi)
         self._rsi_curve.setData(x[mask], rsi[mask])
+        last = rsi[-1] if n and not np.isnan(rsi[-1]) else None
+        self._rsi_value_label.setText(f"RSI {last:.2f}" if last is not None else "RSI --")
+        self._rsi_value_label.setVisible(True)
+        self._pin_rsi_value_label()
+
+    def _pin_rsi_value_label(self, *_) -> None:
+        """Pinned to the RSI subplot's top-right corner, same convention as
+        _pin_current_price_label on the main chart."""
+        if not self._rsi_value_label.isVisible():
+            return
+        xlo, xhi = self._plot_rsi.vb.viewRange()[0]
+        ylo, yhi = self._plot_rsi.vb.viewRange()[1]
+        x_pad = (xhi - xlo) * 0.01
+        y_pad = (yhi - ylo) * 0.03
+        self._rsi_value_label.setPos(xhi - x_pad, yhi - y_pad)
 
     def _update_chandelier_label(self, visible: pd.DataFrame) -> None:
         highs  = visible["high"].to_numpy(dtype=float)
