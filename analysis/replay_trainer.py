@@ -946,6 +946,15 @@ class ReplayTrainerWindow(QMainWindow):
 
         self._set_xaxis_ticks(visible)
         self._pin_current_price_label()
+        # Re-derive the RR-linked SL/TP field on every render (not just when
+        # its own inputs change) -- for a market order, ref_price is the
+        # *current* price, which moves every Step/Play/Random/Jump. Without
+        # this, the derived field stays pinned to whatever price was current
+        # when it was last (re)computed, so if any replay advancement happens
+        # between setting SL and actually placing the trade, the realized R
+        # at settlement silently drifts from the target RR (reported: RR set
+        # to 1 but settled at 0.48).
+        self._update_rr_derived()
         self._update_slptp_preview()
         self._update_risk_sized_shares()
 
