@@ -919,9 +919,33 @@ class ReplayTrainerWindow(QMainWindow):
                 f"K-line Replay Trainer  —  {self._code}  "
                 f"{str(visible['time_key'].iloc[-1])}  ({n} bars visible)")
 
+        self._set_xaxis_ticks(visible)
         self._pin_current_price_label()
         self._update_slptp_preview()
         self._update_risk_sized_shares()
+
+    def _set_xaxis_ticks(self, visible: pd.DataFrame) -> None:
+        """Map integer bar indices to time_key strings on the main chart's
+        bottom axis -- otherwise it shows the raw integer bar index (chart
+        candles are plotted at integer x-positions for even spacing across
+        session gaps/weekends, not real timestamps), which reads as a
+        meaningless number rather than a date/time. Mirrors
+        trade_viewer_qt.py's _set_xaxis_ticks; subplots get the same tick
+        *positions* (for grid alignment) with blank text, to avoid crowding."""
+        n = len(visible)
+        if n == 0:
+            return
+        step = max(1, n // 10)
+        tf = self._tf_combo.currentText()
+        label_slice = slice(0, 10) if tf == "1d" else slice(5, 16)
+        ticks = [
+            (i, str(visible.iloc[i]["time_key"])[label_slice])
+            for i in range(0, n, step)
+        ]
+        self._plot_c.getAxis("bottom").setTicks([ticks])
+        pos_only = [(i, "") for i, _ in ticks]
+        self._plot_vol.getAxis("bottom").setTicks([pos_only])
+        self._plot_dv.getAxis("bottom").setTicks([pos_only])
 
     def _pin_current_price_label(self, *_) -> None:
         """Current (latest revealed) price, pinned to the top-right corner of
@@ -981,7 +1005,15 @@ class ReplayTrainerWindow(QMainWindow):
             line = pg.InfiniteLine(
                 pos=price, angle=0, movable=False,
                 pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
-                label=f"{tag} {price:.2f}", labelOpts={"color": color, "position": 0.02},
+                # position=0.02 (near the panel's left edge) with pyqtgraph's
+                # default anchor (text horizontally CENTERED on that point)
+                # pushed the left half of the string -- the "POC"/"VAH"/"VAL"
+                # prefix -- past the left edge and out of the visible panel,
+                # leaving only the trailing number visible. anchors=(0.0, 0.5)
+                # makes the label's own left edge sit at that point instead,
+                # so the whole string grows rightward into the panel.
+                label=f"{tag} {price:.2f}",
+                labelOpts={"color": color, "position": 0.02, "anchors": [(0.0, 0.5), (0.0, 0.5)]},
             )
             self._profile_widget.addItem(line)
             self._profile_render_items.append(line)
@@ -993,7 +1025,12 @@ class ReplayTrainerWindow(QMainWindow):
         price_line = pg.InfiniteLine(
             pos=last_price, angle=0, movable=False,
             pen=pg.mkPen("#42a5f5", width=1.5),
-            label=f"Last {last_price:.2f}", labelOpts={"color": "#42a5f5", "position": 0.95},
+            # position=0.95 (near the right edge) -- same fix as above but
+            # mirrored: anchors=(1.0, 0.5) puts the label's right edge at that
+            # point so it grows leftward into the panel instead of having its
+            # right half (part of "Last X.XX") clipped past the right edge.
+            label=f"Last {last_price:.2f}",
+            labelOpts={"color": "#42a5f5", "position": 0.95, "anchors": [(1.0, 0.5), (1.0, 0.5)]},
         )
         self._profile_widget.addItem(price_line)
         self._profile_render_items.append(price_line)
