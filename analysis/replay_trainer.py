@@ -895,6 +895,17 @@ class ReplayTrainerWindow(QMainWindow):
             brush=_qc("#546e7a", 160), pen=pg.mkPen(None),
         )
         self._profile_widget.addItem(bars)
+        # pyqtgraph's X auto-range only ever grows to fit new data, never
+        # shrinks back down for a smaller one -- switching from a wider render
+        # (e.g. Volume Profile over many bars) to a narrower one (e.g. Range
+        # Profile over a short drag-selected span) left the view stuck at the
+        # old, much larger max-volume scale, squeezing the correctly-computed
+        # (smaller) bars into an invisible sliver. Disable auto-range and set
+        # it explicitly every update instead, same fix trade_viewer_qt.py's
+        # own Range Profile already uses.
+        vb = self._profile_widget.getViewBox()
+        vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+        vb.setXRange(0, float(volumes.max()) * 1.15, padding=0)
         self._profile_render_items.append(bars)
         for price, color, tag in ((poc, "#ffee58", "POC"), (vah, "#ef5350", "VAH"), (val, "#26a69a", "VAL")):
             line = pg.InfiniteLine(
