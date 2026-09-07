@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QToolBar, QLabel, QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox,
     QPushButton, QCheckBox, QRadioButton, QButtonGroup, QMessageBox,
+    QStatusBar,
 )
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -231,21 +232,50 @@ def check_limit_fill(
     return fill_bar, limit_price
 
 
+class _StdoutTee:
+    """Wraps the real stdout so each printed line still goes to the real
+    console *and* gets forwarded to a callback (a Qt signal's .emit) -- lets
+    feeds/fetcher.py's existing print() calls ("Cache hit", "Fetching...",
+    "page: +N bars", "Saving N bars to cache", ...) show up in the GUI
+    without needing to touch that shared module."""
+
+    def __init__(self, callback, real_stdout):
+        self._callback = callback
+        self._real = real_stdout
+        self._buf = ""
+
+    def write(self, text: str) -> None:
+        self._real.write(text)
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                self._callback(line)
+
+    def flush(self) -> None:
+        self._real.flush()
+
+
 class _KlineFetchWorker(QThread):
     """Fetch klines in a background thread so Load never freezes the UI."""
-    done  = pyqtSignal(object)   # emits pd.DataFrame
-    error = pyqtSignal(str)
+    done     = pyqtSignal(object)   # emits pd.DataFrame
+    error    = pyqtSignal(str)
+    log_line = pyqtSignal(str)      # one line of whatever fetch_klines() printed
 
     def __init__(self, code: str, tf: str, start: str, end: str):
         super().__init__()
         self._code, self._tf, self._start, self._end = code, tf, start, end
 
     def run(self) -> None:
+        old_stdout = sys.stdout
+        sys.stdout = _StdoutTee(self.log_line.emit, old_stdout)
         try:
             df = fetch_klines(code=self._code, ktype=self._tf, start=self._start, end=self._end)
             self.done.emit(df)
         except Exception as exc:
             self.error.emit(str(exc))
+        finally:
+            sys.stdout = old_stdout
 
 
 class ReplayTrainerWindow(QMainWindow):
@@ -806,6 +836,14 @@ class ReplayTrainerWindow(QMainWindow):
 
         side.addStretch(1)
 
+        # Bottom-left status bar -- mirrors whatever feeds/fetcher.py prints
+        # to the console during Load (see _KlineFetchWorker/_StdoutTee) so
+        # progress ("Cache hit", "Fetching...", "page: +N bars", ...) is
+        # visible in the GUI instead of only in a terminal window.
+        self._status_bar = QStatusBar()
+        self.setStatusBar(self._status_bar)
+        self._status_bar.showMessage("Ready")
+
     # ── data loading ──────────────────────────────────────────────────────────
 
     def _on_tf_changed(self, _text: str) -> None:
@@ -824,6 +862,7 @@ class ReplayTrainerWindow(QMainWindow):
         self._fetcher = _KlineFetchWorker(code, tf, start, end)
         self._fetcher.done.connect(lambda df: self._on_data_ready(df, code))
         self._fetcher.error.connect(self._on_load_error)
+        self._fetcher.log_line.connect(self._status_bar.showMessage)
         self._fetcher.start()
 
     def _on_load_error(self, msg: str) -> None:
