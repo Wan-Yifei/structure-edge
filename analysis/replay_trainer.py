@@ -1880,6 +1880,22 @@ class ReplayTrainerWindow(QMainWindow):
         else:
             self._play_timer.stop()
 
+    def keyPressEvent(self, event) -> None:
+        """Space toggles Play/Pause (standard media-player convention) --
+        unless a text/numeric input field currently has focus, so typing a
+        literal space (Code field) or nudging a spinbox isn't hijacked. Qt
+        delivers key events to the focused child widget first; QLineEdit
+        already consumes Space itself (inserts a space character) and never
+        propagates it up here, so this guard only really matters for spin
+        boxes, which don't."""
+        if event.key() == Qt.Key.Key_Space:
+            focus = self.focusWidget()
+            if not isinstance(focus, (QLineEdit, QSpinBox, QDoubleSpinBox)):
+                self._play_btn.toggle()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def _on_skip_to_result(self) -> None:
         if self._open_trade is None and self._pending_order is None:
             return
