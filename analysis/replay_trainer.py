@@ -309,6 +309,8 @@ class ReplayTrainerWindow(QMainWindow):
         self._chandelier_period     = 20
         self._chandelier_multiplier = 2.0
 
+        self._session_time_items: list = []   # vertical lines/labels marking session boundaries
+
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_step)
 
@@ -493,6 +495,15 @@ class ReplayTrainerWindow(QMainWindow):
         self._rsi_period_spin.setToolTip("RSI period (bars)")
         self._rsi_period_spin.valueChanged.connect(self._render)
         tb3.addWidget(self._rsi_period_spin)
+        self._session_times_cb = QCheckBox("Session Times")
+        self._session_times_cb.setChecked(True)
+        self._session_times_cb.setToolTip(
+            "Marks each session boundary (e.g. 09:30 Regular open, 16:00 "
+            "Regular close) with a vertical line + label, using the same "
+            "session windows as config/schedule.json / the IVB (session_vp) "
+            "strategy.")
+        self._session_times_cb.stateChanged.connect(self._render)
+        tb3.addWidget(self._session_times_cb)
 
         # Main body: chart | side panel (order entry + profile + stats)
         body = QHBoxLayout()
@@ -1036,6 +1047,13 @@ class ReplayTrainerWindow(QMainWindow):
         if self._rsi_cb.isChecked():
             self._update_rsi(visible)
 
+        if self._session_times_cb.isChecked():
+            self._update_session_times(visible)
+        else:
+            for item in self._session_time_items:
+                self._plot_c.removeItem(item)
+            self._session_time_items = []
+
         if self._chandelier_cb.isChecked():
             self._update_chandelier_label(visible)
         else:
@@ -1271,6 +1289,53 @@ class ReplayTrainerWindow(QMainWindow):
         x_pad = (xhi - xlo) * 0.01
         y_pad = (yhi - ylo) * 0.03
         self._rsi_value_label.setPos(xhi - x_pad, yhi - y_pad)
+
+    def _update_session_times(self, visible: pd.DataFrame) -> None:
+        """Vertical line at every session boundary (e.g. 09:30 Regular open,
+        16:00 Regular close, plus the premarket/afterhours/overnight
+        transitions) -- Regular's own open/close are highlighted (solid
+        gold) since that's what a IVB (session_vp) practice session cares
+        about most; the others are a subtler dotted gray for context."""
+        for item in self._session_time_items:
+            self._plot_c.removeItem(item)
+        self._session_time_items = []
+
+        sessions_cfg = _load_sessions_config()
+        times = visible["time_key"].astype(str)
+        if len(times) == 0:
+            return
+        # Seed prev_session from bar 0 itself (not None) so bar 0 is never
+        # treated as a spurious "boundary" -- it's just wherever the loaded
+        # data happens to start, not a real session transition.
+        try:
+            prev_session = session_for_timestamp(
+                datetime.strptime(times.iloc[0][:16], "%Y-%m-%d %H:%M"), sessions_cfg)
+        except ValueError:
+            prev_session = None
+        for i, ts in enumerate(times):
+            if i == 0:
+                continue
+            try:
+                dt = datetime.strptime(ts[:16], "%Y-%m-%d %H:%M")
+            except ValueError:
+                continue
+            sess = session_for_timestamp(dt, sessions_cfg)
+            if sess is not None and sess != prev_session:
+                is_regular_boundary = sess == "regular" or prev_session == "regular"
+                color = _GOLD if is_regular_boundary else _GREY
+                line = pg.InfiniteLine(
+                    pos=i, angle=90, movable=False,
+                    pen=pg.mkPen(
+                        color, width=1.5 if is_regular_boundary else 1,
+                        style=Qt.PenStyle.SolidLine if is_regular_boundary else Qt.PenStyle.DotLine,
+                    ),
+                    label=ts[11:16],
+                    labelOpts={"color": color, "position": 0.95},
+                )
+                line.setZValue(1)
+                self._plot_c.addItem(line, ignoreBounds=True)
+                self._session_time_items.append(line)
+            prev_session = sess
 
     def _update_chandelier_label(self, visible: pd.DataFrame) -> None:
         highs  = visible["high"].to_numpy(dtype=float)
