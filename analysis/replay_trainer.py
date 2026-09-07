@@ -366,11 +366,14 @@ class ReplayTrainerWindow(QMainWindow):
         self._play_btn.setCheckable(True)
         self._play_btn.toggled.connect(self._on_play_toggled)
         tb2.addWidget(self._play_btn)
-        tb2.addWidget(QLabel("Speed(ms):"))
+        tb2.addWidget(QLabel("Delay/bar (ms):"))
         self._speed_spin = QSpinBox()
-        self._speed_spin.setRange(100, 3000)
+        self._speed_spin.setRange(100, 10_000)
         self._speed_spin.setValue(500)
         self._speed_spin.setSingleStep(100)
+        self._speed_spin.setToolTip(
+            "Milliseconds to wait between each bar during Play -- higher is "
+            "SLOWER (100 = fastest, 10000 = slowest).")
         tb2.addWidget(self._speed_spin)
         skip_btn = QPushButton("Skip to Result ⏭")
         skip_btn.clicked.connect(self._on_skip_to_result)
