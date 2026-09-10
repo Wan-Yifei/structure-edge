@@ -27,11 +27,14 @@ from datetime import datetime
 import numpy as np
 
 from feeds.fetcher import fetch_klines
+from strategy.session_vp.profile import compute_value_area
 from strategy.session_vp.reversal import compute_rsi
+from strategy.smc.fvg import compute_volume_profile
 from strategy.smc.kd_trend import compute_kd
 
 _ROOT = pathlib.Path(__file__).parent.parent
 _DEFAULT_CONFIG_PATH = _ROOT / "config" / "scanner" / "indicator_alert_params.json"
+_SCHEDULE_PATH = _ROOT / "config" / "schedule.json"
 
 
 def _compute_rsi_series(klines, params: dict) -> dict[str, np.ndarray]:
@@ -50,9 +53,100 @@ def _compute_kd_series(klines, params: dict) -> dict[str, np.ndarray]:
             ["up1", "lo1", "mid1", "up2", "lo2", "mid2", "spread", "width"]}
 
 
+def _load_schedule_sessions() -> dict:
+    with open(_SCHEDULE_PATH, encoding="utf-8") as f:
+        return json.load(f)["sessions"]
+
+
+def _compute_session_va_series(klines, params: dict) -> dict[str, np.ndarray]:
+    """Distance from the latest price to the CURRENT session occurrence's
+    POC / VAH / VAL.
+
+    Params:
+      session         only evaluate while this session is the active one
+                      (e.g. "regular"); omit to follow whichever session the
+                      latest bar falls in.
+      warmup_minutes  freeze the profile over the session's first N minutes
+                      (default 30, matching the session_vp strategy). Set 0
+                      for a developing profile over the whole session so far
+                      -- note that a developing VAH tracks price as price
+                      makes new highs, so a "near VAH" rule on a rolling
+                      profile self-triggers on breakouts; the frozen profile
+                      gives a level that stays put while price approaches it.
+      n_bins          profile resolution (default 50)
+      va_pct          value-area coverage (default 0.70)
+
+    Fields: poc/vah/val (the levels), price, plus per level
+      dist_<lvl>_pct / dist_<lvl>_abs  unsigned gap -- "how close", pair with
+                                       condition "below" for a proximity alert
+      off_<lvl>_pct  / off_<lvl>_abs   signed gap (+ above / - below) -- pair
+                                       with "above"/"below" 0 for a break alert
+    OHLCV-based (strategy.smc.compute_volume_profile), no ticks.db dependency
+    -- same choice strategy/session_vp makes, since the scanner runs on symbols
+    and dates that may have no tick coverage at all.
+
+    Every field is a full-length array of NaN with only the last bar filled:
+    scan_indicator_alert() reads series[-1], and a genuine per-bar series
+    would mean rebuilding the profile once per bar for a value nothing reads.
+    """
+    n = len(klines)
+    nan_col = lambda: np.full(n, np.nan)   # noqa: E731 -- one-liner factory
+    levels  = ("poc", "vah", "val")
+    out = {"price": nan_col()}
+    for lvl in levels:
+        out[lvl] = nan_col()
+        for pre in ("dist", "off"):
+            for unit in ("pct", "abs"):
+                out[f"{pre}_{lvl}_{unit}"] = nan_col()
+    if n == 0:
+        return out
+
+    # Imported lazily: backtest.session_vp_engine pulls in the backtest stack,
+    # which the other indicators here have no reason to load.
+    from backtest.session_vp_engine import precompute_session_context
+
+    ctx = precompute_session_context(klines, _load_schedule_sessions())
+    last_oid = int(ctx["occurrence_id"][-1])
+    if last_oid < 0:
+        return out           # latest bar is outside every enabled session
+    idxs = ctx["groups"][last_oid]
+    session_name, _elapsed = ctx["session_info"][idxs[-1]]
+    want = params.get("session")
+    if want and session_name != want:
+        return out           # a different session is active -- rule idles
+
+    warmup = int(params.get("warmup_minutes", 30))
+    if warmup > 0:
+        end_i = next((i for i in idxs if ctx["session_info"][i][1] >= warmup), None)
+        if end_i is None:
+            return out       # still inside the warmup -- no frozen profile yet
+    else:
+        end_i = idxs[-1]     # developing profile over the session so far
+
+    edges, bin_vols = compute_volume_profile(
+        klines.iloc[idxs[0] : end_i + 1], n_bins=int(params.get("n_bins", 50)))
+    if edges is None:
+        return out           # degenerate price range (flat session)
+
+    va = compute_value_area(edges, bin_vols, va_pct=float(params.get("va_pct", 0.70)))
+    price = float(klines["close"].iloc[-1])
+    out["price"][-1] = price
+    for lvl in levels:
+        level = float(va[lvl])
+        if level <= 0:
+            continue
+        out[lvl][-1] = level
+        out[f"off_{lvl}_abs"][-1]  = price - level
+        out[f"off_{lvl}_pct"][-1]  = (price - level) / level * 100.0
+        out[f"dist_{lvl}_abs"][-1] = abs(price - level)
+        out[f"dist_{lvl}_pct"][-1] = abs(price - level) / level * 100.0
+    return out
+
+
 INDICATOR_REGISTRY = {
     "rsi": _compute_rsi_series,
     "kd":  _compute_kd_series,
+    "session_va": _compute_session_va_series,
     # Add a new indicator by writing a _compute_xxx_series(klines, params) ->
     # dict[str, np.ndarray] function above and registering it here -- e.g.
     # "macd": _compute_macd_series. Nothing else in this file, the DB schema,
@@ -76,7 +170,24 @@ def load_indicator_alert_config(path: pathlib.Path | None = None) -> dict[str, l
     return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
-def _rule_id(symbol: str, rule: dict) -> str:
+def rule_enabled(rule: dict) -> bool:
+    """Whether a rule takes part in the scan at all.
+
+    Distinct from the UI's Mute button: mute is a temporary silence that the
+    scanner auto-lifts once the reading goes negative again, and a muted rule
+    keeps being evaluated so its row stays live in the table. `enabled: false`
+    takes the rule out of the scan entirely -- kept in the config, costing no
+    fetch and producing no row, until it is switched back on.
+
+    A rule with no "enabled" key is on, so configs written before this flag
+    existed keep working untouched.
+    """
+    return bool(rule.get("enabled", True))
+
+
+def rule_id(symbol: str, rule: dict) -> str:
+    # "enabled" is deliberately not part of the identity -- toggling a rule
+    # off and back on must land on the same row, not orphan the old one.
     params_json = json.dumps(rule.get("params", {}), sort_keys=True)
     return "|".join([
         symbol, rule["tf"], rule["indicator"], rule["field"],
@@ -125,7 +236,7 @@ def scan_indicator_alert(
         return None
 
     return {
-        "rule_id":      _rule_id(symbol, rule),
+        "rule_id":      rule_id(symbol, rule),
         "symbol":       symbol,
         "tf":           rule["tf"],
         "indicator":    rule["indicator"],

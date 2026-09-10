@@ -658,7 +658,9 @@ class ScanWorker(QThread):
         new indicator (MACD, classic KDJ, ...) gets added later without
         touching this method, the DB schema, or the UI.
         """
-        from analysis.indicator_alert_watcher import load_indicator_alert_config, scan_indicator_alert
+        from analysis.indicator_alert_watcher import (
+            load_indicator_alert_config, rule_enabled, rule_id, scan_indicator_alert,
+        )
         from db.signals import SignalsDB
 
         rules = load_indicator_alert_config().get(symbol, [])
@@ -671,6 +673,23 @@ class ScanWorker(QThread):
         end      = end_dt.strftime("%Y-%m-%d")
 
         for rule in rules:
+            if not rule_enabled(rule):
+                # Drop the row this rule left behind while it was on -- it
+                # would otherwise sit in the Live tab forever showing a frozen
+                # reading from the last cycle that evaluated it. Unlike Mute
+                # (a temporary silence that keeps the row updating), disabling
+                # takes the rule out of the scan entirely, so it should leave
+                # nothing behind. The notify throttle is cleared too, so
+                # re-enabling alerts immediately instead of waiting out a
+                # repeat window measured from before the rule was switched off.
+                rid = rule_id(symbol, rule)
+                self._indicator_alert_last_notify.pop(rid, None)
+                try:
+                    with SignalsDB(_SIGNALS_DB_PATH) as db:
+                        db.delete_indicator_alert_state(rid)
+                except Exception as exc:
+                    self.log.emit(f"[{symbol}] indicator_alert cleanup error: {exc}")
+                continue
             try:
                 result = scan_indicator_alert(symbol, rule, start, end, force_refresh=True)
             except Exception as exc:
@@ -946,7 +965,7 @@ class IndicatorAlertConfigDialog(QDialog):
     are registered in analysis/indicator_alert_watcher.py's INDICATOR_REGISTRY.
     """
 
-    _COLUMNS = ["Symbol", "Indicator", "TF", "Params (JSON)", "Field", "Condition", "Threshold"]
+    _COLUMNS = ["On", "Symbol", "Indicator", "TF", "Params (JSON)", "Field", "Condition", "Threshold"]
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -956,14 +975,24 @@ class IndicatorAlertConfigDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             "One row per rule. A rule fires every scan cycle (not just on the edge\n"
-            "crossing) while its condition holds -- mute a noisy rule from the Live tab's\n"
-            "Indicator Alerts panel instead of deleting it here.\n"
-            "Condition must be \"above\" or \"below\"; Params must be a JSON object, e.g. {\"period\": 6}."
+            "crossing) while its condition holds. Uncheck \"On\" to park a rule\n"
+            "without deleting it -- it stops being scanned entirely and drops out of the\n"
+            "Live tab. To silence one only until it goes negative again, use Mute there.\n"
+            "Condition must be \"above\" or \"below\"; Params must be a JSON object.\n"
+            "  rsi         params {\"period\": 6}   field value\n"
+            "  session_va  params {\"session\": \"regular\", \"warmup_minutes\": 30}\n"
+            "              field dist_vah_pct / dist_val_abs / dist_poc_pct -- unsigned\n"
+            "              gap to the level, pair with condition \"below\" for a proximity\n"
+            "              alert; or off_vah_pct / off_val_abs / ... -- signed, +above/-below."
         ))
 
         self._tbl = QTableWidget(0, len(self._COLUMNS))
         self._tbl.setHorizontalHeaderLabels(self._COLUMNS)
         self._tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # "On" holds a bare checkbox -- an eighth of the width is wasted on it
+        # under the blanket Stretch above.
+        self._tbl.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self._tbl)
 
         rows_btns = QHBoxLayout()
@@ -993,13 +1022,23 @@ class IndicatorAlertConfigDialog(QDialog):
         rule = rule or {}
         row = self._tbl.rowCount()
         self._tbl.insertRow(row)
-        self._tbl.setItem(row, 0, QTableWidgetItem(symbol))
-        self._tbl.setItem(row, 1, QTableWidgetItem(rule.get("indicator", "rsi")))
-        self._tbl.setItem(row, 2, QTableWidgetItem(rule.get("tf", "1m")))
-        self._tbl.setItem(row, 3, QTableWidgetItem(json.dumps(rule.get("params", {}))))
-        self._tbl.setItem(row, 4, QTableWidgetItem(rule.get("field", "value")))
-        self._tbl.setItem(row, 5, QTableWidgetItem(rule.get("condition", "below")))
-        self._tbl.setItem(row, 6, QTableWidgetItem(str(rule.get("threshold", 30))))
+        # A rule with no "enabled" key is on (see indicator_alert_watcher's
+        # rule_enabled), so rows from a config written before the flag existed
+        # come up checked rather than silently switching themselves off the
+        # first time this dialog is saved.
+        on = QTableWidgetItem()
+        on.setFlags((on.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    & ~Qt.ItemFlag.ItemIsEditable)
+        on.setCheckState(Qt.CheckState.Checked if rule.get("enabled", True)
+                         else Qt.CheckState.Unchecked)
+        self._tbl.setItem(row, 0, on)
+        self._tbl.setItem(row, 1, QTableWidgetItem(symbol))
+        self._tbl.setItem(row, 2, QTableWidgetItem(rule.get("indicator", "rsi")))
+        self._tbl.setItem(row, 3, QTableWidgetItem(rule.get("tf", "1m")))
+        self._tbl.setItem(row, 4, QTableWidgetItem(json.dumps(rule.get("params", {}))))
+        self._tbl.setItem(row, 5, QTableWidgetItem(rule.get("field", "value")))
+        self._tbl.setItem(row, 6, QTableWidgetItem(rule.get("condition", "below")))
+        self._tbl.setItem(row, 7, QTableWidgetItem(str(rule.get("threshold", 30))))
 
     def _on_add_row(self) -> None:
         self._append_row()
@@ -1015,29 +1054,31 @@ class IndicatorAlertConfigDialog(QDialog):
 
         config: dict[str, list[dict]] = {}
         for row in range(self._tbl.rowCount()):
-            symbol = cell(row, 0)
+            symbol = cell(row, 1)
             if not symbol:
                 continue
             try:
-                params = json.loads(cell(row, 3) or "{}")
+                params = json.loads(cell(row, 4) or "{}")
             except Exception as exc:
                 QMessageBox.warning(self, "Invalid params", f"Row {row + 1}: params must be valid JSON ({exc})")
                 return
-            condition = cell(row, 5)
+            condition = cell(row, 6)
             if condition not in ("above", "below"):
                 QMessageBox.warning(self, "Invalid condition", f"Row {row + 1}: condition must be \"above\" or \"below\"")
                 return
             try:
-                threshold = float(cell(row, 6))
+                threshold = float(cell(row, 7))
             except ValueError:
                 QMessageBox.warning(self, "Invalid threshold", f"Row {row + 1}: threshold must be a number")
                 return
 
+            on_item = self._tbl.item(row, 0)
             rule = {
-                "indicator": cell(row, 1),
-                "tf":        cell(row, 2),
+                "enabled":   on_item is None or on_item.checkState() == Qt.CheckState.Checked,
+                "indicator": cell(row, 2),
+                "tf":        cell(row, 3),
                 "params":    params,
-                "field":     cell(row, 4),
+                "field":     cell(row, 5),
                 "condition": condition,
                 "threshold": threshold,
             }
@@ -1053,7 +1094,13 @@ class IndicatorAlertConfigDialog(QDialog):
                 "rule fires (repeatedly, once per scan cycle, not just on the edge "
                 "crossing) whenever the latest closed bar's value satisfies "
                 "condition+threshold -- mute a noisy rule from the scanner UI to pause "
-                "it until it goes negative again."
+                "it until it goes negative again. `enabled: false` (missing = true) "
+                "parks a rule instead: it is skipped by the scan entirely and leaves no "
+                "row in the UI, unlike mute which keeps evaluating it. The session_va "
+                "indicator watches the current session occurrence's own volume profile "
+                "-- fields dist_{poc,vah,val}_{pct,abs} (unsigned gap, use with "
+                "condition \"below\" for a proximity alert) and off_* (signed, + above "
+                "/ - below); params {session, warmup_minutes, n_bins, va_pct}."
             ),
             **config,
         }
