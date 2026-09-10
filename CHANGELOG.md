@@ -1,5 +1,71 @@
 # Changelog
 
+## v0.15.0 — indicator-alert rule disable + session value-area proximity alerts (2026-09-10)
+
+### Feat: per-rule enable/disable for indicator alerts (`analysis/indicator_alert_watcher.py`, `analysis/signal_scanner.py`)
+
+- Rules in `config/scanner/indicator_alert_params.json` take an optional
+  `"enabled": false` to be parked without deleting them. A missing key means
+  enabled, so every config written before this flag keeps working untouched.
+- Distinct from the existing Mute button, which stays as it was: mute is a
+  temporary silence the scanner auto-lifts once the reading goes negative
+  again, and a muted rule keeps being evaluated so its row stays live in the
+  table. A disabled rule is skipped by the scan entirely — no kline fetch, no
+  DB row, no notification — until it is switched back on.
+- Disabling deletes the rule's `indicator_alert_state` row and clears its
+  notify-throttle timestamp, so it leaves no frozen last reading behind in the
+  Live tab and re-enabling alerts immediately instead of waiting out a repeat
+  window measured from before it was switched off.
+- `_rule_id()` (now public as `rule_id()`) deliberately excludes `enabled` from
+  a rule's identity, so toggling off and back on lands on the same row rather
+  than orphaning the old one.
+- The rules dialog gains a leading "On" checkbox column.
+
+### Feat: `session_va` indicator — price proximity to the current session's POC / VAH / VAL (`analysis/indicator_alert_watcher.py`)
+
+- New entry in `INDICATOR_REGISTRY`, so it reuses the whole existing alert
+  path unchanged: no DB migration, no scanner dispatch change, and the generic
+  rules dialog already edits it.
+- Builds the volume profile of the session occurrence the latest bar belongs
+  to and reports where price sits relative to it. Params: `session` (only run
+  while that session is active; omit to follow whichever one is), `warmup_minutes`
+  (freeze the profile over the session's first N minutes, default 30 — set 0
+  for a developing whole-session profile), `n_bins` (default 50), `va_pct`
+  (default 0.70).
+- Fields per level (`poc` / `vah` / `val`): `dist_*_pct` and `dist_*_abs` are
+  the unsigned gap, for proximity rules (`condition: below`); `off_*_pct` and
+  `off_*_abs` are signed (+ above / − below), for break rules against a
+  threshold of 0. Distance is therefore configurable as either a percentage or
+  an absolute price. `poc`/`vah`/`val`/`price` are exposed as fields too.
+- Frozen (`warmup_minutes > 0`) is the default because a developing VAH tracks
+  price as price makes new highs, so a "near VAH" rule on a rolling profile
+  self-triggers on the breakout it is meant to anticipate. The rolling mode is
+  kept for watching a level that is still forming.
+- OHLCV-based (`strategy.smc.fvg.compute_volume_profile` +
+  `strategy.session_vp.profile.compute_value_area`), no `ticks.db` dependency —
+  the same choice `strategy/session_vp` makes, since the scanner runs on
+  symbols and dates that may have no tick coverage.
+- Returns full-length arrays with only the last bar filled: `scan_indicator_alert()`
+  reads `series[-1]`, and a true per-bar series would rebuild the profile once
+  per bar for a value nothing reads.
+- Tests: `tests/analysis/test_indicator_alert_watcher.py` (18 cases).
+
+### Fix: overlapping Call/Put Wall labels rendered as an illegible smudge (`analysis/trade_viewer_qt.py`)
+
+- Option wall labels were all right-anchored at the last bar, so walls at the
+  same or adjacent strikes (a call and a put wall on one strike, or ranks #2/#3
+  one strike apart) drew their text on top of each other.
+- New `_pin_option_wall_labels()` lays them out in columns: labels stay glued
+  to their own price (moving one vertically would misattribute it to the wrong
+  level) and a label too close to the one above it shifts one column leftward.
+  Recomputed on `sigRangeChanged`, since the pixel gap between two prices
+  depends on the current Y zoom.
+- Label text is no longer alpha-faded by wall rank — only the dashed line is.
+  Same rule the AVWAP sigma-band labels already follow: a faint line is visual
+  hierarchy, faint text is just unreadable. Labels also gained the `_BG_TIP`
+  background fill used by the POC/VAH/VAL labels, went 7pt → 8pt, and sit at
+  `zValue=55` above the candles.
+
 ## v0.14.1 — live tick handler fixes (2026-07-06)
 
 ### Fix: Live mode Δ Delta / CVD / Tick Profile / heatmap never updated from live ticks (`analysis/trade_viewer_qt.py`)
