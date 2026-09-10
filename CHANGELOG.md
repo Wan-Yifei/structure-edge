@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.16.0 — session-profile POC hysteresis + POC trail (2026-09-10)
+
+### Feat: POC switch hysteresis and a POC1/POC2 trail in the session profile (`analysis/trade_viewer_qt.py`)
+
+The session profile's POC is a from-scratch `argmax` on every rebuild with no
+memory of the last one, so on a two-cluster profile it teleports between the
+peaks as their totals cross. Observed on SOXL 2026-09-10: four flips across
+$5 (123.8 <-> 118.7) inside twelve minutes, and 91 POC changes over the day.
+
+- **Hysteresis** (`Hold:` spinbox, default 5%, 0 disables): a rival cluster
+  must hold that much more volume than the one the POC currently sits in
+  before the POC moves. On the day above this takes 91 switches down to 4,
+  and removes the 12-minute flip-flop entirely, leaving one decisive move.
+- The comparison is over a **cluster**, not a bin. A single bin's volume is
+  far too noisy to gate on: the profile is re-binned from scratch over a
+  lo/hi that grows with the session, so a peak bin routinely hands a big
+  slice of its volume to a neighbour. Measured rival/held single-bin ratios
+  of 1.6-2.3 inside what was visually one stable cluster, which a percentage
+  margin cannot separate from a real move. `_cluster_mass()` sums a fixed
+  price window (`_POC_CLUSTER_PCT`, 0.5%) around each candidate instead.
+- A held POC is reported at its own stored price rather than re-snapped to
+  the nearest bin centre each rebuild, which would make it jitter a few cents
+  on its own as the bin boundaries shift.
+- **POC trail** (`POCs:` spinbox, default 2, up to 6): POC1 is the current
+  level, POC2 the one it moved off, and so on, newest first — the pair reads
+  as a direction of travel. Older entries fade and are dotted; levels closer
+  than half a bin count as the same level. The trail resets when the profile
+  is redefined (symbol / date / mode / range / bins / session filter), since
+  a POC over a different set of bars is not a previous position of this one.
+- `_compute_poc_vah_val()` takes an optional `poc_idx` so the value area
+  expands from the held bin, keeping POC and VAH/VAL agreeing on the peak.
+  VAH/VAL are widened to contain the held POC when the area collapses onto
+  its own bin — a sub-bin correction that restores VAL <= POC <= VAH.
+
 ## v0.15.0 — indicator-alert rule disable + session value-area proximity alerts (2026-09-10)
 
 ### Feat: per-rule enable/disable for indicator alerts (`analysis/indicator_alert_watcher.py`, `analysis/signal_scanner.py`)
