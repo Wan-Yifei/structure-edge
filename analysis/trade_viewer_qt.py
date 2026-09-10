@@ -1980,6 +1980,8 @@ class TradeViewerQt(QMainWindow):
         self._ema_items:     list = []  # PlotCurveItem per EMA period
         self._avwap_items:   list = []  # anchored-VWAP curve + anchor line + label
         self._option_wall_items: list = []  # Call/Put Wall + Zero Gamma lines -- cleared+redrawn each update
+        self._option_wall_labels: list = []  # (price, TextItem) subset of the above, for collision layout
+        self._option_wall_x = 0              # last bar the wall labels right-anchor to
         self._option_alert_items: list = []  # large-trade markers -- accumulate, not cleared each update
         self._kd_items:      list = []  # PlotCurveItem + fill for KD subplot
         self._kd_band_items: list = []  # PlotCurveItem + fill for KD band on main chart
@@ -2204,6 +2206,9 @@ class TradeViewerQt(QMainWindow):
         self._chandelier_label.setVisible(False)
         self._plot_c.addItem(self._chandelier_label, ignoreBounds=True)
         self._plot_c.vb.sigRangeChanged.connect(self._pin_chandelier_label)
+        # Wall-label collision layout depends on the pixel-per-price scale, so
+        # it has to be recomputed on every zoom/pan, not just on redraw.
+        self._plot_c.vb.sigRangeChanged.connect(self._pin_option_wall_labels)
 
         # Session vol profile (bottom-right)
         self._profile_widget = pg.PlotWidget(
@@ -3318,6 +3323,7 @@ class TradeViewerQt(QMainWindow):
         for item in self._option_wall_items:
             self._plot_c.removeItem(item)
         self._option_wall_items.clear()
+        self._option_wall_labels.clear()
 
     def _draw_option_wall_line(self, price: float, color: str, label: str,
                                n: int, alpha: int = 255) -> None:
@@ -3333,13 +3339,20 @@ class TradeViewerQt(QMainWindow):
         # candle into the empty margin), which at typical zoom levels put the
         # label beyond the view's xMax pan limit, only reachable by zooming in
         # first (reported: Call/Put Wall labels drifting off the right edge).
+        #
+        # Text stays fully opaque with a background fill even though the *line*
+        # fades out for weaker ranks -- same rule as the AVWAP sigma-band
+        # labels: a faint line is visual hierarchy, faint text is unreadable.
         lbl = pg.TextItem(
-            text=f"{label} {price:.2f}", color=_qc(color, alpha), anchor=(1.0, 1.0),
+            text=f"{label} {price:.2f}", color=color,
+            fill=pg.mkBrush(_qc(_BG_TIP, 200)), anchor=(1.0, 1.0),
         )
-        lbl.setFont(QFont("Monospace", 7))
+        lbl.setFont(QFont("Monospace", 8))
+        lbl.setZValue(55)
         lbl.setPos(n - 1, price)
         self._plot_c.addItem(lbl, ignoreBounds=True)
         self._option_wall_items.append(lbl)
+        self._option_wall_labels.append((price, lbl))
 
     def _draw_option_walls(self, klines: pd.DataFrame) -> None:
         """Overlay Call Wall(s) / Put Wall(s) / Zero Gamma as horizontal price
@@ -3360,6 +3373,7 @@ class TradeViewerQt(QMainWindow):
         n = len(klines)
         if n == 0:
             return
+        self._option_wall_x = n - 1
 
         for rank, wall in enumerate(data.get("call_walls") or []):
             alpha = max(60, 255 - rank * 40)
@@ -3374,6 +3388,50 @@ class TradeViewerQt(QMainWindow):
         zero_gamma = data.get("zero_gamma")
         if zero_gamma is not None:
             self._draw_option_wall_line(zero_gamma, _ZERO_GAMMA_COL, "Zero Gamma", n)
+
+        self._pin_option_wall_labels()
+
+    def _pin_option_wall_labels(self, *_) -> None:
+        """Lay the wall labels out in columns so their text never overlaps.
+
+        Walls cluster by nature: adjacent strikes (115 / 114), or a call wall
+        and a put wall on the same strike, all map to nearly the same y, and
+        right-anchoring every label at the last bar stacked their text into an
+        illegible smudge (reported: overlapping Call/Put Wall labels).
+
+        Each label stays glued to its own price -- nudging one vertically would
+        misattribute it to the wrong level -- so collisions are resolved
+        sideways: a label too close to the one above it moves into the next
+        column leftward from the last bar. Columns share a uniform width (the
+        labels differ only by a "#2"/"#3" suffix) so they stay aligned.
+        """
+        if not self._option_wall_labels:
+            return
+        x_upp, y_upp = self._plot_c.vb.viewPixelSize()
+        if not x_upp or not y_upp:
+            return
+
+        # self._option_wall_x, not len(self._klines)-1: the walls are drawn
+        # against the session-filtered frame, which can be shorter.
+        x_right  = self._option_wall_x
+        rects    = [lbl.textItem.boundingRect() for _, lbl in self._option_wall_labels]
+        col_w_px = max(r.width() for r in rects) + 6
+        row_h_px = max(r.height() for r in rects)
+
+        # Descending price, so a column's last entry is always the nearest
+        # label above the one being placed -- the only possible collision.
+        placed: list[float] = []   # last price placed in each column
+        for price, lbl in sorted(self._option_wall_labels, key=lambda t: -t[0]):
+            col = next(
+                (i for i, last in enumerate(placed)
+                 if abs(last - price) / y_upp >= row_h_px),
+                len(placed),
+            )
+            if col == len(placed):
+                placed.append(price)
+            else:
+                placed[col] = price
+            lbl.setPos(x_right - col * col_w_px * x_upp, price)
 
     def _clear_option_alert_items(self) -> None:
         for item in self._option_alert_items:
