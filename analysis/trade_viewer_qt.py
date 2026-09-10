@@ -120,6 +120,15 @@ _OB_MIT   = "#ffa726"   # mitigation OB amber
 _EMA_COLS = ["#42a5f5", "#ab47bc", "#ffa726"]  # EMA 20/50/200
 _AVWAP_COL = "#ffeb3b"  # anchored VWAP line/label color
 _ZERO_GAMMA_COL = "#ff8c00"  # option Zero Gamma line -- matches gex.py's own matplotlib chart
+# Half-width, in percent of price, of the window the POC switch hysteresis
+# sums volume over. Comparing two single bins does not work: the profile is
+# re-binned from scratch on every rebuild over a lo/hi that grows with the
+# session, so a peak bin routinely hands a large slice of its volume to a
+# neighbour and one bin's volume is far too noisy to gate a switch on
+# (measured: rival/held single-bin ratios of 1.6-2.3 during what was
+# visually one stable cluster). Summing a fixed PRICE window around each
+# candidate is stable across re-binning.
+_POC_CLUSTER_PCT = 0.5
 
 def _qc(hex_str: str, alpha: int = 255) -> QColor:
     c = QColor(hex_str)
@@ -502,6 +511,7 @@ def _compute_poc_vah_val(
     centers: np.ndarray,
     volumes: np.ndarray,
     va_pct: float = 0.70,
+    poc_idx: int | None = None,
 ) -> tuple[float, float, float]:
     """Return (poc_price, vah_price, val_price) from a volume profile.
 
@@ -512,13 +522,21 @@ def _compute_poc_vah_val(
     When all bins have equal volume (OHLCV flat distribution) argmax returns
     index 0 (bottom price), which would be misleading; in that case the median
     bin is used as POC instead.
+
+    poc_idx pins the value area to a specific bin instead of the argmax one.
+    Its caller is the viewer's POC switch hysteresis: when a held POC is being
+    displayed, the value area has to expand from that same bin, or the panel
+    would show a POC and a VAH/VAL that disagree about where the peak is.
     """
     if centers.size == 0:
         return 0.0, 0.0, 0.0
-    poc_idx = int(np.argmax(volumes))
-    # OHLCV flat distribution: all bins equal → use median bin as POC
-    if np.all(volumes == volumes[poc_idx]):
-        poc_idx = len(volumes) // 2
+    if poc_idx is None:
+        poc_idx = int(np.argmax(volumes))
+        # OHLCV flat distribution: all bins equal → use median bin as POC
+        if np.all(volumes == volumes[poc_idx]):
+            poc_idx = len(volumes) // 2
+    else:
+        poc_idx = int(np.clip(poc_idx, 0, len(volumes) - 1))
     poc   = float(centers[poc_idx])
     total = float(volumes.sum())
     if total <= 0:
@@ -1318,6 +1336,17 @@ class TradeViewerQt(QMainWindow):
         self._klines:       pd.DataFrame | None = None
         self._warmup:       pd.DataFrame | None = None
         self._ticks:        dict | None         = None
+        # Session-profile POC state. POC is a from-scratch argmax on every
+        # rebuild with no memory, so on a bimodal profile it teleports between
+        # the two peaks as their totals cross (observed: four 5-dollar flips
+        # inside four minutes on a genuinely two-cluster day). _poc_held is
+        # the currently displayed level, kept until a rival bin beats it by
+        # the hysteresis margin; _poc_trail is where it has been, newest
+        # first, so the move reads as a direction rather than a surprise.
+        # Both reset when the profile is redefined (see _poc_ctx_key).
+        self._poc_held:     float | None        = None
+        self._poc_trail:    list[float]         = []
+        self._poc_ctx_key:  tuple | None        = None
         self._live_ticks:   dict                = defaultdict(
             lambda: defaultdict(lambda: {"buy": 0, "sell": 0, "neutral": 0}))
         self._tick_lock      = threading.Lock()
@@ -1660,6 +1689,40 @@ class TradeViewerQt(QMainWindow):
             "higher = thinner bars, finer price resolution.")
         self._profile_bins_spin.valueChanged.connect(self._on_range_changed)
         tb_sess.addWidget(self._profile_bins_spin)
+
+        tb_sess.addWidget(_lbl("POCs:"))
+        self._poc_trail_spin = QSpinBox()
+        self._poc_trail_spin.setRange(1, 6)
+        self._poc_trail_spin.setValue(2)
+        self._poc_trail_spin.setFixedWidth(40)
+        self._poc_trail_spin.setToolTip(
+            "How many POCs to mark in the session profile, newest first.\n"
+            "POC1 is the current one, POC2 the level it moved off, and so on,\n"
+            "so the trail shows which way value is migrating. Older ones fade\n"
+            "and are dotted. The trail resets when the profile is redefined\n"
+            "(symbol / date / range / bins / session filter).")
+        self._poc_trail_spin.valueChanged.connect(
+            lambda _: self._rebuild_session_profile())
+        tb_sess.addWidget(self._poc_trail_spin)
+
+        tb_sess.addWidget(_lbl("Hold:"))
+        self._poc_hyst_spin = QSpinBox()
+        self._poc_hyst_spin.setRange(0, 50)
+        self._poc_hyst_spin.setValue(5)
+        self._poc_hyst_spin.setSuffix("%")
+        self._poc_hyst_spin.setFixedWidth(56)
+        self._poc_hyst_spin.setToolTip(
+            "POC switch hysteresis. A rival volume cluster has to hold this\n"
+            "much more volume than the one the POC currently sits in before\n"
+            "the POC moves to it (clusters, not single bins -- re-binning\n"
+            "makes one bin's volume far too noisy to gate on).\n"
+            "Without it a two-cluster profile flips the POC back and forth\n"
+            "every refresh: 2026-09-10 flipped four times across $5 in twelve\n"
+            "minutes, which at the 5%% default becomes one move.\n"
+            "0 disables it -- POC then tracks the raw argmax every rebuild.")
+        self._poc_hyst_spin.valueChanged.connect(
+            lambda _: self._rebuild_session_profile())
+        tb_sess.addWidget(self._poc_hyst_spin)
 
         # ── Row 5: order flow controls ────────────────────────────────────────
         self.addToolBarBreak()
@@ -4013,6 +4076,93 @@ class TradeViewerQt(QMainWindow):
                 pass
         self._profile_pin_conns.clear()
 
+    def _reset_poc_state_if_redefined(self, range_val: str, n_bins: int) -> None:
+        """Drop the held POC and its trail when the profile is no longer the
+        same profile. A POC computed over a different symbol, date, range,
+        bin count or session filter is not a previous position of this one,
+        so carrying it over would draw a trail between unrelated levels."""
+        key = (
+            self._code_edit.text().strip(), self._date_edit.text().strip(),
+            self._mode_combo.currentText(), range_val, n_bins,
+            tuple(sorted(self._active_sessions())), self._candle_mins,
+        )
+        if key != self._poc_ctx_key:
+            self._poc_ctx_key = key
+            self._poc_held = None
+            self._poc_trail = []
+
+    @staticmethod
+    def _cluster_mass(centers: np.ndarray, volumes: np.ndarray,
+                      price: float) -> float:
+        """Total volume within _POC_CLUSTER_PCT of `price` -- the size of the
+        volume cluster a candidate POC sits in, rather than of its own bin."""
+        return float(volumes[np.abs(centers - price)
+                             <= price * _POC_CLUSTER_PCT / 100.0].sum())
+
+    def _resolve_poc(self, centers: np.ndarray,
+                     volumes: np.ndarray) -> tuple[float, int]:
+        """Return (poc_price, poc_bin_index) with switch hysteresis applied.
+
+        The held level is stored as a PRICE and, while held, is reported back
+        unchanged. Re-snapping it to the nearest bin centre each rebuild would
+        make it jitter by a few cents on its own as lo/hi (and so every bin
+        boundary) shift with each new bar -- movement that says nothing about
+        where volume actually is.
+
+        A switch needs the challenger's whole cluster to beat the held one's
+        by the margin, not just its peak bin: see _POC_CLUSTER_PCT.
+        """
+        raw_i = int(np.argmax(volumes))
+        # Same flat-distribution guard _compute_poc_vah_val applies.
+        if np.all(volumes == volumes[raw_i]):
+            raw_i = len(volumes) // 2
+        raw_p = float(centers[raw_i])
+
+        margin = self._poc_hyst_spin.value() / 100.0
+        held = self._poc_held
+        if margin <= 0 or held is None or not (centers[0] <= held <= centers[-1]):
+            return raw_p, raw_i          # off, nothing held, or held out of range
+
+        held_i = int(np.argmin(np.abs(centers - held)))
+        bin_w = float(centers[1] - centers[0]) if centers.size > 1 else 0.0
+        if abs(raw_p - held) <= bin_w:
+            return held, held_i          # same level, just re-binned
+        if (self._cluster_mass(centers, volumes, raw_p)
+                > self._cluster_mass(centers, volumes, held) * (1.0 + margin)):
+            return raw_p, raw_i
+        return held, held_i
+
+    def _update_poc_trail(self, poc: float, bin_w: float) -> list[float]:
+        """Record `poc` as the current level and return the newest-first slice
+        to draw.
+
+        The trail is a history of where the POC has BEEN, not the profile's
+        runner-up peaks -- POC2 is the level POC1 moved off, so the pair reads
+        as a direction of travel. Entries closer together than half a bin are
+        treated as the same level: without that a POC stepping between two
+        neighbouring bins would fill the trail with what is visually one line,
+        pushing the older level that actually matters off the end.
+        """
+        self._poc_held = poc
+        tol = bin_w * 0.5
+        if not self._poc_trail:
+            self._poc_trail = [poc]
+        elif abs(self._poc_trail[0] - poc) <= tol:
+            # Still the same level, just re-binned a cent or two: refresh the
+            # head in place rather than pushing a new entry. The head must
+            # stay equal to the POC being drawn, or POC1's label reports a
+            # stale price; only a move worth more than a bin earns a POC2.
+            self._poc_trail[0] = poc
+        else:
+            # Drop any older entry that has become the same level as the new
+            # one (price came back), so the trail keeps showing DISTINCT
+            # levels instead of logging a round trip twice.
+            self._poc_trail = [poc] + [
+                p for p in self._poc_trail if abs(p - poc) > tol
+            ]
+            del self._poc_trail[8:]
+        return self._poc_trail[: self._poc_trail_spin.value()]
+
     def _rebuild_session_profile(self) -> None:
         if self._klines is None:
             return
@@ -4056,28 +4206,51 @@ class TradeViewerQt(QMainWindow):
         pw.getPlotItem().setLabel("top", range_val.upper(),
                                   **{"color": _FG, "size": "8pt"})
 
-        poc, vah, val = _compute_poc_vah_val(centers, volumes)
+        self._reset_poc_state_if_redefined(range_val, n_bins)
+        poc, poc_idx = self._resolve_poc(centers, volumes)
+        # POC comes from _resolve_poc (it may be a held level, which is kept at
+        # its own price rather than re-snapped); the value area still expands
+        # from that same bin so the three lines agree about where the peak is.
+        _, vah, val = _compute_poc_vah_val(centers, volumes, poc_idx=poc_idx)
+        # A held POC is an exact past price, while VAH/VAL are bin centres, so
+        # a value area that collapsed onto the POC's own bin can come back a
+        # fraction of a bin short of it and draw POC outside its own VA. Widen
+        # to restore VAL <= POC <= VAH; the correction is sub-bin, i.e. below
+        # the resolution either number is quoted at anyway.
+        vah, val = max(vah, poc), min(val, poc)
+        bin_w = float(centers[1] - centers[0]) if centers.size > 1 else 0.0
+        trail = self._update_poc_trail(poc, bin_w)
 
-        poc_line = pg.InfiniteLine(
-            pos=poc, angle=0, movable=False,
-            pen=pg.mkPen(_RED, width=1),
-        )
-        poc_label = pg.TextItem(
-            text=f"POC {poc:.2f}", color=_RED,
-            fill=pg.mkBrush(_qc(_BG_TIP, 180)),
-            anchor=(0.0, 1.0),
-        )
-        poc_label.setFont(QFont("Monospace", 7))
-        pw.addItem(poc_line,  ignoreBounds=True)
-        pw.addItem(poc_label, ignoreBounds=True)
+        # POC1 = current, POC2.. = the levels it moved off, newest first.
+        # Only the line fades and turns dotted with age; the text stays fully
+        # opaque (same rule as the AVWAP band and option wall labels -- a
+        # faint line is visual hierarchy, faint text is just unreadable).
+        poc_labels: list[tuple[float, pg.TextItem]] = []
+        for rank, price in enumerate(trail):
+            poc_line = pg.InfiniteLine(
+                pos=price, angle=0, movable=False,
+                pen=pg.mkPen(_qc(_RED, max(70, 255 - rank * 70)), width=1,
+                             style=Qt.PenStyle.SolidLine if rank == 0
+                             else Qt.PenStyle.DotLine),
+            )
+            poc_label = pg.TextItem(
+                text=f"POC{rank + 1} {price:.2f}", color=_RED,
+                fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+                anchor=(0.0, 1.0),
+            )
+            poc_label.setFont(QFont("Monospace", 7))
+            pw.addItem(poc_line,  ignoreBounds=True)
+            pw.addItem(poc_label, ignoreBounds=True)
+            poc_labels.append((price, poc_label))
 
-        def _pin_poc_label() -> None:
+        def _pin_poc_labels() -> None:
             xlo = vb.viewRange()[0][0]
-            poc_label.setPos(xlo, poc)
+            for p, lbl_item in poc_labels:
+                lbl_item.setPos(xlo, p)
 
-        conn = vb.sigRangeChanged.connect(lambda *_: _pin_poc_label())
+        conn = vb.sigRangeChanged.connect(lambda *_: _pin_poc_labels())
         self._profile_pin_conns.append(conn)
-        _pin_poc_label()
+        _pin_poc_labels()
 
         for price, lbl in [(vah, "VAH"), (val, "VAL")]:
             va_line = pg.InfiniteLine(
