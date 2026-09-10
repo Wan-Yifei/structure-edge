@@ -52,7 +52,7 @@
     ],
     "scan_interval_s": 60,
     "alert_sound": true,
-    "indicator_alert_repeat_s": 10,
+    "indicator_alert_repeat_s": 120,
     "default": {
       "strategy": "smc",
       "auto_params": true,
