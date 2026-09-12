@@ -1747,6 +1747,20 @@ class TradeViewerQt(QMainWindow):
             tb3.addWidget(cb)
 
         tb3.addSeparator()
+        cb_vp = QCheckBox("VP")
+        cb_vp.setChecked(False)
+        cb_vp.setToolTip(
+            "Tick profile: show the hovered candle (or selected range) as a\n"
+            "volume profile -- one bar per price level for TOTAL traded volume,\n"
+            "with POC / VAH / VAL -- instead of the buy/sell order-flow split.\n"
+            "Bars are linear here, not log-scaled, so bar length is proportional\n"
+            "to volume the way a profile is meant to be read.\n"
+            "Takes precedence over Net. The S/M/L filters still apply; the Imb\n"
+            "highlight does not (it compares the two sides this mode merges).")
+        cb_vp.stateChanged.connect(self._on_tick_size_toggle)
+        self._ind_checks["tick_vp"] = cb_vp
+        tb3.addWidget(cb_vp)
+
         cb_net = QCheckBox("Net")
         cb_net.setChecked(False)
         cb_net.setToolTip(
@@ -4425,6 +4439,10 @@ class TradeViewerQt(QMainWindow):
         bin_h = (max(prices) - min(prices)) / max(len(prices), 1) * 0.9 if prices else 0.01
         bin_h = max(bin_h, 0.001)
 
+        if self._ind("tick_vp"):
+            self._draw_tick_vp(prices, buys, sells, neutrals, bin_h, header)
+            return
+
         buys_arr    = np.array(buys,     dtype=float)
         sells_arr   = np.array(sells,    dtype=float)
         neutral_arr = np.array(neutrals, dtype=float)
@@ -4534,6 +4552,87 @@ class TradeViewerQt(QMainWindow):
 
         # Sync Y range to current main chart viewport so profile aligns spatially.
         # sigRangeChanged doesn't fire on hover, so we apply it once after drawing.
+        _, (ylo, yhi) = self._plot_c.vb.viewRange()
+        pw.setYRange(ylo, yhi, padding=0)
+
+    def _draw_tick_vp(self, prices: list, buys: list, sells: list,
+                      neutrals: list, bin_h: float, header: str) -> None:
+        """Render the same tick data as a volume profile: one bar per price
+        level for total traded volume, plus POC / VAH / VAL.
+
+        The order-flow view this replaces answers "who was aggressing at each
+        price"; this one answers "where did the volume actually trade", which
+        is the market-profile question the right-hand session panel asks of a
+        whole session -- here scoped to a single candle (or the selected
+        range), so the two panels read the same way at two zoom levels.
+
+        Volume is buy + sell + neutral after the S/M/L filters, matching what
+        the session profile counts from the same tick source. Bars are linear,
+        not log-scaled like the order-flow view: a profile is read by
+        comparing bar lengths, which log scaling destroys.
+
+        Tick-only by construction -- the caller reaches this with a price->
+        counts dict from ticks.db, and a candle with no tick coverage never
+        gets here (see _show_tick_profile's early return). Unlike the session
+        panel there is no OHLCV fallback, so a level shown here is a price
+        that genuinely traded rather than one a bar's range merely spanned.
+        """
+        pw = self._tick_profile_widget
+        centers = np.asarray(prices, dtype=float)
+        totals = (np.asarray(buys, dtype=float)
+                  + np.asarray(sells, dtype=float)
+                  + np.asarray(neutrals, dtype=float))
+        if not totals.any():
+            return
+
+        poc, vah, val = _compute_poc_vah_val(centers, totals)
+
+        # Inside the value area vs outside: the VA is the point of the view,
+        # so it carries the saturated colour and the tails fade back.
+        in_va = (centers >= val) & (centers <= vah)
+        brushes = [_qc(_GOLD, 150) if inside else _qc(_GOLD, 60) for inside in in_va]
+        pw.addItem(pg.BarGraphItem(
+            x0=np.zeros(len(centers)), x1=totals,
+            y=centers, height=bin_h, brushes=brushes, pen=pg.mkPen(None),
+        ))
+
+        max_vol = float(totals.max())
+        pw.setXRange(0, max_vol * 1.15, padding=0)
+
+        # x=0 keeps every label on the left edge, where the X range is pinned
+        # just above; anchoring to a bar's tip would scatter them across the
+        # panel and overlap the bars themselves in a 200-300px column.
+        for price, text, colour, anchor in (
+            (val, "VAL", _GOLD, (0.0, 0.0)),
+            (poc, "POC", _RED, (0.0, 1.0)),
+            (vah, "VAH", _GOLD, (0.0, 0.0)),
+        ):
+            style = (Qt.PenStyle.SolidLine if text == "POC" else Qt.PenStyle.DashLine)
+            line = pg.InfiniteLine(pos=price, angle=0, movable=False,
+                                   pen=pg.mkPen(colour, width=1, style=style))
+            line.setZValue(6)
+            pw.addItem(line, ignoreBounds=True)
+            lbl = pg.TextItem(text=f"{text} {price:.2f}", color=colour,
+                              fill=pg.mkBrush(_qc(_BG_TIP, 180)), anchor=anchor)
+            lbl.setFont(QFont("Monospace", 7))
+            lbl.setPos(0.0, price)
+            lbl.setZValue(20)
+            pw.addItem(lbl, ignoreBounds=True)
+
+        total_vol = float(totals.sum())
+        vol_str = (f"{total_vol/1_000_000:.2f}M" if total_vol >= 1_000_000
+                   else f"{total_vol/1000:.0f}K" if total_vol >= 1000
+                   else f"{total_vol:.0f}")
+        pw.getPlotItem().setLabel("bottom", "", **{})
+        pw.getPlotItem().setLabel("top", (
+            f"<span style='color:{_FG}'>{header}</span>"
+            f"&nbsp;&nbsp;<span style='color:{_GOLD}'>VP {vol_str}</span>"
+            f"&nbsp;<span style='color:{_RED}'>POC {poc:.2f}</span>"
+        ), **{"size": "7pt"})
+
+        # Same one-shot Y sync the order-flow view does: hover redraws do not
+        # fire sigRangeChanged, so the alignment with the main chart has to be
+        # reapplied after each draw.
         _, (ylo, yhi) = self._plot_c.vb.viewRange()
         pw.setYRange(ylo, yhi, padding=0)
 
