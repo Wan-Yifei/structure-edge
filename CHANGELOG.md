@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.17.0 — volume-profile mode for the tick panel (2026-09-12)
+
+### Feat: `VP` mode on the tick profile panel (`analysis/trade_viewer_qt.py`)
+
+The top-right panel had one view of a candle's ticks: the order-flow split
+(diverging buy/sell bars, log-scaled, imbalance highlighting, delta title),
+which answers "who was aggressing at each price". The new `VP` checkbox
+switches it to the market-profile question instead -- "where did the volume
+actually trade" -- for the same hovered candle or selected range.
+
+- One bar per price level for total volume (buy + sell + neutral), with
+  POC / VAH / VAL drawn and labelled. Levels inside the value area take the
+  saturated colour; the tails fade back.
+- Bars are linear, not log-scaled like the order-flow view: a profile is read
+  by comparing bar lengths, which log scaling destroys.
+- Makes the two right-hand panels read the same way at two zoom levels -- the
+  session profile below already answers this question for a whole session.
+- Tick-only. A candle with no tick coverage never reaches the renderer, so
+  unlike the session panel there is no OHLCV fallback: a level shown here is a
+  price that genuinely traded, not one a bar's range merely spanned.
+- The S/M/L order-size filters still apply. The Imb highlight does not -- it
+  compares the two sides this mode merges. `VP` takes precedence over `Net`.
+- Works in both single-candle hover and range-accumulation modes.
+
 ## v0.16.0 — session-profile POC hysteresis + POC trail (2026-09-10)
 
 ### Feat: POC switch hysteresis and a POC1/POC2 trail in the session profile (`analysis/trade_viewer_qt.py`)
