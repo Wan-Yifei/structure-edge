@@ -343,6 +343,7 @@
         <div class="control">
           <div class="control-label"><span>胜率（0–1）</span></div>
           <input type="number" id="entry-winrate" min="0" max="1" step="0.01" placeholder="例如 0.65"
+            oninput="updateRatioOverrideHint()"
             style="width:100%;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:13px;color:var(--text);outline:none;font-family:inherit;">
         </div>
         <div class="control">
@@ -350,10 +351,18 @@
           <input type="number" id="entry-pnl" step="0.01" placeholder="例如 1.38 或 -0.49"
             style="width:100%;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:13px;color:var(--text);outline:none;font-family:inherit;">
         </div>
-        <div class="control" style="margin-bottom:0;">
+        <div class="control">
           <div class="control-label"><span>交易笔数（0 = 当天未交易）</span></div>
           <input type="number" id="entry-trades" min="0" step="1" placeholder="0"
+            oninput="updateRatioOverrideHint()"
             style="width:100%;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:13px;color:var(--text);outline:none;font-family:inherit;">
+        </div>
+        <div class="control" style="margin-bottom:0;">
+          <div class="control-label"><span>全胜/全败日盈亏比（留空 = 1.00）</span></div>
+          <input type="number" id="entry-ratio-override" min="0.01" step="0.01"
+            placeholder="留空则按 1:1 处理"
+            style="width:100%;background:var(--surface-2);border:0.5px solid var(--border-strong);border-radius:var(--radius);padding:7px 10px;font-size:13px;color:var(--text);outline:none;font-family:inherit;">
+          <div class="control-hint" id="ratio-override-hint">仅在当日全胜或全败时生效；其余日子盈亏比由当日盈亏%推导，此处填写会被忽略。</div>
         </div>
         <div class="btn-row">
           <button class="primary" onclick="saveEntry()">保存到CSV（覆盖当日）</button>
@@ -612,17 +621,49 @@ window.addEventListener('DOMContentLoaded', () => {
 // avgWin) for small/atypical samples -- flagged as N/A rather than reported.
 // All-win / all-loss days have no opposite-outcome trades to compare against,
 // so the ratio can't be derived at all -- rather than dropping the day
-// entirely (which used to exclude it from the ratio EWMA), default it to a
+// entirely (which used to exclude it from the ratio EWMA), it falls back to a
 // neutral 1:1 so it still contributes a data point.
-function deriveRatio(winRate, pnl, trades) {
+//
+// override (optional, > 0) replaces that 1:1 fallback on those days only. A
+// 1:1 stand-in is deliberately conservative but it is still a guess, and on a
+// day you actually remember -- a single clean runner, or three stop-outs at
+// the same size -- your own number is better evidence than the placeholder.
+// The comment records which of the two it was, so a later reader can tell a
+// filled-in value from a defaulted one rather than trusting every 1.00 equally.
+//
+// The override is ignored on days where the ratio IS derivable: there the
+// arithmetic uses the day's real PnL, and letting a typed number silently win
+// over it would corrupt the series it is meant to improve.
+function deriveRatio(winRate, pnl, trades, override) {
   const N = trades;
   const W = Math.round(winRate * N);
   const L = N - W;
-  if (W === 0) return { ratioStr: '1.00', comment: 'All losses -- no winning trades to average, defaulted to 1:1' };
-  if (L === 0) return { ratioStr: '1.00', comment: 'All wins -- no losing trades to compare against, defaulted to 1:1' };
+  const ov = (override !== undefined && override !== null && !isNaN(override) && override > 0)
+    ? override : null;
+  const fallback = ov === null ? '1.00' : ov.toFixed(2);
+  const how = ov === null ? 'defaulted to 1:1' : `ratio set manually to ${fallback}`;
+  if (W === 0) return { ratioStr: fallback, comment: `All losses -- no winning trades to average, ${how}` };
+  if (L === 0) return { ratioStr: fallback, comment: `All wins -- no losing trades to compare against, ${how}` };
   const avgWin = (pnl + L) / W;
   if (avgWin < 0) return { ratioStr: 'N/A', comment: 'Derived ratio negative -- small-sample loss assumption breaks down, unreliable' };
   return { ratioStr: avgWin.toFixed(2), comment: '' };
+}
+
+// Tell the user, before they save, whether the override field is actually
+// going to be used -- the field applies only to an all-win/all-loss day, which
+// is not obvious from the win rate and trade count on their own.
+function updateRatioOverrideHint() {
+  const hintEl = document.getElementById('ratio-override-hint');
+  if (!hintEl) return;
+  const base = '仅在当日全胜或全败时生效；其余日子盈亏比由当日盈亏%推导，此处填写会被忽略。';
+  const wr = parseFloat(document.getElementById('entry-winrate').value);
+  const nRaw = document.getElementById('entry-trades').value;
+  const n = nRaw === '' ? NaN : parseInt(nRaw, 10);
+  if (isNaN(wr) || isNaN(n) || n <= 0) { hintEl.textContent = base; return; }
+  const W = Math.round(wr * n);
+  if (W === n) hintEl.textContent = `当日 ${n} 笔全胜 → 将使用此处的盈亏比（留空则 1.00）`;
+  else if (W === 0) hintEl.textContent = `当日 ${n} 笔全败 → 将使用此处的盈亏比（留空则 1.00）`;
+  else hintEl.textContent = base;
 }
 
 function upsertRow(newRow) {
@@ -649,6 +690,14 @@ function loadEntryForDate() {
   document.getElementById('entry-winrate').value = row['Win Rate'] === 'NA' ? '' : row['Win Rate'];
   document.getElementById('entry-pnl').value = row['Daily PnL %'] === 'NA' ? '' : row['Daily PnL %'];
   document.getElementById('entry-trades').value = row['Trades'] || '0';
+  // Put the stored ratio back in the override box for an all-win/all-loss day,
+  // so re-saving that day keeps the number instead of silently reverting it to
+  // the 1:1 fallback. Any other day derives its ratio, so the box stays empty.
+  const ovEl = document.getElementById('entry-ratio-override');
+  const cmt = row['Comment'] || '';
+  const stored = parseFloat(row['Profit/Loss Ratio']);
+  ovEl.value = (/^All (wins|losses)\b/.test(cmt) && !isNaN(stored)) ? stored.toFixed(2) : '';
+  updateRatioOverrideHint();
   statusEl.textContent = `已读取 ${dateVal} 的现有数据，可修改后保存覆盖`;
 }
 
@@ -672,7 +721,12 @@ async function saveEntry() {
     const pnl = parseFloat(document.getElementById('entry-pnl').value);
     if (isNaN(winRate) || winRate < 0 || winRate > 1) { statusEl.textContent = '胜率需在 0–1 之间'; return; }
     if (isNaN(pnl)) { statusEl.textContent = '请输入当日盈亏 %'; return; }
-    const { ratioStr, comment } = deriveRatio(winRate, pnl, trades);
+    const ovRaw = document.getElementById('entry-ratio-override').value;
+    const override = ovRaw === '' ? null : parseFloat(ovRaw);
+    if (override !== null && (isNaN(override) || override <= 0)) {
+      statusEl.textContent = '全胜/全败日盈亏比需为正数，或留空使用 1.00'; return;
+    }
+    const { ratioStr, comment } = deriveRatio(winRate, pnl, trades, override);
     newRow = {
       Date: dateVal,
       'Win Rate': winRate.toFixed(2),
