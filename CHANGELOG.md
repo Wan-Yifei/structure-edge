@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.17.1 — fix blank tick panel after using VP mode (2026-09-13)
+
+### Fix: turning `VP` off left the tick profile panel blank (`analysis/trade_viewer_qt.py`)
+
+Once VP mode had been used, switching back to the order-flow view showed an
+empty panel with a volume-scale X axis (reported with a screenshot: axis
+reading 5K-20K while nothing was drawn).
+
+- Cause: VP mode pins its X range with `setXRange`, and pyqtgraph's `setRange`
+  disables auto-range for that axis as a side effect (`disableAutoRange`
+  defaults to `True`). Nothing turned it back on, so the order-flow view kept
+  VP's range -- tens of thousands wide -- while its own log-scale bars span
+  roughly +/-10, collapsing them into an invisible sliver at the left edge.
+- Fix: `_draw_tick_profile` re-enables X auto-range on every draw, and the
+  order-flow branch calls `updateAutoRange()` once its bars are in place.
+  Re-enabling alone is not enough -- that only sets a flag, and the range is
+  not recomputed until something forces it (verified directly against
+  pyqtgraph: `enableAutoRange` left the stale range untouched,
+  `updateAutoRange` restored it). Recomputing is preferred over pinning an
+  explicit range so the view keeps the padding behaviour it always had.
+- Verified on real ticks.db data (SOXL 2026-09-10): the order-flow X range
+  comes back to within 0.01 of its never-visited-VP value, holds across eight
+  alternating toggles, works when VP is the first mode drawn, and behaves in
+  both hover and range-accumulation modes.
+
 ## v0.17.0 — volume-profile mode for the tick panel (2026-09-12)
 
 ### Feat: `VP` mode on the tick profile panel (`analysis/trade_viewer_qt.py`)
