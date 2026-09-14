@@ -4435,6 +4435,14 @@ class TradeViewerQt(QMainWindow):
         pw = self._tick_profile_widget
         pw.clear()
         pw.addItem(self._tick_profile_hline)
+        # Every draw starts from X auto-range ON. The VP branch below pins an
+        # explicit X range, and pyqtgraph's setRange disables auto-range as a
+        # side effect (disableAutoRange defaults True) -- that stuck, so once
+        # VP had been used the order-flow view kept VP's volume-scale X range
+        # and drew its log-scale bars (about +/-10 wide) as an invisible sliver
+        # at the left edge. Resetting here rather than in the order-flow branch
+        # keeps the two modes independent of each other's ordering.
+        pw.getPlotItem().vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
 
         bin_h = (max(prices) - min(prices)) / max(len(prices), 1) * 0.9 if prices else 0.01
         bin_h = max(bin_h, 0.001)
@@ -4549,6 +4557,15 @@ class TradeViewerQt(QMainWindow):
         )
         pw.getPlotItem().setLabel("bottom", "", **{})
         pw.getPlotItem().setLabel("top", title_html, **{"size": "7pt"})
+
+        # Force the X auto-range to recompute now. Re-enabling it (top of this
+        # method) only sets a flag; without this the view keeps whatever range
+        # it last held, which after a visit to VP mode is a volume scale tens
+        # of thousands wide -- these log-scale bars are about +/-10, so they
+        # collapse into an invisible sliver at the left edge and the panel
+        # looks blank (reported). Recomputing beats pinning an explicit range
+        # here: it keeps the padding behaviour this view has always had.
+        pw.getPlotItem().vb.updateAutoRange()
 
         # Sync Y range to current main chart viewport so profile aligns spatially.
         # sigRangeChanged doesn't fire on hover, so we apply it once after drawing.
