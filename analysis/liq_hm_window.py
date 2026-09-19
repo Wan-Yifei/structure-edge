@@ -1167,6 +1167,40 @@ class LiqHmWindow(QWidget):
                 self._clear_overlay_items()
                 self._update_legend()   # bin_size just changed on rebuild
 
+    def _paint_column(self, col: int, snap: list[dict]) -> float | None:
+        """Write *snap* into grid column *col* and return that column's mid.
+
+        Clears the column first. For an appended column that is a no-op (the
+        row is already zero), but it is what makes repainting the live
+        rightmost column correct: without it, a price level that has since
+        left the book would keep its last volume painted there forever.
+
+        Also refreshes _best_bid/_best_ask, each held over when this snapshot
+        has no levels on that side (a merged snapshot can legitimately be
+        one-sided -- see feeds.order_book_merge).
+        """
+        min_vol = self._min_vol_spin.value()
+        self._bid_grid[col] = 0.0
+        self._ask_grid[col] = 0.0
+        for row in snap:
+            if row["volume"] < min_vol:
+                continue
+            p_bin = int((row["price"] - self._price_min) / self._bin_size)
+            if not (0 <= p_bin < self._bid_grid.shape[1]):
+                continue
+            if row["side"] == "BID":
+                self._bid_grid[col, p_bin] = row["volume"]
+            else:
+                self._ask_grid[col, p_bin] = row["volume"]
+
+        bid_prices = [r["price"] for r in snap if r["side"] == "BID"]
+        ask_prices = [r["price"] for r in snap if r["side"] == "ASK"]
+        col_bid = max(bid_prices) if bid_prices else None
+        col_ask = min(ask_prices) if ask_prices else None
+        self._best_bid = col_bid if col_bid is not None else self._best_bid
+        self._best_ask = col_ask if col_ask is not None else self._best_ask
+        return _calc_col_mid(snap)
+
     def _push_column(self, snap: list[dict],
                      ts: datetime | None = None,
                      is_fill: bool = False) -> None:
@@ -1180,7 +1214,6 @@ class LiqHmWindow(QWidget):
         into _raw_snaps or overwrite _latest_snap, since those feed iceberg/
         spoof detection which look for volume genuinely refreshing.
         """
-        min_vol  = self._min_vol_spin.value()
         max_cols = self._max_cols_spin.value()
 
         if len(self._col_ts) >= max_cols:
@@ -1199,27 +1232,7 @@ class LiqHmWindow(QWidget):
         col    = len(self._col_ts)
         col_ts = ts if ts is not None else datetime.now(_ET).replace(tzinfo=None)
         self._col_ts.append(col_ts)
-
-        for row in snap:
-            if row["volume"] < min_vol:
-                continue
-            p_bin = int((row["price"] - self._price_min) / self._bin_size)
-            if not (0 <= p_bin < self._bid_grid.shape[1]):
-                continue
-            if row["side"] == "BID":
-                self._bid_grid[col, p_bin] = row["volume"]
-            else:
-                self._ask_grid[col, p_bin] = row["volume"]
-
-        # Track best bid / ask and mid-price from this snapshot
-        mid = _calc_col_mid(snap)
-        bid_prices = [r["price"] for r in snap if r["side"] == "BID"]
-        ask_prices = [r["price"] for r in snap if r["side"] == "ASK"]
-        col_bid = max(bid_prices) if bid_prices else None
-        col_ask = min(ask_prices) if ask_prices else None
-        self._best_bid = col_bid if col_bid is not None else self._best_bid
-        self._best_ask = col_ask if col_ask is not None else self._best_ask
-        self._mid_prices.append(mid)
+        self._mid_prices.append(self._paint_column(col, snap))
 
         if not is_fill:
             for row in snap:
