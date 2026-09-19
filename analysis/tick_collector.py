@@ -1,4 +1,4 @@
-"""Real-time tick collector — subscribes to TICKER feed and writes to DuckDB.
+"""Real-time tick collector — subscribes to TICKER feed and writes to SQLite.
 
 Usage:
     uv run analysis/tick_collector.py [--config config/schedule.json] [--host HOST] [--port PORT]
@@ -197,7 +197,7 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Real-time tick collector — streams TICKER feed to DuckDB.",
+        description="Real-time tick collector — streams TICKER feed to SQLite.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -209,7 +209,7 @@ Examples:
     p.add_argument("--config", default=str(_DEFAULT_CONFIG),
                    help="Path to schedule.json (default: config/schedule.json)")
     p.add_argument("--db", default=str(_DEFAULT_DB),
-                   help="Path to DuckDB file (default: store/ticks.duckdb)")
+                   help="Path to the tick SQLite file (default: db/ticks.db)")
     p.add_argument("--codes", nargs="*",
                    help="Override target codes from config (e.g. US.AAPL US.TSLA)")
     p.add_argument("--timeout", type=int, default=5,

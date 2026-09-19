@@ -1898,7 +1898,7 @@ class OrderFlowApp(tk.Tk):
     # ── Profile drawing ───────────────────────────────────────────────────────
 
     def _load_local_ticks(self, code: str, date_str: str, tf: str) -> dict | None:
-        """Query DuckDB for code+date; return candle buckets or None if unavailable."""
+        """Query the tick SQLite store for code+date; return candle buckets or None."""
         import pathlib as _pl
         db_path = _pl.Path(__file__).parent.parent / "db" / "ticks.db"
         if not db_path.exists():
@@ -2827,7 +2827,7 @@ examples:
 
 
 def _load_tick_buckets(code: str, date_str: str, tf: str) -> dict | None:
-    """Return candle tick buckets from local DuckDB, or None if unavailable."""
+    """Return candle tick buckets from the local tick SQLite store, or None."""
     try:
         db_path = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
         if not db_path.exists():
@@ -2956,7 +2956,7 @@ def _render_headless(args: argparse.Namespace) -> None:
     # ── profile: prefer local tick data, fallback to OHLCV ────────────────────
     local_buckets = _load_tick_buckets(args.code, date_str, args.tf)
     if local_buckets:
-        print("Using local tick data from DuckDB")
+        print("Using local tick data from db/ticks.db")
         _draw_headless_tick_profile(ax_c, ax_p, local_buckets, df, date_str, args.tf)
     else:
         print("No local tick data — using OHLCV estimate")
