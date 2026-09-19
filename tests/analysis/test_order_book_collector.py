@@ -183,14 +183,50 @@ class TestMakeHandler(unittest.TestCase):
         self.assertEqual(state["session_count"], 4)   # insert returned 4
 
     def test_handler_accumulates_session_count(self):
+        """Two writes accumulate. _MIN_WRITE_INTERVAL is patched to 0 because
+        the handler rate-limits writes to one per code per 2s -- back-to-back
+        calls otherwise leave the second one skipped, which is the throttle's
+        behaviour (covered below), not an accumulation failure. Without the
+        patch this test asserted 4 and got 2."""
         store = self._make_store_mock()
         store.insert_snapshot.return_value = 2
+        state = {"last_update_time": None, "first_update_done": False, "session_count": 0}
+        with patch("analysis.order_book_collector._MIN_WRITE_INTERVAL", 0):
+            HandlerClass = self._make_handler(store, state)
+            h = HandlerClass()
+            h.on_recv_rsp(self._make_data())
+            h.on_recv_rsp(self._make_data())
+        self.assertEqual(state["session_count"], 4)
+        self.assertEqual(store.insert_snapshot.call_count, 2)
+
+    def test_handler_throttles_writes_within_the_interval(self):
+        """A second push for the same code inside _MIN_WRITE_INTERVAL is
+        dropped. This is what the collector trades away to keep the WAL from
+        growing unboundedly on high-frequency ORDER_BOOK pushes, and it had no
+        test at all -- which is how the accumulation test above came to assert
+        an impossible number."""
+        store = self._make_store_mock()
         state = {"last_update_time": None, "first_update_done": False, "session_count": 0}
         HandlerClass = self._make_handler(store, state)
         h = HandlerClass()
         h.on_recv_rsp(self._make_data())
         h.on_recv_rsp(self._make_data())
-        self.assertEqual(state["session_count"], 4)
+        h.on_recv_rsp(self._make_data())
+        self.assertEqual(store.insert_snapshot.call_count, 1,
+                         "pushes inside the throttle window should be dropped")
+
+    def test_handler_throttle_is_per_code(self):
+        """The throttle keys on code, so a different symbol is never blocked by
+        this one's recent write."""
+        store = self._make_store_mock()
+        state = {"last_update_time": None, "first_update_done": False, "session_count": 0}
+        HandlerClass = self._make_handler(store, state)
+        h = HandlerClass()
+        h.on_recv_rsp(self._make_data(code="US.AAPL"))
+        h.on_recv_rsp(self._make_data(code="US.NVDA"))
+        self.assertEqual(store.insert_snapshot.call_count, 2)
+        codes = [c.args[0] for c in store.insert_snapshot.call_args_list]
+        self.assertEqual(codes, ["US.AAPL", "US.NVDA"])
 
     def test_handler_ret_error_skips_insert(self):
         store = self._make_store_mock()
