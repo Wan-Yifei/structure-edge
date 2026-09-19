@@ -1,7 +1,10 @@
 """Unit tests for analysis.order_book_collector.
 
-Tests _parse_side() and _parse_args() without moomoo or network.
+Tests _parse_args() without moomoo or network.
 Tests _make_handler() with a fully mocked moomoo module.
+
+parse_side's tests moved to tests/feeds/test_order_book_merge.py along
+with the function itself.
 Run: uv run pytest tests/ -v
 """
 
@@ -11,66 +14,6 @@ from unittest.mock import MagicMock, patch, call
 import pathlib
 import tempfile
 from datetime import datetime
-
-
-# ── _parse_side ───────────────────────────────────────────────────────────────
-
-class TestParseSide(unittest.TestCase):
-
-    def setUp(self):
-        from analysis.order_book_collector import _parse_side
-        self._fn = _parse_side
-
-    def test_empty_returns_empty(self):
-        self.assertEqual(self._fn([]), [])
-
-    def test_dict_format(self):
-        items = [{"price": "100.5", "volume": "300"}, {"price": "99.0", "volume": "500"}]
-        result = self._fn(items)
-        self.assertEqual(result, [(100.5, 300), (99.0, 500)])
-
-    def test_sequence_format(self):
-        items = [[101.0, 200, "extra"], [102.5, 150]]
-        result = self._fn(items)
-        self.assertEqual(result, [(101.0, 200), (102.5, 150)])
-
-    def test_mixed_dict_and_sequence(self):
-        items = [{"price": 100.0, "volume": 100}, [101.0, 200]]
-        result = self._fn(items)
-        self.assertEqual(result, [(100.0, 100), (101.0, 200)])
-
-    def test_malformed_dict_missing_key_skipped(self):
-        items = [{"price": 100.0}, {"price": 101.0, "volume": 200}]
-        result = self._fn(items)
-        self.assertEqual(result, [(101.0, 200)])
-
-    def test_malformed_sequence_too_short_skipped(self):
-        items = [[100.0], [101.0, 200]]
-        result = self._fn(items)
-        self.assertEqual(result, [(101.0, 200)])
-
-    def test_non_numeric_value_skipped(self):
-        items = [{"price": "N/A", "volume": 100}, {"price": 100.0, "volume": 200}]
-        result = self._fn(items)
-        self.assertEqual(result, [(100.0, 200)])
-
-    def test_none_item_skipped(self):
-        items = [None, {"price": 100.0, "volume": 100}]
-        result = self._fn(items)
-        self.assertEqual(result, [(100.0, 100)])
-
-    def test_float_coercion(self):
-        items = [{"price": "100", "volume": "50"}]
-        price, vol = self._fn(items)[0]
-        self.assertIsInstance(price, float)
-        self.assertIsInstance(vol, int)
-
-    def test_large_list(self):
-        items = [{"price": float(i), "volume": i * 10} for i in range(1, 21)]
-        result = self._fn(items)
-        self.assertEqual(len(result), 20)
-        self.assertEqual(result[0], (1.0, 10))
-        self.assertEqual(result[-1], (20.0, 200))
 
 
 # ── _parse_args ───────────────────────────────────────────────────────────────

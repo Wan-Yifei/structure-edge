@@ -8,6 +8,7 @@ regression here would break both consumers at once.
 """
 
 import logging
+import unittest
 
 import pytest
 
@@ -27,22 +28,63 @@ def _lv(*pairs):
     return [{"price": p, "volume": v} for p, v in pairs]
 
 
-# ── parse_side ────────────────────────────────────────────────────────────────
+# ── parse_side ───────────────────────────────────────────────────────────────
 
-class TestParseSide:
-    def test_dict_form(self):
-        assert parse_side([{"price": 1.5, "volume": 3}]) == [(1.5, 3)]
+class TestParseSide(unittest.TestCase):
 
-    def test_sequence_form(self):
-        """Some SDK versions deliver [price, volume, ...] sequences."""
-        assert parse_side([[1.5, 3, "extra"]]) == [(1.5, 3)]
+    def setUp(self):
+        self._fn = parse_side
 
-    def test_malformed_entries_are_skipped_not_fatal(self):
-        items = [{"price": 1.0, "volume": 1}, {"nope": 0}, [2.0], {"price": 3.0, "volume": 2}]
-        assert parse_side(items) == [(1.0, 1), (3.0, 2)]
+    def test_empty_returns_empty(self):
+        self.assertEqual(self._fn([]), [])
 
-    def test_empty(self):
-        assert parse_side([]) == []
+    def test_dict_format(self):
+        items = [{"price": "100.5", "volume": "300"}, {"price": "99.0", "volume": "500"}]
+        result = self._fn(items)
+        self.assertEqual(result, [(100.5, 300), (99.0, 500)])
+
+    def test_sequence_format(self):
+        items = [[101.0, 200, "extra"], [102.5, 150]]
+        result = self._fn(items)
+        self.assertEqual(result, [(101.0, 200), (102.5, 150)])
+
+    def test_mixed_dict_and_sequence(self):
+        items = [{"price": 100.0, "volume": 100}, [101.0, 200]]
+        result = self._fn(items)
+        self.assertEqual(result, [(100.0, 100), (101.0, 200)])
+
+    def test_malformed_dict_missing_key_skipped(self):
+        items = [{"price": 100.0}, {"price": 101.0, "volume": 200}]
+        result = self._fn(items)
+        self.assertEqual(result, [(101.0, 200)])
+
+    def test_malformed_sequence_too_short_skipped(self):
+        items = [[100.0], [101.0, 200]]
+        result = self._fn(items)
+        self.assertEqual(result, [(101.0, 200)])
+
+    def test_non_numeric_value_skipped(self):
+        items = [{"price": "N/A", "volume": 100}, {"price": 100.0, "volume": 200}]
+        result = self._fn(items)
+        self.assertEqual(result, [(100.0, 200)])
+
+    def test_none_item_skipped(self):
+        items = [None, {"price": 100.0, "volume": 100}]
+        result = self._fn(items)
+        self.assertEqual(result, [(100.0, 100)])
+
+    def test_float_coercion(self):
+        items = [{"price": "100", "volume": "50"}]
+        price, vol = self._fn(items)[0]
+        self.assertIsInstance(price, float)
+        self.assertIsInstance(vol, int)
+
+    def test_large_list(self):
+        items = [{"price": float(i), "volume": i * 10} for i in range(1, 21)]
+        result = self._fn(items)
+        self.assertEqual(len(result), 20)
+        self.assertEqual(result[0], (1.0, 10))
+        self.assertEqual(result[-1], (20.0, 200))
 
 
 # ── partial pushes ───────────────────────────────────────────────────────────
