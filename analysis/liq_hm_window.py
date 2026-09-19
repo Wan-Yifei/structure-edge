@@ -14,6 +14,7 @@ import bisect
 import pathlib
 import sqlite3
 import sys
+import time
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 import numpy as np
@@ -22,7 +23,9 @@ from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")
 
-from PyQt6.QtCore    import Qt, QRectF, QTimer, QThread, pyqtSignal, pyqtSlot
+from PyQt6.QtCore    import (
+    Qt, QObject, QRectF, QThread, QTimer, pyqtSignal, pyqtSlot,
+)
 from PyQt6.QtGui     import QColor, QPainterPath
 from PyQt6.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QLabel, QPushButton,
@@ -38,6 +41,11 @@ _TEAL = "#26a69a"   # bid side (also bull color in green-up / Western convention
 _RED  = "#ef5350"   # ask side (also bull color in red-up / CN convention)
 
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
+
+# OpenD endpoint for the heatmap's own ORDER_BOOK subscription (same
+# defaults as feeds/fetcher.py and the collectors).
+_OPEND_HOST = "127.0.0.1"
+_OPEND_PORT = 11111
 
 # Spoof marker symbols — explicit QPainterPath so orientation is version-agnostic.
 # Qt painter Y increases downward: y=-0.5 is visually top, y=+0.5 is visually bottom.
@@ -222,6 +230,18 @@ class _BulkSnapshotWorker(QThread):
 
     def run(self) -> None:
         self.done.emit(_query_n_snapshots(self._code, self._n))
+
+
+class _PushBridge(QObject):
+    """Carries ORDER_BOOK pushes from the moomoo SDK thread to the GUI thread.
+
+    The SDK calls on_recv_rsp on its own socket thread. Touching widgets or
+    numpy grids from there is a data race, so the handler does nothing but
+    merge and emit; Qt delivers the signal as a queued connection, so the slot
+    runs on the GUI thread. This is what lets the heatmap repaint on the push
+    itself instead of polling the database for it.
+    """
+    snapshot = pyqtSignal(str, object, float)   # code, snap rows, push wall-clock
 
 
 # Keep-alive list for workers whose owner discarded them while still running.
@@ -458,6 +478,16 @@ class LiqHmWindow(QWidget):
 
         self._code: str  = ""
         self._live: bool = True
+        # Push path. _ob_ctx/_ob_sub_code are None until a subscription is up;
+        # when it is, the DB poll timer stops fetching and only rolls columns,
+        # and _on_push does the painting. _push_ok records whether the feed has
+        # actually delivered, so a silent subscribe failure can fall back to
+        # polling rather than leaving a frozen heatmap.
+        self._ob_ctx = None
+        self._ob_sub_code: str | None = None
+        self._push_bridge = _PushBridge(self)
+        self._push_bridge.snapshot.connect(self._on_push)
+        self._push_ok: bool = False
 
         # Rolling grid (index 0 = oldest visible column)
         self._bid_grid = np.zeros((MAX_COLS_DEF, N_PRICE), dtype=np.float64)
@@ -583,7 +613,13 @@ class LiqHmWindow(QWidget):
         self._col_secs_spin.setSingleStep(1)
         self._col_secs_spin.setValue(COL_SECS_DEF)
         self._col_secs_spin.setFixedWidth(55)
-        self._col_secs_spin.setToolTip("Seconds per column — also controls refresh rate")
+        self._col_secs_spin.setToolTip(
+            "Seconds per column.\n"
+            "With the ORDER_BOOK push feed up this is purely the time-axis\n"
+            "resolution: the newest column repaints on every push, so the\n"
+            "heatmap responds at feed speed whatever this is set to.\n"
+            "Without the feed it also doubles as the poll interval against\n"
+            "order_book.db, which is the original behaviour.")
         self._col_secs_spin.valueChanged.connect(self._on_col_secs_changed)
         row1.addWidget(self._col_secs_spin)
 
@@ -854,6 +890,7 @@ class LiqHmWindow(QWidget):
     def set_code(self, code: str) -> None:
         if code == self._code:
             return
+        self._stop_push()   # the old code's subscription says nothing about this one
         self._code = code
         self.setWindowTitle(f"Liquidity Heatmap  —  {code}")
         self._reset_grid()
@@ -861,6 +898,7 @@ class LiqHmWindow(QWidget):
     def set_live(self, live: bool) -> None:
         self._live = live
         if live and self._code:
+            self._start_push(self._code)
             if self._needs_init:
                 if self._bulk_worker is not None and self._bulk_worker.isRunning():
                     return   # prefill already in flight — _on_bulk_ready will clear _needs_init
@@ -873,6 +911,110 @@ class LiqHmWindow(QWidget):
                 self._on_tick()
         else:
             self._timer.stop()
+
+    def _start_push(self, code: str) -> bool:
+        """Subscribe to ORDER_BOOK for *code*. Returns True if the feed is up.
+
+        A second ORDER_BOOK subscription alongside order_book_collector.py
+        counts against the OpenD quota. The main viewer already does exactly
+        this for TICKER while tick_collector.py runs, so the pattern is known
+        to work -- but if it fails here the heatmap must keep working, so the
+        caller falls back to polling the collector's database.
+        """
+        if self._ob_sub_code == code and self._ob_ctx is not None:
+            return True
+        self._stop_push()
+        try:
+            from moomoo import OpenQuoteContext, OrderBookHandlerBase, RET_OK, SubType
+            from feeds.order_book_merge import OrderBookMerger
+
+            bridge = self._push_bridge
+            merger = OrderBookMerger()
+
+            class _Handler(OrderBookHandlerBase):
+                def on_recv_rsp(self, rsp_pb):
+                    ret, data = super().on_recv_rsp(rsp_pb)
+                    if ret != RET_OK or data is None:
+                        return ret, data
+                    c = data.get("code", "")
+                    now = time.time()
+                    merged = merger.merge(c, data.get("Bid", []),
+                                          data.get("Ask", []), now)
+                    if merged is None:
+                        return ret, data
+                    bids, asks = merged
+                    # Shaped like the DB rows every other path here consumes,
+                    # so _paint_column/_calc_col_mid need no special case.
+                    rows = [{"side": "BID", "price": p, "volume": v} for p, v in bids]
+                    rows += [{"side": "ASK", "price": p, "volume": v} for p, v in asks]
+                    bridge.snapshot.emit(c, rows, now)
+                    return ret, data
+
+            ctx = OpenQuoteContext(host=_OPEND_HOST, port=_OPEND_PORT)
+            ctx.set_handler(_Handler())
+            ret, msg = ctx.subscribe([code], [SubType.ORDER_BOOK], subscribe_push=True)
+            if ret != RET_OK:
+                ctx.close()
+                print(f"[liqhm] ORDER_BOOK subscribe failed ({msg}) — "
+                      f"falling back to polling order_book.db", flush=True)
+                return False
+            self._ob_ctx = ctx
+            self._ob_sub_code = code
+            self._push_ok = False   # set on the first delivered push
+            print(f"[liqhm] ORDER_BOOK push subscribed: {code}", flush=True)
+            return True
+        except Exception as exc:
+            print(f"[liqhm] ORDER_BOOK subscribe error ({exc}) — "
+                  f"falling back to polling order_book.db", flush=True)
+            self._stop_push()
+            return False
+
+    def _stop_push(self) -> None:
+        """Drop the subscription and its context, if any."""
+        if self._ob_ctx is not None:
+            try:
+                self._ob_ctx.close()
+            except Exception:
+                pass
+        self._ob_ctx = None
+        self._ob_sub_code = None
+        self._push_ok = False
+
+    def _on_push(self, code: str, rows: list, now: float) -> None:
+        """A merged ORDER_BOOK snapshot, on the GUI thread. Repaint and render.
+
+        Repaints the rightmost column rather than appending one: the x axis
+        stays a uniform Col(s)-wide grid (the timer still rolls it), while the
+        newest column tracks the book as fast as the feed moves. Appending per
+        push would make the time axis non-uniform and unreadable.
+        """
+        if code != self._code or not self._live or not rows:
+            return
+        self._push_ok = True
+        # Must run BEFORE deciding append-vs-repaint: a price-window rebuild in
+        # here wipes _col_ts/_mid_prices/_raw_snaps (see _maybe_init_price_range),
+        # so a column index taken beforehand can be past the end afterwards --
+        # which is exactly what it did, IndexError on _mid_prices[-1].
+        self._maybe_init_price_range(rows)
+        if not self._col_ts:
+            # No column yet -- session start, or the rebuild just cleared them.
+            # Append one for the live edge to live in.
+            self._push_column(rows)
+        else:
+            col = len(self._col_ts) - 1
+            self._mid_prices[-1] = self._paint_column(col, rows)
+            # Every push is genuine book data, so it belongs in _raw_snaps --
+            # unlike the timer's fill column. Iceberg/spoof detection looks for
+            # volume refreshing at a price and now sees every refresh the feed
+            # reports, not one sample per collector write.
+            ts = self._col_ts[-1]
+            for row in rows:
+                self._raw_snaps.append({
+                    "ts": ts, "side": row["side"],
+                    "price": row["price"], "volume": row["volume"],
+                })
+            self._latest_snap = rows
+        self._render()
 
     def pin_timestamp(self, ts: datetime) -> None:
         """Move vertical crosshair to the column nearest *ts*."""
@@ -908,6 +1050,7 @@ class LiqHmWindow(QWidget):
         self._needs_init = True
 
         self._timer.stop()
+        self._push_ok = False
         max_cols = self._max_cols_spin.value()
         n_price  = self._n_price_spin.value()
         self._bid_grid  = np.zeros((max_cols, n_price), dtype=np.float64)
@@ -1018,8 +1161,23 @@ class LiqHmWindow(QWidget):
         self._time_lbl.setVisible(bool(ts_str))
 
     def _on_tick(self) -> None:
-        """Kick off a background snapshot query; skip if one is already running."""
+        """One Col(s) boundary.
+
+        With the push feed up this only advances the time axis: it rolls a new
+        rightmost column seeded from the last known book, which _on_push then
+        repaints as the feed moves. The DB is not read at all -- that round
+        trip, plus the collector's write throttle, is exactly the latency this
+        path exists to remove.
+
+        Without the feed (subscribe failed, or it has not delivered yet) it
+        falls back to the original behaviour: query the collector's database in
+        a background thread.
+        """
         if not self._code:
+            return
+        if self._push_ok:
+            self._push_column(self._latest_snap or [], is_fill=True)
+            self._render()
             return
         if self._worker is not None and self._worker.isRunning():
             return   # previous query still in flight — skip this tick
@@ -1867,6 +2025,7 @@ class LiqHmWindow(QWidget):
 
     def closeEvent(self, event) -> None:
         self._timer.stop()
+        self._stop_push()
         for w in (self._worker, self._bulk_worker, self._absorb_worker):
             if w is not None:
                 _retire_worker(w)
