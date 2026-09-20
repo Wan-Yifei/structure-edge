@@ -47,6 +47,18 @@ _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 _OPEND_HOST = "127.0.0.1"
 _OPEND_PORT = 11111
 
+# Re-subscribe if a feed that HAD been delivering goes this long without a
+# push. order_book_collector.py learned the same lesson (its _watchdog
+# re-subscribes on a data timeout): an OpenD subscription can stop delivering
+# without any error surfacing, and a frozen heatmap looks exactly like a quiet
+# book, so nothing about the picture tells you it happened.
+#
+# Only silence *after* the feed has proven itself counts. Before the first
+# push there is nothing to distinguish "subscription is dead" from "market is
+# closed", and re-subscribing on that would churn all night for no reason --
+# the DB fallback already covers that case.
+_PUSH_STALE_SECS = 90.0
+
 # Spoof marker symbols — explicit QPainterPath so orientation is version-agnostic.
 # Qt painter Y increases downward: y=-0.5 is visually top, y=+0.5 is visually bottom.
 def _make_triangle(up: bool) -> QPainterPath:
@@ -488,6 +500,7 @@ class LiqHmWindow(QWidget):
         self._push_bridge = _PushBridge(self)
         self._push_bridge.snapshot.connect(self._on_push)
         self._push_ok: bool = False
+        self._last_push_ts: float = 0.0   # time.time() of the last push
 
         # Rolling grid (index 0 = oldest visible column)
         self._bid_grid = np.zeros((MAX_COLS_DEF, N_PRICE), dtype=np.float64)
@@ -969,6 +982,23 @@ class LiqHmWindow(QWidget):
             self._stop_push()
             return False
 
+    def _resubscribe_push(self) -> None:
+        """A feed that was delivering has gone quiet -- rebuild it.
+
+        Drops _push_ok so the DB fallback takes over immediately rather than
+        leaving the heatmap frozen while the new subscription warms up; the
+        first push that arrives flips it back. The merger is rebuilt with the
+        context, so no side cached from before the gap is carried across it --
+        after 90s of silence a cached side says nothing about the book now.
+        """
+        print(f"[liqhm] no ORDER_BOOK push for {_PUSH_STALE_SECS:.0f}s — "
+              f"re-subscribing {self._code}", flush=True)
+        self._push_ok = False
+        self._last_push_ts = 0.0
+        self._stop_push()
+        if self._code:
+            self._start_push(self._code)
+
     def _stop_push(self) -> None:
         """Drop the subscription and its context, if any."""
         if self._ob_ctx is not None:
@@ -991,6 +1021,7 @@ class LiqHmWindow(QWidget):
         if code != self._code or not self._live or not rows:
             return
         self._push_ok = True
+        self._last_push_ts = now
         # Must run BEFORE deciding append-vs-repaint: a price-window rebuild in
         # here wipes _col_ts/_mid_prices/_raw_snaps (see _maybe_init_price_range),
         # so a column index taken beforehand can be past the end afterwards --
@@ -1176,9 +1207,12 @@ class LiqHmWindow(QWidget):
         if not self._code:
             return
         if self._push_ok:
-            self._push_column(self._latest_snap or [], is_fill=True)
-            self._render()
-            return
+            if time.time() - self._last_push_ts > _PUSH_STALE_SECS:
+                self._resubscribe_push()
+            else:
+                self._push_column(self._latest_snap or [], is_fill=True)
+                self._render()
+                return
         if self._worker is not None and self._worker.isRunning():
             return   # previous query still in flight — skip this tick
         self._worker = _SnapshotWorker(self._code)
