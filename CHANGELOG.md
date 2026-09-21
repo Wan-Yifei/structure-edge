@@ -1,5 +1,67 @@
 # Changelog
 
+## v0.20.0 — one row per order-book snapshot (2026-09-21)
+
+### Feat: the collector stores every push instead of one every 2s (`feeds/order_book_store.py`, `analysis/order_book_collector.py`)
+
+The old schema stored one row per price level and the collector rate-limited
+writes to one snapshot per code per 2s, because 140 levels x every push was
+judged too much to write. A push-rate probe run against the live feed settled
+what that was costing: ORDER_BOOK arrives on a fixed ~300ms cadence (p90 =
+0.302s in all three samples) with activity-dependent bursting, and **zero
+duplicate books** -- 1.0 push/tick overnight, 2.25 at the open. Nothing was
+being deduplicated away; the throttle was discarding distinct books.
+
+`ob_snapshots` now holds one row per snapshot, with the two sides as JSON, and
+the throttle is gone. **12x more snapshots stored** -- 0.5/s before, 6.2/s
+measured after, median inter-snapshot gap 0.291s.
+
+Identity is `rowid`, deliberately not `(code, ts)`. An intermediate version
+used that as a primary key with `INSERT OR REPLACE` and lost books: the feed
+bursts several distinct books 12-19ms apart while `datetime.now()` on Windows
+only advances in ~15.6ms steps, so 30 pushes stored 9. Reads order by
+`ts DESC, rowid DESC` and `prune` counts rows, not timestamps.
+
+### Fix: a locked book is not a crossed book (`feeds/order_book_merge.py`)
+
+The cross guard tested `best_bid >= best_ask`, throwing away every snapshot
+where the two sides quoted the same price. That is a routine state -- two
+venues on the same price before the trade prints -- and it clusters around the
+open, which is when the heatmap can least afford a hole. Only `bid > ask` is
+physically impossible.
+
+It surfaced now because removing the write throttle let all ~6 pushes/s reach
+the merger, filling the console with
+`crossed book bid=141.44 >= ask=141.44 (both/neither side fresh), skipping`.
+Warnings for genuine crosses are now throttled to one per code per 5s with a
+suppressed count on the next one through; throttling the log never affects
+whether the snapshot is skipped.
+
+### Fix: definitions lost to an index-based refactor (`analysis/liq_hm_window.py`)
+
+The refactor that routed every read through `OrderBookStore` replaced a block
+between two text anchors by index, and the end anchor sat further down the file
+than intended. It also took `_TICK_DB_PATH`, `_query_ticks` and four
+`QThread`/`QObject` classes -- among them `_PushBridge`, which `__init__`
+instantiates. Opening the heatmap raised `NameError` while the whole suite
+still passed, because nothing in it ever built the window.
+
+`tests/analysis/test_gui_window_smoke.py` now constructs `LiqHmWindow` and
+`DomWindow` offscreen. Confirmed to fail if `_PushBridge` goes missing again.
+
+### Fix: two scripts were reading a frozen table (`scripts/check_db.py`, `scripts/analyze_absorb_price_change.py`)
+
+Both still queried `order_book_snapshots` directly after it stopped being
+written, so they reported a 325-snapshot pruning remnant as if it were live
+data. Adds `earliest_ts()` and `codes()` to the store, which is what they were
+hand-rolling as `MIN(ts)` and `SELECT DISTINCT code`.
+
+### Migration
+
+`order_book_snapshots` is no longer read or written. `OrderBookStore.
+drop_legacy_table()` removes it; a `VACUUM` afterwards reclaims the freed
+pages (96% of a 308MB file in practice). Neither runs automatically.
+
 ## v0.19.0 — incremental live kline fetch, Refresh down to 1s (2026-09-21)
 
 ### Feat: live cycles top up a cached frame instead of re-pulling the window (`analysis/trade_viewer_qt.py`)
