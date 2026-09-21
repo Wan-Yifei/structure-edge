@@ -208,6 +208,22 @@ class OrderBookStore:
                 "SELECT MAX(ts) FROM ob_snapshots").fetchone()
         return datetime.fromisoformat(r[0]) if r and r[0] else None
 
+    def earliest_ts(self, code: str | None = None) -> datetime | None:
+        """Oldest snapshot timestamp, for *code* or across every code."""
+        if code:
+            r = self._con.execute(
+                "SELECT MIN(ts) FROM ob_snapshots WHERE code = ?",
+                [code]).fetchone()
+        else:
+            r = self._con.execute(
+                "SELECT MIN(ts) FROM ob_snapshots").fetchone()
+        return datetime.fromisoformat(r[0]) if r and r[0] else None
+
+    def codes(self) -> list[str]:
+        """Every code with at least one stored snapshot, sorted."""
+        return [r[0] for r in self._con.execute(
+            "SELECT DISTINCT code FROM ob_snapshots ORDER BY code")]
+
     def query_date(self, code: str, day: date) -> list[dict]:
         start = datetime(day.year, day.month, day.day)
         end   = datetime(day.year, day.month, day.day, 23, 59, 59, 999999)

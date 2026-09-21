@@ -189,6 +189,42 @@ class TestLatestTs:
         assert store.latest_ts(C) is None
 
 
+# ── earliest_ts / codes ──────────────────────────────────────────────────────
+
+class TestEarliestTsAndCodes:
+    """Added for the two scripts that were still hand-rolling MIN(ts) and
+    SELECT DISTINCT code against the pre-schema-change table."""
+
+    def test_earliest_per_code(self, store):
+        _fill(store, 3)
+        store.insert_snapshot("US.SOXS", T0 - timedelta(seconds=99), *_book(3.0))
+        assert store.earliest_ts(C) == T0
+        assert store.earliest_ts("US.SOXS") == T0 - timedelta(seconds=99)
+
+    def test_earliest_across_all_codes(self, store):
+        _fill(store, 3)
+        store.insert_snapshot("US.SOXS", T0 - timedelta(seconds=99), *_book(3.0))
+        assert store.earliest_ts() == T0 - timedelta(seconds=99)
+
+    def test_earliest_none_when_empty(self, store):
+        assert store.earliest_ts() is None
+        assert store.earliest_ts(C) is None
+
+    def test_earliest_and_latest_bracket_the_data(self, store):
+        _fill(store, 10)
+        lo, hi = store.earliest_ts(C), store.latest_ts(C)
+        for r in store.query_snapshots(C, lo, hi, end_inclusive=True):
+            assert lo <= r["ts"] <= hi
+
+    def test_codes_sorted_and_deduped(self, store):
+        for c in ("US.SOXS", "US.SOXL", "US.SOXS"):
+            store.insert_snapshot(c, T0, *_book(3.0))
+        assert store.codes() == ["US.SOXL", "US.SOXS"]
+
+    def test_codes_empty_table(self, store):
+        assert store.codes() == []
+
+
 # ── duplicate timestamps ─────────────────────────────────────────────────────
 
 class TestDuplicateTimestamps:
