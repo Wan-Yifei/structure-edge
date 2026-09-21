@@ -143,6 +143,77 @@ def _query_n_snapshots(code: str, n: int) -> list[list[dict]]:
         return []
 
 
+_TICK_DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
+
+
+def _query_ticks(code: str, start: datetime, end: datetime) -> list[dict]:
+    """Return tick records for *code* in [start, end) from ticks.db."""
+    if not _TICK_DB_PATH.exists():
+        return []
+    try:
+        from feeds.tick_store import TickStore
+        store = TickStore(_TICK_DB_PATH, read_only=True)
+        rows  = store.query_ticks(code, start, end)
+        store.close()
+        return rows
+    except Exception as exc:
+        print(f"[QueryTicks] ERROR: {exc}", flush=True)
+        return []
+
+
+# ── background query workers ──────────────────────────────────────────────────
+
+class _AbsorbTickWorker(QThread):
+    """Load ticks for the current display window in a background thread."""
+    done = pyqtSignal(list)   # emits list[dict]
+
+    def __init__(self, code: str, start: datetime, end: datetime) -> None:
+        super().__init__()
+        self._code  = code
+        self._start = start
+        self._end   = end
+
+    def run(self) -> None:
+        self.done.emit(_query_ticks(self._code, self._start, self._end))
+
+
+class _SnapshotWorker(QThread):
+    """Fetch the latest OB snapshot in a background thread to avoid UI stalls."""
+    done = pyqtSignal(list)   # emits list[dict] (may be empty)
+
+    def __init__(self, code: str) -> None:
+        super().__init__()
+        self._code = code
+
+    def run(self) -> None:
+        self.done.emit(_query_latest_snapshot(self._code))
+
+
+class _BulkSnapshotWorker(QThread):
+    """Fetch the last N distinct OB snapshots in a background thread."""
+    done = pyqtSignal(list)   # emits list[list[dict]]
+
+    def __init__(self, code: str, n: int) -> None:
+        super().__init__()
+        self._code = code
+        self._n    = n
+
+    def run(self) -> None:
+        self.done.emit(_query_n_snapshots(self._code, self._n))
+
+
+class _PushBridge(QObject):
+    """Carries ORDER_BOOK pushes from the moomoo SDK thread to the GUI thread.
+
+    The SDK calls on_recv_rsp on its own socket thread. Touching widgets or
+    numpy grids from there is a data race, so the handler does nothing but
+    merge and emit; Qt delivers the signal as a queued connection, so the slot
+    runs on the GUI thread. This is what lets the heatmap repaint on the push
+    itself instead of polling the database for it.
+    """
+    snapshot = pyqtSignal(str, object, float)   # code, snap rows, push wall-clock
+
+
 # Keep-alive list for workers whose owner discarded them while still running.
 _PENDING_WORKERS: list[QThread] = []
 
