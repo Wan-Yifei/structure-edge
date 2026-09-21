@@ -53,6 +53,9 @@ backtest_results/
 # just a different suffix so the *.db rule above doesn't catch them
 db/*.bak*
 
+# Table dumps taken before a destructive migration (CSV, so *.db misses them)
+db/archive/
+
 # API tokens / credentials accidentally dropped in repo root
 github_token.txt
 *_token.txt
