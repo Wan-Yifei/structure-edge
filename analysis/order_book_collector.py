@@ -37,23 +37,6 @@ _DEFAULT_CONFIG = pathlib.Path(__file__).parent.parent / "config" / "schedule.js
 _DEFAULT_DB     = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
 
-def _parse_side(items) -> list[tuple[float, int]]:
-    """Parse bid or ask levels from push data into (price, volume) tuples.
-
-    Push items may be dicts {"price": ..., "volume": ...} or sequences [price, volume, ...].
-    """
-    result = []
-    for item in items:
-        try:
-            if isinstance(item, dict):
-                result.append((float(item["price"]), int(item["volume"])))
-            else:
-                result.append((float(item[0]), int(item[1])))
-        except (KeyError, IndexError, TypeError, ValueError):
-            pass
-    return result
-
-
 # ── Order book handler ─────────────────────────────────────────────────────────
 
 _MIN_WRITE_INTERVAL = 2.0  # seconds — minimum gap between DB writes per code
@@ -90,24 +73,18 @@ def _make_handler(store, state: dict):
     Writes are rate-limited to _MIN_WRITE_INTERVAL seconds per code to prevent
     WAL runaway growth on high-frequency ORDER_BOOK pushes.
 
-    ORDER_BOOK pushes can be *partial*: Qot_GetOrderBook.proto documents
-    svrRecvTimeBid/svrRecvTimeAsk as separate per-side fields precisely
-    because a given push can carry a fresh update for one side while the
-    other is stale/cached (its recv time reads zero) -- e.g. right after a
-    reconnect, or just because that side simply hasn't changed since the
-    last push. Treating each push as a complete two-sided snapshot means a
-    bid-only push overwrites the stored "latest" row and makes the ask side
-    vanish from every reader (the Liquidity Heatmap, depth-to-cursor, etc.)
-    until the next push that happens to include asks -- reported as the ask
-    (or bid) side going completely blank for stretches, then reappearing.
-    Cache the last non-empty list per side per code and always write the
-    merged, complete state instead of whatever this one push happened to
-    contain.
+    Folding partial pushes into complete two-sided snapshots is
+    feeds.order_book_merge.OrderBookMerger's job -- see it for why a push
+    cannot be trusted to carry both sides, and why a crossed book has to be
+    attributed to one side or dropped. That logic is shared with the
+    Liquidity Heatmap, which consumes the same feed directly; a second copy
+    would drift and re-earn the bugs those rules were written for.
     """
     from moomoo import OrderBookHandlerBase, RET_OK
+    from feeds.order_book_merge import OrderBookMerger
 
     last_write: dict[str, float] = {}  # code -> time.time() of last DB write
-    last_side:  dict[str, dict]  = {}  # code -> {"bids": [...], "asks": [...], "bids_ts": float, "asks_ts": float}
+    merger = OrderBookMerger(stale_secs=_SIDE_STALE_SECS, log=log)
 
     class _Handler(OrderBookHandlerBase):
         def on_recv_rsp(self, rsp_pb):
@@ -115,61 +92,12 @@ def _make_handler(store, state: dict):
             if ret != RET_OK or data is None:
                 return ret, data
 
-            code  = data.get("code", "")
-            cache = last_side.setdefault(
-                code, {"bids": [], "asks": [], "bids_ts": 0.0, "asks_ts": 0.0})
-            new_bids = _parse_side(data.get("Bid", []))
-            new_asks = _parse_side(data.get("Ask", []))
-            now = time.time()
-            if new_bids:
-                cache["bids"], cache["bids_ts"] = new_bids, now
-            elif cache["bids"] and now - cache["bids_ts"] > _SIDE_STALE_SECS:
-                log.warning("%s bid side stale for >%.0fs, dropping %d cached level(s)",
-                            code, _SIDE_STALE_SECS, len(cache["bids"]))
-                cache["bids"] = []
-            if new_asks:
-                cache["asks"], cache["asks_ts"] = new_asks, now
-            elif cache["asks"] and now - cache["asks_ts"] > _SIDE_STALE_SECS:
-                log.warning("%s ask side stale for >%.0fs, dropping %d cached level(s)",
-                            code, _SIDE_STALE_SECS, len(cache["asks"]))
-                cache["asks"] = []
-            bids, asks = cache["bids"], cache["asks"]
-            if not bids and not asks:
+            code = data.get("code", "")
+            now  = time.time()
+            merged = merger.merge(code, data.get("Bid", []), data.get("Ask", []), now)
+            if merged is None:
                 return ret, data
-
-            if bids and asks:
-                best_bid = max(p for p, _ in bids)
-                best_ask = min(p for p, _ in asks)
-                if best_bid >= best_ask:
-                    # A sustained crossed top-of-book isn't physically valid --
-                    # a real cross gets arbitraged away in microseconds. Seen
-                    # in practice: bid frozen at one price for 60+ seconds
-                    # while ask legitimately moved below it -- moomoo's feed
-                    # kept re-sending that bid level as a "fresh" (non-empty)
-                    # push the whole time, so the >0s cache-staleness check
-                    # above never triggers (it only measures time since the
-                    # last push, not whether the reported *value* actually
-                    # changed). Trust whichever side genuinely refreshed this
-                    # push and drop the other; if both (or neither) refreshed
-                    # and it's still crossed, there's no way to tell which
-                    # side is bad -- skip writing rather than persist an
-                    # impossible snapshot.
-                    if new_bids and not new_asks:
-                        log.warning("%s crossed book bid=%.2f >= ask=%.2f, "
-                                    "dropping stale ask cache", code, best_bid, best_ask)
-                        cache["asks"] = []
-                    elif new_asks and not new_bids:
-                        log.warning("%s crossed book bid=%.2f >= ask=%.2f, "
-                                    "dropping stale bid cache", code, best_bid, best_ask)
-                        cache["bids"] = []
-                    else:
-                        log.warning("%s crossed book bid=%.2f >= ask=%.2f "
-                                    "(both/neither side fresh), skipping write",
-                                    code, best_bid, best_ask)
-                        return ret, data
-                    bids, asks = cache["bids"], cache["asks"]
-                    if not bids and not asks:
-                        return ret, data
+            bids, asks = merged
 
             if now - last_write.get(code, 0.0) < _MIN_WRITE_INTERVAL:
                 return ret, data  # skip — too soon since last write for this code
