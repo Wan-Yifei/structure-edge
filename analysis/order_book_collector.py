@@ -39,7 +39,15 @@ _DEFAULT_DB     = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
 # ── Order book handler ─────────────────────────────────────────────────────────
 
-_MIN_WRITE_INTERVAL = 2.0  # seconds — minimum gap between DB writes per code
+# The 2s-per-code write throttle that used to live here is gone. It existed
+# because the row-per-price-level schema turned one push into ~120 inserts, so
+# an unthrottled feed wrote ~800 rows/s and the WAL grew without bound. It cost
+# 93% of the book updates the feed delivered (measured, SOXL 2026-09-21: 2,008
+# pushes in 300s, 143 kept) and every one of those was a distinct book -- the
+# same run found zero repeats among 2,007 consecutive comparisons.
+#
+# One row per snapshot makes the same feed ~7 rows/s, so there is nothing left
+# to throttle away.
 _SIDE_STALE_SECS = 10.0  # drop a cached side once it's gone this long without a
                           # fresh (non-empty) push. The push protocol omits a
                           # side when it's simply *unchanged*, which is the
@@ -59,8 +67,14 @@ _SIDE_STALE_SECS = 10.0  # drop a cached side once it's gone this long without a
 # snapshot writes ~60-120 rows at once (one per depth level), so an
 # unbounded exemption (like ticks.db's) isn't appropriate here -- it would
 # grow without limit over a trading day. A higher keep count instead.
-_RETENTION_KEEP_DEFAULT = 1000
-_RETENTION_KEEP_OVERRIDE = {"US.SOXL": 5000}
+# Snapshots per code, not rows. The old numbers were row budgets, which at
+# ~120 rows a snapshot meant 8 snapshots for most codes and 41 for SOXL --
+# under 20 seconds of history, and shrinking further whenever the book got
+# deeper. At the measured 6.7 snapshots/s these give roughly 25 minutes for
+# most codes and 2.5 hours for SOXL, and the heatmap's 240-column window
+# becomes fillable for the first time.
+_RETENTION_KEEP_DEFAULT = 10_000
+_RETENTION_KEEP_OVERRIDE = {"US.SOXL": 60_000}
 
 
 def _make_handler(store, state: dict):
@@ -70,8 +84,8 @@ def _make_handler(store, state: dict):
         last_update_time  float | None   — time.time() of most recent snapshot
         first_update_done bool           — whether first-update log was emitted
         session_count     int            — total rows inserted this session
-    Writes are rate-limited to _MIN_WRITE_INTERVAL seconds per code to prevent
-    WAL runaway growth on high-frequency ORDER_BOOK pushes.
+    Every push that yields a complete book is written. There is no write
+    throttle any more -- see the note where _MIN_WRITE_INTERVAL used to be.
 
     Folding partial pushes into complete two-sided snapshots is
     feeds.order_book_merge.OrderBookMerger's job -- see it for why a push
@@ -83,7 +97,6 @@ def _make_handler(store, state: dict):
     from moomoo import OrderBookHandlerBase, RET_OK
     from feeds.order_book_merge import OrderBookMerger
 
-    last_write: dict[str, float] = {}  # code -> time.time() of last DB write
     merger = OrderBookMerger(stale_secs=_SIDE_STALE_SECS, log=log)
 
     class _Handler(OrderBookHandlerBase):
@@ -99,13 +112,9 @@ def _make_handler(store, state: dict):
                 return ret, data
             bids, asks = merged
 
-            if now - last_write.get(code, 0.0) < _MIN_WRITE_INTERVAL:
-                return ret, data  # skip — too soon since last write for this code
-
             ts = datetime.now(_ET).replace(tzinfo=None)
             n  = store.insert_snapshot(code, ts, bids, asks)
             if n:
-                last_write[code] = now
                 state["last_update_time"] = now
                 state["session_count"]    = state.get("session_count", 0) + n
                 if not state["first_update_done"]:
@@ -198,7 +207,7 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
                 if default_codes:
                     deleted += store.prune(keep=_RETENTION_KEEP_DEFAULT, codes=default_codes)
                 if deleted:
-                    log.info("Pruned %d old rows (keeping <=%d per code, %s)",
+                    log.info("Pruned %d old snapshots (keeping <=%d per code, %s)",
                              deleted, _RETENTION_KEEP_DEFAULT,
                              ", ".join(f"{c}<={k}" for c, k in _RETENTION_KEEP_OVERRIDE.items()))
             except Exception as exc:

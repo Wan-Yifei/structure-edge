@@ -35,8 +35,8 @@ class TestInsert(unittest.TestCase):
 
     def test_bids_only_inserted(self):
         n = self.store.insert_snapshot(CODE, T0, [(100.0, 500), (99.5, 300)], [])
-        self.assertEqual(n, 2)
-        self.assertEqual(self.store.row_count(CODE), 2)
+        self.assertEqual(n, 2, "return value is levels captured")
+        self.assertEqual(self.store.snapshot_count(CODE), 1)
 
     def test_asks_only_inserted(self):
         n = self.store.insert_snapshot(CODE, T0, [], [(101.0, 400), (101.5, 200)])
@@ -48,19 +48,20 @@ class TestInsert(unittest.TestCase):
             [(100.0, 500), (99.5, 300)],
             [(101.0, 400), (101.5, 200)],
         )
-        self.assertEqual(n, 4)
-        self.assertEqual(self.store.row_count(CODE), 4)
+        self.assertEqual(n, 4, "return value is levels captured")
+        self.assertEqual(self.store.snapshot_count(CODE), 1,
+                         "one snapshot, whatever its depth")
 
     def test_row_count_all_codes(self):
         self.store.insert_snapshot(CODE, T0, [(100.0, 100)], [])
         self.store.insert_snapshot("US.TSLA", T0, [(200.0, 200)], [])
-        self.assertEqual(self.store.row_count(), 2)
+        self.assertEqual(self.store.snapshot_count(), 2)   # one per code
 
     def test_row_count_filtered_by_code(self):
         self.store.insert_snapshot(CODE, T0, [(100.0, 100)], [(101.0, 50)])
         self.store.insert_snapshot("US.TSLA", T0, [(200.0, 200)], [])
-        self.assertEqual(self.store.row_count(CODE), 2)
-        self.assertEqual(self.store.row_count("US.TSLA"), 1)
+        self.assertEqual(self.store.snapshot_count(CODE), 1)
+        self.assertEqual(self.store.snapshot_count("US.TSLA"), 1)
 
     def test_ts_string_accepted(self):
         n = self.store.insert_snapshot(CODE, "2026-05-30 09:30:00", [(100.0, 100)], [])
@@ -162,28 +163,31 @@ class TestPrune(unittest.TestCase):
                 code, T0 + timedelta(seconds=i), [(100.0, 100)], [(101.0, 50)]
             )
 
-    def test_keeps_most_recent_rows_per_code(self):
-        self._insert_n(CODE, 10)   # 20 rows (2 levels/snapshot)
+    def test_keeps_most_recent_snapshots_per_code(self):
+        # keep is snapshots now. Under the old row-per-level table the same
+        # keep=6 would have left 6 ROWS -- 3 snapshots of a 2-level book, and
+        # only 1/20th of a snapshot at real 60+60 depth. That arithmetic is
+        # why the heatmap could never pre-fill more than a few columns.
+        self._insert_n(CODE, 10)
         deleted = self.store.prune(keep=6)
-        self.assertEqual(deleted, 14)   # 20 - 6
-        self.assertEqual(self.store.row_count(CODE), 6)
+        self.assertEqual(deleted, 4)    # 10 - 6
+        self.assertEqual(self.store.snapshot_count(CODE), 6)
 
     def test_keeps_newest_not_oldest(self):
-        # 3 snapshots = 6 rows; keep=2 *rows* -> only the newest snapshot's
-        # 2 rows survive (T0+2s) -- T0 and T0+1s must both be gone.
+        # 3 snapshots, keep=2 -> the two newest (T0+1s, T0+2s) survive whole.
         self._insert_n(CODE, 3)
         self.store.prune(keep=2)
-        rows = self.store.query_snapshots(CODE, T0, T0 + timedelta(seconds=2))
-        self.assertEqual(rows, [])   # T0 and T0+1s rows were pruned
-        rows = self.store.query_snapshots(CODE, T0 + timedelta(seconds=2),
+        rows = self.store.query_snapshots(CODE, T0, T0 + timedelta(seconds=1))
+        self.assertEqual(rows, [], "the oldest snapshot is gone")
+        rows = self.store.query_snapshots(CODE, T0 + timedelta(seconds=1),
                                           T0 + timedelta(seconds=3))
-        self.assertEqual(len(rows), 2)   # only the newest snapshot remains
+        self.assertEqual(len(rows), 4, "2 snapshots x 2 levels, each intact")
 
     def test_under_keep_threshold_deletes_nothing(self):
         self._insert_n(CODE, 3)
         deleted = self.store.prune(keep=1000)
         self.assertEqual(deleted, 0)
-        self.assertEqual(self.store.row_count(CODE), 6)
+        self.assertEqual(self.store.snapshot_count(CODE), 3)
 
     def test_codes_param_scopes_to_subset(self):
         # Mirrors order_book_collector.py's per-code retention override: a
@@ -192,32 +196,32 @@ class TestPrune(unittest.TestCase):
         self._insert_n(CODE, 10)
         self._insert_n("US.TSLA", 10)
         deleted = self.store.prune(keep=2, codes=[CODE])
-        self.assertEqual(self.store.row_count(CODE), 2)
-        self.assertEqual(self.store.row_count("US.TSLA"), 20)   # untouched
+        self.assertEqual(self.store.snapshot_count(CODE), 2)
+        self.assertEqual(self.store.snapshot_count("US.TSLA"), 10)   # untouched
 
     def test_different_keep_per_code_via_two_calls(self):
         # The actual pattern _watchdog uses: a low default keep for most
         # codes, a higher override keep for specific ones (e.g. SOXL).
-        # keep is a *row* count, not a snapshot count.
+        # keep is a snapshot count.
         self._insert_n(CODE, 10)
         self._insert_n("US.SOXL", 10)
         self.store.prune(keep=8, codes=["US.SOXL"])
         self.store.prune(keep=2, codes=[CODE])
-        self.assertEqual(self.store.row_count("US.SOXL"), 8)
-        self.assertEqual(self.store.row_count(CODE), 2)
+        self.assertEqual(self.store.snapshot_count("US.SOXL"), 8)
+        self.assertEqual(self.store.snapshot_count(CODE), 2)
 
     def test_no_codes_arg_defaults_to_all(self):
         self._insert_n(CODE, 10)
         self._insert_n("US.TSLA", 10)
         self.store.prune(keep=2)
-        self.assertEqual(self.store.row_count(CODE), 2)
-        self.assertEqual(self.store.row_count("US.TSLA"), 2)
+        self.assertEqual(self.store.snapshot_count(CODE), 2)
+        self.assertEqual(self.store.snapshot_count("US.TSLA"), 2)
 
     def test_empty_codes_list_deletes_nothing(self):
         self._insert_n(CODE, 10)
         deleted = self.store.prune(keep=1, codes=[])
         self.assertEqual(deleted, 0)
-        self.assertEqual(self.store.row_count(CODE), 20)
+        self.assertEqual(self.store.snapshot_count(CODE), 10)
 
 
 class TestAvailableDates(unittest.TestCase):

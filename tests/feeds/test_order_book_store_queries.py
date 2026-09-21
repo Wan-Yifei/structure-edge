@@ -187,3 +187,55 @@ class TestLatestTs:
     def test_none_when_empty(self, store):
         assert store.latest_ts() is None
         assert store.latest_ts(C) is None
+
+
+# ── duplicate timestamps ─────────────────────────────────────────────────────
+
+class TestDuplicateTimestamps:
+    """Two genuinely different books can land on the same timestamp.
+
+    The feed bursts several books per ~300ms cadence tick, 12-19ms apart
+    (measured), while datetime.now() on Windows only advances in ~15.6ms
+    steps. An earlier version of this schema keyed on (code, ts) and used
+    INSERT OR REPLACE, which silently dropped the first of each colliding
+    pair -- 30 pushes became 9 stored snapshots. These pin the fix.
+    """
+
+    def test_both_snapshots_are_kept(self, store):
+        store.insert_snapshot(C, T0, *_book(10.0))
+        store.insert_snapshot(C, T0, *_book(20.0))
+        assert store.snapshot_count(C) == 2
+
+    def test_latest_returns_one_book_not_two_fused(self, store):
+        store.insert_snapshot(C, T0, *_book(10.0))
+        store.insert_snapshot(C, T0, *_book(20.0))
+        rows = store.latest_snapshot(C)
+        assert len(rows) == 6, "one 3+3 book, not both fused into 12 rows"
+        assert max(r["price"] for r in rows) > 19, "the later insert wins"
+
+    def test_at_or_before_returns_one_book(self, store):
+        store.insert_snapshot(C, T0, *_book(10.0))
+        store.insert_snapshot(C, T0, *_book(20.0))
+        assert len(store.snapshot_at_or_before(C, T0)) == 6
+
+    def test_last_n_groups_by_row_not_timestamp(self, store):
+        store.insert_snapshot(C, T0, *_book(10.0))
+        store.insert_snapshot(C, T0, *_book(20.0))
+        store.insert_snapshot(C, T0 + timedelta(seconds=1), *_book(30.0))
+        snaps = store.last_n_snapshots(C, 5)
+        assert len(snaps) == 3, "three snapshots, even though two share a ts"
+        assert all(len(g) == 6 for g in snaps), "none fused"
+
+    def test_insertion_order_is_preserved(self, store):
+        for base in (10.0, 20.0, 30.0):
+            store.insert_snapshot(C, T0, *_book(base))
+        snaps = store.last_n_snapshots(C, 3)
+        tops = [max(r["price"] for r in g) for g in snaps]
+        assert tops == sorted(tops), "oldest-first must follow insertion order"
+
+    def test_prune_counts_rows_not_timestamps(self, store):
+        for base in (10.0, 20.0, 30.0, 40.0):
+            store.insert_snapshot(C, T0, *_book(base))   # all the same ts
+        store.prune(keep=2)
+        assert store.snapshot_count(C) == 2, "a ts-based prune would keep 0 or 4"
+        assert all(len(g) == 6 for g in store.last_n_snapshots(C, 2))
