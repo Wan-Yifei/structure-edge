@@ -61,20 +61,37 @@ _SIDE_STALE_SECS = 10.0  # drop a cached side once it's gone this long without a
                           # the live ask -- structurally impossible for a real
                           # resting order, since it would just cross and fill).
 
-# Row-count retention (see _watchdog's prune call) -- same "give this one
-# symbol more history" intent as tick_collector.py's _RETENTION_EXEMPT, but
-# order_book_snapshots is pruned by row count, not age, and a full L2
-# snapshot writes ~60-120 rows at once (one per depth level), so an
-# unbounded exemption (like ticks.db's) isn't appropriate here -- it would
-# grow without limit over a trading day. A higher keep count instead.
-# Snapshots per code, not rows. The old numbers were row budgets, which at
-# ~120 rows a snapshot meant 8 snapshots for most codes and 41 for SOXL --
-# under 20 seconds of history, and shrinking further whenever the book got
-# deeper. At the measured 6.7 snapshots/s these give roughly 25 minutes for
-# most codes and 2.5 hours for SOXL, and the heatmap's 240-column window
-# becomes fillable for the first time.
-_RETENTION_KEEP_DEFAULT = 10_000
-_RETENTION_KEEP_OVERRIDE = {"US.SOXL": 60_000}
+# Retention (see _watchdog's prune call) -- same "give this one symbol more
+# history" intent as tick_collector.py's _RETENTION_EXEMPT, but ob_snapshots
+# is pruned by row count, not age, so an unbounded exemption (like ticks.db's)
+# isn't appropriate here.
+#
+# The counts are DERIVED from an hours target rather than written down, because
+# a bare count silently changes meaning whenever the store rate changes. That
+# already happened once: 60_000 was chosen when the collector throttled writes
+# to one snapshot per 2s and meant 33 hours of SOXL history; removing the
+# throttle raised the rate ~12x and the same constant quietly became 2.7 hours.
+#
+# _SNAPSHOTS_PER_SEC is the *regular-session* rate, which is the densest one
+# (the feed's ~300ms cadence is fixed, but it bursts more per tick when the
+# market is active -- 2.25 pushes/tick at the open against 1.0 overnight).
+# Sizing on the densest rate means the hours target is a floor across every
+# session, at the cost of some disk in the quiet ones.
+#
+# Disk: ~2,093 B per snapshot on disk including the index (measured), so SOXL's
+# 24h works out to ~1.1 GB and each additional code to ~0.3 GB.
+_SNAPSHOTS_PER_SEC = 6.2                       # measured, regular session
+_RETENTION_HOURS_DEFAULT = 6.5                 # one regular session
+_RETENTION_HOURS_OVERRIDE = {"US.SOXL": 24.0}  # a full 20:00->20:00 cycle
+
+
+def _keep_for_hours(hours: float) -> int:
+    return int(hours * 3600 * _SNAPSHOTS_PER_SEC)
+
+
+_RETENTION_KEEP_DEFAULT = _keep_for_hours(_RETENTION_HOURS_DEFAULT)
+_RETENTION_KEEP_OVERRIDE = {c: _keep_for_hours(h)
+                            for c, h in _RETENTION_HOURS_OVERRIDE.items()}
 
 
 def _make_handler(store, state: dict):

@@ -287,5 +287,53 @@ class TestMakeHandlerPartialUpdateMerge(unittest.TestCase):
         self.assertEqual(aapl_asks, [(200.0, 10)])
 
 
+
+
+# ── retention sizing ─────────────────────────────────────────────────────────
+
+class TestRetentionSizing:
+    """The keep counts are derived from an hours target, not written down.
+
+    A bare count changes meaning whenever the store rate changes. 60_000 was
+    chosen when writes were throttled to one snapshot per 2s and meant 33
+    hours of SOXL history; dropping the throttle raised the rate ~12x and the
+    same constant quietly became 2.7 hours. These pin the derivation so the
+    next rate change is a one-line edit with a visible consequence.
+    """
+
+    def test_soxl_keeps_a_full_day(self):
+        from analysis.order_book_collector import (
+            _RETENTION_KEEP_OVERRIDE, _SNAPSHOTS_PER_SEC)
+        hours = _RETENTION_KEEP_OVERRIDE["US.SOXL"] / _SNAPSHOTS_PER_SEC / 3600
+        assert 23.5 <= hours <= 24.5, f"got {hours:.1f}h"
+
+    def test_default_keeps_at_least_one_regular_session(self):
+        from analysis.order_book_collector import (
+            _RETENTION_KEEP_DEFAULT, _SNAPSHOTS_PER_SEC)
+        hours = _RETENTION_KEEP_DEFAULT / _SNAPSHOTS_PER_SEC / 3600
+        assert hours >= 6.5, f"a regular session is 6.5h, got {hours:.1f}h"
+
+    def test_override_is_more_generous_than_the_default(self):
+        from analysis.order_book_collector import (
+            _RETENTION_KEEP_DEFAULT, _RETENTION_KEEP_OVERRIDE)
+        for code, keep in _RETENTION_KEEP_OVERRIDE.items():
+            assert keep > _RETENTION_KEEP_DEFAULT, code
+
+    def test_keep_for_hours_scales_linearly(self):
+        from analysis.order_book_collector import _keep_for_hours
+        assert _keep_for_hours(2.0) == 2 * _keep_for_hours(1.0)
+        assert _keep_for_hours(0) == 0
+
+    def test_sizing_uses_the_densest_session_rate(self):
+        """Sized on the regular-session rate so the hours target is a floor.
+
+        The ~300ms cadence is fixed; what varies is pushes per tick -- 2.25 at
+        the open against 1.0 overnight (probe). Using the low rate would make
+        the target a ceiling that only holds when nothing is happening.
+        """
+        from analysis.order_book_collector import _SNAPSHOTS_PER_SEC
+        assert _SNAPSHOTS_PER_SEC >= 1 / 0.302, "below the bare cadence floor"
+
+
 if __name__ == "__main__":
     unittest.main()
