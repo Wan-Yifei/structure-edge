@@ -3010,6 +3010,18 @@ class TradeViewerQt(QMainWindow):
         else:
             self._rebuild_session_profile()
 
+        # Tick profile panel: normally hover-driven, so it holds whatever the
+        # cursor last landed on. That is right for a closed candle -- its data
+        # cannot change -- but the newest candle is still forming, and leaving
+        # its panel frozen at the moment the cursor arrived meant it quietly
+        # went stale while the candle beside it kept growing. Redraw it here so
+        # it advances with the bar it describes. Only the last index qualifies;
+        # anything older is finished and repainting it would be pure waste.
+        # _show_tick_profile returns immediately in range mode, so the
+        # range-selection panel is left alone.
+        if self._last_hover_idx is not None and self._last_hover_idx == len(klines) - 1:
+            self._show_tick_profile(self._last_hover_idx)
+
         # Set view range only when Code or TF changes (i.e. a genuinely new
         # chart).  Deferred via singleShot so profile / overlay drawing cannot
         # override the range we set here.

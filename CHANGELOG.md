@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.18.1 — the forming candle's tick profile follows the chart (2026-09-21)
+
+### Fix: top-right tick profile went stale on the newest candle (`analysis/trade_viewer_qt.py`)
+
+The tick profile panel is hover-driven: it repaints when the cursor moves to a
+different candle, when an S/M/L/Net/VP/Imb toggle changes, or on a range
+selection. `_render()` never touched it.
+
+That is correct for a closed candle -- its ticks cannot change -- but the
+newest candle is still forming. Resting the cursor on it in Live mode showed
+the book as it was at the moment the cursor arrived, and it stayed there while
+the candle beside it kept growing; the only way to refresh was to move the
+mouse away and back.
+
+`_render()` now repaints the panel when the hovered candle is the last one, so
+it advances on the same cycle as the bar it describes (Refresh(s), default
+15s). Older indices are left alone -- they are finished, and repainting them
+would be pure waste. Range mode is unaffected, since `_show_tick_profile`
+already returns immediately there.
+
+Verified offscreen: redrawn when hovering the last candle, not when hovering
+an older one, not when nothing is hovered; when a new candle arrives the
+previous last stops refreshing and the new one starts; range mode leaves the
+panel untouched; and end to end, a tick added to the forming bar shows up
+without any mouse movement.
+
 ## v0.18.0 — push-driven Liquidity Heatmap (2026-09-20)
 
 ### Feat: the heatmap consumes the ORDER_BOOK push feed directly (`analysis/liq_hm_window.py`)
