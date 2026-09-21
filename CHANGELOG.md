@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.20.1 — order-book retention sized in hours (2026-09-21)
+
+### Fix: retention was still sized for the throttled write rate (`analysis/order_book_collector.py`)
+
+`_RETENTION_KEEP_OVERRIDE = {"US.SOXL": 60_000}` was chosen when the collector
+wrote one snapshot per 2s, where it meant 33 hours of history. Removing the
+throttle raised the rate ~12x and the same constant quietly became **2.7
+hours** -- the heatmap's pre-fill and any order-book backtracking could only
+reach that far.
+
+The counts are now derived from an hours target (`_keep_for_hours`) rather
+than written down, so a future rate change is a one-line edit with a visible
+consequence instead of a silent one. SOXL keeps **24 hours** (535,680
+snapshots, ~1.1 GB); other codes keep one regular session, 6.5 hours
+(145,080, ~0.3 GB each). Sizing uses the regular-session rate, the densest
+one, which makes the hours target a floor across every session.
+
 ## v0.20.0 — one row per order-book snapshot (2026-09-21)
 
 ### Feat: the collector stores every push instead of one every 2s (`feeds/order_book_store.py`, `analysis/order_book_collector.py`)
@@ -55,21 +72,6 @@ Both still queried `order_book_snapshots` directly after it stopped being
 written, so they reported a 325-snapshot pruning remnant as if it were live
 data. Adds `earliest_ts()` and `codes()` to the store, which is what they were
 hand-rolling as `MIN(ts)` and `SELECT DISTINCT code`.
-
-### Fix: retention was still sized for the throttled write rate
-
-`_RETENTION_KEEP_OVERRIDE = {"US.SOXL": 60_000}` was chosen when the collector
-wrote one snapshot per 2s, where it meant 33 hours of history. Removing the
-throttle raised the rate ~12x and the same constant quietly became **2.7
-hours** -- the heatmap's pre-fill and any order-book backtracking could only
-reach that far.
-
-The counts are now derived from an hours target (`_keep_for_hours`) rather
-than written down, so a future rate change is a one-line edit with a visible
-consequence instead of a silent one. SOXL keeps **24 hours** (535,680
-snapshots, ~1.1 GB); other codes keep one regular session, 6.5 hours
-(145,080, ~0.3 GB each). Sizing uses the regular-session rate, the densest
-one, which makes the hours target a floor across every session.
 
 ### Migration
 
