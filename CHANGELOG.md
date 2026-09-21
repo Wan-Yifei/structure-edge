@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.19.0 — incremental live kline fetch, Refresh down to 1s (2026-09-21)
+
+### Feat: live cycles top up a cached frame instead of re-pulling the window (`analysis/trade_viewer_qt.py`)
+
+Every live refresh re-fetched the whole lookback window: four paginated
+`request_history_kline` calls (1m looks back 5 days, ~7200 bars at 2000/page).
+That dominated the cycle and is why `Refresh(s)` had a 5s floor -- at 1s it
+would have been ~240 history calls a minute, well past the API's limits.
+
+A live cycle now hands last cycle's frame back to the fetcher, which tops it
+up with a single `get_cur_kline` and merges. **One API call per cycle instead
+of four**, and no re-parse of bars that have not changed. **`Refresh(s)`'s
+floor drops from 5s to 1s**, validated live at 1s.
+
+Correctness rests on two things:
+
+- `_merge_klines` **overwrites** on an equal `time_key` rather than appending
+  only unseen ones. The newest bar is still forming, so the same key returns
+  with a different close/high/low/volume; keeping the first copy would freeze
+  the live bar. The old `get_cur_kline` supplement had exactly that blind spot
+  -- it filtered to unseen keys -- which went unnoticed only because the full
+  re-pull replaced the frame every cycle anyway.
+- Gaps are **detected, not predicted**. `get_cur_kline` returns the most
+  recent `_CUR_KLINE_BARS` (200) bars, so it can only bridge a shorter gap.
+  Rather than reason about elapsed time, the fetcher compares its oldest
+  returned bar against the cache's newest and falls back to a full fetch when
+  bars are missing between them -- correct however long the app was asleep,
+  paused or disconnected.
+
+The cache is `_klines` itself, keyed by `(code, tf)`, so a symbol or timeframe
+switch cannot top up a frame with the wrong bars. Historical mode never tops
+up; its window is pinned to a date rather than rolling. The merged frame is
+trimmed to the same rolling start the full fetch would have used, so it does
+not grow all session. A full fetch still happens on connect, on a code or
+timeframe switch, and on any detected gap.
+
+### Known: the remaining cost at 1s
+
+The API cost is solved, but the per-cycle local work is not: `load_local_ticks`
+re-reads the whole day's ticks (~181ms measured) and `_render()` repaints
+1500 bars with all overlays (~205ms). At Refresh=1s that is roughly 20% of
+wall-clock spent redrawing. Usable -- confirmed at 1s -- but the next
+bottleneck if it needs to go lower is the tick reload, which could be made
+incremental the same way.
+
 ## v0.18.1 — the forming candle's tick profile follows the chart (2026-09-21)
 
 ### Fix: top-right tick profile went stale on the newest candle (`analysis/trade_viewer_qt.py`)
