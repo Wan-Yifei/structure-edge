@@ -120,31 +120,12 @@ def _query_latest_snapshot(code: str) -> list[dict]:
     """
     if not _DB_PATH.exists():
         return []
-    con = None
     try:
-        con = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        cur = con.execute(
-            "SELECT ts, side, price, volume FROM order_book_snapshots "
-            "WHERE code = ? AND ts = ("
-            "  SELECT MAX(ts) FROM order_book_snapshots WHERE code = ?"
-            ")",
-            [code, code],
-        )
-        rows = [
-            {
-                "ts":     datetime.fromisoformat(r[0]),
-                "side":   r[1],
-                "price":  float(r[2]),
-                "volume": float(r[3]),
-            }
-            for r in cur.fetchall()
-        ]
-        return rows
+        from feeds.order_book_store import OrderBookStore
+        with OrderBookStore(_DB_PATH, read_only=True) as store:
+            return store.latest_snapshot(code)
     except Exception:
         return []
-    finally:
-        if con is not None:
-            con.close()
 
 
 def _query_n_snapshots(code: str, n: int) -> list[list[dict]]:
@@ -154,35 +135,12 @@ def _query_n_snapshots(code: str, n: int) -> list[list[dict]]:
     """
     if not _DB_PATH.exists():
         return []
-    con = None
     try:
-        con = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
-        cur = con.execute(
-            "SELECT DISTINCT ts FROM order_book_snapshots "
-            "WHERE code = ? ORDER BY ts DESC LIMIT ?",
-            [code, n],
-        )
-        ts_list = [r[0] for r in cur.fetchall()][::-1]  # reverse: oldest first
-        snapshots: list[list[dict]] = []
-        for ts_str in ts_list:
-            cur2 = con.execute(
-                "SELECT ts, side, price, volume FROM order_book_snapshots "
-                "WHERE code = ? AND ts = ?",
-                [code, ts_str],
-            )
-            rows = [
-                {"ts": datetime.fromisoformat(r[0]), "side": r[1],
-                 "price": float(r[2]), "volume": float(r[3])}
-                for r in cur2.fetchall()
-            ]
-            if rows:
-                snapshots.append(rows)
-        return snapshots
+        from feeds.order_book_store import OrderBookStore
+        with OrderBookStore(_DB_PATH, read_only=True) as store:
+            return store.last_n_snapshots(code, n)
     except Exception:
         return []
-    finally:
-        if con is not None:
-            con.close()
 
 
 _TICK_DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"

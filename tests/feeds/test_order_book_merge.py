@@ -202,20 +202,115 @@ class TestCrossedBook:
                 continue
             bids, asks = got
             if bids and asks:
-                assert max(p for p, _ in bids) < min(p for p, _ in asks), (
+                assert max(p for p, _ in bids) <= min(p for p, _ in asks), (
                     f"push {i} returned a crossed book: {bids} / {asks}")
 
-    def test_touching_prices_are_not_crossed(self):
-        """bid == ask is treated as crossed (>=), bid < ask is fine."""
+    def test_adjacent_prices_are_not_crossed(self):
         m = _m()
         assert m.merge(C, _lv((10.0, 5)), _lv((10.01, 7)), 0.0) is not None
-        assert _m().merge(C, _lv((10.0, 5)), _lv((10.0, 7)), 0.0) is None
+
+    def test_locked_book_is_kept(self):
+        """bid == ask is a real state, not a cross.
+
+        Two venues can quote the same price for as long as it takes the
+        trade to print, and it happens most around the open. An earlier
+        `>=` test here pinned the opposite and threw those snapshots away;
+        with the collector's write throttle removed that showed up as a
+        console flood of "crossed book bid=141.44 >= ask=141.44" and holes
+        in the heatmap at the busiest minute of the session.
+        """
+        got = _m().merge(C, _lv((10.0, 5)), _lv((10.0, 7)), 0.0)
+        assert got is not None
+        assert got == ([(10.0, 5)], [(10.0, 7)]), "both sides survive intact"
+
+    def test_locked_book_does_not_poison_the_cache(self):
+        """A lock must not drop a side the way a cross does."""
+        m = _m()
+        m.merge(C, _lv((10.0, 5)), _lv((10.0, 7)), 0.0)
+        bids, asks = m.merge(C, [], [], 1.0)
+        assert bids == [(10.0, 5)] and asks == [(10.0, 7)]
 
     def test_deep_book_uses_best_prices_not_first_entries(self):
         """best bid = max, best ask = min, regardless of list order."""
         m = _m()
         got = m.merge(C, _lv((9.8, 1), (10.0, 5)), _lv((10.3, 2), (10.1, 7)), 0.0)
         assert got is not None, "9.8/10.0 vs 10.1/10.3 is not crossed"
+
+
+class _Recorder(logging.Handler):
+    """Collects formatted warnings so the throttle can be asserted on."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.msgs: list[str] = []
+
+    def emit(self, record):
+        self.msgs.append(record.getMessage())
+
+
+def _m_logged(**kw):
+    log = logging.getLogger("test_obm_throttle")
+    log.handlers.clear()
+    log.propagate = False
+    rec = _Recorder()
+    log.addHandler(rec)
+    log.setLevel(logging.WARNING)
+    return OrderBookMerger(log=log, **kw), rec
+
+
+class TestCrossWarningThrottle:
+    """A real cross persists across pushes, and the feed sends ~6/s.
+
+    Before the write throttle was removed the collector only saw a fraction
+    of those; now it sees all of them, and one warning per push buries the
+    console.
+    """
+
+    def _cross(self, m, t):
+        return m.merge(C, _lv((10.2, 4)), _lv((10.1, 7)), t)
+
+    def test_first_cross_is_logged(self):
+        m, rec = _m_logged()
+        self._cross(m, 0.0)
+        assert len(rec.msgs) == 1
+
+    def test_repeats_inside_the_interval_are_suppressed(self):
+        m, rec = _m_logged()
+        for i in range(30):
+            self._cross(m, i * 0.16)   # ~6/s for ~5s
+        assert len(rec.msgs) <= 2, rec.msgs
+
+    def test_suppressed_count_is_reported_on_the_next_one(self):
+        m, rec = _m_logged()
+        for i in range(10):
+            self._cross(m, i * 0.1)    # 0.0 logs, 0.1-0.9 suppressed
+        self._cross(m, 100.0)          # well past the interval
+        assert "+9 similar suppressed" in rec.msgs[-1], rec.msgs
+
+    def test_a_later_cross_still_gets_through(self):
+        m, rec = _m_logged()
+        self._cross(m, 0.0)
+        self._cross(m, 60.0)
+        assert len(rec.msgs) == 2
+
+    def test_codes_throttle_independently(self):
+        m, rec = _m_logged()
+        m.merge("US.AAA", _lv((10.2, 4)), _lv((10.1, 7)), 0.0)
+        m.merge("US.BBB", _lv((10.2, 4)), _lv((10.1, 7)), 0.0)
+        assert len(rec.msgs) == 2
+
+    def test_throttling_never_changes_the_returned_snapshot(self):
+        """Suppressing a log line must not suppress the skip it describes."""
+        m, _ = _m_logged()
+        for i in range(10):
+            assert self._cross(m, i * 0.1) is None
+
+    def test_reset_clears_the_throttle(self):
+        m, rec = _m_logged()
+        self._cross(m, 0.0)
+        m.reset(C)
+        self._cross(m, 0.1)
+        assert len(rec.msgs) == 2, "a reset means the next cross is news again"
 
 
 # ── reset ────────────────────────────────────────────────────────────────────

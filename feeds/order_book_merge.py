@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 
 _DEFAULT_SIDE_STALE_SECS = 10.0
+_CROSS_LOG_INTERVAL_SECS = 5.0   # per code; the feed pushes ~6x/s
 
 Level = tuple[float, int]
 
@@ -65,6 +66,8 @@ class OrderBookMerger:
         self._stale_secs = stale_secs
         self._log = log or logging.getLogger(__name__)
         self._cache: dict[str, dict] = {}
+        self._cross_log_at: dict[str, float] = {}   # code -> last warn time
+        self._cross_suppressed: dict[str, int] = {}
 
     def reset(self, code: str | None = None) -> None:
         """Forget cached sides -- for a code, or all of them.
@@ -74,8 +77,31 @@ class OrderBookMerger:
         """
         if code is None:
             self._cache.clear()
+            self._cross_log_at.clear()
+            self._cross_suppressed.clear()
         else:
             self._cache.pop(code, None)
+            self._cross_log_at.pop(code, None)
+            self._cross_suppressed.pop(code, None)
+
+    def _warn_cross(self, code: str, now: float, msg: str, *args) -> None:
+        """Log a crossed-book warning at most once per code per interval.
+
+        A genuine cross usually persists for several pushes, and the feed
+        delivers ~6 of those a second, so an unconditional warning buries
+        everything else in the console. Emit the first, count the rest, and
+        report the count with the next one that gets through.
+        """
+        last = self._cross_log_at.get(code)
+        if last is not None and now - last < _CROSS_LOG_INTERVAL_SECS:
+            self._cross_suppressed[code] = self._cross_suppressed.get(code, 0) + 1
+            return
+        skipped = self._cross_suppressed.pop(code, 0)
+        if skipped:
+            msg += " (+%d similar suppressed)"
+            args = (*args, skipped)
+        self._cross_log_at[code] = now
+        self._log.warning(msg, *args)
 
     def merge(self, code: str, bid_items, ask_items,
               now: float) -> tuple[list[Level], list[Level]] | None:
@@ -115,8 +141,17 @@ class OrderBookMerger:
         if bids and asks:
             best_bid = max(p for p, _ in bids)
             best_ask = min(p for p, _ in asks)
-            if best_bid >= best_ask:
-                # A sustained crossed top-of-book isn't physically valid --
+            if best_bid > best_ask:
+                # Strictly bid > ask. A *locked* book (bid == ask) is a
+                # real, routine state -- two venues quoting the same price
+                # before the trade prints -- and it clusters exactly around
+                # the open, when the heatmap most needs every snapshot. An
+                # earlier `>=` here discarded every one of them; with the
+                # collector's write throttle gone the feed reached the
+                # merger at ~6 pushes/s and the skips became a console
+                # flood. Only bid > ask is physically impossible.
+                #
+                # A sustained crossed top-of-book isn't valid --
                 # a real cross gets arbitraged away in microseconds. Seen
                 # in practice: bid frozen at one price for 60+ seconds
                 # while ask legitimately moved below it -- moomoo's feed
@@ -130,18 +165,21 @@ class OrderBookMerger:
                 # side is bad -- skip rather than report an impossible
                 # snapshot.
                 if new_bids and not new_asks:
-                    self._log.warning(
-                        "%s crossed book bid=%.2f >= ask=%.2f, "
+                    self._warn_cross(
+                        code, now,
+                        "%s crossed book bid=%.2f > ask=%.2f, "
                         "dropping stale ask cache", code, best_bid, best_ask)
                     cache["asks"] = []
                 elif new_asks and not new_bids:
-                    self._log.warning(
-                        "%s crossed book bid=%.2f >= ask=%.2f, "
+                    self._warn_cross(
+                        code, now,
+                        "%s crossed book bid=%.2f > ask=%.2f, "
                         "dropping stale bid cache", code, best_bid, best_ask)
                     cache["bids"] = []
                 else:
-                    self._log.warning(
-                        "%s crossed book bid=%.2f >= ask=%.2f "
+                    self._warn_cross(
+                        code, now,
+                        "%s crossed book bid=%.2f > ask=%.2f "
                         "(both/neither side fresh), skipping", code, best_bid, best_ask)
                     return None
                 bids, asks = cache["bids"], cache["asks"]

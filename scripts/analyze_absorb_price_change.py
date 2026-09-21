@@ -12,8 +12,11 @@ from datetime import datetime, timedelta
 import bisect as _bisect
 
 ROOT = pathlib.Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
 OB_DB   = ROOT / "db" / "order_book.db"
 TICK_DB = ROOT / "db" / "ticks.db"
+
+from feeds.order_book_store import OrderBookStore   # noqa: E402
 
 # ── Replicate detection logic inline ──────────────────────────────────────────
 
@@ -69,23 +72,13 @@ def detect_absorption_bubbles(ticks, col_ts, mid_prices, col_secs, min_delta_vol
 # ── Query helpers ──────────────────────────────────────────────────────────────
 
 def query_codes(ob_db):
-    con = sqlite3.connect(str(ob_db))
-    rows = con.execute("SELECT DISTINCT code FROM order_book_snapshots").fetchall()
-    con.close()
-    return [r[0] for r in rows]
+    with OrderBookStore(ob_db, read_only=True) as store:
+        return store.codes()
 
 
 def query_ob_window(code, start, end, ob_db):
-    con = sqlite3.connect(str(ob_db))
-    cur = con.execute(
-        "SELECT ts, side, price, volume FROM order_book_snapshots "
-        "WHERE code=? AND ts>=? AND ts<=? ORDER BY ts",
-        [code, start.isoformat(sep=" "), end.isoformat(sep=" ")],
-    )
-    rows = [{"ts": datetime.fromisoformat(r[0]), "side": r[1],
-             "price": r[2], "volume": r[3]} for r in cur.fetchall()]
-    con.close()
-    return rows
+    with OrderBookStore(ob_db, read_only=True) as store:
+        return store.query_snapshots(code, start, end, end_inclusive=True)
 
 
 def query_ticks_window(code, start, end, tick_db):
@@ -135,15 +128,12 @@ def main():
     min_delta = 100.0
 
     # Get date range from OB DB
-    con = sqlite3.connect(str(OB_DB))
-    row = con.execute("SELECT MIN(ts), MAX(ts) FROM order_book_snapshots").fetchone()
-    con.close()
-    if not row or not row[0]:
+    with OrderBookStore(OB_DB, read_only=True) as store:
+        db_start = store.earliest_ts()
+        db_end   = store.latest_ts()
+    if db_start is None:
         print("No data in order_book.db")
         sys.exit(1)
-
-    db_start = datetime.fromisoformat(row[0])
-    db_end   = datetime.fromisoformat(row[1])
     print(f"OB data range: {db_start} → {db_end}")
 
     codes = query_codes(OB_DB)
