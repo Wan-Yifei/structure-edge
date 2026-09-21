@@ -35,6 +35,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 _DEFAULT_CONFIG = pathlib.Path(__file__).parent.parent / "config" / "schedule.json"
 _THROTTLE = 2.0   # mirrors order_book_collector._MIN_WRITE_INTERVAL
 
+# A gap below this counts as "inside the same burst". The feed pushes on a
+# ~300ms cadence (p90 measured at 0.302s in both an overnight and a regular
+# session) but can fire several callbacks per cadence tick -- 1.0 per tick
+# overnight, 2.25 at the regular open. 0.1s sits well clear of both the
+# ~12ms intra-burst median and the 300ms cadence.
+_INTRA_BURST_SECS = 0.1
+
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(
@@ -48,6 +55,24 @@ def _parse_args(argv=None):
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=11111)
     return p.parse_args(argv)
+
+
+def _fingerprint(items) -> tuple:
+    """Order-insensitive identity of one side of the book.
+
+    Sorted so a reordered but otherwise identical side does not read as a
+    change; rounded so float formatting noise cannot either.
+    """
+    out = []
+    for item in items:
+        try:
+            if isinstance(item, dict):
+                out.append((round(float(item["price"]), 6), int(item["volume"])))
+            else:
+                out.append((round(float(item[0]), 6), int(item[1])))
+        except (KeyError, IndexError, TypeError, ValueError):
+            pass
+    return tuple(sorted(out))
 
 
 def _pct(xs: list[float], q: float) -> float:
@@ -93,6 +118,15 @@ def main(argv=None) -> None:
     n_both: dict[str, int] = defaultdict(int)
     n_kept: dict[str, int] = defaultdict(int)      # would survive the 2 s throttle
     last_kept: dict[str, float] = {}
+    # Does a push actually carry a new book, or repeat the previous one? This
+    # is what decides whether the raw push rate is also the *information* rate
+    # -- and so whether storage has to keep up with it.
+    last_fp: dict[str, tuple] = {}
+    n_same: dict[str, int] = defaultdict(int)        # neither side changed
+    n_bid_chg: dict[str, int] = defaultdict(int)     # bid side changed
+    n_ask_chg: dict[str, int] = defaultdict(int)     # ask side changed
+    n_intra: dict[str, int] = defaultdict(int)       # arrived inside a burst
+    n_intra_same: dict[str, int] = defaultdict(int)  # ... and repeated the book
 
     class _Probe(OrderBookHandlerBase):
         def on_recv_rsp(self, rsp_pb):
@@ -110,11 +144,30 @@ def main(argv=None) -> None:
                     n_bid_only[code] += 1
                 elif asks:
                     n_ask_only[code] += 1
+                gap = None
                 if code in last:
-                    gaps[code].append(now - last[code])
+                    gap = now - last[code]
+                    gaps[code].append(gap)
                 else:
                     first[code] = now
                 last[code] = now
+
+                fp = (_fingerprint(bids), _fingerprint(asks))
+                prev = last_fp.get(code)
+                if prev is not None:
+                    same = fp == prev
+                    if same:
+                        n_same[code] += 1
+                    else:
+                        if fp[0] != prev[0]:
+                            n_bid_chg[code] += 1
+                        if fp[1] != prev[1]:
+                            n_ask_chg[code] += 1
+                    if gap is not None and gap < _INTRA_BURST_SECS:
+                        n_intra[code] += 1
+                        if same:
+                            n_intra_same[code] += 1
+                last_fp[code] = fp
                 # What the collector would actually have persisted.
                 if now - last_kept.get(code, 0.0) >= _THROTTLE:
                     n_kept[code] += 1
@@ -171,6 +224,36 @@ def main(argv=None) -> None:
     print(f"\n{'code':10s} {'both sides':>11s} {'bid-only':>10s} {'ask-only':>10s}")
     for code in active:
         print(f"{code:10s} {n_both[code]:11,} {n_bid_only[code]:10,} {n_ask_only[code]:10,}")
+
+    print(f"\nNEW BOOK vs REPEAT  (is the push rate also the information rate?)")
+    print(f"{'code':10s} {'compared':>9s} {'repeat':>8s} {'repeat%':>8s} "
+          f"{'bid chg':>8s} {'ask chg':>8s} | {'distinct/s':>10s}")
+    for code in active:
+        cmp_n = max(n_push[code] - 1, 0)
+        rep = n_same[code]
+        distinct = (n_push[code] - rep) / max(elapsed, 1e-9)
+        print(f"{code:10s} {cmp_n:9,} {rep:8,} "
+              f"{(rep / cmp_n * 100 if cmp_n else 0):7.1f}% "
+              f"{n_bid_chg[code]:8,} {n_ask_chg[code]:8,} | {distinct:10.2f}")
+
+    print(f"\n{'code':10s} {'in-burst':>9s} {'of which repeat':>16s}")
+    for code in active:
+        ib = n_intra[code]
+        print(f"{code:10s} {ib:9,} {n_intra_same[code]:9,} "
+              f"({(n_intra_same[code] / ib * 100 if ib else 0):.1f}%)"
+              f"   [gap < {_INTRA_BURST_SECS}s]")
+
+    tot_push = sum(n_push[c] for c in active)
+    tot_same = sum(n_same[c] for c in active)
+    if tot_push:
+        distinct_rate = (tot_push - tot_same) / max(elapsed, 1e-9)
+        print(f"\nSTORAGE (current schema writes ~120 rows per snapshot)")
+        print(f"  every push          {tot_push / elapsed * 120:8.0f} rows/s"
+              f"   {tot_push / elapsed * 120 * 6.5 * 3600 / 1e6:7.1f}M per 6.5h session")
+        print(f"  distinct books only {distinct_rate * 120:8.0f} rows/s"
+              f"   {distinct_rate * 120 * 6.5 * 3600 / 1e6:7.1f}M per 6.5h session")
+        print(f"  one row per snapshot{distinct_rate:8.2f} rows/s"
+              f"   {distinct_rate * 6.5 * 3600 / 1000:7.1f}k per 6.5h session")
 
     all_gaps = sorted(g for c in active for g in gaps[c])
     if all_gaps:
