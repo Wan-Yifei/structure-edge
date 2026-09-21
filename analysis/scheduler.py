@@ -925,13 +925,10 @@ class SchedulerApp(tk.Tk):
         if not db_path.exists():
             return None
         try:
-            con = sqlite3.connect(str(db_path), timeout=2)
-            row = con.execute(
-                "SELECT MAX(ts) FROM order_book_snapshots"
-            ).fetchone()
-            con.close()
-            if row and row[0]:
-                last_ts = datetime.fromisoformat(row[0])
+            from feeds.order_book_store import OrderBookStore
+            with OrderBookStore(db_path, read_only=True) as store:
+                last_ts = store.latest_ts()
+            if last_ts is not None:
                 return (datetime.now() - last_ts).total_seconds() / 60
         except Exception:
             pass

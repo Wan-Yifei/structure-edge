@@ -77,18 +77,93 @@ class OrderBookStore:
 
     # ── read ───────────────────────────────────────────────────────────────────
 
-    def query_snapshots(self, code: str,
-                        start: datetime, end: datetime) -> list[dict]:
-        cur = self._con.execute(
-            "SELECT ts, side, price, volume FROM order_book_snapshots "
-            "WHERE code = ? AND ts >= ? AND ts < ? ORDER BY ts",
-            [code, _ts_str(start), _ts_str(end)],
-        )
+    # Every read goes through one of the methods below rather than a
+    # hand-rolled SELECT. The heatmap, the DOM window and two scripts each
+    # used to open their own connection and spell out the same
+    # "SELECT ts, side, price, volume FROM order_book_snapshots" -- six copies
+    # of the row shape, which means six places to fix for any schema change.
+
+    def _rows(self, sql: str, params: list) -> list[dict]:
+        """Run a query returning (ts, side, price, volume) and shape the rows.
+
+        The single place that knows how a stored snapshot maps to the dicts
+        readers expect.
+        """
         return [
             {"ts": datetime.fromisoformat(r[0]),
-             "side": r[1], "price": r[2], "volume": r[3]}
-            for r in cur.fetchall()
+             "side": r[1], "price": float(r[2]), "volume": float(r[3])}
+            for r in self._con.execute(sql, params).fetchall()
         ]
+
+    def query_snapshots(self, code: str, start: datetime, end: datetime,
+                        end_inclusive: bool = False) -> list[dict]:
+        """Rows for *code* between *start* and *end*, oldest first.
+
+        end_inclusive exists because the callers disagreed: the viewer's
+        date-window loads were written against a half-open end, the DOM
+        window's against a closed one. Rather than quietly change either,
+        both keep the bound they had.
+        """
+        op = "<=" if end_inclusive else "<"
+        return self._rows(
+            "SELECT ts, side, price, volume FROM order_book_snapshots "
+            f"WHERE code = ? AND ts >= ? AND ts {op} ? ORDER BY ts",
+            [code, _ts_str(start), _ts_str(end)],
+        )
+
+    def latest_snapshot(self, code: str) -> list[dict]:
+        """Every row of the newest snapshot for *code* -- one full book."""
+        return self._rows(
+            "SELECT ts, side, price, volume FROM order_book_snapshots "
+            "WHERE code = ? AND ts = ("
+            "  SELECT MAX(ts) FROM order_book_snapshots WHERE code = ?)",
+            [code, code],
+        )
+
+    def snapshot_at_or_before(self, code: str, ts: datetime) -> list[dict]:
+        """The newest snapshot at or before *ts* -- the book as of that moment."""
+        return self._rows(
+            "SELECT ts, side, price, volume FROM order_book_snapshots "
+            "WHERE code = ? AND ts = ("
+            "  SELECT MAX(ts) FROM order_book_snapshots "
+            "  WHERE code = ? AND ts <= ?)",
+            [code, code, _ts_str(ts)],
+        )
+
+    def last_n_snapshots(self, code: str, n: int) -> list[list[dict]]:
+        """The last *n* snapshots for *code*, oldest first, one list each.
+
+        One query rather than the 1 + n the callers used to issue: pull every
+        row whose ts is in the newest n timestamps, then group. At ~120 rows a
+        snapshot that is a round trip per snapshot saved.
+        """
+        rows = self._rows(
+            "SELECT ts, side, price, volume FROM order_book_snapshots "
+            "WHERE code = ? AND ts IN ("
+            "  SELECT ts FROM ("
+            "    SELECT DISTINCT ts FROM order_book_snapshots "
+            "    WHERE code = ? ORDER BY ts DESC LIMIT ?))"
+            "ORDER BY ts",
+            [code, code, n],
+        )
+        out: list[list[dict]] = []
+        for row in rows:
+            if not out or out[-1][0]["ts"] != row["ts"]:
+                out.append([row])
+            else:
+                out[-1].append(row)
+        return out
+
+    def latest_ts(self, code: str | None = None) -> datetime | None:
+        """Newest snapshot timestamp, for *code* or across every code."""
+        if code:
+            r = self._con.execute(
+                "SELECT MAX(ts) FROM order_book_snapshots WHERE code = ?",
+                [code]).fetchone()
+        else:
+            r = self._con.execute(
+                "SELECT MAX(ts) FROM order_book_snapshots").fetchone()
+        return datetime.fromisoformat(r[0]) if r and r[0] else None
 
     def query_date(self, code: str, day: date) -> list[dict]:
         start = datetime(day.year, day.month, day.day)

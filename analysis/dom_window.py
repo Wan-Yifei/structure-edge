@@ -58,58 +58,24 @@ def _query_latest_snapshot(code: str, db_path: pathlib.Path) -> list[dict]:
     """Most-recent full order book snapshot for `code`."""
     if not db_path.exists():
         return []
-    con = None
     try:
-        con = sqlite3.connect(str(db_path), check_same_thread=False)
-        row = con.execute(
-            "SELECT MAX(ts) FROM order_book_snapshots WHERE code = ?", [code]
-        ).fetchone()
-        if not row or not row[0]:
-            return []
-        cur = con.execute(
-            "SELECT ts, side, price, volume FROM order_book_snapshots "
-            "WHERE code = ? AND ts = ?",
-            [code, row[0]],
-        )
-        result = [{"ts": datetime.fromisoformat(r[0]),
-                   "side": r[1], "price": r[2], "volume": r[3]}
-                  for r in cur.fetchall()]
-        return result
+        from feeds.order_book_store import OrderBookStore
+        with OrderBookStore(db_path, read_only=True) as store:
+            return store.latest_snapshot(code)
     except Exception:
         return []
-    finally:
-        if con is not None:
-            con.close()
 
 
 def _query_snapshot_at(code: str, ts: datetime, db_path: pathlib.Path) -> list[dict]:
     """Most-recent snapshot at or before `ts` for `code`."""
     if not db_path.exists():
         return []
-    con = None
     try:
-        con = sqlite3.connect(str(db_path), check_same_thread=False)
-        ts_str = ts.isoformat(sep=" ")
-        row = con.execute(
-            "SELECT MAX(ts) FROM order_book_snapshots WHERE code = ? AND ts <= ?",
-            [code, ts_str],
-        ).fetchone()
-        if not row or not row[0]:
-            return []
-        cur = con.execute(
-            "SELECT ts, side, price, volume FROM order_book_snapshots "
-            "WHERE code = ? AND ts = ?",
-            [code, row[0]],
-        )
-        result = [{"ts": datetime.fromisoformat(r[0]),
-                   "side": r[1], "price": r[2], "volume": r[3]}
-                  for r in cur.fetchall()]
-        return result
+        from feeds.order_book_store import OrderBookStore
+        with OrderBookStore(db_path, read_only=True) as store:
+            return store.snapshot_at_or_before(code, ts)
     except Exception:
         return []
-    finally:
-        if con is not None:
-            con.close()
 
 
 def _query_ob_window(code: str, start: datetime, end: datetime,
@@ -117,23 +83,14 @@ def _query_ob_window(code: str, start: datetime, end: datetime,
     """All order book snapshots for `code` in [start, end], sorted by ts."""
     if not db_path.exists():
         return []
-    con = None
     try:
-        con = sqlite3.connect(str(db_path), check_same_thread=False)
-        cur = con.execute(
-            "SELECT ts, side, price, volume FROM order_book_snapshots "
-            "WHERE code = ? AND ts >= ? AND ts <= ? ORDER BY ts",
-            [code, start.isoformat(sep=" "), end.isoformat(sep=" ")],
-        )
-        result = [{"ts": datetime.fromisoformat(r[0]),
-                   "side": r[1], "price": r[2], "volume": r[3]}
-                  for r in cur.fetchall()]
-        return result
+        from feeds.order_book_store import OrderBookStore
+        with OrderBookStore(db_path, read_only=True) as store:
+            # end_inclusive: this reader's bound has always been closed,
+            # unlike the viewer's date-window loads. Kept rather than unified.
+            return store.query_snapshots(code, start, end, end_inclusive=True)
     except Exception:
         return []
-    finally:
-        if con is not None:
-            con.close()
 
 
 def _query_ticks_window(code: str, start: datetime, end: datetime,
