@@ -1,5 +1,83 @@
 # Changelog
 
+## v0.18.0 — push-driven Liquidity Heatmap (2026-09-20)
+
+### Feat: the heatmap consumes the ORDER_BOOK push feed directly (`analysis/liq_hm_window.py`)
+
+The heatmap used to read the collector's database on a 1s timer, so its
+latency was the collector's 2s write throttle plus that poll: up to ~3s from
+a book change to a pixel. It now subscribes to ORDER_BOOK itself and repaints
+on the push.
+
+Measured during the 2026-09-20 overnight session with the new probe: moomoo
+pushes on a **~300ms cadence** (2,001 pushes in 600s; p10 0.294 / median 0.300
+/ p90 0.306 -- regular enough that it is clearly a fixed server-side interval,
+not market activity), and the collector's throttle was discarding **85.7%** of
+them. End-to-end latency goes from ~1.5-3s to ~300ms, which is the feed's own
+floor.
+
+- `_PushBridge` carries snapshots from the SDK's socket thread to the GUI
+  thread via a queued signal; the handler only merges and emits.
+- Merging is `feeds.order_book_merge.OrderBookMerger`, shared with the
+  collector, so partial pushes, side staleness and crossed books are handled
+  by the one implementation that has been through production.
+- The rightmost column is repainted in place while the Col(s) timer still
+  rolls a new one on schedule, so the x axis stays a uniform time grid with a
+  live edge. Appending per push would make it non-uniform and unreadable.
+- Every push now lands in `_raw_snaps`, where before only the throttled writes
+  did -- iceberg and spoof detection look for volume refreshing at a price, so
+  they see every refresh the feed reports instead of one sample per 2s.
+- A watchdog re-subscribes after `_PUSH_STALE_SECS` (90s) of silence from a
+  feed that had been delivering. An OpenD subscription can stop delivering
+  with no error surfacing, and a frozen heatmap looks exactly like a quiet
+  book. Silence *before* the first push does not count, so opening the window
+  hours before the session starts does not churn.
+- The DB is still read for the cold-start pre-fill, and the old polling path
+  survives as a fallback when the subscription fails or has not delivered yet.
+
+### Refactor: shared ORDER_BOOK merge module (`feeds/order_book_merge.py`)
+
+`order_book_collector.py`'s partial-push handling, side-staleness window and
+crossed-book attribution move into `OrderBookMerger`, shared by the collector
+and the heatmap. Pure by design: a push goes in, a complete snapshot or None
+comes out; throttling and persistence stay with the collector. Verified
+behaviour-identical to the inline original over 7 hand-built cases and 40
+randomised push sequences, comparing the full write series.
+
+### Fix: overlay markers froze on the push path (`analysis/liq_hm_window.py`)
+
+Found during live validation. The push path did not call
+`_redraw_orderflow_markers()` / `_load_absorb_ticks()`, so aggressor bubbles
+stayed on the column they were first drawn on while the grid scrolled out from
+under them. They now refresh on the column roll -- a push moves no column, and
+redrawing at 3.3/s would be wasted work. `Reset` repaints the overlays too; it
+only rescaled the axes before, which is why it appeared to do nothing.
+
+### Tooling: ORDER_BOOK push-rate probe (`analysis/ob_push_probe.py`)
+
+Times every push and reports the gap distribution plus what the collector's
+throttle would discard. Writes nothing, so it runs alongside the collector.
+`order_book.db` cannot answer this on its own -- every gap measured there is
+floored by the throttle, not by the feed.
+
+### Test: throttle coverage the collector never had (`tests/analysis/test_order_book_collector.py`)
+
+`test_handler_accumulates_session_count` had been failing for as long as the
+throttle existed: it called `on_recv_rsp` twice back to back and asserted both
+writes landed. It now isolates accumulation from the throttle, and two new
+tests cover the throttle itself (a burst inside the window produces one write;
+the throttle keys on code). Confirmed by mutation.
+
+### Known, not addressed
+
+`order_book_snapshots` stores one row per price level, so a snapshot is ~120
+rows, and `prune(keep=1000)` is row-based -- each code retains only 8-9
+snapshots (~18s of history). That is why the pre-fill is so short. Removing
+the collector's throttle is not viable until this changes: at the measured
+3.3 pushes/s the current schema would write 400 rows/s (~0.94 GB per regular
+session per code), which is what the throttle was added to prevent. One row
+per snapshot would make it 3.3 rows/s.
+
 ## v0.17.1 — fix blank tick panel after using VP mode (2026-09-13)
 
 ### Fix: turning `VP` off left the tick profile panel blank (`analysis/trade_viewer_qt.py`)
