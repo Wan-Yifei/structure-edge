@@ -218,6 +218,11 @@ _TREND_WINDOW: dict[str, int] = {
     "1m": 120, "5m": 60, "15m": 50, "30m": 40, "1h": 30, "4h": 20, "1d": 15,
 }
 
+# How many recent bars get_cur_kline is asked for when topping up a live
+# frame. It bounds the gap a top-up can bridge; anything longer is caught
+# by the gap check and falls back to a full fetch.
+_CUR_KLINE_BARS = 200
+
 _LIVE_LOOKBACK_DAYS: dict[str, int] = {
     "1m": 5, "3m": 5, "5m": 5, "15m": 7, "30m": 10, "1h": 14, "4h": 30, "1d": 730,
 }
@@ -925,6 +930,27 @@ class ObItem(pg.GraphicsObject):
 
 # ── Background data-fetch worker ──────────────────────────────────────────────
 
+def _merge_klines(base, fresh):
+    """Fold `fresh` bars into `base`, newer rows winning on an equal time_key.
+
+    Overwrite, not append-if-absent. The newest bar is still forming, so the
+    same time_key comes back repeatedly with a different close/high/low/volume
+    -- keeping the first copy would freeze the live bar at whatever it looked
+    like when first seen. The pre-existing get_cur_kline supplement had exactly
+    that blind spot (it filtered to unseen keys), which went unnoticed only
+    because the full history re-pull replaced the whole frame every cycle.
+    """
+    if base is None or len(base) == 0:
+        return fresh.reset_index(drop=True)
+    if fresh is None or len(fresh) == 0:
+        return base.reset_index(drop=True)
+    fresh = fresh.reindex(columns=base.columns)
+    out = pd.concat([base, fresh], ignore_index=True)
+    out["time_key"] = out["time_key"].astype(str)
+    out = out.drop_duplicates("time_key", keep="last")   # keep="last" = fresh wins
+    return out.sort_values("time_key").reset_index(drop=True)
+
+
 class DataFetcher(QThread):
     """Fetches klines + ticks + SMC signals in a background thread."""
 
@@ -969,65 +995,105 @@ class DataFetcher(QThread):
             # up to ~7200 bars), dropping the most recent days including
             # "today" entirely. Mirrors feeds/fetcher.py's paginated fetch.
             ktype, _ = TIMEFRAME_MAP[tf]
-            frames: list[pd.DataFrame] = []
-            page_req_key = None
-            while True:
-                if page_req_key is None:
-                    ret, page_df, page_req_key = self._ctx.request_history_kline(
-                        code, start=start, end=end, ktype=ktype,
-                        autype=AuType.NONE, max_count=2000, extended_time=True,
-                        session=Session.ALL,
-                    )
-                else:
-                    ret, page_df, page_req_key = self._ctx.request_history_kline(
-                        code, ktype=ktype, autype=AuType.NONE, max_count=2000,
-                        extended_time=True, session=Session.ALL,
-                        page_req_key=page_req_key,
-                    )
-                if ret != RET_OK:
-                    self.error.emit(f"Kline fetch failed: {page_df}")
-                    return
-                if page_df is not None and not page_df.empty:
-                    frames.append(page_df)
-                if not page_req_key:
-                    break
-            df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-            if df.empty:
-                self.error.emit(
-                    f"Kline fetch returned no data for {code} {tf} "
-                    f"({start[:10]} → {end[:10]}). "
-                    "Check moomoo data subscription or try a higher timeframe."
-                )
-                return
+            df = None
 
-            # In Live mode, supplement with get_cur_kline so that bars from the
-            # current session (which request_history_kline may not yet include)
-            # are also visible.  Requires that the symbol is already subscribed.
+            # Live top-up: when the caller hands back last cycle's frame, the
+            # window it already covers does not need pulling again. The full
+            # re-pull is 4 paginated request_history_kline calls per cycle (1m
+            # looks back 5 days, ~7200 bars at 2000/page) -- the bulk of the
+            # cycle time, and the reason Refresh could not go below 5s without
+            # risking the history-kline rate limit.
             #
-            # This call was observed silently failing (bare except: pass) for
-            # long stretches -- the chart would then miss newly-completed
-            # bars entirely until the user manually disconnected and
-            # reconnected (which re-subscribes and appears to restore it).
-            # Surface ret!=RET_OK / exceptions as a warning (not fatal --
-            # request_history_kline's own data is still usable) so the next
-            # occurrence is diagnosable from the log instead of just "chart
-            # stopped updating, no idea why".
-            if not historical:
+            # get_cur_kline returns the most recent _CUR_KLINE_BARS bars, so it
+            # bridges any gap shorter than that. Rather than predict whether it
+            # will, the gap is DETECTED: if its oldest bar is newer than the
+            # cache's newest, bars are missing in between and this falls
+            # through to the full fetch. That stays correct however long the
+            # app was asleep, paused or disconnected -- no assumption about how
+            # much time passed, just a look at what actually came back.
+            cached = p.get("cached_klines")
+            if not historical and cached is not None and len(cached) > 0:
                 try:
-                    r2, cur_df = self._ctx.get_cur_kline(
-                        code, 200, ktype, AuType.NONE)
-                    if r2 == RET_OK and cur_df is not None and not cur_df.empty:
-                        hist_keys = set(df["time_key"].astype(str))
-                        cur_new   = cur_df[
-                            ~cur_df["time_key"].astype(str).isin(hist_keys)]
-                        if not cur_new.empty:
-                            cur_new = cur_new.reindex(columns=df.columns)
-                            df = pd.concat([df, cur_new], ignore_index=True)
-                            df = df.sort_values("time_key").reset_index(drop=True)
-                    elif r2 != RET_OK:
-                        self.error.emit(f"get_cur_kline warning: {cur_df}")
+                    r0, cur0 = self._ctx.get_cur_kline(
+                        code, _CUR_KLINE_BARS, ktype, AuType.NONE)
+                    if r0 == RET_OK and cur0 is not None and not cur0.empty:
+                        oldest_fresh = str(cur0["time_key"].astype(str).min())
+                        newest_cached = str(cached["time_key"].astype(str).max())
+                        if oldest_fresh <= newest_cached:
+                            df = _merge_klines(cached, cur0)
+                            # Keep the window rolling; an incrementally fed
+                            # frame would otherwise grow all session.
+                            df = df[df["time_key"].astype(str) >= start]
+                            df = df.reset_index(drop=True)
+                        else:
+                            self.error.emit(
+                                f"Live top-up gap ({oldest_fresh} > "
+                                f"{newest_cached}) — full fetch")
+                    elif r0 != RET_OK:
+                        self.error.emit(f"get_cur_kline warning: {cur0}")
                 except Exception as exc:
-                    self.error.emit(f"get_cur_kline warning: {exc}")
+                    self.error.emit(f"Live top-up failed ({exc}) — full fetch")
+
+            if df is None:
+                frames: list[pd.DataFrame] = []
+                page_req_key = None
+                while True:
+                    if page_req_key is None:
+                        ret, page_df, page_req_key = self._ctx.request_history_kline(
+                            code, start=start, end=end, ktype=ktype,
+                            autype=AuType.NONE, max_count=2000, extended_time=True,
+                            session=Session.ALL,
+                        )
+                    else:
+                        ret, page_df, page_req_key = self._ctx.request_history_kline(
+                            code, ktype=ktype, autype=AuType.NONE, max_count=2000,
+                            extended_time=True, session=Session.ALL,
+                            page_req_key=page_req_key,
+                        )
+                    if ret != RET_OK:
+                        self.error.emit(f"Kline fetch failed: {page_df}")
+                        return
+                    if page_df is not None and not page_df.empty:
+                        frames.append(page_df)
+                    if not page_req_key:
+                        break
+                df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+                if df.empty:
+                    self.error.emit(
+                        f"Kline fetch returned no data for {code} {tf} "
+                        f"({start[:10]} → {end[:10]}). "
+                        "Check moomoo data subscription or try a higher timeframe."
+                    )
+                    return
+
+                # In Live mode, supplement with get_cur_kline so that bars from the
+                # current session (which request_history_kline may not yet include)
+                # are also visible.  Requires that the symbol is already subscribed.
+                #
+                # This call was observed silently failing (bare except: pass) for
+                # long stretches -- the chart would then miss newly-completed
+                # bars entirely until the user manually disconnected and
+                # reconnected (which re-subscribes and appears to restore it).
+                # Surface ret!=RET_OK / exceptions as a warning (not fatal --
+                # request_history_kline's own data is still usable) so the next
+                # occurrence is diagnosable from the log instead of just "chart
+                # stopped updating, no idea why".
+                if not historical:
+                    try:
+                        r2, cur_df = self._ctx.get_cur_kline(
+                            code, 200, ktype, AuType.NONE)
+                        if r2 == RET_OK and cur_df is not None and not cur_df.empty:
+                            hist_keys = set(df["time_key"].astype(str))
+                            cur_new   = cur_df[
+                                ~cur_df["time_key"].astype(str).isin(hist_keys)]
+                            if not cur_new.empty:
+                                cur_new = cur_new.reindex(columns=df.columns)
+                                df = pd.concat([df, cur_new], ignore_index=True)
+                                df = df.sort_values("time_key").reset_index(drop=True)
+                        elif r2 != RET_OK:
+                            self.error.emit(f"get_cur_kline warning: {cur_df}")
+                    except Exception as exc:
+                        self.error.emit(f"get_cur_kline warning: {exc}")
 
             # K_DAY time_key arrives as "YYYY-MM-DD" (no time component).
             # Normalise to "YYYY-MM-DD 00:00:00" so all downstream [:16] slices
@@ -1334,6 +1400,11 @@ class TradeViewerQt(QMainWindow):
 
         # State
         self._klines:       pd.DataFrame | None = None
+        # (code, tf) the frame in _klines belongs to. The live top-up reuses
+        # _klines as its cache rather than keeping a second copy, so this is
+        # what stops a frame being topped up with another symbol's or another
+        # timeframe's bars after a switch.
+        self._live_kl_key:  tuple | None        = None
         self._warmup:       pd.DataFrame | None = None
         self._ticks:        dict | None         = None
         # Session-profile POC state. POC is a from-scratch argmax on every
@@ -1509,9 +1580,15 @@ class TradeViewerQt(QMainWindow):
         tb1.addSeparator()
 
         # Refresh (Live)
-        tb1.addWidget(_lbl("Refresh (s, min 5):"))
+        tb1.addWidget(_lbl("Refresh (s):"))
         self._refresh_spin = QSpinBox()
-        self._refresh_spin.setRange(5, 300)
+        # Floor was 5s because every live cycle re-pulled the whole lookback
+        # window: 4 paginated request_history_kline calls, which at 1s would
+        # have been ~240 history calls a minute. Live cycles now top up a
+        # cached frame with one get_cur_kline instead, so the API cost per
+        # cycle is one call and 1s is affordable. A full fetch still happens on
+        # connect, on a code/timeframe switch, and whenever a gap is detected.
+        self._refresh_spin.setRange(1, 300)
         self._refresh_spin.setValue(getattr(args, "refresh", 15) or 15)
         self._refresh_spin.setFixedWidth(55)
         self._refresh_spin.valueChanged.connect(self._on_refresh_changed)
@@ -2653,6 +2730,13 @@ class TradeViewerQt(QMainWindow):
             "candle_mins":     cm,
             "ind":             ind,
             "live_ticks":      live_snap,
+            # Only when it is this exact (code, tf); the fetcher additionally
+            # refuses to use it if a gap shows up. Historical mode never tops
+            # up -- its window is pinned to a date, not rolling.
+            "cached_klines":   (self._klines
+                                if (not historical
+                                    and self._live_kl_key == (new_code, tf))
+                                else None),
             "fvg_min_gap_pct": self._fvg_min_pct.value() / 100.0,
             "ob_max_count":    self._ob_max_count.value(),
         }
@@ -2684,6 +2768,9 @@ class TradeViewerQt(QMainWindow):
         xlo, xhi = self._plot_c.vb.viewRange()[0] if prev_n > 0 else (0, 0)
 
         self._klines      = result["klines"]
+        self._live_kl_key = (
+            None if result.get("historical")
+            else (result.get("code", ""), result.get("tf", "")))
         self._ticks       = result["ticks"]
         self._warmup      = result["warmup"]
         self._smc_signals = result["smc_signals"]
