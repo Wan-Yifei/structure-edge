@@ -1212,6 +1212,18 @@ class LiqHmWindow(QWidget):
             else:
                 self._push_column(self._latest_snap or [], is_fill=True)
                 self._render()
+                # Overlays are positioned by column index, so they go stale the
+                # moment a column rolls. _on_snap_ready did this for the poll
+                # path; the push path dropped it, which left aggressor bubbles
+                # frozen at the column they were first drawn on while the grid
+                # scrolled out from under them (reported, with Reset not
+                # helping because it only rescales the view).
+                #
+                # Here rather than in _on_push: a push does not move any
+                # column, and at ~3.3 pushes/s (measured) redrawing markers and
+                # re-querying absorb ticks on each one would be wasted work.
+                self._redraw_orderflow_markers()
+                self._load_absorb_ticks()
                 return
         if self._worker is not None and self._worker.isRunning():
             return   # previous query still in flight — skip this tick
@@ -2034,13 +2046,20 @@ class LiqHmWindow(QWidget):
         return max(5, round(self._max_cols_spin.value() * 0.05))
 
     def _reset_view(self) -> None:
-        """Restore X/Y ranges to the full data bounds (undo any zoom/pan)."""
+        """Restore X/Y ranges to the full data bounds (undo any zoom/pan).
+
+        Also repaints the overlays. Reset is what you press when the display
+        looks wrong, and rescaling alone left stale markers exactly where they
+        were -- reported as "Reset does nothing" while aggressor bubbles sat
+        frozen on an old column.
+        """
         n = len(self._col_ts)
         if n == 0 or self._bin_size == 0.0:
             return
         self._plot_widget.setXRange(
             0, self._max_cols_spin.value() + self._right_margin_cols(), padding=0)
         self._plot_widget.setYRange(self._price_min, self._price_max, padding=0)
+        self._redraw_orderflow_markers()
 
     def _on_pin_toggled(self, checked: bool) -> None:
         flags = self.windowFlags()
