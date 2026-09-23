@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.20.2 — overlay markers re-anchor on every column roll (2026-09-23)
+
+### Fix: quiet book left the bubbles pinned while the grid scrolled (`analysis/liq_hm_window.py`)
+
+Reported in the after-hours session: the price path kept advancing but the
+aggressor bubbles stayed where they were drawn.
+
+`_on_snap_ready` (the DB-poll path) rolls a column on **every** tick -- when
+the book has not changed it forward-fills, so the time axis keeps moving -- but
+it only called `_redraw_orderflow_markers()` / `_load_absorb_ticks()` when the
+snapshot carried new data. Overlays are positioned by column index, so an
+unchanged book still moves every marker's correct position one column left.
+After-hours is where this shows: the book can sit still for many ticks at a
+stretch, and a stale push feed (>90s) falls back to this same path.
+
+The push path had the identical bug and was fixed earlier by redrawing in
+`_on_tick`; the comment there claimed the poll path already did this, which was
+only true for the ticks that happened to carry new data.
+
+`tests/analysis/test_liq_hm_marker_refresh.py` drives the real widget offscreen
+and pins one redraw per column roll whatever the mix of quiet and active ticks.
+
 ## v0.20.1 — order-book retention sized in hours (2026-09-21)
 
 ### Fix: retention was still sized for the throttled write rate (`analysis/order_book_collector.py`)

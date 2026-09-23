@@ -1231,9 +1231,16 @@ class LiqHmWindow(QWidget):
             # fall behind the newest column.
             new_xhi = new_n + 0.5
             self._plot_widget.setXRange(new_xhi - visible, new_xhi, padding=0)
-        if new_data:
-            self._redraw_orderflow_markers()
-            self._load_absorb_ticks()
+        # Unconditional, not gated on new_data: a column rolls on *every* tick
+        # (see the forward-fill above), and overlays are positioned by column
+        # index, so an unchanged book still moves every marker's correct
+        # position one column left. Gating this on new_data left the price path
+        # advancing while the bubbles stayed pinned to the column they were
+        # drawn on -- visible in after-hours, where the book can sit still for
+        # many ticks at a stretch. The push path in _on_tick already calls both
+        # on every tick for the same reason.
+        self._redraw_orderflow_markers()
+        self._load_absorb_ticks()
 
     def _maybe_init_price_range(self, snap: list[dict]) -> None:
         """Set/rebuild the visible price band from the levels *near the touch*.
