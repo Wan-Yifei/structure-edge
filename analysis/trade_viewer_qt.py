@@ -128,9 +128,19 @@ _EMA_COLS = ["#42a5f5", "#ab47bc", "#ffa726"]  # EMA 20/50/200
 #
 #     SOXS = SOXS_prev_close * (2 - SOXL / SOXL_prev_close)
 #
-# Checked against live quotes (SOXL 151.845 / 146.33, SOXS 32.350 / 33.63):
-# predicted 32.362 against 32.350 actual, 0.04% off. Tracking error and the
-# funds' own drift make this an estimate, not an arbitrage relation.
+# Backtested over 16,917 5m bars across 61 sessions (2026-07-01..09-25) by
+# anchoring each day on the prior daily close and comparing the estimate with
+# SOXS's actual print. Regular session: median error 0.14% ($0.06), p90 0.52%
+# ($0.23), p99 1.43% ($0.77), no measurable bias (-0.03% signed mean). The
+# error does NOT grow through the session -- 0.13-0.16% median every hour from
+# 09:30 to 16:00 -- so the daily anchor needs no intraday refresh.
+#
+# Extended hours are worse (overnight median 0.20%, p99 4.7%), and the whole
+# tail is thin-market data rather than model failure: the worst cases are SOXS
+# prints frozen at one value for an hour while SOXL kept moving.
+#
+# Tracking error and fund drift make this an estimate, not an arbitrage
+# relation.
 _INVERSE_PAIR  = {"US.SOXL": "US.SOXS"}
 _PAIR_COL      = "#ab47bc"   # purple -- must not read as the gold price tag
 
