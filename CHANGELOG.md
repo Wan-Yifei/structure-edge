@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.21.1 — fix: the pair tag took the whole price readout down (2026-09-25)
+
+### Fix: `_pair_implied` read a `self._code` the window does not have (`analysis/trade_viewer_qt.py`)
+
+v0.21.0 shipped with the crosshair raising `AttributeError` on every mouse
+move: the viewer keeps its symbol in the code box, not in a `_code` attribute,
+so the lookup threw and aborted the handler before it could show anything --
+taking the ordinary gold price tag with it. Reported as no price showing at all.
+
+The tests did not catch it because they built a bare object and assigned
+`_code` themselves, inventing the very state the window lacks. They now
+construct a real `TradeViewerQt` and set the symbol through the code box, and
+a new `TestCrosshairLabels` drives the actual mouse-move handler -- including
+the case that broke, an ordinary symbol still showing its price. Only
+`_pair_anchor` is set directly, since it comes from a live market snapshot.
+
+The anchor also carries its base code now. `_trigger_fetch` returns early on a
+live code change, so the previous symbol's anchor outlives the switch until
+the next load; matching the stored code against the box keeps it from being
+read against the wrong symbol in that window.
+
 ## v0.21.0 — inverse-pair price on the crosshair (2026-09-25)
 
 ### Feat: hovering a SOXL level also shows where SOXS would be (`analysis/trade_viewer_qt.py`)

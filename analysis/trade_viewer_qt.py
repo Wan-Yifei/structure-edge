@@ -1443,9 +1443,12 @@ class TradeViewerQt(QMainWindow):
         self._tick_lock      = threading.Lock()
         self._last_tick_price: float            = 0.0
         self._last_nbbo:      tuple[float, float] = (0.0, 0.0)
-        # (pair_code, base_prev_close, pair_prev_close) -- the daily reset
-        # anchor both legs of an _INVERSE_PAIR are measured from.
-        self._pair_anchor: tuple[str, float, float] | None = None
+        # (base_code, pair_code, base_prev_close, pair_prev_close) -- the daily
+        # reset anchor both legs of an _INVERSE_PAIR are measured from. The base
+        # code rides along so a switch away from the pair symbol cannot be read
+        # against the previous one's anchor: _trigger_fetch returns early on a
+        # live code change, leaving the old anchor in place until the next load.
+        self._pair_anchor: tuple[str, str, float, float] | None = None
         self._fetcher:      DataFetcher | None  = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._trigger_fetch)
@@ -2814,7 +2817,8 @@ class TradeViewerQt(QMainWindow):
                         base_pc = float(by_code.loc[self._live_code, "prev_close_price"] or 0)
                         pair_pc = float(by_code.loc[pair_code, "prev_close_price"] or 0)
                         if base_pc > 0 and pair_pc > 0:
-                            self._pair_anchor = (pair_code, base_pc, pair_pc)
+                            self._pair_anchor = (self._live_code, pair_code,
+                                                 base_pc, pair_pc)
             except Exception:
                 pass
 
@@ -5219,27 +5223,33 @@ class TradeViewerQt(QMainWindow):
 
     # ── Crosshair + tooltip ───────────────────────────────────────────────────
 
-    def _pair_implied(self, price: float) -> tuple[str, float] | None:
+    def _pair_implied(self, price: float) -> tuple[str, str, float] | None:
         """Where the inverse-leveraged pair sits when this symbol is at *price*.
 
-        Returns (pair_code, price) or None when there is nothing to show --
-        the symbol has no pair, the anchor has not been fetched, or we are in
-        historical mode where the anchor would be the wrong day's.
+        Returns (base_code, pair_code, price), or None when there is nothing to
+        show -- no anchor fetched yet, the symbol in the box is not the one the
+        anchor was taken for, or historical mode, where the anchor would be the
+        wrong day's.
 
         None is also returned once the implied price goes non-positive: both
         funds reset daily from the previous close, so the relation only holds
         while each leg is still solvent against that anchor, and a SOXL move
         past +200% would put SOXS below zero. Well outside anything that can
         happen in a session, but it costs one comparison to not print it.
+
+        The current symbol is read from the code box, which is where the viewer
+        actually keeps it -- an earlier version of this read a self._code that
+        does not exist on the window, so every mouse move raised AttributeError
+        and took the ordinary price tag down with it.
         """
         anchor = self._pair_anchor
-        if anchor is None or not self._code:
+        if anchor is None:
             return None
-        pair_code, base_pc, pair_pc = anchor
-        if _INVERSE_PAIR.get(self._code) != pair_code or base_pc <= 0:
+        base_code, pair_code, base_pc, pair_pc = anchor
+        if base_code != self._code_edit.text().strip() or base_pc <= 0:
             return None
         implied = pair_pc * (2.0 - price / base_pc)
-        return (pair_code, implied) if implied > 0 else None
+        return (base_code, pair_code, implied) if implied > 0 else None
 
     def _on_mouse_move(self, pos) -> None:
         # pos is QPointF emitted directly by scene.sigMouseMoved
@@ -5321,12 +5331,12 @@ class TradeViewerQt(QMainWindow):
             self._price_label.setText(f"{y:.2f}")
             self._pair_price_label.setVisible(False)
         else:
-            pair_code, pair_px = pair
+            base_code, pair_code, pair_px = pair
             # Tickers are shown only in pair mode: with two numbers on one line
             # they stop being decoration and start doing the disambiguating.
             self._price_label.setAnchor((0.0, 1.0))   # lifted above the line
             self._price_label.setText(
-                f"{_short_code(self._code)} {y:.2f}")
+                f"{_short_code(base_code)} {y:.2f}")
             self._pair_price_label.setPos(label_x, y)
             self._pair_price_label.setText(
                 f"{_short_code(pair_code)} {pair_px:.2f}")
