@@ -46,6 +46,15 @@ def test_liq_hm_window_constructs(qapp):
     _settle(qapp, w)
 
 
+def test_trade_viewer_constructs(qapp):
+    """The main chart, including the crosshair tags built in __init__."""
+    from analysis.trade_viewer_qt import TradeViewerQt
+
+    w = TradeViewerQt()
+    assert w._pair_price_label is not None, "inverse-pair crosshair tag"
+    _settle(qapp, w)
+
+
 def test_dom_window_constructs(qapp, tmp_path):
     from analysis.dom_window import DomWindow
 

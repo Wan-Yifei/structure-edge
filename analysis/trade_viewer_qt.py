@@ -118,6 +118,26 @@ _OB_BEAR  = "#ef5350"   # bear OB red
 _OB_BREAK = "#9e9e9e"   # breaker OB grey
 _OB_MIT   = "#ffa726"   # mitigation OB amber
 _EMA_COLS = ["#42a5f5", "#ab47bc", "#ffa726"]  # EMA 20/50/200
+
+# Inverse-leveraged pairs. Hovering a price level on the key symbol also shows
+# where its inverse would be trading at that level, so a level picked on one
+# can be read straight off as a level on the other.
+#
+# Both are +/-3x the same index and reset daily from the previous close, so
+# from that shared anchor a SOXL return of 3r implies a SOXS return of -3r:
+#
+#     SOXS = SOXS_prev_close * (2 - SOXL / SOXL_prev_close)
+#
+# Checked against live quotes (SOXL 151.845 / 146.33, SOXS 32.350 / 33.63):
+# predicted 32.362 against 32.350 actual, 0.04% off. Tracking error and the
+# funds' own drift make this an estimate, not an arbitrage relation.
+_INVERSE_PAIR  = {"US.SOXL": "US.SOXS"}
+_PAIR_COL      = "#ab47bc"   # purple -- must not read as the gold price tag
+
+
+def _short_code(code: str) -> str:
+    """US.SOXL -> SOXL. Market prefixes waste width in a crosshair tag."""
+    return code.split(".")[-1] if code else code
 _AVWAP_COL = "#ffeb3b"  # anchored VWAP line/label color
 _ZERO_GAMMA_COL = "#ff8c00"  # option Zero Gamma line -- matches gex.py's own matplotlib chart
 # Half-width, in percent of price, of the window the POC switch hysteresis
@@ -1423,6 +1443,9 @@ class TradeViewerQt(QMainWindow):
         self._tick_lock      = threading.Lock()
         self._last_tick_price: float            = 0.0
         self._last_nbbo:      tuple[float, float] = (0.0, 0.0)
+        # (pair_code, base_prev_close, pair_prev_close) -- the daily reset
+        # anchor both legs of an _INVERSE_PAIR are measured from.
+        self._pair_anchor: tuple[str, float, float] | None = None
         self._fetcher:      DataFetcher | None  = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._trigger_fetch)
@@ -2265,6 +2288,19 @@ class TradeViewerQt(QMainWindow):
         self._price_label.setVisible(False)
         self._plot_c.addItem(self._price_label, ignoreBounds=True)
 
+        # Inverse-pair price tag: sits just BELOW the crosshair line (anchor
+        # top-left) while the gold one moves just above it, so the two prices
+        # read as one pair straddling the level rather than a stack of numbers.
+        self._pair_price_label = pg.TextItem(
+            text="", color=_PAIR_COL,
+            fill=pg.mkBrush(_qc(_BG_TIP, 180)),
+            anchor=(0.0, 0.0),   # left edge, top -> body hangs below the point
+        )
+        self._pair_price_label.setFont(QFont("Monospace", 7))
+        self._pair_price_label.setZValue(100)
+        self._pair_price_label.setVisible(False)
+        self._plot_c.addItem(self._pair_price_label, ignoreBounds=True)
+
         # OHLCV tooltip: floating multi-line label above cursor, with dark fill
         # anchor=(0.0, 1.0): BOTTOM-LEFT at position → text body extends upward
         self._ohlcv_label = pg.TextItem(
@@ -2719,6 +2755,12 @@ class TradeViewerQt(QMainWindow):
             self._log(f"Live: switched to {new_code}, waiting for first bar…")
             return  # let the refresh timer drive the first fetch for the new code
 
+        if historical:
+            # prev_close from the snapshot API is today's, not the displayed
+            # date's, so the estimate would be silently wrong. No tag is better
+            # than a wrong one.
+            self._pair_anchor = None
+
         with self._tick_lock:
             live_snap = {k: dict(v) for k, v in self._live_ticks.items()}
 
@@ -2750,8 +2792,15 @@ class TradeViewerQt(QMainWindow):
         # true best bid/ask rather than values derived from ORDER_BOOK depth
         # (which on LITE accounts does not start at the actual NBBO).
         if not historical and self._live_code:
+            # The pair's leg rides along in the same snapshot call rather than
+            # costing a second round trip; prev_close is a daily constant, so
+            # refetching it each load is enough to stay current across a
+            # session rollover.
+            pair_code = _INVERSE_PAIR.get(self._live_code)
+            codes = [self._live_code] + ([pair_code] if pair_code else [])
+            self._pair_anchor = None
             try:
-                ret, df = ctx.get_market_snapshot([self._live_code])
+                ret, df = ctx.get_market_snapshot(codes)
                 if ret == RET_OK and not df.empty:
                     row = df.iloc[0]
                     bid = float(row.get("bid_price", 0) or 0)
@@ -2760,6 +2809,12 @@ class TradeViewerQt(QMainWindow):
                         self._last_nbbo = (bid, ask)
                         if self._liq_hm_window is not None:
                             self._liq_hm_window.update_quote(bid, ask)
+                    if pair_code is not None and len(df) > 1:
+                        by_code = df.set_index("code")
+                        base_pc = float(by_code.loc[self._live_code, "prev_close_price"] or 0)
+                        pair_pc = float(by_code.loc[pair_code, "prev_close_price"] or 0)
+                        if base_pc > 0 and pair_pc > 0:
+                            self._pair_anchor = (pair_code, base_pc, pair_pc)
             except Exception:
                 pass
 
@@ -5164,6 +5219,28 @@ class TradeViewerQt(QMainWindow):
 
     # ── Crosshair + tooltip ───────────────────────────────────────────────────
 
+    def _pair_implied(self, price: float) -> tuple[str, float] | None:
+        """Where the inverse-leveraged pair sits when this symbol is at *price*.
+
+        Returns (pair_code, price) or None when there is nothing to show --
+        the symbol has no pair, the anchor has not been fetched, or we are in
+        historical mode where the anchor would be the wrong day's.
+
+        None is also returned once the implied price goes non-positive: both
+        funds reset daily from the previous close, so the relation only holds
+        while each leg is still solvent against that anchor, and a SOXL move
+        past +200% would put SOXS below zero. Well outside anything that can
+        happen in a session, but it costs one comparison to not print it.
+        """
+        anchor = self._pair_anchor
+        if anchor is None or not self._code:
+            return None
+        pair_code, base_pc, pair_pc = anchor
+        if _INVERSE_PAIR.get(self._code) != pair_code or base_pc <= 0:
+            return None
+        implied = pair_pc * (2.0 - price / base_pc)
+        return (pair_code, implied) if implied > 0 else None
+
     def _on_mouse_move(self, pos) -> None:
         # pos is QPointF emitted directly by scene.sigMouseMoved
         in_candle = self._plot_c.sceneBoundingRect().contains(pos)
@@ -5181,7 +5258,8 @@ class TradeViewerQt(QMainWindow):
             for line in (self._vline, self._hline,
                          self._vline_v, self._vline_kd, self._vline_cvd,
                          self._vline_adi,
-                         self._price_label, self._ohlcv_label,
+                         self._price_label, self._pair_price_label,
+                         self._ohlcv_label,
                          self._vol_label, self._kd_label, self._cvd_label,
                          self._adi_label,
                          self._profile_hline, self._tick_profile_hline):
@@ -5236,8 +5314,23 @@ class TradeViewerQt(QMainWindow):
         label_x  = xlo + (xhi - xlo) * 0.01  # ~1% from left edge
 
         # Price tag: left edge, vertically centered on cursor price
+        pair = self._pair_implied(y)
         self._price_label.setPos(label_x, y)
-        self._price_label.setText(f"{y:.2f}")
+        if pair is None:
+            self._price_label.setAnchor((0.0, 0.5))   # centred on the line
+            self._price_label.setText(f"{y:.2f}")
+            self._pair_price_label.setVisible(False)
+        else:
+            pair_code, pair_px = pair
+            # Tickers are shown only in pair mode: with two numbers on one line
+            # they stop being decoration and start doing the disambiguating.
+            self._price_label.setAnchor((0.0, 1.0))   # lifted above the line
+            self._price_label.setText(
+                f"{_short_code(self._code)} {y:.2f}")
+            self._pair_price_label.setPos(label_x, y)
+            self._pair_price_label.setText(
+                f"{_short_code(pair_code)} {pair_px:.2f}")
+            self._pair_price_label.setVisible(True)
         self._price_label.setVisible(True)
 
         if self._klines is not None and not self._klines.empty:

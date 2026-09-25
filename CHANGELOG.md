@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.21.0 — inverse-pair price on the crosshair (2026-09-25)
+
+### Feat: hovering a SOXL level also shows where SOXS would be (`analysis/trade_viewer_qt.py`)
+
+The crosshair's price tag now splits in two on SOXL: the gold tag lifts just
+above the line and a purple one hangs just below it with the SOXS price
+implied by that same level, so a level picked on one leg can be read straight
+off as a level on the other. Both tags carry their ticker, which they do not
+in single-symbol mode -- with one number there is nothing to disambiguate.
+
+Both funds are +/-3x the same index and reset daily from the previous close,
+so from that shared anchor a SOXL return of 3r implies a SOXS return of -3r:
+
+    SOXS = SOXS_prev_close * (2 - SOXL / SOXL_prev_close)
+
+Checked against live quotes (SOXL 151.845 / prev 146.33, SOXS 32.350 / prev
+33.63): predicted 32.362 against 32.350 actual, 0.04% off. The leverage
+cancels, so a SOXL move of +4% reads as SOXS -4%. Tracking error and fund
+drift make this an estimate, not an arbitrage relation.
+
+The pair's prev_close rides along in the market snapshot the viewer already
+requests on each load, so the feature costs no extra round trip. Nothing is
+drawn when there is no anchor, on symbols outside `_INVERSE_PAIR`, or in
+historical mode, where the anchor would be today's close rather than the
+displayed date's -- no tag beats a silently wrong one.
+
+`tests/analysis/test_gui_window_smoke.py` now also constructs the main viewer,
+so the crosshair items are covered by the suite rather than only by opening it.
+
 ## v0.20.2 — overlay markers re-anchor on every column roll (2026-09-23)
 
 ### Fix: quiet book left the bubbles pinned while the grid scrolled (`analysis/liq_hm_window.py`)
