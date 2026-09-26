@@ -51,11 +51,20 @@ def _bins(kl, ticks=None, i0=0, i1=None, n_bins=60):
     spelling .iloc[i0:i1 + 1] out at each call site, where the off-by-one is
     easy to get wrong in a way that still passes.
     """
+    return _profile(kl, ticks, i0, i1, n_bins)[:3]
+
+
+def _profile(kl, ticks=None, i0=0, i1=None, n_bins=60):
+    """As _bins, but keeping the range-wide stats dict."""
     if i1 is None:
         i1 = len(kl) - 1
-    centers, volumes, used_ticks, _stats = _compute_profile_bins(
-        kl.iloc[i0:i1 + 1], ticks, CM, n_bins=n_bins)
-    return centers, volumes, used_ticks
+    return _compute_profile_bins(kl.iloc[i0:i1 + 1], ticks, CM, n_bins=n_bins)
+
+
+def _bucket(i: int):
+    """Tick-bucket key for bar i, the key _compute_profile_bins looks up."""
+    return _ticks_for_bar(
+        (T0 + timedelta(minutes=i * CM)).strftime("%Y-%m-%d %H:%M"), {})[0]
 
 
 def _ticks_for_bar(bar_end_str: str, price_vol: dict[float, int]) -> tuple[datetime, dict]:
@@ -268,6 +277,148 @@ class TestComputeProfileBinsTicks(unittest.TestCase):
         _, volumes, used_ticks = _bins(kl, ticks, 0, 0)
         # No valid tick data → OHLCV fallback
         self.assertFalse(used_ticks)
+
+
+# ---------------------------------------------------------------------------
+# _compute_profile_bins - range-wide stats
+# ---------------------------------------------------------------------------
+
+class TestComputeProfileBinsStats(unittest.TestCase):
+    """The fourth return value, which feeds the Range Profile readout
+    (Tot / Buy / Sell / Neu / Mid*).
+
+    Two rules make it easy to misread. It counts tick-covered bars ONLY --
+    OHLCV-fallback bars carry no direction or size information, so they add to
+    the visual bins but not to these totals. And "medium" is a size breakdown
+    *within* buy + sell, not a fourth additive bucket, so total stays a closed
+    sum of buy + sell + neutral.
+    """
+
+    KEYS = ("total", "buy", "sell", "neutral", "medium")
+
+    def _stats(self, kl, ticks=None, i0=0, i1=None):
+        return _profile(kl, ticks, i0, i1)[3]
+
+    # -- nothing to count --------------------------------------------------
+    def test_no_ticks_leaves_every_field_zero(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 400.0))
+        st = self._stats(kl, None)
+        self.assertEqual(set(st), set(self.KEYS))
+        for k in self.KEYS:
+            self.assertEqual(st[k], 0.0, k)
+
+    def test_ohlcv_volume_does_not_leak_into_the_totals(self):
+        """400 units of OHLCV volume, no ticks: the bins get it, stats do not."""
+        kl = _klines(_bar(0, 100.0, 110.0, 400.0))
+        _, volumes, used, st = _profile(kl, {})
+        self.assertFalse(used)
+        self.assertAlmostEqual(float(volumes.sum()), 400.0, places=6)
+        self.assertEqual(st["total"], 0.0)
+
+    def test_degenerate_range_returns_zeroed_stats(self):
+        kl = _klines(("2026-01-15 09:35", 100.0, 100.0, 100.0, 100.0, 50.0))
+        st = self._stats(
+            kl, {_bucket(0): {100.0: {"buy": 5, "sell": 5, "neutral": 0}}})
+        for k in self.KEYS:
+            self.assertEqual(st[k], 0.0, k)
+
+    # -- tallying ----------------------------------------------------------
+    def test_buy_sell_neutral_tallied_separately(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0))
+        st = self._stats(
+            kl, {_bucket(0): {105.0: {"buy": 10, "sell": 20, "neutral": 30}}})
+        self.assertEqual((st["buy"], st["sell"], st["neutral"]), (10, 20, 30))
+
+    def test_total_is_a_closed_sum(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0))
+        st = self._stats(kl, {_bucket(0): {
+            102.0: {"buy": 10, "sell": 20, "neutral": 30},
+            108.0: {"buy": 1, "sell": 2, "neutral": 3},
+        }})
+        self.assertEqual(st["total"], st["buy"] + st["sell"] + st["neutral"])
+        self.assertEqual(st["total"], 66)
+
+    def test_aggregates_across_bars(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0), _bar(1, 100.0, 110.0, 0.0))
+        st = self._stats(kl, {
+            _bucket(0): {105.0: {"buy": 10, "sell": 0, "neutral": 0}},
+            _bucket(1): {105.0: {"buy": 5, "sell": 7, "neutral": 0}},
+        }, i0=0, i1=1)
+        self.assertEqual((st["buy"], st["sell"], st["total"]), (15, 7, 22))
+
+    def test_stats_match_the_binned_volume_when_everything_is_counted(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0))
+        _, volumes, _, st = _profile(kl, {_bucket(0): {
+            102.0: {"buy": 40, "sell": 0, "neutral": 0},
+            107.0: {"buy": 0, "sell": 60, "neutral": 0},
+        }})
+        self.assertAlmostEqual(float(volumes.sum()), st["total"], places=6)
+
+    def test_independent_of_bin_count(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0))
+        ticks = {_bucket(0): {105.0: {"buy": 10, "sell": 20, "neutral": 30}}}
+        self.assertEqual(_profile(kl, ticks, n_bins=10)[3],
+                         _profile(kl, ticks, n_bins=200)[3])
+
+    # -- medium ------------------------------------------------------------
+    def test_medium_sums_both_sides(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0))
+        st = self._stats(kl, {_bucket(0): {
+            105.0: {"buy": 50, "sell": 50, "neutral": 0,
+                    "buy_m": 20, "sell_m": 15},
+        }})
+        self.assertEqual(st["medium"], 35)
+
+    def test_medium_is_not_added_into_total(self):
+        """It is a slice of buy + sell, so counting it again would double it."""
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0))
+        st = self._stats(kl, {_bucket(0): {
+            105.0: {"buy": 50, "sell": 50, "neutral": 0,
+                    "buy_m": 20, "sell_m": 15},
+        }})
+        self.assertEqual(st["total"], 100)
+        self.assertLessEqual(st["medium"], st["buy"] + st["sell"])
+
+    def test_medium_is_zero_when_the_feed_omits_the_size_keys(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0))
+        st = self._stats(
+            kl, {_bucket(0): {105.0: {"buy": 10, "sell": 0, "neutral": 0}}})
+        self.assertEqual(st["medium"], 0)
+
+    # -- what gets excluded ------------------------------------------------
+    def test_prices_outside_the_bar_range_are_not_counted(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0))
+        st = self._stats(kl, {_bucket(0): {
+            99.0:  {"buy": 999, "sell": 0, "neutral": 0},
+            105.0: {"buy": 50,  "sell": 0, "neutral": 0},
+            111.0: {"buy": 888, "sell": 0, "neutral": 0},
+        }})
+        self.assertEqual(st["total"], 50)
+
+    def test_zero_total_entries_are_skipped(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 400.0))
+        st = self._stats(
+            kl, {_bucket(0): {105.0: {"buy": 0, "sell": 0, "neutral": 0}}})
+        self.assertEqual(st["total"], 0.0)
+
+    def test_a_bar_without_ticks_is_excluded_from_a_mixed_range(self):
+        """Bar 1 falls back to OHLCV: its 400 units reach the bins, not the
+        totals. This is the rule that makes Tot smaller than the profile."""
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0), _bar(1, 100.0, 110.0, 400.0))
+        _, volumes, used, st = _profile(
+            kl, {_bucket(0): {105.0: {"buy": 60, "sell": 0, "neutral": 0}}},
+            i0=0, i1=1)
+        self.assertTrue(used)
+        self.assertAlmostEqual(float(volumes.sum()), 460.0, places=6)
+        self.assertEqual(st["total"], 60)
+
+    def test_only_the_requested_bars_are_counted(self):
+        kl = _klines(_bar(0, 100.0, 110.0, 0.0), _bar(1, 100.0, 110.0, 0.0))
+        ticks = {
+            _bucket(0): {105.0: {"buy": 11, "sell": 0, "neutral": 0}},
+            _bucket(1): {105.0: {"buy": 22, "sell": 0, "neutral": 0}},
+        }
+        self.assertEqual(self._stats(kl, ticks, i0=1, i1=1)["total"], 22)
 
 
 # ---------------------------------------------------------------------------
