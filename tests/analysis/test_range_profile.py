@@ -37,6 +37,27 @@ def _bar(i: int, lo: float, hi: float, vol: float) -> tuple:
     return (ts, mid, hi, lo, mid, vol)
 
 
+def _bins(kl, ticks=None, i0=0, i1=None, n_bins=60):
+    """Profile the bar range [i0, i1] inclusive.
+
+    _compute_profile_bins used to take that index range and slice internally.
+    It now profiles whatever rows it is handed, so that the Session Volume
+    Profile can pass a non-contiguous, session-filtered subset -- the slicing
+    moved to the caller. It also grew a fourth return value, range-wide
+    direction/size stats, which these tests do not exercise: they are about
+    the binning.
+
+    Keeping the inclusive-range convention in one place here rather than
+    spelling .iloc[i0:i1 + 1] out at each call site, where the off-by-one is
+    easy to get wrong in a way that still passes.
+    """
+    if i1 is None:
+        i1 = len(kl) - 1
+    centers, volumes, used_ticks, _stats = _compute_profile_bins(
+        kl.iloc[i0:i1 + 1], ticks, CM, n_bins=n_bins)
+    return centers, volumes, used_ticks
+
+
 def _ticks_for_bar(bar_end_str: str, price_vol: dict[float, int]) -> tuple[datetime, dict]:
     """Build a ticks bucket key + data for _compute_profile_bins.
 
@@ -58,7 +79,7 @@ class TestComputeProfileBinsOHLCV(unittest.TestCase):
     def _run(self, kl, i0=0, i1=None, n_bins=60):
         if i1 is None:
             i1 = len(kl) - 1
-        return _compute_profile_bins(kl, None, CM, i0, i1, n_bins=n_bins)
+        return _bins(kl, None, i0, i1, n_bins)
 
     def test_single_candle_returns_60_bins(self):
         kl = _klines(_bar(0, 100.0, 110.0, 1000.0))
@@ -98,7 +119,7 @@ class TestComputeProfileBinsOHLCV(unittest.TestCase):
             [("2026-01-15 09:35", 100.0, 100.0, 100.0, 100.0, 0.0)],
             columns=["time_key", "open", "high", "low", "close", "volume"],
         )
-        centers, volumes, used_ticks = _compute_profile_bins(kl, None, CM, 0, 0)
+        centers, volumes, used_ticks = _bins(kl, None, 0, 0)
         self.assertEqual(len(centers), 0)
         self.assertEqual(len(volumes), 0)
         self.assertFalse(used_ticks)
@@ -110,9 +131,14 @@ class TestComputeProfileBinsOHLCV(unittest.TestCase):
             _bar(2, 205.0, 215.0, 500.0),  # bar 2
         )
         centers, volumes, _ = self._run(kl, i0=1, i1=2)
-        # No volume should land at price ~100 (bar 0 excluded)
-        below_150 = volumes[centers < 150.0].sum()
-        self.assertAlmostEqual(below_150, 0.0, places=6)
+        # Asserting "no volume below 150" would pass for free: the excluded bar
+        # also sets the range, so there are no bins down there to look at. The
+        # claim worth pinning is that the range and the total both come from
+        # bars 1-2 alone.
+        self.assertGreaterEqual(float(centers.min()), 200.0)
+        self.assertLessEqual(float(centers.max()), 215.0)
+        self.assertAlmostEqual(float(volumes.sum()), 1000.0, places=6,
+                               msg="bar 0's 100 units must not be included")
 
     def test_custom_n_bins(self):
         kl = _klines(_bar(0, 100.0, 110.0, 1000.0))
@@ -169,14 +195,14 @@ class TestComputeProfileBinsTicks(unittest.TestCase):
         kl, ticks = self._make_klines_and_ticks([
             (100.0, 110.0, 500.0, {105.0: 500}),
         ])
-        _, _, used_ticks = _compute_profile_bins(kl, ticks, CM, 0, 0)
+        _, _, used_ticks = _bins(kl, ticks, 0, 0)
         self.assertTrue(used_ticks)
 
     def test_single_price_level_lands_in_correct_bin(self):
         kl, ticks = self._make_klines_and_ticks([
             (100.0, 110.0, 0.0, {105.0: 200}),
         ])
-        centers, volumes, used_ticks = _compute_profile_bins(kl, ticks, CM, 0, 0)
+        centers, volumes, used_ticks = _bins(kl, ticks, 0, 0)
         self.assertTrue(used_ticks)
         poc_price = float(centers[int(np.argmax(volumes))])
         # POC bin center should be near 105
@@ -186,7 +212,7 @@ class TestComputeProfileBinsTicks(unittest.TestCase):
         kl, ticks = self._make_klines_and_ticks([
             (100.0, 110.0, 0.0, {102.0: 100, 105.0: 200, 108.0: 300}),
         ])
-        _, volumes, used_ticks = _compute_profile_bins(kl, ticks, CM, 0, 0)
+        _, volumes, used_ticks = _bins(kl, ticks, 0, 0)
         self.assertTrue(used_ticks)
         self.assertAlmostEqual(float(volumes.sum()), 600.0, places=5)
 
@@ -194,7 +220,7 @@ class TestComputeProfileBinsTicks(unittest.TestCase):
         kl, ticks = self._make_klines_and_ticks([
             (100.0, 110.0, 0.0, {99.0: 999, 105.0: 50, 111.0: 888}),
         ])
-        _, volumes, _ = _compute_profile_bins(kl, ticks, CM, 0, 0)
+        _, volumes, _ = _bins(kl, ticks, 0, 0)
         # Only the 105.0 tick (within 100–110) should land in bins
         self.assertAlmostEqual(float(volumes.sum()), 50.0, places=5)
 
@@ -204,7 +230,7 @@ class TestComputeProfileBinsTicks(unittest.TestCase):
             (100.0, 110.0, 0.0, {105.0: 200}),
             (100.0, 110.0, 0.0, {105.0: 300}),
         ])
-        _, volumes, used_ticks = _compute_profile_bins(kl, ticks, CM, 0, 2)
+        _, volumes, used_ticks = _bins(kl, ticks, 0, 2)
         self.assertTrue(used_ticks)
         self.assertAlmostEqual(float(volumes.sum()), 600.0, places=5)
 
@@ -213,7 +239,7 @@ class TestComputeProfileBinsTicks(unittest.TestCase):
         kl, ticks = self._make_klines_and_ticks([
             (100.0, 110.0, 9999.0, {105.0: 50}),
         ])
-        _, volumes, used_ticks = _compute_profile_bins(kl, ticks, CM, 0, 0)
+        _, volumes, used_ticks = _bins(kl, ticks, 0, 0)
         self.assertTrue(used_ticks)
         # Tick total is 50, not 9999
         self.assertAlmostEqual(float(volumes.sum()), 50.0, places=5)
@@ -221,7 +247,7 @@ class TestComputeProfileBinsTicks(unittest.TestCase):
     def test_missing_tick_bucket_falls_back_to_ohlcv(self):
         kl = _klines(_bar(0, 100.0, 110.0, 400.0))
         # ticks dict exists but has no entry for this bar
-        _, volumes, used_ticks = _compute_profile_bins(kl, {}, CM, 0, 0)
+        _, volumes, used_ticks = _bins(kl, {}, 0, 0)
         self.assertFalse(used_ticks)
         self.assertAlmostEqual(float(volumes.sum()), 400.0, places=5)
 
@@ -230,7 +256,7 @@ class TestComputeProfileBinsTicks(unittest.TestCase):
         ts_str = T0.strftime("%Y-%m-%d %H:%M")
         bk, _ = _ticks_for_bar(ts_str, {})
         ticks = {bk: {105.0: {"buy": 10, "sell": 20, "neutral": 30}}}
-        _, volumes, used_ticks = _compute_profile_bins(kl, ticks, CM, 0, 0)
+        _, volumes, used_ticks = _bins(kl, ticks, 0, 0)
         self.assertTrue(used_ticks)
         self.assertAlmostEqual(float(volumes.sum()), 60.0, places=5)
 
@@ -239,7 +265,7 @@ class TestComputeProfileBinsTicks(unittest.TestCase):
         ts_str = T0.strftime("%Y-%m-%d %H:%M")
         bk, _ = _ticks_for_bar(ts_str, {})
         ticks = {bk: {105.0: {"buy": 0, "sell": 0, "neutral": 0}}}
-        _, volumes, used_ticks = _compute_profile_bins(kl, ticks, CM, 0, 0)
+        _, volumes, used_ticks = _bins(kl, ticks, 0, 0)
         # No valid tick data → OHLCV fallback
         self.assertFalse(used_ticks)
 
