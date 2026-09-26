@@ -28,6 +28,9 @@ from PyQt6.QtWidgets import QApplication   # noqa: E402
 SOXL_PC, SOXS_PC = 146.33, 33.63
 SOXL_LAST, SOXS_LAST = 151.845, 32.350
 
+# The shipped anchor is the live pair; this one is the previous close, which
+# the code falls back to and which makes SOXL_LAST a genuine out-of-sample
+# prediction rather than the anchor reading itself back.
 ANCHOR = ("US.SOXL", "US.SOXS", SOXL_PC, SOXS_PC)
 
 
@@ -72,8 +75,14 @@ class TestImpliedPrice:
     def test_relative_error_is_under_a_tenth_of_a_percent(self, soxl):
         assert abs(soxl._pair_implied(SOXL_LAST)[2] - SOXS_LAST) / SOXS_LAST < 0.001
 
-    def test_at_the_anchor_both_legs_read_their_own_prev_close(self, soxl):
+    def test_at_the_anchor_the_pair_reads_its_own_reference(self, soxl):
+        """Why a live anchor beats the previous close: at the anchor price the
+        estimate is exact, so error is only drift over the offset from it."""
         assert soxl._pair_implied(SOXL_PC)[2] == pytest.approx(SOXS_PC)
+
+    def test_a_live_anchor_is_exact_at_the_live_price(self, soxl):
+        soxl._pair_anchor = ("US.SOXL", "US.SOXS", SOXL_LAST, SOXS_LAST)
+        assert soxl._pair_implied(SOXL_LAST)[2] == pytest.approx(SOXS_LAST)
 
     def test_moves_opposite_to_the_hovered_price(self, soxl):
         up   = soxl._pair_implied(SOXL_PC * 1.05)[2]
@@ -160,6 +169,44 @@ class TestCrosshairLabels:
         self._hover(soxl)
         assert not soxl._pair_price_label.isVisible()
         assert soxl._price_label.isVisible(), "the gold tag must survive"
+
+
+class TestAnchorSelection:
+    """_pair_refs picks what both legs are measured from."""
+
+    @staticmethod
+    def _refs(base, pair):
+        from analysis.trade_viewer_qt import _pair_refs
+        return _pair_refs(base, pair)
+
+    def test_prefers_the_live_pair(self):
+        assert self._refs({"last_price": 151.8, "prev_close_price": 146.3},
+                          {"last_price": 32.3, "prev_close_price": 33.6}) == (151.8, 32.3)
+
+    def test_falls_back_to_prev_close_when_neither_has_traded(self):
+        assert self._refs({"last_price": 0, "prev_close_price": 146.3},
+                          {"last_price": 0, "prev_close_price": 33.6}) == (146.3, 33.6)
+
+    def test_one_leg_untraded_drops_both_to_prev_close(self):
+        """Pairing one leg's live price with the other's close would compare
+        two different moments and make the ratio meaningless."""
+        assert self._refs({"last_price": 151.8, "prev_close_price": 146.3},
+                          {"last_price": 0, "prev_close_price": 33.6}) == (146.3, 33.6)
+
+    def test_nothing_usable(self):
+        assert self._refs({"last_price": 0, "prev_close_price": 0},
+                          {"last_price": 0, "prev_close_price": 0}) is None
+
+    def test_missing_keys_are_not_an_error(self):
+        assert self._refs({}, {}) is None
+
+    def test_none_values_are_not_an_error(self):
+        assert self._refs({"last_price": None, "prev_close_price": 146.3},
+                          {"last_price": None, "prev_close_price": 33.6}) == (146.3, 33.6)
+
+    def test_unparseable_value_falls_through(self):
+        assert self._refs({"last_price": "n/a", "prev_close_price": 146.3},
+                          {"last_price": "n/a", "prev_close_price": 33.6}) == (146.3, 33.6)
 
 
 class TestPairTable:

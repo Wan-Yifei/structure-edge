@@ -128,16 +128,31 @@ _EMA_COLS = ["#42a5f5", "#ab47bc", "#ffa726"]  # EMA 20/50/200
 #
 #     SOXS = SOXS_prev_close * (2 - SOXL / SOXL_prev_close)
 #
-# Backtested over 16,917 5m bars across 61 sessions (2026-07-01..09-25) by
-# anchoring each day on the prior daily close and comparing the estimate with
-# SOXS's actual print. Regular session: median error 0.14% ($0.06), p90 0.52%
-# ($0.23), p99 1.43% ($0.77), no measurable bias (-0.03% signed mean). The
-# error does NOT grow through the session -- 0.13-0.16% median every hour from
-# 09:30 to 16:00 -- so the daily anchor needs no intraday refresh.
+# The anchor is the LIVE pair, refreshed with every fetch cycle, not the daily
+# previous close. Both work -- the relation only needs a moment when both legs
+# are known -- but the error is drift accumulated since the anchor, so a fresh
+# one is worth a lot. Measured on 1m and 5m bars, regular session only,
+# 2026-08-01..09-25, the two timeframes agreeing throughout:
 #
-# Extended hours are worse (overnight median 0.20%, p99 4.7%), and the whole
-# tail is thin-market data rather than model failure: the worst cases are SOXS
-# prints frozen at one value for an hour while SOXL kept moving.
+#     anchor          median   p90
+#     prev close      $0.030   $0.138
+#     live,  1m old   $0.011   $0.035
+#     live, 15m old   $0.021   $0.081
+#     live, 60m old   $0.029   $0.139
+#
+# and against a fresh anchor the error scales with how far the hovered level is
+# from the live price, which is what actually matters when reading a level off
+# the chart:
+#
+#     within 0.1%     $0.009   $0.022
+#     0.1 - 0.25%     $0.011   $0.027
+#     0.25 - 0.5%     $0.017   $0.043
+#     0.5 - 1%        $0.027   $0.080
+#     beyond 1%       $0.050   $0.153
+#
+# Careful with historical validation: moomoo's daily and 5m series are
+# split-adjusted while 1m is raw, so mixing a daily prev_close into 1m bars
+# manufactures a constant ~$0.58 offset that looks like model error.
 #
 # Tracking error and fund drift make this an estimate, not an arbitrage
 # relation.
@@ -148,6 +163,25 @@ _PAIR_COL      = "#ab47bc"   # purple -- must not read as the gold price tag
 def _short_code(code: str) -> str:
     """US.SOXL -> SOXL. Market prefixes waste width in a crosshair tag."""
     return code.split(".")[-1] if code else code
+
+
+def _pair_refs(base_row, pair_row) -> tuple[float, float] | None:
+    """Pick the anchor both legs are measured from: live pair, else prev close.
+
+    Both references must come from the same moment or the ratio between them is
+    meaningless, so a missing live print on either leg drops BOTH to prev close
+    rather than pairing one leg's live price with the other's close. Happens
+    pre-market, when one leg has traded and the other has not.
+    """
+    for field in ("last_price", "prev_close_price"):
+        try:
+            b = float(base_row.get(field) or 0)
+            q = float(pair_row.get(field) or 0)
+        except (TypeError, ValueError):
+            continue
+        if b > 0 and q > 0:
+            return b, q
+    return None
 _AVWAP_COL = "#ffeb3b"  # anchored VWAP line/label color
 _ZERO_GAMMA_COL = "#ff8c00"  # option Zero Gamma line -- matches gex.py's own matplotlib chart
 # Half-width, in percent of price, of the window the POC switch hysteresis
@@ -1453,8 +1487,8 @@ class TradeViewerQt(QMainWindow):
         self._tick_lock      = threading.Lock()
         self._last_tick_price: float            = 0.0
         self._last_nbbo:      tuple[float, float] = (0.0, 0.0)
-        # (base_code, pair_code, base_prev_close, pair_prev_close) -- the daily
-        # reset anchor both legs of an _INVERSE_PAIR are measured from. The base
+        # (base_code, pair_code, base_ref, pair_ref) -- a moment when both legs
+        # of an _INVERSE_PAIR were known, refreshed every fetch. The base
         # code rides along so a switch away from the pair symbol cannot be read
         # against the previous one's anchor: _trigger_fetch returns early on a
         # live code change, leaving the old anchor in place until the next load.
@@ -2824,11 +2858,11 @@ class TradeViewerQt(QMainWindow):
                             self._liq_hm_window.update_quote(bid, ask)
                     if pair_code is not None and len(df) > 1:
                         by_code = df.set_index("code")
-                        base_pc = float(by_code.loc[self._live_code, "prev_close_price"] or 0)
-                        pair_pc = float(by_code.loc[pair_code, "prev_close_price"] or 0)
-                        if base_pc > 0 and pair_pc > 0:
+                        refs = _pair_refs(by_code.loc[self._live_code],
+                                          by_code.loc[pair_code])
+                        if refs is not None:
                             self._pair_anchor = (self._live_code, pair_code,
-                                                 base_pc, pair_pc)
+                                                 refs[0], refs[1])
             except Exception:
                 pass
 
@@ -5255,10 +5289,10 @@ class TradeViewerQt(QMainWindow):
         anchor = self._pair_anchor
         if anchor is None:
             return None
-        base_code, pair_code, base_pc, pair_pc = anchor
-        if base_code != self._code_edit.text().strip() or base_pc <= 0:
+        base_code, pair_code, base_ref, pair_ref = anchor
+        if base_code != self._code_edit.text().strip() or base_ref <= 0:
             return None
-        implied = pair_pc * (2.0 - price / base_pc)
+        implied = pair_ref * (2.0 - price / base_ref)
         return (base_code, pair_code, implied) if implied > 0 else None
 
     def _on_mouse_move(self, pos) -> None:

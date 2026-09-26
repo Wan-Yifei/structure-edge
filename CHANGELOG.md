@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.22.0 — pair estimate anchors on the live quote (2026-09-25)
+
+### Feat: anchor the inverse-pair estimate on the live pair, not the previous close (`analysis/trade_viewer_qt.py`)
+
+The error in the estimate is drift accumulated since whatever moment both legs
+were last known together, so a fresh anchor is worth a lot. The anchor is now
+the live pair from the market snapshot each fetch cycle already requests --
+at Refresh=1s that is a one-second-old anchor.
+
+Measured on 1m and 5m bars, regular session, 2026-08-01..09-25, the two
+timeframes agreeing throughout:
+
+| anchor | median | p90 |
+|---|---|---|
+| previous close | $0.030 | $0.138 |
+| live, 1m old | **$0.011** | $0.035 |
+| live, 15m old | $0.021 | $0.081 |
+| live, 60m old | $0.029 | $0.139 |
+
+Against a fresh anchor the error scales with how far the hovered level sits
+from the live price, which is what matters when reading a level off the chart:
+within 0.1% it is $0.009 median / $0.022 p90, rising to $0.027 / $0.080 at
+0.5-1% away. Roughly a 3x improvement on the levels actually being read.
+
+`_pair_refs` drops BOTH legs to previous close when either has no live print,
+rather than pairing one leg's live price with the other's close -- two
+different moments make the ratio meaningless. That happens pre-market, when
+one leg has traded and the other has not.
+
+### Note on validating this against history
+
+moomoo's daily and 5m series are split-adjusted while 1m is raw. Mixing a
+daily prev_close into 1m bars manufactures a constant ~$0.58 offset that reads
+as model error; an earlier pass of this measurement hit exactly that.
+
 ## v0.21.1 — fix: the pair tag took the whole price readout down (2026-09-25)
 
 ### Fix: `_pair_implied` read a `self._code` the window does not have (`analysis/trade_viewer_qt.py`)
