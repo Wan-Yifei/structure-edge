@@ -2,7 +2,7 @@
     "_note": "Per-symbol list of indicator threshold rules for analysis/indicator_alert_watcher.py. `indicator` selects a compute function from INDICATOR_REGISTRY (rsi/kd/... -- extend by registering a new function there, no schema change needed); `field` picks which output series of that indicator to compare against `threshold`. Each rule fires (repeatedly, once per scan cycle, not just on the edge crossing) whenever the latest closed bar's value satisfies condition+threshold -- mute a noisy rule from the scanner UI to pause it until it goes negative again. `enabled: false` (missing = true) parks a rule instead: it is skipped by the scan entirely and leaves no row in the UI, unlike mute which keeps evaluating it. The session_va indicator watches the current session occurrence's own volume profile -- fields dist_{poc,vah,val}_{pct,abs} (unsigned gap, use with condition \"below\" for a proximity alert) and off_* (signed, + above / - below); params {session, warmup_minutes, n_bins, va_pct}.",
     "US.SOXL": [
         {
-            "enabled": true,
+            "enabled": false,
             "indicator": "rsi",
             "tf": "1m",
             "params": {
@@ -24,7 +24,7 @@
             "threshold": 80.0
         },
         {
-            "enabled": true,
+            "enabled": false,
             "indicator": "rsi",
             "tf": "3m",
             "params": {
@@ -35,7 +35,7 @@
             "threshold": 30.0
         },
         {
-            "enabled": true,
+            "enabled": false,
             "indicator": "session_va",
             "tf": "1m",
             "params": {
@@ -49,7 +49,7 @@
             "threshold": 0.2
         },
         {
-            "enabled": true,
+            "enabled": false,
             "indicator": "session_va",
             "tf": "1m",
             "params": {
@@ -61,6 +61,19 @@
             "field": "dist_val_abs",
             "condition": "below",
             "threshold": 0.2
+        }
+    ],
+    "US.SOXS": [
+        {
+            "enabled": true,
+            "indicator": "rsi",
+            "tf": "1m",
+            "params": {
+                "period": 6
+            },
+            "field": "value",
+            "condition": "below",
+            "threshold": 30.0
         }
     ]
 }
