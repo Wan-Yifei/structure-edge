@@ -897,6 +897,17 @@ class LiqHmWindow(QWidget):
         if code == self._code:
             return
         self._stop_push()   # the old code's subscription says nothing about this one
+        if self._hist_secs is not False:
+            # Leave replay, or the window is stranded: _reset_grid below clears
+            # the replayed columns while _hist_secs still says "replaying", so
+            # every later set_live() stands down and the feed never comes back.
+            # The combo is reset without its signal, since the grid reset and
+            # the caller's own set_live() already do what it would have done.
+            self._hist_secs = False
+            self._hist_bucket = 0
+            self._hist_combo.blockSignals(True)
+            self._hist_combo.setCurrentIndex(0)
+            self._hist_combo.blockSignals(False)
         self._code = code
         self.setWindowTitle(f"Liquidity Heatmap  —  {code}")
         self._reset_grid()
@@ -1023,6 +1034,12 @@ class LiqHmWindow(QWidget):
         push would make the time axis non-uniform and unreadable.
         """
         if code != self._code or not self._live or not rows:
+            return
+        if self._hist_secs is not False:
+            # Belt and braces. _stop_push() should mean nothing arrives here
+            # during a replay, but a push that slipped through would run
+            # _maybe_init_price_range against the replay's much wider band and
+            # rebuild the grid out from under it.
             return
         self._push_ok = True
         self._last_push_ts = now

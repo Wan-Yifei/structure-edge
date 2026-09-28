@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.24.1 — the rest of the ways a replay could be wiped (2026-09-28)
+
+### Fix: a symbol switch during a replay stranded the window (`analysis/liq_hm_window.py`)
+
+`set_code` cleared the grid without clearing `_hist_secs`, so the window still
+believed it was replaying. Every later `set_live()` then stood down -- the
+guard added in v0.24.0 -- and the feed never came back. Worse than the bug that
+guard was added for, and only reachable by changing symbol while replaying. It
+now leaves replay mode and puts the combo back to Live.
+
+`_on_push` stands down during a replay too. `_stop_push()` should mean nothing
+arrives, but a push that slipped through would rebuild the grid against the
+replay's much wider band, which is exactly the original failure.
+
+### The check now enumerates the ranges instead of listing them
+
+The v0.24.0 verification covered 30m/2h/6h/1d and silently skipped **All** --
+a hand-written list that did not match `HIST_RANGES`. It now derives the cases
+from `HIST_RANGES`, so a range added later is covered without anyone
+remembering to. All five ranges pass four scenarios: the main viewer's
+per-second `set_code`/`set_live`, a symbol switch, returning to Live, and
+toolbar changes reloading rather than resetting.
+
 ## v0.24.0 — CVD anchors on the Range control (2026-09-28)
 
 ### Fix: a replay was wiped a second after loading (`analysis/liq_hm_window.py`)
