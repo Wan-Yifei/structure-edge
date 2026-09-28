@@ -473,6 +473,10 @@ class LiqHmWindow(QWidget):
         # Live mode is _hist_secs is False -- distinct from 0/None, both of
         # which are meaningful range values.
         self._hist_secs: object = False
+        # Column width of the current replay, in seconds. Wider than Col(s),
+        # since ranges are coarsened -- anything that reasons about how much
+        # time a column covers has to use this one while replaying.
+        self._hist_bucket: int = 0
         self._push_ok: bool = False
         self._last_push_ts: float = 0.0   # time.time() of the last push
 
@@ -630,8 +634,9 @@ class LiqHmWindow(QWidget):
         self._hist_combo.setToolTip(
             "Redraw the heatmap from the collector's database instead of the\n"
             "rolling live buffer, so you can scroll back through a whole\n"
-            "session. Columns are coarsened to fit the range; order-flow\n"
-            "overlays are off while replaying. Back to Live to resume.")
+            "session. Columns are coarsened to fit the range. Aggressor\n"
+            "bubbles are rebuilt from ticks; iceberg/spoof/imbalance need\n"
+            "consecutive books and stay off. Back to Live to resume.")
         self._hist_combo.currentIndexChanged.connect(self._on_hist_range_changed)
         row1.addWidget(self._hist_combo)
 
@@ -1646,14 +1651,19 @@ class LiqHmWindow(QWidget):
 
     def _redraw_orderflow_markers(self) -> None:
         self._clear_overlay_items()
-        if not self._raw_snaps or self._bin_size == 0.0:
+        if self._bin_size == 0.0:
             return
+        # Iceberg, spoof and imbalance all read _raw_snaps; aggressor bubbles
+        # read ticks and do not. Bailing out on an empty _raw_snaps used to
+        # take the bubbles with it, which is why a replay -- where _raw_snaps
+        # is deliberately empty on purpose -- detected bubbles and drew none.
+        has_book = bool(self._raw_snaps)
 
         bucket_to_idx = self._build_bucket_to_idx()
         min_vol = self._min_vol_spin.value()
         n_price = self._n_price_spin.value()
 
-        if self._ice_cb.isChecked():
+        if has_book and self._ice_cb.isChecked():
             from analysis.orderflow_detect import detect_icebergs
             icebergs = detect_icebergs(
                 self._raw_snaps, bucket_to_idx, self._bin_size, self._price_min,
@@ -1666,7 +1676,7 @@ class LiqHmWindow(QWidget):
             )
             self._draw_iceberg_markers(icebergs)
 
-        if self._spoof_cb.isChecked():
+        if has_book and self._spoof_cb.isChecked():
             from analysis.orderflow_detect import detect_spoofs
             spoofs = detect_spoofs(
                 self._raw_snaps,
@@ -1677,7 +1687,7 @@ class LiqHmWindow(QWidget):
             )
             self._draw_spoof_markers(spoofs)
 
-        if self._simb_cb.isChecked():
+        if has_book and self._simb_cb.isChecked():
             from analysis.orderflow_detect import detect_stacked_imbalance
             simbs = detect_stacked_imbalance(
                 self._raw_snaps,
@@ -1882,7 +1892,10 @@ class LiqHmWindow(QWidget):
             self._absorb_reload_pending = True
             return
         self._absorb_reload_pending = False
-        col_secs = self._col_secs_spin.value()
+        # A replay column spans its bucket, not Col(s); using the live value
+        # here would pad the query by a second either side of a range whose
+        # columns are half a minute wide.
+        col_secs = self._hist_bucket or self._col_secs_spin.value()
         if self._absorb_last_ts is None:
             # Full load: query the entire visible window.
             start = self._col_ts[0] - timedelta(seconds=col_secs)
@@ -2026,6 +2039,7 @@ class LiqHmWindow(QWidget):
         label, secs = HIST_RANGES[idx]
         if label == "Live":
             self._hist_secs = False
+            self._hist_bucket = 0
             self._reset_grid()
             if self._live and self._code:
                 self.set_live(True)
@@ -2095,6 +2109,7 @@ class LiqHmWindow(QWidget):
         if hi <= lo:
             hi = lo + 0.01
 
+        self._hist_bucket = bucket
         n_price = self._n_price_spin.value()
         self._price_min, self._price_max = lo, hi
         self._bin_size = (hi - lo) / n_price
@@ -2120,10 +2135,27 @@ class LiqHmWindow(QWidget):
         self._plot_widget.setXRange(0, n, padding=0)
         self._plot_widget.setYRange(lo, hi, padding=0)
         self._update_legend()
+
+        # Aggressor bubbles do come back. They are built from ticks, which the
+        # bucketing never touched, and detect_aggressor_bubbles() assigns each
+        # tick to a column by bisecting col_ts -- so uneven, bucket-wide
+        # columns are fine. Iceberg/spoof/imbalance stay dark because they read
+        # _raw_snaps, which a replay leaves empty on purpose: they look for a
+        # level refreshing between consecutive books, and consecutive here are
+        # a bucket apart. Nothing has to disable them; there is just no input.
+        #
+        # A full reload, not the incremental top-up the live path uses: the
+        # high-water mark belongs to a different time range entirely.
+        self._absorb_last_ts = None
+        self._absorb_ticks = []
+        self._load_absorb_ticks()
+
+        note = ("aggressor on -- MinΔ is per column, so raise it for wide buckets"
+                if self._absorb_cb.isChecked() else "aggressor off")
         self._set_hist_status(
             f"replay {n:,} cols @ {bucket}s  "
             f"{self._col_ts[0]:%m-%d %H:%M} - {self._col_ts[-1]:%m-%d %H:%M}"
-            "  (drag to scroll, overlays off)")
+            f"  (drag to scroll, {note})")
 
     def _set_hist_status(self, msg: str) -> None:
         print(f"[liqhm] {msg}", flush=True)

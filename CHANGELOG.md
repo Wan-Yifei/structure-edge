@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.23.1 — aggressor bubbles come back in replay (2026-09-28)
+
+### Feat: the replay rebuilds aggressor bubbles (`analysis/liq_hm_window.py`)
+
+v0.23.0 turned every order-flow overlay off while replaying. That was one
+blanket rule for two different things. Iceberg, spoof and imbalance read
+`_raw_snaps` and look for a level refreshing between consecutive books --
+consecutive in a replay are a bucket apart, so the signal genuinely is not
+there. Aggressor bubbles are built from ticks, which the bucketing never
+touched, and `detect_aggressor_bubbles` assigns each tick to a column by
+bisecting `col_ts`, so uneven bucket-wide columns are fine.
+
+The replay now loads ticks for its whole range when Aggressor is checked --
+644k ticks for a day, 1.2s -- and draws the bubbles across it: 1,949 of them
+over a 6h replay, verified against the scatter item's own point count. With
+the checkbox off no ticks are fetched at all, so the cost is opt-in. MinΔ is
+per column, so a wide bucket needs a higher threshold; the status line says so.
+
+### Fix: an empty `_raw_snaps` silently dropped the bubbles too
+
+`_redraw_orderflow_markers` bailed out on `not self._raw_snaps` before reaching
+the aggressor block at the bottom, so the replay detected bubbles and drew none
+of them. The guard now gates only the three book-based detections. Caught by
+counting drawn markers rather than detected bubbles -- the detection was right
+all along.
+
 ## v0.23.0 — heatmap replays history from the database (2026-09-28)
 
 ### Feat: a Replay control redraws the heatmap from stored snapshots (`analysis/liq_hm_window.py`, `feeds/order_book_store.py`)
