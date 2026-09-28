@@ -79,6 +79,22 @@ class TestParseSide(unittest.TestCase):
         self.assertIsInstance(price, float)
         self.assertIsInstance(vol, int)
 
+    def test_zero_price_level_dropped(self):
+        """The feed emits price-0 padding levels -- 63 in 3.1M stored levels,
+        in bursts every ~20 minutes. Harmless until something takes a min()
+        over the book, where one of them sets the scale for a whole chart."""
+        items = [{"price": 0.0, "volume": 0}, {"price": 100.0, "volume": 200}]
+        self.assertEqual(self._fn(items), [(100.0, 200)])
+
+    def test_negative_price_level_dropped(self):
+        items = [{"price": -1.5, "volume": 10}, {"price": 100.0, "volume": 200}]
+        self.assertEqual(self._fn(items), [(100.0, 200)])
+
+    def test_zero_volume_at_a_real_price_is_kept(self):
+        """A level can legitimately go to zero size while still being quoted;
+        only the price is used as evidence of where the book is."""
+        self.assertEqual(self._fn([{"price": 100.0, "volume": 0}]), [(100.0, 0)])
+
     def test_large_list(self):
         items = [{"price": float(i), "volume": i * 10} for i in range(1, 21)]
         result = self._fn(items)

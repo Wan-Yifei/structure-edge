@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.23.0 — heatmap replays history from the database (2026-09-28)
+
+### Feat: a Replay control redraws the heatmap from stored snapshots (`analysis/liq_hm_window.py`, `feeds/order_book_store.py`)
+
+The heatmap kept a rolling 240-column buffer -- four minutes at Col(s)=1 --
+and everything older was gone. Measuring first showed the destructive
+price-window rebuild was not the cause: over 15.4 minutes of real data it fired
+**zero** times. It was simply the buffer rolling.
+
+Panning already worked; there was just nothing to pan to. Rather than hold the
+history in RAM (a day at 1s is 138MB of grid plus ~600MB of raw levels), the
+new **Replay** control re-draws it from the collector's database, which has
+been storing every snapshot all along: 30m / 2h / 6h / 1d / All, about 6MB and
+under 1.3s each.
+
+`OrderBookStore.bucketed_snapshots()` returns one snapshot per time bucket --
+the newest in each, matching what the live path paints. The bucket is coarsened
+so a range lands under 4000 columns, which is also about where columns stop
+being a pixel wide. Measured on the full 535k-snapshot table: 0.46s at a 60s
+bucket, 0.61s at 5s, but **73s and 192MB at 1s**, so long ranges must coarsen
+rather than be capped afterwards. Selecting by a materialised id list collapses
+the same way: `rowid IN (?,?,…)` with 11k parameters measured 51s against 42ms
+at 3.8k, hence the nested subquery.
+
+Live updates stop while replaying, and order-flow overlays are off: iceberg and
+spoof look for a level refreshing between consecutive books, and consecutive
+here are a bucket apart, so the signal is not there to find.
+
+### Fix: junk levels were setting the price scale (`feeds/order_book_merge.py`)
+
+The feed emits padding levels at price 0.0, and the stored history holds one at
+66568.05. 63 such levels among 3.1M, and they never mattered -- until the replay
+took a min()/max() over a day of book and stretched a $12 session into a $158
+band, crushing the chart into a sliver. The replay band now comes from the mid
+path at the 0.5/99.5 percentiles, and `parse_side` drops non-positive prices so
+no more of them are stored.
+
 ## v0.22.1 — profile level labels moved to the right edge (2026-09-28)
 
 ### Fix: Last / POC / VAH / VAL sat on top of the histogram (`analysis/trade_viewer_qt.py`)

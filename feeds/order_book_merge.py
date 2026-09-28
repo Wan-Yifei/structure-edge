@@ -31,11 +31,19 @@ def parse_side(items) -> list[Level]:
     for item in items:
         try:
             if isinstance(item, dict):
-                result.append((float(item["price"]), int(item["volume"])))
+                price, volume = float(item["price"]), int(item["volume"])
             else:
-                result.append((float(item[0]), int(item[1])))
+                price, volume = float(item[0]), int(item[1])
         except (KeyError, IndexError, TypeError, ValueError):
-            pass
+            continue
+        # A level at or below zero is not a price. The feed emits them as
+        # padding -- 63 of them in 3.1M stored levels, price 0.0 volume 0,
+        # roughly one burst every 20 minutes -- and they are harmless until
+        # something takes a min() over the book, at which point one of them
+        # sets the scale for a whole session's chart.
+        if price <= 0:
+            continue
+        result.append((price, volume))
     return result
 
 

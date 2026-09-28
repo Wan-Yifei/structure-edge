@@ -197,6 +197,42 @@ class OrderBookStore:
             [code, n],
         )
 
+    def bucketed_snapshots(self, code: str, start: datetime, end: datetime,
+                           bucket_secs: int) -> list[list[dict]]:
+        """One snapshot per *bucket_secs* window in [start, end), oldest first.
+
+        For drawing a long stretch of the heatmap: a column covers bucket_secs
+        of time and shows the book as it stood at the end of that window, so
+        pulling every snapshot in the range and throwing almost all of them
+        away is pure cost. The whole retained history is ~535k snapshots; at a
+        30s bucket this returns ~3.8k of them.
+
+        The bucket representative is MAX(rowid), which is the newest row in the
+        window -- rowid is insertion order, and that matches what the live path
+        paints, since it repaints a column in place as new pushes arrive.
+
+        Measured against the full table (SQLite, 535k snapshots): 0.46s at a
+        60s bucket, 0.49s at 30s, 0.61s at 5s. A 1s bucket is 73s and 192MB --
+        it selects 105k snapshots, which is both unusable and undrawable, so
+        callers are expected to coarsen the bucket for long ranges rather than
+        this method silently capping it.
+
+        Selecting by a materialised id list instead of this nested subquery
+        collapses past a few thousand buckets: `rowid IN (?,?,...)` with 11k
+        parameters measured 51s against 42ms for the same query at 3.8k.
+        """
+        if bucket_secs < 1:
+            bucket_secs = 1
+        return self._snapshots(
+            "SELECT ts, bids, asks FROM ob_snapshots "
+            "WHERE rowid IN ("
+            "    SELECT MAX(rowid) FROM ob_snapshots "
+            "    WHERE code = ? AND ts >= ? AND ts < ? "
+            "    GROUP BY CAST(strftime('%s', ts) / ? AS INT)"
+            ") ORDER BY rowid",
+            [code, _ts_str(start), _ts_str(end), bucket_secs],
+        )
+
     def latest_ts(self, code: str | None = None) -> datetime | None:
         """Newest snapshot timestamp, for *code* or across every code."""
         if code:

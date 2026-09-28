@@ -28,7 +28,7 @@ from PyQt6.QtCore    import (
 )
 from PyQt6.QtGui     import QColor, QPainterPath
 from PyQt6.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QLabel, QPushButton,
+    QCheckBox, QComboBox, QDoubleSpinBox, QLabel, QPushButton,
     QSpinBox, QToolBar, QVBoxLayout, QWidget,
 )
 import pyqtgraph as pg
@@ -81,6 +81,18 @@ N_PRICE      = 100   # price bins (y-resolution)
 COL_SECS_DEF = 1     # seconds per column -- ORDER_BOOK is push-driven, not
                       # polled, so 1s keeps the heatmap visually current;
                       # adjustable via the "Col(s)" spinbox (range 1-300)
+# Ceiling on columns drawn when replaying history from the database. The grid
+# itself is cheap (100 bins x 8 B x 2 sides = 1.6 KB a column), but the query
+# is not: a 1s bucket over the retained history selects 105k snapshots and
+# measured 73s / 192MB, against 0.6s for anything 5s or coarser. Ranges are
+# coarsened to land under this, which also keeps columns above a pixel wide --
+# 4000 of them already exceeds the panel's width.
+MAX_HIST_COLS = 4000
+
+# Preset ranges for the history replay, in seconds. None = everything retained.
+HIST_RANGES = [("Live", 0), ("30m", 1800), ("2h", 7200),
+               ("6h", 21600), ("1d", 86400), ("All", None)]
+
 MAX_COLS_DEF = 240   # columns kept in memory  (4 min at 1 s/col -- raise via
                       # the "History" spinbox, range 60-1440, for more
                       # lookback at the cost of a wider/denser grid)
@@ -457,6 +469,10 @@ class LiqHmWindow(QWidget):
         self._ob_sub_code: str | None = None
         self._push_bridge = _PushBridge(self)
         self._push_bridge.snapshot.connect(self._on_push)
+        # Seconds of history being replayed from the DB, or None for "all".
+        # Live mode is _hist_secs is False -- distinct from 0/None, both of
+        # which are meaningful range values.
+        self._hist_secs: object = False
         self._push_ok: bool = False
         self._last_push_ts: float = 0.0   # time.time() of the last push
 
@@ -604,6 +620,20 @@ class LiqHmWindow(QWidget):
         self._max_cols_spin.setToolTip("Number of columns kept in memory")
         self._max_cols_spin.valueChanged.connect(self._on_max_cols_changed)
         row1.addWidget(self._max_cols_spin)
+
+        row1.addSeparator()
+        row1.addWidget(_lbl("Replay:"))
+        self._hist_combo = QComboBox()
+        for label, _secs in HIST_RANGES:
+            self._hist_combo.addItem(label)
+        self._hist_combo.setFixedWidth(64)
+        self._hist_combo.setToolTip(
+            "Redraw the heatmap from the collector's database instead of the\n"
+            "rolling live buffer, so you can scroll back through a whole\n"
+            "session. Columns are coarsened to fit the range; order-flow\n"
+            "overlays are off while replaying. Back to Live to resume.")
+        self._hist_combo.currentIndexChanged.connect(self._on_hist_range_changed)
+        row1.addWidget(self._hist_combo)
 
         row1.addSeparator()
         row1.addWidget(_lbl("Bins:"))
@@ -1469,8 +1499,10 @@ class LiqHmWindow(QWidget):
         self._time_axis.update_timestamps(self._col_ts)
         max_cols = self._max_cols_spin.value()
         # Minimum tick gap = max_cols // 10 so labels are never crowded even
-        # when only a few columns of data exist in the full-width view.
-        step = max(max_cols // 10, 1)
+        # when only a few columns of data exist in the full-width view. A
+        # replayed range can hold far more columns than the live buffer, so
+        # take whichever is larger or a day's worth would print 150 labels.
+        step = max(max(n, max_cols) // 10, 1)
         self._plot_widget.getPlotItem().getAxis("bottom").setTicks(
             [[(i, self._col_ts[i].strftime("%H:%M")) for i in range(0, n, step)]]
         )
@@ -1984,15 +2016,131 @@ class LiqHmWindow(QWidget):
         self._redraw_orderflow_markers()
 
     def _on_col_secs_changed(self) -> None:
+        if self._hist_secs is not False:
+            self._load_history(self._hist_secs)   # it is the replay bucket floor
+            return
         if self._live and self._timer.isActive():
             self._timer.start(self._col_secs_spin.value() * 1000)
 
+    def _on_hist_range_changed(self, idx: int) -> None:
+        label, secs = HIST_RANGES[idx]
+        if label == "Live":
+            self._hist_secs = False
+            self._reset_grid()
+            if self._live and self._code:
+                self.set_live(True)
+            return
+        self._hist_secs = secs
+        self._load_history(secs)
+
+    def _load_history(self, secs) -> None:
+        """Redraw the whole grid from the database rather than the live buffer.
+
+        The live path keeps a rolling window in memory -- 240 columns, four
+        minutes at 1s -- and everything older is gone. The collector has been
+        storing every snapshot all along, so scrolling back is a query, not a
+        bigger buffer: holding a day at 1s would be 138MB of grid plus ~600MB
+        of raw levels, against ~6MB here.
+
+        One column per time bucket, coarsened so the range fits MAX_HIST_COLS.
+        Live updates stop while replaying: the columns are historical and a new
+        one appended at the right edge would sit at the wrong time scale.
+        """
+        if not self._code:
+            return
+        self._stop_push()
+        self._timer.stop()
+
+        from feeds.order_book_store import OrderBookStore
+        try:
+            with OrderBookStore(_DB_PATH, read_only=True) as store:
+                newest = store.latest_ts(self._code)
+                oldest = store.earliest_ts(self._code)
+                if newest is None or oldest is None:
+                    self._set_hist_status("no stored snapshots for this code")
+                    return
+                start = oldest if secs is None else max(
+                    oldest, newest - timedelta(seconds=secs))
+                span = max(1.0, (newest - start).total_seconds())
+                bucket = max(self._col_secs_spin.value(),
+                             int(span // MAX_HIST_COLS) + 1)
+                snaps = store.bucketed_snapshots(
+                    self._code, start, newest + timedelta(seconds=1), bucket)
+        except Exception as exc:
+            self._set_hist_status(f"history query failed: {exc}")
+            return
+
+        if not snaps:
+            self._set_hist_status("no snapshots in that range")
+            return
+
+        # One band over the whole range, taken from the mid path rather than
+        # the levels. The live band comes from a single snapshot's near-touch
+        # depth, which over hours leaves most of the replay outside it --
+        # price moves further than the book is deep.
+        #
+        # Percentiles, not min/max: the stored history carries a handful of
+        # junk levels (a 0.0 and a 66568.05 among 3.1M), and a single one of
+        # them taken as a bound stretches a $12 day into a $158 band and
+        # crushes the whole chart into a sliver. 63 bad levels are enough to
+        # ruin every replay if the scale is a min().
+        mids = [m for m in (_calc_col_mid(sn) for sn in snaps)
+                if m is not None and m > 0]
+        if not mids:
+            self._set_hist_status("no usable prices in that range")
+            return
+        lo_m, hi_m = (float(x) for x in np.percentile(mids, [0.5, 99.5]))
+        pad = max((hi_m - lo_m) * 0.25, 0.02)
+        lo, hi = lo_m - pad, hi_m + pad
+        if hi <= lo:
+            hi = lo + 0.01
+
+        n_price = self._n_price_spin.value()
+        self._price_min, self._price_max = lo, hi
+        self._bin_size = (hi - lo) / n_price
+
+        n = len(snaps)
+        self._bid_grid = np.zeros((n, n_price), dtype=np.float64)
+        self._ask_grid = np.zeros((n, n_price), dtype=np.float64)
+        self._col_ts = []
+        self._mid_prices = []
+        # Skipped on purpose: _raw_snaps feeds iceberg/spoof/imbalance, which
+        # look for a level refreshing between consecutive books. Consecutive
+        # here are a bucket apart, so the signal is not there to find, and
+        # keeping the levels would cost ~145 dicts a column.
+        self._raw_snaps = []
+        self._absorb_ticks = []
+        self._clear_overlay_items()
+
+        for i, snap in enumerate(snaps):
+            self._col_ts.append(snap[0]["ts"])
+            self._mid_prices.append(self._paint_column(i, snap))
+
+        self._render()
+        self._plot_widget.setXRange(0, n, padding=0)
+        self._plot_widget.setYRange(lo, hi, padding=0)
+        self._update_legend()
+        self._set_hist_status(
+            f"replay {n:,} cols @ {bucket}s  "
+            f"{self._col_ts[0]:%m-%d %H:%M} - {self._col_ts[-1]:%m-%d %H:%M}"
+            "  (drag to scroll, overlays off)")
+
+    def _set_hist_status(self, msg: str) -> None:
+        print(f"[liqhm] {msg}", flush=True)
+        if hasattr(self, "_legend_lbl") and self._legend_lbl is not None:
+            self._legend_lbl.setText(msg)
+
     def _on_max_cols_changed(self) -> None:
+        if self._hist_secs is not False:
+            return   # the replay grid is sized by its range, not this
         self._reset_grid()
         if self._live and self._code:
             self.set_live(True)
 
     def _on_n_price_changed(self) -> None:
+        if self._hist_secs is not False:
+            self._load_history(self._hist_secs)   # bins resize the replay grid
+            return
         self._reset_grid()
         if self._live and self._code:
             self.set_live(True)
@@ -2022,7 +2170,8 @@ class LiqHmWindow(QWidget):
         if n == 0 or self._bin_size == 0.0:
             return
         self._plot_widget.setXRange(
-            0, self._max_cols_spin.value() + self._right_margin_cols(), padding=0)
+            0, max(n, self._max_cols_spin.value()) + self._right_margin_cols(),
+            padding=0)
         self._plot_widget.setYRange(self._price_min, self._price_max, padding=0)
         self._redraw_orderflow_markers()
 
