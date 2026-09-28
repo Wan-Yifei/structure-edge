@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.22.1 — profile level labels moved to the right edge (2026-09-28)
+
+### Fix: Last / POC / VAH / VAL sat on top of the histogram (`analysis/trade_viewer_qt.py`)
+
+All three profile panels draw horizontal bars growing rightward from x=0, so
+the left edge is the one x every bar passes through -- and that is where the
+level labels were pinned, over the bars they describe. Reported as the blue
+`Last` tag occluding the profile.
+
+They now sit right-aligned on the right edge, which the X range already keeps
+clear: it is pinned to 15% past the longest bar. Covers the session profile
+(POC trail, VAH/VAL, Last), the single-candle tick VP panel (POC/VAH/VAL) and
+the range profile panel (POC/VAH/VAL/Last).
+
+The range panel's Tot/Buy/Sell/Neu readout stays top-left: it is a panel
+header rather than a price level, and leaving it there keeps it from colliding
+with the four that moved. The main chart's inline range labels were already on
+the right and are unchanged.
+
+`tests/analysis/test_profile_label_side.py` drives the real widgets offscreen
+and reads the placed items back, since the claim is geometric -- an anchor
+change without the matching x coordinate still renders, just wrongly.
+
 ## v0.22.0 — pair estimate anchors on the live quote (2026-09-25)
 
 ### Feat: anchor the inverse-pair estimate on the live pair, not the previous close (`analysis/trade_viewer_qt.py`)

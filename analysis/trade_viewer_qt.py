@@ -4452,17 +4452,20 @@ class TradeViewerQt(QMainWindow):
             poc_label = pg.TextItem(
                 text=f"POC{rank + 1} {price:.2f}", color=_RED,
                 fill=pg.mkBrush(_qc(_BG_TIP, 180)),
-                anchor=(0.0, 1.0),
+                anchor=(1.0, 1.0),
             )
             poc_label.setFont(QFont("Monospace", 7))
             pw.addItem(poc_line,  ignoreBounds=True)
             pw.addItem(poc_label, ignoreBounds=True)
             poc_labels.append((price, poc_label))
 
+        # Right edge, not left. The histogram grows rightward from x=0, so a
+        # left-pinned label sits on top of every bar; the X range carries 15%
+        # headroom past the longest one, which leaves the right edge clear.
         def _pin_poc_labels() -> None:
-            xlo = vb.viewRange()[0][0]
+            xhi = vb.viewRange()[0][1]
             for p, lbl_item in poc_labels:
-                lbl_item.setPos(xlo, p)
+                lbl_item.setPos(xhi, p)
 
         conn = vb.sigRangeChanged.connect(lambda *_: _pin_poc_labels())
         self._profile_pin_conns.append(conn)
@@ -4476,15 +4479,15 @@ class TradeViewerQt(QMainWindow):
             va_label = pg.TextItem(
                 text=f"{lbl} {price:.2f}", color=_GOLD,
                 fill=pg.mkBrush(_qc(_BG_TIP, 180)),
-                anchor=(0.0, 0.0),
+                anchor=(1.0, 0.0),
             )
             va_label.setFont(QFont("Monospace", 7))
             pw.addItem(va_line,  ignoreBounds=True)
             pw.addItem(va_label, ignoreBounds=True)
 
             def _pin_va(lbl_item=va_label, p=price) -> None:
-                xlo = vb.viewRange()[0][0]
-                lbl_item.setPos(xlo, p)
+                xhi = vb.viewRange()[0][1]
+                lbl_item.setPos(xhi, p)
 
             conn2 = vb.sigRangeChanged.connect(lambda *_, f=_pin_va: f())
             self._profile_pin_conns.append(conn2)
@@ -4515,15 +4518,15 @@ class TradeViewerQt(QMainWindow):
         price_label = pg.TextItem(
             text=f"Last {last_price:.2f}", color="#42a5f5",
             fill=pg.mkBrush(_qc(_BG_TIP, 180)),
-            anchor=(0.0, 1.0),
+            anchor=(1.0, 1.0),
         )
         price_label.setFont(QFont("Monospace", 7))
         pw.addItem(price_line,  ignoreBounds=True)
         pw.addItem(price_label, ignoreBounds=True)
 
         def _pin_price_label() -> None:
-            xlo = vb.viewRange()[0][0]
-            price_label.setPos(xlo, last_price)
+            xhi = vb.viewRange()[0][1]
+            price_label.setPos(xhi, last_price)
 
         conn3 = vb.sigRangeChanged.connect(lambda *_: _pin_price_label())
         self._profile_pin_conns.append(conn3)
@@ -4818,13 +4821,16 @@ class TradeViewerQt(QMainWindow):
         max_vol = float(totals.max())
         pw.setXRange(0, max_vol * 1.15, padding=0)
 
-        # x=0 keeps every label on the left edge, where the X range is pinned
-        # just above; anchoring to a bar's tip would scatter them across the
-        # panel and overlap the bars themselves in a 200-300px column.
+        # Right-aligned at the right edge of the X range pinned just above.
+        # Bars grow rightward from x=0, so the left edge is the one place every
+        # bar passes through; the 15% headroom past the longest bar leaves the
+        # right edge clear. Anchoring to a bar's tip instead would scatter the
+        # labels across a 200-300px column and overlap the bars themselves.
+        label_x = max_vol * 1.15
         for price, text, colour, anchor in (
-            (val, "VAL", _GOLD, (0.0, 0.0)),
-            (poc, "POC", _RED, (0.0, 1.0)),
-            (vah, "VAH", _GOLD, (0.0, 0.0)),
+            (val, "VAL", _GOLD, (1.0, 0.0)),
+            (poc, "POC", _RED, (1.0, 1.0)),
+            (vah, "VAH", _GOLD, (1.0, 0.0)),
         ):
             style = (Qt.PenStyle.SolidLine if text == "POC" else Qt.PenStyle.DashLine)
             line = pg.InfiniteLine(pos=price, angle=0, movable=False,
@@ -4834,7 +4840,7 @@ class TradeViewerQt(QMainWindow):
             lbl = pg.TextItem(text=f"{text} {price:.2f}", color=colour,
                               fill=pg.mkBrush(_qc(_BG_TIP, 180)), anchor=anchor)
             lbl.setFont(QFont("Monospace", 7))
-            lbl.setPos(0.0, price)
+            lbl.setPos(label_x, price)
             lbl.setZValue(20)
             pw.addItem(lbl, ignoreBounds=True)
 
@@ -5065,7 +5071,7 @@ class TradeViewerQt(QMainWindow):
             lbl = pg.TextItem(
                 text="", color=color,
                 fill=pg.mkBrush(_qc(_BG_TIP, 180)),
-                anchor=(0.0, 1.0),
+                anchor=(1.0, 1.0),   # right-aligned; _pin_panel_labels puts it on xhi
             )
             lbl.setFont(QFont("Monospace", 7))
             pw.addItem(line,  ignoreBounds=True)
@@ -5089,13 +5095,16 @@ class TradeViewerQt(QMainWindow):
         stats_item.setToolTip(stats_tip)
         pw.addItem(stats_item, ignoreBounds=True)
 
+        # Level labels ride the right edge, clear of the bars growing out from
+        # x=0. stats_item stays top-left: it is a panel header, not a level, and
+        # keeping it there means it never collides with the four of them.
         def _pin_panel_labels() -> None:
-            xlo = vb.viewRange()[0][0]
+            xlo, xhi = vb.viewRange()[0]
             yhi = vb.viewRange()[1][1]
-            poc_lbl.setPos(xlo, poc);  poc_lbl.setText(f"POC {poc:.2f}")
-            vah_lbl.setPos(xlo, vah);  vah_lbl.setText(f"VAH {vah:.2f}")
-            val_lbl.setPos(xlo, val);  val_lbl.setText(f"VAL {val:.2f}")
-            price_lbl.setPos(xlo, last_price); price_lbl.setText(f"Last {last_price:.2f}")
+            poc_lbl.setPos(xhi, poc);  poc_lbl.setText(f"POC {poc:.2f}")
+            vah_lbl.setPos(xhi, vah);  vah_lbl.setText(f"VAH {vah:.2f}")
+            val_lbl.setPos(xhi, val);  val_lbl.setText(f"VAL {val:.2f}")
+            price_lbl.setPos(xhi, last_price); price_lbl.setText(f"Last {last_price:.2f}")
             stats_item.setPos(xlo, yhi)
 
         conn = vb.sigRangeChanged.connect(lambda *_: _pin_panel_labels())
