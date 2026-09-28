@@ -903,6 +903,17 @@ class LiqHmWindow(QWidget):
 
     def set_live(self, live: bool) -> None:
         self._live = live
+        if self._hist_secs is not False:
+            # A replay owns the grid. The main viewer calls this on every
+            # refresh cycle -- once a second at the current floor -- and
+            # re-arming the feed here wiped the replay within a second of
+            # loading it: the first live push carries a near-touch band a few
+            # dollars wide, _maybe_init_price_range compares it against the
+            # replay band (a day is ~$25) and fires the too_wide rebuild,
+            # which zeroes the grid and empties _col_ts. Reported as the 1D
+            # replay flashing up and reverting to live, while 30m survived --
+            # 30m band is $1.75, close enough to live to not trip the check.
+            return
         if live and self._code:
             self._start_push(self._code)
             if self._needs_init:
@@ -1452,6 +1463,12 @@ class LiqHmWindow(QWidget):
         """Push historical pre-fill columns then switch to the normal timer."""
         self._needs_init  = False
         self._bulk_worker = None
+        if self._hist_secs is not False:
+            # A replay started while this was in flight. Its five live columns
+            # belong to the other mode, and the timer restart at the bottom
+            # would put the feed back on top of the replayed grid -- which is
+            # how a fast replay could still end up live a second later.
+            return
         for snap in snapshots:
             if snap:
                 self._maybe_init_price_range(snap)

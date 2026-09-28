@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.24.0 — CVD anchors on the Range control (2026-09-28)
+
+### Fix: a replay was wiped a second after loading (`analysis/liq_hm_window.py`)
+
+Reported: the 1D replay flashed up and reverted to live, while 30m was fine.
+The main viewer calls `set_live(True)` on the heatmap every refresh cycle --
+once a second at the current floor -- which re-armed the feed underneath the
+replay. The first live push carries a near-touch band a few dollars wide;
+`_maybe_init_price_range` compared it against the replay's band (a day is
+~$25), fired the `too_wide` rebuild, and zeroed the grid. 30m survived only
+because its band is $1.75, close enough to live not to trip the check.
+
+`set_live` and `_on_bulk_ready` now both return early while a replay is up. The
+second one matters for short ranges: a pre-fill worker still in flight would
+restart the timer after `_load_history` had stopped it.
+
+### Feat: CVD accumulates over the Range window (`analysis/trade_viewer_qt.py`)
+
+CVD reset at every trading-day boundary. It now resets per *block* of trading
+days, where the block size comes from the same Range control that scopes the
+session volume profile -- 1D (default, unchanged behaviour), 2D, 3D or 1W.
+
+Blocks are counted back from the newest trading day, so the most recent block
+always holds a full N days and its boundary does not move when the lookback
+changes. That also puts the reset on the same bar the profile's window starts,
+which is the point: a level read off the profile and the CVD under it now
+describe the same stretch of tape.
+
+`RANGE_DAYS` is now one map both read, and the trading-day rule the two share
+is one function (`_trading_day_of_bucket`) instead of the expression CVD had
+repeated.
+
 ## v0.23.1 — aggressor bubbles come back in replay (2026-09-28)
 
 ### Feat: the replay rebuilds aggressor bubbles (`analysis/liq_hm_window.py`)

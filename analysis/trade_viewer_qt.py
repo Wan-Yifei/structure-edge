@@ -443,6 +443,11 @@ def load_order_book_window(code: str, start: datetime, end: datetime) -> list[di
         return []
 
 
+# Trading days each Range setting spans. "7d" is a trading week, five
+# sessions -- the label says 1W because that is the calendar span it covers.
+RANGE_DAYS = {"1d": 1, "2d": 2, "3d": 3, "7d": 5}
+
+
 def _trading_day(time_key, cm: int):
     """Trading-day date for a bar, end-of-bar `time_key`.
 
@@ -455,7 +460,16 @@ def _trading_day(time_key, cm: int):
         bar_end = datetime.strptime(str(time_key)[:16], "%Y-%m-%d %H:%M")
     except ValueError:
         return None
-    bk = candle_start(bar_end - timedelta(minutes=cm), cm)
+    return _trading_day_of_bucket(candle_start(bar_end - timedelta(minutes=cm), cm))
+
+
+def _trading_day_of_bucket(bk):
+    """Trading-day date for an already-computed bucket start.
+
+    Split out because _draw_cvd() has the bucket in hand and used to repeat
+    this expression -- the profile range and the CVD reset have to agree on
+    where a day begins or the two would anchor to different boundaries.
+    """
     return bk.date() + timedelta(days=1) if bk.hour >= 20 else bk.date()
 
 
@@ -471,7 +485,7 @@ def apply_profile_range(klines: pd.DataFrame, range_val: str, cm: int) -> pd.Dat
     """
     if klines.empty:
         return klines
-    n_days = {"1d": 1, "2d": 2, "3d": 3, "7d": 5}.get(range_val)
+    n_days = RANGE_DAYS.get(range_val)
     if n_days is None:
         return klines
     days  = klines["time_key"].map(lambda tk: _trading_day(tk, cm))
@@ -1814,8 +1828,14 @@ class TradeViewerQt(QMainWindow):
 
         tb_sess.addSeparator()
 
-        # Profile date range
-        tb_sess.addWidget(_lbl("Range:"))
+        # Shared anchor for the session volume profile and the CVD reset
+        range_lbl = _lbl("Range:")
+        range_lbl.setToolTip(
+            "Trading days covered by the session volume profile, and the\n"
+            "window CVD accumulates over before resetting. 1D is one session,\n"
+            "1W is five. Both read the same setting so a level read off the\n"
+            "profile and the CVD under it describe the same stretch of tape.")
+        tb_sess.addWidget(range_lbl)
         self._range_group = QButtonGroup(self)
         for val, label in [("1d", "1D"), ("2d", "2D"), ("3d", "3D"), ("7d", "1W")]:
             rb = QRadioButton(label)
@@ -2746,6 +2766,10 @@ class TradeViewerQt(QMainWindow):
 
     def _on_range_changed(self) -> None:
         self._rebuild_session_profile()
+        # CVD anchors on the same window, so it has to be recomputed -- the
+        # profile rebuild alone would leave the two showing different ranges.
+        if self._klines is not None:
+            self._render(self._klines, self._ticks)
 
     def _get_range_val(self) -> str:
         for val in ("1d", "2d", "3d", "7d"):
@@ -3827,9 +3851,13 @@ class TradeViewerQt(QMainWindow):
         excluded from the delta itself, same caveat as the Range Profile
         Buy/Sell stats -- moomoo's ticker_direction tags a large share of
         same-price prints NEUTRAL, so this only reflects a subset of volume.
-        Resets to 0 at the start of each *trading* day (matches TradingView's
-        default CVD session reset) instead of accumulating across the whole
-        loaded range. A trading day here runs 20:00 ET -> next 20:00 ET
+        Resets to 0 at the start of each accumulation block, where a block is
+        the number of trading days the Range control selects -- 1D (the
+        default, matching TradingView's session reset), 2D, 3D or 1W. Blocks
+        are counted back from the most recent trading day, so the newest block
+        always holds exactly the last N days and the reset lands where the
+        session profile's window starts. A trading day here runs 20:00 ET ->
+        next 20:00 ET
         (overnight session start through the following after-hours close,
         matching the "night" session window used by _filter_sessions() and
         config/schedule.json) -- resetting on the calendar-date boundary
@@ -3847,7 +3875,7 @@ class TradeViewerQt(QMainWindow):
                 bk = candle_start(bar_end - timedelta(minutes=cm), cm)
             except ValueError:
                 continue
-            day[i] = bk.date() + timedelta(days=1) if bk.hour >= 20 else bk.date()
+            day[i] = _trading_day_of_bucket(bk)
             pd_ = buckets.get(bk)
             if not pd_:
                 continue
@@ -3855,13 +3883,24 @@ class TradeViewerQt(QMainWindow):
             total_sell = sum(pd_[p]["sell"] for p in pd_)
             delta[i] = total_buy - total_sell
 
+        # Block index per trading day, counted BACK from the newest one so the
+        # most recent block is always a full N days. Counting forward from the
+        # oldest loaded day would put the boundary at an arbitrary place that
+        # moves every time the lookback changes.
+        n_days = RANGE_DAYS.get(self._get_range_val(), 1)
+        present = sorted({d for d in day if d is not None})
+        block = {d: (len(present) - 1 - i) // n_days
+                 for i, d in enumerate(present)}
+
         cvd = np.zeros(n, dtype=float)
-        running  = 0.0
-        prev_day = None
+        running    = 0.0
+        prev_block = None
         for i in range(n):
-            if day[i] is not None and day[i] != prev_day:
-                running  = 0.0
-                prev_day = day[i]
+            if day[i] is not None:
+                b = block[day[i]]
+                if b != prev_block:
+                    running    = 0.0
+                    prev_block = b
             running += delta[i]
             cvd[i] = running
         self._cvd_arr = cvd
