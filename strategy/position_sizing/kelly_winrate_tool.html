@@ -365,10 +365,12 @@
           <div class="control-hint" id="ratio-override-hint">仅在当日全胜或全败时生效；其余日子盈亏比由当日盈亏%推导，此处填写会被忽略。</div>
         </div>
         <div class="btn-row">
-          <button class="primary" onclick="saveEntry()">保存到CSV（覆盖当日）</button>
+          <button class="primary" onclick="saveEntry()">保存当日</button>
           <button class="ghost" onclick="loadEntryForDate()">读取该日期数据</button>
+          <button class="ghost" onclick="exportCSV()">导出CSV文件</button>
         </div>
         <div class="control-hint" id="entry-status"></div>
+        <div class="control-hint" id="pending-status"></div>
       </div>
     </div>
 
@@ -549,7 +551,12 @@ function applyCSVData(text, sourceLabel) {
   document.getElementById('rate-input').value =
     winRates.map((r, i) => (winRateDates[i] ? winRateDates[i] + '\t' : '') + r).join('\n');
 
-  const writeSuffix = csvFileHandle ? ' · 可在下方录入并写回该文件' : (supportsFSAccess ? '' : ' · 当前浏览器不支持写回，保存时将改为下载新文件');
+  // Keyed on the handle, not on supportsFSAccess: a Chromium user who loaded
+  // the file through the plain file input has no handle either, and needs the
+  // same 'save edits the table, export writes the file' explanation.
+  const writeSuffix = csvFileHandle
+    ? ' · 可在下方录入并写回该文件'
+    : ' · 保存只改表格，录完后点"导出CSV文件"写出一个文件';
   if (ratios.length > 0) {
     const lam = parseFloat(document.getElementById('sl-lambda').value);
     const { final: bEwma } = calcEWMA(ratios, lam);
@@ -672,6 +679,48 @@ function upsertRow(newRow) {
   else { csvRows.push(newRow); csvRows.sort((a, b) => a.Date.localeCompare(b.Date)); }
 }
 
+// Days saved into csvRows but not yet on disk. Saving used to download a fresh
+// daily_win_rate.csv on every click, which piled up a folder of near-identical
+// files when entering several days in a row. Saving now only edits the
+// in-memory table; the download is its own button, pressed once at the end.
+//
+// This does not apply when a real file handle is open (Chromium's
+// showOpenFilePicker): that path writes straight back to the chosen file, so
+// there is nothing to accumulate and nothing to export.
+const pendingDates = new Set();
+
+function updatePendingStatus() {
+  const el = document.getElementById('pending-status');
+  if (!el) return;
+  if (pendingDates.size === 0) { el.textContent = ''; return; }
+  const days = [...pendingDates].sort();
+  const shown = days.length <= 4 ? days.join('、') : `${days[0]} … ${days[days.length - 1]}`;
+  el.textContent = `${days.length} 天待导出（${shown}）· 录完后点"导出CSV文件"写出一个文件`;
+}
+
+// Saving to memory is only as durable as the tab. Warn rather than let a
+// refresh or an accidental close drop a session's worth of entries.
+window.addEventListener('beforeunload', (e) => {
+  if (pendingDates.size === 0) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+
+function exportCSV() {
+  const statusEl = document.getElementById('entry-status');
+  if (csvRows.length === 0) {
+    statusEl.textContent = '没有可导出的数据';
+    return;
+  }
+  downloadText(serializeCSV(csvHeader, csvRows), 'daily_win_rate.csv');
+  const n = pendingDates.size;
+  pendingDates.clear();
+  updatePendingStatus();
+  statusEl.textContent = n > 0
+    ? `已导出 ${csvRows.length} 天（含 ${n} 天新录入）→ daily_win_rate.csv，请替换原文件`
+    : `已导出 ${csvRows.length} 天 → daily_win_rate.csv`;
+}
+
 function downloadText(text, filename) {
   const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -745,15 +794,18 @@ async function saveEntry() {
       const writable = await csvFileHandle.createWritable();
       await writable.write(text);
       await writable.close();
+      pendingDates.delete(dateVal);
       statusEl.textContent = `已保存 ${dateVal} → ${csvFileHandle.name} · 点击上方"计算"刷新表格`;
     } catch (err) {
       statusEl.textContent = '写入文件失败: ' + err.message;
       return;
     }
   } else {
-    downloadText(text, 'daily_win_rate.csv');
-    statusEl.textContent = `已保存 ${dateVal}（当前浏览器不支持直接写回，已下载更新后的 daily_win_rate.csv，请手动替换原文件）· 点击上方"计算"刷新表格`;
+    // No download here on purpose -- see pendingDates.
+    pendingDates.add(dateVal);
+    statusEl.textContent = `已保存 ${dateVal} 到表格 · 可继续录入其他日期，全部录完后点"导出CSV文件"`;
   }
+  updatePendingStatus();
 
   applyCSVData(text, csvFileHandle ? csvFileHandle.name : 'daily_win_rate.csv');
 }
