@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.24.2 — load as many days of ticks as CVD accumulates over (2026-09-29)
+
+### Fix: CVD was flat at zero before the current trading day (`analysis/trade_viewer_qt.py`)
+
+v0.24.0 gave CVD a 2D/3D/1W window but left the tick loader at one day.
+`load_local_ticks` spans the prior 20:00 through 23:59, so every bar older than
+the current trading day had no bucket, contributed a delta of 0, and the curve
+sat flat at zero until 20:00. Reported after switching to 2D/3D.
+
+`load_tick_days` now loads as many days as the Range spans. Two things had to
+be right, and the first attempt at each was wrong:
+
+- **Caching.** Past days never change, and re-reading five of them measured
+  13.3s against 0.2-2.8s for one -- far too slow on a fetch that runs on a 1s
+  timer. Days are cached by (code, tf, date); the newest is always re-read
+  since it is still growing, and empty days are not cached at all rather than
+  spending a slot of a bounded cache on nothing. Warm, a 5-day load is 0.2s.
+- **Counting trading days, not calendar days.** Stepping back three calendar
+  days over a weekend reaches Sunday, leaving the oldest session empty. Then
+  counting *non-empty* calendar days was still wrong: Sunday's file holds the
+  20:00 buckets that open Monday's trading day, so it retired a slot without
+  adding a session. The quota is now the number of distinct trading days the
+  loaded buckets cover.
+
+Changing Range also refetches rather than just redrawing -- the extra days'
+ticks have to be on hand before the curve means anything.
+
+Verified against live data: at 1D/2D/3D/1W every trading day in the block now
+carries a real curve, where 3D previously left its oldest session at zero.
+
 ## v0.24.1 — the rest of the ways a replay could be wiped (2026-09-28)
 
 ### Fix: a symbol switch during a replay stranded the window (`analysis/liq_hm_window.py`)

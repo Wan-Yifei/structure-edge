@@ -448,6 +448,65 @@ def load_order_book_window(code: str, start: datetime, end: datetime) -> list[di
 RANGE_DAYS = {"1d": 1, "2d": 2, "3d": 3, "7d": 5}
 
 
+def load_tick_days(code: str, end_date_str: str, tf: str, days: int,
+                   cache: dict | None = None) -> tuple[dict, dict]:
+    """Merged tick buckets for the `days` calendar days ending at end_date_str.
+
+    Returns (merged_buckets, newly_loaded) where newly_loaded maps date_str ->
+    buckets for the days that were read from disk this call, so the caller can
+    keep them. Past days never change, and re-reading them is what made this
+    expensive: five days measured 13.3s against 0.2-2.8s for one, which is far
+    too slow for a fetch on a 1s refresh timer. The newest day is always read
+    fresh -- it is still growing -- and is deliberately left out of
+    newly_loaded so it is never cached stale.
+
+    Later days win on overlapping buckets. load_local_ticks() spans 28 hours
+    (the prior 20:00 through 23:59), so consecutive days overlap by four hours;
+    the buy/sell/neutral totals agree, only the adaptive S/M/L split differs,
+    and the fresher day's thresholds are the better ones to keep.
+    """
+    cache = cache or {}
+    end = datetime.strptime(end_date_str, "%Y-%m-%d")
+
+    # Step back over CALENDAR days but count TRADING ones. RANGE_DAYS is in
+    # trading days, so over a weekend "3D" is five calendar days back -- taking
+    # three left the oldest session with no ticks and its CVD flat at zero,
+    # which is the same symptom this whole change set out to fix, one layer
+    # down. A day with no ticks costs ~0.01s and does not count against the
+    # quota. The cap stops a long holiday break from walking back forever.
+    collected: list[tuple[tuple, dict]] = []
+    seen_trading_days: set = set()
+    for back in range(days * 3 + 4):
+        if len(seen_trading_days) >= days:
+            break
+        d = (end - timedelta(days=back)).strftime("%Y-%m-%d")
+        is_newest = back == 0
+        key = (code, tf, d)
+        if not is_newest and key in cache:
+            day = cache[key]
+            fresh = False
+        else:
+            day = load_local_ticks(code, d, tf) or {}
+            fresh = True
+        collected.append((key, day) if fresh and not is_newest else (None, day))
+        # Count trading days, not calendar days that happen to be non-empty.
+        # load_local_ticks spans the prior 20:00 through 23:59, so a Sunday
+        # carries the 240 buckets that open Monday's trading day -- counting it
+        # as a day of its own retired the quota early and left the oldest
+        # session with no ticks, the exact hole this is meant to close.
+        seen_trading_days.update(_trading_day_of_bucket(bk) for bk in day)
+
+    merged: dict = {}
+    new: dict = {}
+    for key, day in reversed(collected):          # oldest first; later wins
+        merged.update(day)
+        # Only non-empty days are worth caching. A weekend reads in ~0.01s, and
+        # caching it would spend one of the bounded cache's slots on nothing.
+        if key is not None and day:
+            new[key] = day
+    return merged, new
+
+
 def _trading_day(time_key, cm: int):
     """Trading-day date for a bar, end-of-bar `time_key`.
 
@@ -1245,8 +1304,11 @@ class DataFetcher(QThread):
 
             # Tick data
             ticks: dict | None = None
+            self._new_tick_days: dict = {}
             if historical:
-                ticks = load_local_ticks(code, date_str, tf)
+                ticks, self._new_tick_days = load_tick_days(
+                    code, date_str, tf, int(p.get("tick_days", 1) or 1),
+                    p.get("tick_cache"))
             else:
                 # Live mode: load today's ticks from DB first (covers the whole
                 # trading day even when the viewer is opened after hours), then
@@ -1256,13 +1318,20 @@ class DataFetcher(QThread):
                 # present there is authoritative — adding the live snapshot on
                 # top would double-count the same real trades.
                 today = datetime.now().strftime("%Y-%m-%d")
-                ticks = load_local_ticks(code, today, tf) or {}
+                # As many days as the Range control accumulates CVD over --
+                # loading one while CVD spans three left every bar before the
+                # current trading day with no tick bucket, so its delta was 0
+                # and the curve sat flat at zero until 20:00.
+                ticks, self._new_tick_days = load_tick_days(
+                    code, today, tf, int(p.get("tick_days", 1) or 1),
+                    p.get("tick_cache"))
                 live_snap: dict = p.get("live_ticks") or {}
                 for bk, pd_ in live_snap.items():
                     if bk not in ticks:
                         ticks[bk] = {price: dict(counts) for price, counts in pd_.items()}
 
             self.ready.emit({
+                "new_tick_days": self._new_tick_days,
                 "klines":      df,
                 "warmup":      warmup,
                 "smc_signals": smc_signals,
@@ -1507,6 +1576,9 @@ class TradeViewerQt(QMainWindow):
         # against the previous one's anchor: _trigger_fetch returns early on a
         # live code change, leaving the old anchor in place until the next load.
         self._pair_anchor: tuple[str, str, float, float] | None = None
+        # (code, tf, "YYYY-MM-DD") -> tick buckets for that day. Past days are
+        # immutable, so they are read once; the current day is always re-read.
+        self._tick_day_cache: dict = {}
         self._fetcher:      DataFetcher | None  = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._trigger_fetch)
@@ -2766,10 +2838,11 @@ class TradeViewerQt(QMainWindow):
 
     def _on_range_changed(self) -> None:
         self._rebuild_session_profile()
-        # CVD anchors on the same window, so it has to be recomputed -- the
-        # profile rebuild alone would leave the two showing different ranges.
+        # A refetch, not just a redraw: CVD anchors on this window, and the
+        # extra trading days it now spans need their ticks loaded before the
+        # curve means anything. Redrawing alone left the older bars at delta 0.
         if self._klines is not None:
-            self._render(self._klines, self._ticks)
+            self._trigger_fetch()
 
     def _get_range_val(self) -> str:
         for val in ("1d", "2d", "3d", "7d"):
@@ -2843,6 +2916,8 @@ class TradeViewerQt(QMainWindow):
             "candle_mins":     cm,
             "ind":             ind,
             "live_ticks":      live_snap,
+            "tick_days":       RANGE_DAYS.get(self._get_range_val(), 1),
+            "tick_cache":      dict(self._tick_day_cache),
             # Only when it is this exact (code, tf); the fetcher additionally
             # refuses to use it if a gap shows up. Historical mode never tops
             # up -- its window is pinned to a date, not rolling.
@@ -2899,6 +2974,13 @@ class TradeViewerQt(QMainWindow):
             None if result.get("historical")
             else (result.get("code", ""), result.get("tf", "")))
         self._ticks       = result["ticks"]
+        for key, day in (result.get("new_tick_days") or {}).items():
+            self._tick_day_cache[key] = day
+        if len(self._tick_day_cache) > 12:
+            # Bounded: a day of 1m buckets is small, but a long session of
+            # symbol and timeframe switches would otherwise accumulate them all.
+            for key in sorted(self._tick_day_cache)[:-12]:
+                del self._tick_day_cache[key]
         self._warmup      = result["warmup"]
         self._smc_signals = result["smc_signals"]
         self._fvg_gaps    = result["fvg_gaps"]
