@@ -140,21 +140,6 @@ def _query_latest_snapshot(code: str) -> list[dict]:
         return []
 
 
-def _query_n_snapshots(code: str, n: int) -> list[list[dict]]:
-    """Return the last *n* distinct OB snapshots for *code*, oldest first.
-
-    Each inner list contains all rows for one timestamp (one full book state).
-    """
-    if not _DB_PATH.exists():
-        return []
-    try:
-        from feeds.order_book_store import OrderBookStore
-        with OrderBookStore(_DB_PATH, read_only=True) as store:
-            return store.last_n_snapshots(code, n)
-    except Exception:
-        return []
-
-
 _TICK_DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
 
 
@@ -201,17 +186,39 @@ class _SnapshotWorker(QThread):
         self.done.emit(_query_latest_snapshot(self._code))
 
 
-class _BulkSnapshotWorker(QThread):
-    """Fetch the last N distinct OB snapshots in a background thread."""
-    done = pyqtSignal(list)   # emits list[list[dict]]
+class _WindowPrefillWorker(QThread):
+    """Fetch one snapshot per Col(s) bucket to fill the live rolling window.
 
-    def __init__(self, code: str, n: int) -> None:
+    The old pre-fill asked for the last 5 snapshots -- under a second of chart
+    at the feed's ~6/s. Leaving a replay therefore dropped straight back to a
+    blank panel that took max_cols seconds to rebuild, losing whatever had
+    happened in between. Bucketing by Col(s) instead fills every visible column
+    from the collector's database in one query: 240 columns measured 25ms,
+    1440 columns 138ms.
+    """
+    done = pyqtSignal(list)   # emits list[list[dict]], oldest first
+
+    def __init__(self, code: str, cols: int, bucket_secs: int) -> None:
         super().__init__()
         self._code = code
-        self._n    = n
+        self._cols = cols
+        self._bucket = max(1, bucket_secs)
 
     def run(self) -> None:
-        self.done.emit(_query_n_snapshots(self._code, self._n))
+        out: list = []
+        try:
+            from feeds.order_book_store import OrderBookStore
+            with OrderBookStore(_DB_PATH, read_only=True) as store:
+                newest = store.latest_ts(self._code)
+                if newest is not None:
+                    start = newest - timedelta(
+                        seconds=self._cols * self._bucket)
+                    out = store.bucketed_snapshots(
+                        self._code, start,
+                        newest + timedelta(seconds=1), self._bucket)
+        except Exception as exc:
+            print(f"[liqhm] window prefill failed: {exc}", flush=True)
+        self.done.emit(out)
 
 
 class _PushBridge(QObject):
@@ -523,7 +530,7 @@ class LiqHmWindow(QWidget):
 
         # Background query workers (one at a time each)
         self._worker:      _SnapshotWorker | None      = None
-        self._bulk_worker: _BulkSnapshotWorker | None  = None
+        self._bulk_worker: _WindowPrefillWorker | None = None
         # True after _reset_grid(); cleared after initial bulk pre-fill completes
         self._needs_init:  bool                        = False
         # Timestamp of the last snapshot pushed; used to skip duplicate polls
@@ -930,8 +937,10 @@ class LiqHmWindow(QWidget):
             if self._needs_init:
                 if self._bulk_worker is not None and self._bulk_worker.isRunning():
                     return   # prefill already in flight — _on_bulk_ready will clear _needs_init
-                # Pre-fill with the last 5 historical snapshots, then start timer
-                self._bulk_worker = _BulkSnapshotWorker(self._code, 5)
+                # Fill every visible column from the DB, then start the timer
+                self._bulk_worker = _WindowPrefillWorker(
+                    self._code, self._max_cols_spin.value(),
+                    self._col_secs_spin.value())
                 self._bulk_worker.done.connect(self._on_bulk_ready)
                 self._bulk_worker.start()
             else:
@@ -1486,10 +1495,16 @@ class LiqHmWindow(QWidget):
             # would put the feed back on top of the replayed grid -- which is
             # how a fast replay could still end up live a second later.
             return
+        # One band, taken from the newest snapshot, rather than re-deriving it
+        # per column: _maybe_init_price_range wipes the grid when it decides to
+        # rebuild, so calling it 240 times mid-fill would throw away most of
+        # what had just been painted. The newest book is also the right one to
+        # scale by -- this is the live view, about to continue from there.
+        snapshots = [sn for sn in snapshots if sn]
+        if snapshots:
+            self._maybe_init_price_range(snapshots[-1])
         for snap in snapshots:
-            if snap:
-                self._maybe_init_price_range(snap)
-                self._push_column(snap, ts=snap[0]["ts"])
+            self._push_column(snap, ts=snap[0]["ts"])
         if self._col_ts:
             self._render()
             self._redraw_orderflow_markers()

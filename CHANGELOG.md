@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.25.0 — the live heatmap fills its whole window on open (2026-09-30)
+
+### Feat: pre-fill the rolling buffer from the database (`analysis/liq_hm_window.py`)
+
+Leaving a replay dropped back to a near-blank panel that took `Max cols`
+seconds to rebuild -- four minutes at the defaults -- losing whatever happened
+in between. The pre-fill asked for the last **5 snapshots**, under a second of
+chart at the feed's ~6/s.
+
+`_WindowPrefillWorker` now fetches one snapshot per Col(s) bucket for the whole
+visible window, reusing the `bucketed_snapshots` query the replay is built on.
+Returning from any replay range repopulates all 240 columns -- a full four
+minutes of chart -- in **0.3-0.4s**, and a cold open fills the same way instead
+of starting empty. 240 columns measured 25ms at the database, 1440 columns
+138ms, so the cost is in the thread hand-off rather than the query.
+
+The band is now derived once from the newest snapshot rather than re-derived
+per column. `_maybe_init_price_range` wipes the grid when it decides to
+rebuild, so calling it 240 times mid-fill would have thrown away most of what
+had just been painted -- harmless at 5 snapshots, not at 240.
+
+`_BulkSnapshotWorker` and `_query_n_snapshots` are removed; nothing else used
+them.
+
 ## v0.24.2 — load as many days of ticks as CVD accumulates over (2026-09-29)
 
 ### Fix: CVD was flat at zero before the current trading day (`analysis/trade_viewer_qt.py`)
