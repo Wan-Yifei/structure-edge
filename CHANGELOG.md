@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.26.0 — GEX chart says whether the walls matter (2026-10-04)
+
+### Feat: dealer hedging intensity against actual volume (`strategy/option/gex.py`)
+
+GEX is an absolute number: it says how much gamma dealers carry, not whether
+that is large against how much the stock trades. The same GEX is decisive on a
+thin name and invisible on a liquid one, and nothing in the chart distinguished
+the two.
+
+A new full-width line converts GEX to **shares dealers must trade per 1% move**
+(GEX is gamma x OI x 100 x spot, the delta change for a move of one whole spot,
+so a percent of it is the per-1% figure) and divides by 20-day average volume,
+with a verdict: negligible < 0.5% < minor < 2% < material < 5% < dominant.
+
+On SOXL today the strongest strike needs 9.4K shares per 1% move, **0.02% of
+average volume** -- negligible. All strikes combined reach 0.18%. Against 61M
+shares a day the walls cannot pin anything, which is worth knowing before
+trading off them. The same measure on a thinner name is where it earns its
+place.
+
+Also checked a second way, repricing gamma with Black-Scholes at spot = strike
+to capture the rise as price approaches a wall: $165 goes from 15.3K to 16.9K
+shares, still 0.03%.
+
+The verdict line spans the full width under the stats panel. A first attempt
+put it in a quarter-width column, where it printed over the next column's
+stats -- the same class of collision v0.25.1 fixed.
+
 ## v0.25.1 — GEX chart labels stop overlapping (2026-10-04)
 
 ### Fix: three collisions in the option GEX chart (`strategy/option/gex.py`)

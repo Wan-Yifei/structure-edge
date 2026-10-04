@@ -236,6 +236,29 @@ def zero_gamma(df: pd.DataFrame) -> float | None:
     return None
 
 
+# Hedging demand as a share of average daily volume, and what that is worth.
+# GEX on its own is an absolute number: it says how much gamma dealers carry,
+# not whether that matters against how much the stock actually trades. The same
+# GEX is decisive on a thin name and invisible on a liquid one. Measured on
+# SOXL, the strongest strike needs ~0.03% of a day's volume per 1% move, which
+# is why its "walls" do not pin anything -- 61M shares a day swamp them.
+_HEDGE_BANDS = [
+    (0.5,   "negligible"),   # lost in normal flow
+    (2.0,   "minor"),        # visible only on quiet days
+    (5.0,   "material"),     # shows up in the tape
+    (1e9,   "dominant"),     # hedging drives the price
+]
+
+
+def _hedge_label(pct_adv: float) -> str:
+    if pct_adv != pct_adv:          # NaN -- no volume reference available
+        return "n/a"
+    for limit, name in _HEDGE_BANDS:
+        if pct_adv < limit:
+            return name
+    return "dominant"
+
+
 def build_gex_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
                  spot: float, avg_vol: float, expiries: list[str]) -> dict:
     itm_calls = df[(df["option_type"] == "CALL") & df["itm"]]
@@ -261,6 +284,21 @@ def build_gex_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
     def _pct(n: float) -> float:
         return n / avg_vol * 100 if avg_vol else float("nan")
 
+    # Shares dealers must trade per 1% move in spot. "gex" is gamma x OI x 100
+    # x spot, which is the delta change for a move of one whole spot, so a
+    # percent of it is the delta change for a 1% move. Absolute value: a short
+    # call and a short put both oblige a trade, the sign only says which way.
+    hedge_per_strike = (
+        df.assign(h=df["gex"].abs() * 0.01)
+        .groupby("option_strike_price")["h"].sum()
+    )
+    hedge_total = float(hedge_per_strike.sum())
+    if len(hedge_per_strike):
+        hedge_peak_strike = float(hedge_per_strike.idxmax())
+        hedge_peak = float(hedge_per_strike.max())
+    else:
+        hedge_peak_strike, hedge_peak = float("nan"), 0.0
+
     return {
         "spot": spot,
         "avg_vol": avg_vol,
@@ -281,6 +319,12 @@ def build_gex_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
         "call_wall_v": call_wall_v,
         "put_wall": put_wall,
         "put_wall_v": put_wall_v,
+        "hedge_total": hedge_total,
+        "hedge_peak": hedge_peak,
+        "hedge_peak_strike": hedge_peak_strike,
+        "hedge_peak_pct": _pct(hedge_peak),
+        "hedge_total_pct": _pct(hedge_total),
+        "hedge_label": _hedge_label(_pct(hedge_peak)),
     }
 
 
@@ -474,7 +518,7 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
 
     # ── Stats panel ────────────────────────────────────────────────────────────
     # Top stops below the separator, bottom above the footnote's own strip.
-    ax2 = fig.add_axes([0.07, 0.055, 0.91, 0.205], facecolor=PAGE)
+    ax2 = fig.add_axes([0.07, 0.085, 0.91, 0.175], facecolor=PAGE)
     ax2.axis("off")
 
     def _txt(x, y, s, **kw):
@@ -512,6 +556,22 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
     _txt(COL[3], V1_Y,   f"OI: {stats['put_oi']:,} contracts",       color=TEXT_SEC, fontsize=9)
     _txt(COL[3], V2_Y,   f"Equiv Shares: {_fmt(stats['put_sh'])}",   color=TEXT_SEC, fontsize=9)
     _txt(COL[3], V3_Y,   f"% 20d Avg Vol: {stats['put_pct']:.1f}%",  color=TEXT_SEC, fontsize=9)
+
+    # Full width, on its own row: this is the line that says whether any of the
+    # walls above are worth acting on, and it does not fit a quarter-width
+    # column -- squeezed into one it printed over the next column's stats.
+    hp, hl = stats["hedge_peak_pct"], stats["hedge_label"]
+    hedge_col = {"negligible": TEXT_MUTED, "minor": TEXT_SEC,
+                 "material": SPOT_COL, "dominant": CALL_COL}.get(hl, TEXT_MUTED)
+    peak_k = stats["hedge_peak_strike"]
+    peak_str = f"${peak_k:.0f}" if peak_k == peak_k else "n/a"
+    fig.text(0.075, 0.048,
+             f"Dealer hedging — strongest strike {peak_str}: "
+             f"{_fmt(stats['hedge_peak'])} sh per 1% move"
+             + (f"  =  {hp:.2f}% of 20d avg volume  →  {hl.upper()}" if hp == hp else "")
+             + f"      ·      all strikes combined: {_fmt(stats['hedge_total'])} sh"
+             + (f"  ({stats['hedge_total_pct']:.2f}%)" if hp == hp else ""),
+             color=hedge_col, fontsize=8.5, va="bottom", ha="left")
 
     # On the figure, not inside ax2: sharing the panel meant it sat on the same
     # band as the "% 20d Avg Vol" row and the two printed over each other.
@@ -562,6 +622,11 @@ def main() -> None:
               f"  ({stats['call_pct']:.1f}% of avg vol)", flush=True)
         print(f"  ITM Put  OI: {stats['put_oi']:,} contracts = {_fmt(stats['put_sh'])} sh"
               f"  ({stats['put_pct']:.1f}% of avg vol)", flush=True)
+        print(f"  Hedging    : {_fmt(stats['hedge_peak'])} sh per 1% move at "
+              f"${stats['hedge_peak_strike']:.0f} "
+              f"({stats['hedge_peak_pct']:.2f}% of avg vol -- {stats['hedge_label']});"
+              f"  all strikes {_fmt(stats['hedge_total'])} sh "
+              f"({stats['hedge_total_pct']:.2f}%)", flush=True)
 
         out_path = _resolve_out(args.out, args.code, args.dte)
         _plot(args.code, by_strike, stats, out_path)
