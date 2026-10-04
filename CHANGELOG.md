@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.25.1 — GEX chart labels stop overlapping (2026-10-04)
+
+### Fix: three collisions in the option GEX chart (`strategy/option/gex.py`)
+
+- **Spot against the Call Wall.** Both labels were pinned to the same y, so a
+  spot of 163.71 under a 165 call wall printed the price through the wall's
+  box. Top-of-chart labels now take the highest row still clear of every label
+  already placed, "clear" being more than 7% of the plotted strike range away.
+- **"Strike Price" clipped.** The axes bottom sat at 0.30 of figure height with
+  the separator at 0.285, leaving the tick labels and the axis title nowhere to
+  go. The figure is taller and the axes start higher.
+- **The footnote printed over the stats.** It lived inside the stats panel on
+  the same band as the "% 20d Avg Vol" row. It now has its own strip on the
+  figure below the panel.
+
 ## v0.25.0 — the live heatmap fills its whole window on open (2026-09-30)
 
 ### Feat: pre-fill the rolling buffer from the database (`analysis/liq_hm_window.py`)

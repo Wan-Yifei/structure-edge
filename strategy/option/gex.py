@@ -317,6 +317,11 @@ def _fmt(n: float) -> str:
 
 # ── Chart ──────────────────────────────────────────────────────────────────────
 
+# Minimum x separation, as a fraction of the plotted strike range, before two
+# top-of-chart labels are considered to collide and the later one drops a row.
+_LABEL_SEP_PCT = 0.07
+
+
 def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None) -> None:
     SURF       = "#1a1a19"
     PAGE       = "#0d0d0d"
@@ -344,8 +349,11 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
         "font.size":        9,
     })
 
-    fig = plt.figure(figsize=(14, 8), facecolor=SURF)
-    ax  = fig.add_axes([0.07, 0.30, 0.90, 0.61], facecolor=SURF)
+    fig = plt.figure(figsize=(14, 8.8), facecolor=SURF)
+    # Bottom at 0.33 rather than 0.30: the x tick labels plus "Strike Price"
+    # need ~3% of figure height below the axes, and at 0.30 the label ran into
+    # the separator and was clipped by the stats panel underneath.
+    ax  = fig.add_axes([0.07, 0.33, 0.90, 0.58], facecolor=SURF)
     ax_r = ax.twinx()   # secondary y-axis for cumulative GEX curve
 
     strikes   = by_strike["option_strike_price"].values
@@ -378,16 +386,33 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
     xmin, xmax = ax.get_xlim()
     span = ymax - ymin or 1.0
 
+    # Spot, Zero Gamma and the Call Wall all label the top of the chart, and
+    # nothing stopped two of them sharing a row: spot 163.71 against a 165 call
+    # wall put the price straight through the wall's box. Each label takes the
+    # highest row still clear of every label already placed, where "clear"
+    # means more than _LABEL_SEP_PCT of the x range away.
+    taken: list[tuple[float, int]] = []      # (x, row)
+
+    def _slot(x: float) -> float:
+        min_sep = (xmax - xmin) * _LABEL_SEP_PCT
+        row = 0
+        while any(r == row and abs(x - px) < min_sep for px, r in taken):
+            row += 1
+        taken.append((x, row))
+        return ymax - span * (0.02 + 0.13 * row)
+
     # Spot price — yellow dashed
     ax.axvline(stats["spot"], color=SPOT_COL, linewidth=1.4, linestyle="--", zorder=6, alpha=0.9)
-    ax.text(stats["spot"] + bar_w * 0.3, ymax - span * 0.02,
-            f"  ${stats['spot']:.2f}", color=SPOT_COL, fontsize=8, va="top", ha="left", zorder=7)
+    ax.text(stats["spot"] + bar_w * 0.3, _slot(stats["spot"]),
+            f"${stats['spot']:.2f}", color=SPOT_COL, fontsize=8,
+            va="top", ha="left", zorder=8,
+            bbox=dict(boxstyle="round,pad=0.2", fc=SURF, ec=SPOT_COL, alpha=0.85, lw=0.8))
 
     # Zero Gamma (Gamma Flip) — orange solid
     zg = stats.get("zero_gamma")
     if zg is not None:
         ax.axvline(zg, color=ZERO_G_COL, linewidth=1.6, zorder=6)
-        ax.text(zg + bar_w * 0.3, ymax - span * 0.12,
+        ax.text(zg + bar_w * 0.3, _slot(zg),
                 f"Zero Gamma\n${zg:.2f}", color=ZERO_G_COL, fontsize=7.5,
                 va="top", ha="left", zorder=7,
                 bbox=dict(boxstyle="round,pad=0.2", fc=SURF, ec=ZERO_G_COL, alpha=0.85, lw=0.8))
@@ -395,7 +420,7 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
     # Call Wall — highest call GEX strike
     cw = stats["call_wall"]
     ax.axvline(cw, color=CALL_COL, linewidth=0.8, linestyle=":", zorder=5, alpha=0.7)
-    ax.text(cw, ymax - span * 0.02,
+    ax.text(cw, _slot(cw),
             f"Call Wall\n${cw:.0f}", color=CALL_COL, fontsize=7.5,
             va="top", ha="center", zorder=7,
             bbox=dict(boxstyle="round,pad=0.2", fc=SURF, ec=CALL_COL, alpha=0.85, lw=0.8))
@@ -444,11 +469,12 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
               framealpha=0.92, borderpad=0.7)
 
     # ── Separator ──────────────────────────────────────────────────────────────
-    fig.add_artist(plt.Line2D([0.07, 0.98], [0.285, 0.285],
+    fig.add_artist(plt.Line2D([0.07, 0.98], [0.275, 0.275],
                                transform=fig.transFigure, color=GRID, linewidth=0.8))
 
     # ── Stats panel ────────────────────────────────────────────────────────────
-    ax2 = fig.add_axes([0.07, 0.02, 0.91, 0.24], facecolor=PAGE)
+    # Top stops below the separator, bottom above the footnote's own strip.
+    ax2 = fig.add_axes([0.07, 0.055, 0.91, 0.205], facecolor=PAGE)
     ax2.axis("off")
 
     def _txt(x, y, s, **kw):
@@ -487,9 +513,12 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
     _txt(COL[3], V2_Y,   f"Equiv Shares: {_fmt(stats['put_sh'])}",   color=TEXT_SEC, fontsize=9)
     _txt(COL[3], V3_Y,   f"% 20d Avg Vol: {stats['put_pct']:.1f}%",  color=TEXT_SEC, fontsize=9)
 
-    ax2.text(0.99, 0.02,
-             "Dealers assumed net short  ·  GEX = γ × OI × 100 × spot  ·  Zero Gamma = BS-repriced dealer GEX flips sign vs. hypothetical spot",
-             color=TEXT_MUTED, fontsize=7, transform=ax2.transAxes,
+    # On the figure, not inside ax2: sharing the panel meant it sat on the same
+    # band as the "% 20d Avg Vol" row and the two printed over each other.
+    fig.text(0.98, 0.016,
+             "Dealers assumed net short  ·  GEX = γ × OI × 100 × spot  ·  "
+             "Zero Gamma = BS-repriced dealer GEX flips sign vs. hypothetical spot",
+             color=TEXT_MUTED, fontsize=7,
              va="bottom", ha="right", style="italic")
 
     if out_path:
