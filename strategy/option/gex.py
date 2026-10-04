@@ -250,6 +250,21 @@ _HEDGE_BANDS = [
 ]
 
 
+def _expiry_label(expiries: list[str], max_listed: int = 3) -> str:
+    """Spell out a few expiries, collapse a long run to count plus range.
+
+    Daily-expiry names reach five within a week -- QQQ and SPY both do -- and
+    the full list is 68 characters, which overflows a quarter-width stats
+    column onto the next one and fills the title bar edge to edge.
+    """
+    if not expiries:
+        return "N/A"
+    if len(expiries) <= max_listed:
+        return "  ·  ".join(expiries)
+    # No word for the count: both call sites already print "Expiries:".
+    return f"{expiries[0]} → {expiries[-1]}  ({len(expiries)})"
+
+
 def _hedge_label(pct_adv: float) -> str:
     if pct_adv != pct_adv:          # NaN -- no volume reference available
         return "n/a"
@@ -490,7 +505,7 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
 
     # ── Title ──────────────────────────────────────────────────────────────────
     ticker  = code.split(".")[-1]
-    exp_str = "  ·  ".join(stats["expiries"]) or "N/A"
+    exp_str = _expiry_label(stats["expiries"])
     dir_str = "▲ Stabilizing" if stats["stable"] else "▼ Destabilizing"
     dir_col = CUM_COL if stats["stable"] else CALL_COL
     ax.set_title(
@@ -542,7 +557,7 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
          color=CALL_COL, fontsize=9)
     _txt(COL[1], V2_Y,   f"Put Wall:   ${stats['put_wall']:.0f}  ({_fmt(stats['put_wall_v'])} sh)",
          color=PUT_COL,  fontsize=9)
-    _txt(COL[1], V3_Y,   f"Expiries: {', '.join(stats['expiries']) or 'N/A'}",
+    _txt(COL[1], V3_Y,   f"Expiries: {_expiry_label(stats['expiries'], 2)}",
          color=TEXT_MUTED, fontsize=8)
 
     # Col 2: ITM Calls

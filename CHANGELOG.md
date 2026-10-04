@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.26.1 — collapse long expiry lists (2026-10-04)
+
+### Fix: five daily expiries overflowed the stats column and filled the title (`strategy/option/gex.py`)
+
+QQQ and SPY both list five expiries inside a week. Spelled out that is 68
+characters, which ran out of the quarter-width "Key Strikes" column and printed
+over the ITM Call stats next to it, and filled the title bar edge to edge with
+no room for a sixth.
+
+`_expiry_label` lists a few and collapses a longer run to its range plus a
+count -- `2026-10-05 → 2026-10-09  (5)`. The panel collapses from three, the
+title from four, so SOXL's three-expiry chart still spells them out where it
+fits. Not wrapped to a second line: the hedging verdict row sits directly
+below and would have been the next collision.
+
 ## v0.26.0 — GEX chart says whether the walls matter (2026-10-04)
 
 ### Feat: dealer hedging intensity against actual volume (`strategy/option/gex.py`)
