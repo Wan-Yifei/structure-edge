@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.27.3 — wall labels move right and print white (2026-10-06)
+
+### Fix: labels sat on the left in the band's own colour (`analysis/liq_hm_window.py`)
+
+Teal text on a teal band and red on a red one is the same hue as the thing
+being labelled, which is exactly where it is hardest to read. Labels now print
+white with the side's colour on the box border, so the side still reads without
+the text fighting the heatmap underneath. They also move to the right edge,
+right-aligned, clear of the bid/ask quote tags already on the left.
+
+Their x is a view coordinate, so it went stale on any zoom or pan. Live mode
+re-renders every second and hid that; a replay is static and would have
+stranded them off-screen. A `sigRangeChanged` hook now re-seats them -- moving
+only the x, never re-running detection. It is the first range hook in this
+window; the quote tags have the same latent issue and are left alone for now
+since nothing static draws them.
+
 ## v0.27.2 — option walls default to 4 per side (2026-10-06)
 
 ### Change: `Walls` starts at 4 instead of 1 (`analysis/trade_viewer_qt.py`)

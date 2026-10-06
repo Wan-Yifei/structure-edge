@@ -53,6 +53,11 @@ _LABEL_FILL_RGBA = (13, 17, 23, 200)
 # disagreeing about what counts as a wall.
 _WALL_MIN_BRIGHT = 0.5
 
+# Wall labels print white rather than in the side's colour: teal on teal bands
+# and red on red ones was the same hue as the thing being labelled and hard to
+# read. The side still shows, as the B/A prefix and as the box's border.
+_WALL_TEXT_COL = "#ffffff"
+
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
 # OpenD endpoint for the heatmap's own ORDER_BOOK subscription (same
@@ -853,6 +858,10 @@ class LiqHmWindow(QWidget):
             axisItems={"bottom": self._time_axis},
         )
         pi = self._plot_widget.getPlotItem()
+        # Wall labels carry a view-coordinate x, so a zoom or pan leaves them
+        # behind. Live mode re-renders every second and masks it; a replay is
+        # static and would strand them off-screen.
+        pi.vb.sigRangeChanged.connect(lambda *_: self._pin_wall_labels())
         pi.showGrid(x=True, y=True, alpha=0.15)
         pi.setMenuEnabled(False)
         pi.getAxis("left").setTextPen(_FG)
@@ -2092,14 +2101,36 @@ class LiqHmWindow(QWidget):
                 px = (f"{price:.2f}" if half <= 0.01
                       else f"{price:.2f}±{half:.2f}")
                 lbl = pg.TextItem(
-                    text=f"{side} {px}  {v:,.0f}", color=colour,
-                    fill=pg.mkBrush(QColor(*_LABEL_FILL_RGBA)), anchor=(0.0, 0.5),
+                    text=f"{side} {px}  {v:,.0f}", color=_WALL_TEXT_COL,
+                    fill=pg.mkBrush(QColor(*_LABEL_FILL_RGBA)),
+                    border=pg.mkPen(colour, width=1),
+                    anchor=(1.0, 0.5),          # right edge of the text at the x
                 )
                 lbl.setFont(QFont("Monospace", 7))
                 lbl.setZValue(14)
-                lbl.setPos(xlo + (xhi - xlo) * 0.012, price)
                 self._plot_widget.addItem(lbl, ignoreBounds=True)
                 self._wall_items.append(lbl)
+                # y is fixed; x is re-pinned on every range change, see below.
+                lbl.setPos(self._wall_label_x(), price)
+
+    def _wall_label_x(self) -> float:
+        """X for the right-hand wall labels, just inside the view's right edge."""
+        xlo, xhi = self._plot_widget.getPlotItem().vb.viewRange()[0]
+        return xhi - (xhi - xlo) * 0.012
+
+    def _pin_wall_labels(self) -> None:
+        """Re-seat the wall labels after a zoom or pan.
+
+        Their x is a view coordinate, so it goes stale the moment the range
+        changes. Live mode re-renders every second and hides that, but a replay
+        is static -- there the labels would drift off the edge and stay there.
+        Only the x moves; this never re-runs the detection.
+        """
+        if not self._wall_items:
+            return
+        x = self._wall_label_x()
+        for lbl in self._wall_items:
+            lbl.setPos(x, lbl.pos().y())
 
     def _clear_overlay_items(self) -> None:
         for item in (self._iceberg_items + self._spoof_items
