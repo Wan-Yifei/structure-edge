@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.28.0 — walls show what is left of them (2026-10-06)
+
+### Feat: wall labels print current size against the peak (`analysis/liq_hm_window.py`)
+
+The label showed the largest size a level reached anywhere in the visible
+window, which is the right basis for *ranking* -- a one-snapshot flash must not
+outrank a standing wall -- but the wrong number to *read*. A wall eaten to
+nothing kept both its rank and its old size until the column it peaked in
+scrolled off, up to the whole History window.
+
+A level still holding 90% of its peak prints one number as before. Below that
+it prints `now / peak`:
+
+```
+B 164.80  222 / 2,243      most of it gone
+A 164.70    0 / 1,531      fully consumed
+A 165.20  1,726 / 2,425    still largely there
+```
+
+A wall trading far below its peak is itself worth seeing -- that is the wall
+being consumed, which the single number hid.
+
+Note the ratio depends on the window: live at History=240 compares against the
+last 4 minutes, while a 30-minute replay compares one instant against half an
+hour, so almost everything reads as eaten.
+
+### Change: Walls, Imbalance and Aggressor default on
+
+Three overlays that are wanted most of the time now start checked. Iceberg and
+Spoof stay off -- they are for looking into something specific, not for
+watching.
+
 ## v0.27.3 — wall labels move right and print white (2026-10-06)
 
 ### Fix: labels sat on the left in the band's own colour (`analysis/liq_hm_window.py`)

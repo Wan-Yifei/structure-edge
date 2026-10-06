@@ -58,6 +58,13 @@ _WALL_MIN_BRIGHT = 0.5
 # read. The side still shows, as the B/A prefix and as the box's border.
 _WALL_TEXT_COL = "#ffffff"
 
+# A wall still holding this much of its peak prints one number. Below it the
+# label shows "now / peak", because the ranking is on the peak over the whole
+# visible window and a wall that has been eaten keeps that rank -- and its old
+# number -- until the column it peaked in scrolls off. Reading 20,000 off a
+# level that now holds 500 is worse than not labelling it at all.
+_WALL_INTACT_FRAC = 0.9
+
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
 # OpenD endpoint for the heatmap's own ORDER_BOOK subscription (same
@@ -741,7 +748,7 @@ class LiqHmWindow(QWidget):
         row2.addSeparator()
 
         self._wall_cb = QCheckBox("Walls")
-        self._wall_cb.setChecked(False)
+        self._wall_cb.setChecked(True)
         self._wall_cb.setToolTip(
             "Label the thickest resting levels with their exact price and size.\n"
             "Ranked by the largest size each price reached anywhere in the\n"
@@ -762,7 +769,7 @@ class LiqHmWindow(QWidget):
         row2.addSeparator()
 
         self._simb_cb = QCheckBox("Imbalance")
-        self._simb_cb.setChecked(False)
+        self._simb_cb.setChecked(True)
         self._simb_cb.setToolTip(
             "Lime bar   = bullish stacked imbalance (bid dominates N consecutive depth levels)\n"
             "Pink bar   = bearish stacked imbalance (ask dominates N consecutive depth levels)\n"
@@ -806,7 +813,7 @@ class LiqHmWindow(QWidget):
         row2.addSeparator()
 
         self._absorb_cb = QCheckBox("Aggressor")
-        self._absorb_cb.setChecked(False)
+        self._absorb_cb.setChecked(True)
         self._absorb_cb.setToolTip(
             "Gold bubble   = dominant BUY aggression (net buyers > threshold).\n"
             "Purple bubble = dominant SELL aggression (net sellers > threshold).\n"
@@ -2080,6 +2087,7 @@ class LiqHmWindow(QWidget):
             bright = norm[lo:hi].max(axis=0)
 
             peak = grid[lo:hi].max(axis=0)          # largest size per price bin
+            cur = grid[hi - 1]                      # newest column still in view
             order = np.argsort(peak)[::-1]
             placed: list[int] = []
             for bi in order:
@@ -2100,8 +2108,14 @@ class LiqHmWindow(QWidget):
                 half = self._bin_size / 2
                 px = (f"{price:.2f}" if half <= 0.01
                       else f"{price:.2f}±{half:.2f}")
+                # Peak alone would keep showing a wall that has since been
+                # eaten; "now / peak" makes the consumption visible, and a
+                # level trading far below its peak is itself worth seeing.
+                c = float(cur[bi])
+                size_txt = (f"{v:,.0f}" if c >= v * _WALL_INTACT_FRAC
+                            else f"{c:,.0f} / {v:,.0f}")
                 lbl = pg.TextItem(
-                    text=f"{side} {px}  {v:,.0f}", color=_WALL_TEXT_COL,
+                    text=f"{side} {px}  {size_txt}", color=_WALL_TEXT_COL,
                     fill=pg.mkBrush(QColor(*_LABEL_FILL_RGBA)),
                     border=pg.mkPen(colour, width=1),
                     anchor=(1.0, 0.5),          # right edge of the text at the x
