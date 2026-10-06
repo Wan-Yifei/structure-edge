@@ -45,6 +45,14 @@ _RED  = "#ef5350"   # ask side (also bull color in red-up / CN convention)
 # QApplication exists, is asking for trouble.
 _LABEL_FILL_RGBA = (13, 17, 23, 200)
 
+# How bright a level must render before Walls will label it, on the same 0-1
+# scale the colour ramp uses (its bands sit at 0.25 / 0.5 / 0.75, so this is
+# the amber band and up). Labels are gated on rendered brightness rather than
+# raw size so they land on exactly the bands the eye picks out -- and so the
+# Gamma control thins them out along with the picture, instead of the two
+# disagreeing about what counts as a wall.
+_WALL_MIN_BRIGHT = 0.5
+
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
 # OpenD endpoint for the heatmap's own ORDER_BOOK subscription (same
@@ -2026,6 +2034,12 @@ class LiqHmWindow(QWidget):
         ones that persisted, and a one-snapshot flash should not outrank them.
         Bins are merged when adjacent so a wall spanning two bins is labelled
         once, at its heavier half.
+
+        A candidate must also render at _WALL_MIN_BRIGHT or above, computed
+        through the same log -> percentile -> gamma pipeline as the image and
+        over the same grid the active mode draws (combined, or one side). Size
+        alone would label levels the current Gamma has faded to black, and miss
+        bright ones; this way raising Gamma culls the labels with the picture.
         """
         if not self._wall_cb.isChecked() or self._bin_size <= 0:
             return
@@ -2041,8 +2055,21 @@ class LiqHmWindow(QWidget):
         if hi <= lo:
             lo, hi = 0, n_cols
 
+        gamma = self._gamma_spin.value()
+        combined = not self._bid_ask_cb.isChecked()
+
         for grid, side, colour in ((self._bid_grid, "B", _TEAL),
                                    (self._ask_grid, "A", _RED)):
+            # Brightness as drawn. The reference percentile spans the whole
+            # painted grid [:n], not the zoomed slice, because that is what the
+            # renderer normalises against -- panning must not relabel.
+            src = (self._bid_grid[:n_cols] + self._ask_grid[:n_cols]
+                   if combined else grid[:n_cols])
+            norm = _percentile_norm(np.log1p(src))
+            if gamma != 1.0:
+                norm = np.power(norm, gamma)
+            bright = norm[lo:hi].max(axis=0)
+
             peak = grid[lo:hi].max(axis=0)          # largest size per price bin
             order = np.argsort(peak)[::-1]
             placed: list[int] = []
@@ -2050,6 +2077,8 @@ class LiqHmWindow(QWidget):
                 v = float(peak[bi])
                 if v < max(min_vol, 1.0) or len(placed) >= top_n:
                     break
+                if bright[bi] < _WALL_MIN_BRIGHT:
+                    continue      # faded at this Gamma; not a band the eye sees
                 # Skip a bin touching one already labelled: one wall, one label.
                 if any(abs(int(bi) - q) <= 1 for q in placed):
                     continue

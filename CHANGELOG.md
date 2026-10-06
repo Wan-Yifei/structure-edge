@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.27.1 — Walls labels follow the Gamma control (2026-10-06)
+
+### Fix: labels ranked on raw size, independent of what rendered (`analysis/liq_hm_window.py`)
+
+v0.27.0 picked walls by size alone, so the labels and the picture could
+disagree: a level the current Gamma had faded to black still got a label, and
+raising Gamma thinned the bands without thinning the labels.
+
+A candidate now also has to render at `_WALL_MIN_BRIGHT` (0.5, the amber band
+on the colour ramp's 0.25/0.5/0.75 scale), computed through the same
+`log1p -> percentile -> gamma` pipeline as the image by calling the renderer's
+own `_percentile_norm`, over whichever grid the active mode draws -- combined,
+or one side. Measured on live book data, SOXL at 1800s:
+
+| Gamma | combined | bid/ask |
+|---|---|---|
+| 0.5 - 2.0 | 10 labels | 10 |
+| 3.0 | 4 | 6 |
+| 5.0 | 1 | 6 |
+| 8.0 | 1 | 3 |
+
+Turning Gamma up now culls the labels along with the bands, leaving the one
+wall that is actually there.
+
+The normalisation reference spans the whole painted grid rather than the zoomed
+slice, so panning does not relabel; ranking still uses the visible columns.
+
 ## v0.27.0 — label the thick walls with price and size (2026-10-06)
 
 ### Feat: a Walls overlay on the heatmap (`analysis/liq_hm_window.py`)
