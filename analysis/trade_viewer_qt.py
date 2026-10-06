@@ -2118,7 +2118,7 @@ class TradeViewerQt(QMainWindow):
         tb_opt.addWidget(_lbl("Walls:"))
         self._option_wall_count_spin = QSpinBox()
         self._option_wall_count_spin.setRange(1, 10)
-        self._option_wall_count_spin.setValue(1)
+        self._option_wall_count_spin.setValue(4)   # 4 per side reads the GEX structure, not just its peak
         self._option_wall_count_spin.setFixedWidth(36)
         self._option_wall_count_spin.setToolTip(
             "Number of Call Wall / Put Wall lines to draw per side, strongest\n"

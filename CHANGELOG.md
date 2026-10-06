@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.27.2 — option walls default to 4 per side (2026-10-06)
+
+### Change: `Walls` starts at 4 instead of 1 (`analysis/trade_viewer_qt.py`)
+
+One wall per side shows only where GEX peaks, which says nothing about whether
+that peak stands alone or sits in a cluster. Four per side reads as structure.
+The control's range is unchanged, so 1 still gives the original single-wall
+view.
+
 ## v0.27.1 — Walls labels follow the Gamma control (2026-10-06)
 
 ### Fix: labels ranked on raw size, independent of what rendered (`analysis/liq_hm_window.py`)
