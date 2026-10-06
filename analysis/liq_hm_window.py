@@ -26,7 +26,7 @@ _ET = ZoneInfo("America/New_York")
 from PyQt6.QtCore    import (
     Qt, QObject, QRectF, QThread, QTimer, pyqtSignal, pyqtSlot,
 )
-from PyQt6.QtGui     import QColor, QPainterPath
+from PyQt6.QtGui     import QColor, QFont, QPainterPath
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QLabel, QPushButton,
     QSpinBox, QToolBar, QVBoxLayout, QWidget,
@@ -39,6 +39,11 @@ _FG   = "#b0bec5"
 _GRID = "#263238"
 _TEAL = "#26a69a"   # bid side (also bull color in green-up / Western convention)
 _RED  = "#ef5350"   # ask side (also bull color in red-up / CN convention)
+
+# Background for any label laid over the heatmap. A plain QColor tuple rather
+# than a ready-made brush: building Qt paint objects at import time, before
+# QApplication exists, is asking for trouble.
+_LABEL_FILL_RGBA = (13, 17, 23, 200)
 
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
@@ -520,6 +525,7 @@ class LiqHmWindow(QWidget):
         self._spoof_items:   list = []
         self._simb_items:    list = []
         self._absorb_items:  list = []
+        self._wall_items:    list = []
 
         # Tick cache + worker for absorption bubble overlay
         self._absorb_ticks:         list[dict]               = []
@@ -721,6 +727,27 @@ class LiqHmWindow(QWidget):
 
         row2.addSeparator()
 
+        self._wall_cb = QCheckBox("Walls")
+        self._wall_cb.setChecked(False)
+        self._wall_cb.setToolTip(
+            "Label the thickest resting levels with their exact price and size.\n"
+            "Ranked by the largest size each price reached anywhere in the\n"
+            "visible window -- the bright bands -- not by one snapshot's peak,\n"
+            "so a level that briefly flashed does not outrank a standing wall.")
+        self._wall_cb.stateChanged.connect(self._on_controls_changed)
+        row2.addWidget(self._wall_cb)
+
+        row2.addWidget(_lbl("N:"))
+        self._wall_n_spin = QSpinBox()
+        self._wall_n_spin.setRange(1, 10)
+        self._wall_n_spin.setValue(3)
+        self._wall_n_spin.setFixedWidth(42)
+        self._wall_n_spin.setToolTip("How many walls to label on each side")
+        self._wall_n_spin.valueChanged.connect(self._on_controls_changed)
+        row2.addWidget(self._wall_n_spin)
+
+        row2.addSeparator()
+
         self._simb_cb = QCheckBox("Imbalance")
         self._simb_cb.setChecked(False)
         self._simb_cb.setToolTip(
@@ -868,7 +895,7 @@ class LiqHmWindow(QWidget):
 
         # Best bid / ask horizontal lines (盘口)
         # White dashed so they're visible in both Combined and Bid/Ask colormap modes.
-        _quote_fill = pg.mkBrush(QColor(13, 17, 23, 200))
+        _quote_fill = pg.mkBrush(QColor(*_LABEL_FILL_RGBA))
         self._bid_line = pg.InfiniteLine(
             angle=0, movable=False,
             pen=pg.mkPen(_TEAL, width=1, style=Qt.PenStyle.DashLine),
@@ -1749,6 +1776,8 @@ class LiqHmWindow(QWidget):
             )
             self._draw_simb_markers(simbs)
 
+        self._draw_wall_labels()
+
         if self._absorb_cb.isChecked() and self._absorb_ticks:
             from analysis.orderflow_detect import detect_aggressor_bubbles
             bubbles = detect_aggressor_bubbles(
@@ -1985,14 +2014,74 @@ class LiqHmWindow(QWidget):
                 self._plot_widget.removeItem(item)
             self._absorb_items.clear()
 
+    def _draw_wall_labels(self) -> None:
+        """Write each thick resting level's price and size next to its band.
+
+        The heatmap shows where size sits but not what price that is -- reading
+        a band off the axis is guesswork on a 100-bin scale. This labels the
+        biggest ones outright.
+
+        Ranked on the largest size a price bin reached anywhere in the visible
+        window, not on the newest column: the bands that read as walls are the
+        ones that persisted, and a one-snapshot flash should not outrank them.
+        Bins are merged when adjacent so a wall spanning two bins is labelled
+        once, at its heavier half.
+        """
+        if not self._wall_cb.isChecked() or self._bin_size <= 0:
+            return
+        n_cols = len(self._col_ts)
+        if n_cols == 0:
+            return
+
+        top_n = self._wall_n_spin.value()
+        min_vol = float(self._min_vol_spin.value())
+        xlo, xhi = self._plot_widget.getPlotItem().vb.viewRange()[0]
+        lo = max(0, int(np.floor(xlo)))
+        hi = min(n_cols, int(np.ceil(xhi)))
+        if hi <= lo:
+            lo, hi = 0, n_cols
+
+        for grid, side, colour in ((self._bid_grid, "B", _TEAL),
+                                   (self._ask_grid, "A", _RED)):
+            peak = grid[lo:hi].max(axis=0)          # largest size per price bin
+            order = np.argsort(peak)[::-1]
+            placed: list[int] = []
+            for bi in order:
+                v = float(peak[bi])
+                if v < max(min_vol, 1.0) or len(placed) >= top_n:
+                    break
+                # Skip a bin touching one already labelled: one wall, one label.
+                if any(abs(int(bi) - q) <= 1 for q in placed):
+                    continue
+                placed.append(int(bi))
+                price = self._price_min + (int(bi) + 0.5) * self._bin_size
+                # The grid only knows the bin, so the price is its centre. That
+                # is sub-penny while the band is narrow, but a day-long replay
+                # spreads ~$25 over 100 bins and a bare "164.00" would then be
+                # anywhere in a quarter-dollar. Say so once it matters.
+                half = self._bin_size / 2
+                px = (f"{price:.2f}" if half <= 0.01
+                      else f"{price:.2f}±{half:.2f}")
+                lbl = pg.TextItem(
+                    text=f"{side} {px}  {v:,.0f}", color=colour,
+                    fill=pg.mkBrush(QColor(*_LABEL_FILL_RGBA)), anchor=(0.0, 0.5),
+                )
+                lbl.setFont(QFont("Monospace", 7))
+                lbl.setZValue(14)
+                lbl.setPos(xlo + (xhi - xlo) * 0.012, price)
+                self._plot_widget.addItem(lbl, ignoreBounds=True)
+                self._wall_items.append(lbl)
+
     def _clear_overlay_items(self) -> None:
         for item in (self._iceberg_items + self._spoof_items
-                     + self._simb_items + self._absorb_items):
+                     + self._simb_items + self._absorb_items
+                     + self._wall_items):
             self._plot_widget.removeItem(item)
         self._iceberg_items.clear()
         self._spoof_items.clear()
         self._simb_items.clear()
         self._absorb_items.clear()
+        self._wall_items.clear()
 
     def _update_legend(self) -> None:
         n = 5

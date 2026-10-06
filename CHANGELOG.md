@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.27.0 — label the thick walls with price and size (2026-10-06)
+
+### Feat: a Walls overlay on the heatmap (`analysis/liq_hm_window.py`)
+
+The heatmap shows where size sits but not what price that is -- reading a
+bright band off a 100-bin axis is guesswork. A new **Walls** checkbox labels
+the thickest resting levels outright: `B 164.00  21,852`, teal for bids, red
+for asks, N per side (default 3).
+
+Ranked on the largest size a price bin reached anywhere in the **visible
+window**, not in the newest column. The bands that read as walls are the ones
+that persisted, and a level that flashed for one snapshot should not outrank a
+standing one. Adjacent bins are merged so a wall spanning two bins is labelled
+once, at its heavier half.
+
+The price is the bin's centre, since the grid knows nothing finer. That is
+sub-penny while the band is narrow, but a day-long replay spreads ~$25 over 100
+bins and a bare `164.00` would then mean anywhere in a quarter-dollar -- so
+once half a bin exceeds a cent the label says so: `164.00±0.13`.
+
+Verified against live book data: every label's price, side and size match the
+grid peak at that bin, and the labelled levels are the actual top-N.
+
 ## v0.26.1 — collapse long expiry lists (2026-10-04)
 
 ### Fix: five daily expiries overflowed the stats column and filled the title (`strategy/option/gex.py`)
