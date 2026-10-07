@@ -2462,8 +2462,15 @@ class TradeViewerQt(QMainWindow):
                 angle=0, movable=False,
                 pen=pg.mkPen(_CROSS, width=1, style=Qt.PenStyle.DashLine),
                 label="{value:.2f}",
-                labelOpts={"position": 0.04, "color": _CROSS,
-                           "fill": _qc(_BG_TIP, 200), "movable": False},
+                # anchors, or the price runs off the panel. InfLineLabel's
+                # default for a horizontal line is [(0.5, 0), (0.5, 1)] -- x
+                # centred on the position -- so at 2% from the left edge half
+                # the box hangs outside and gets clipped ("166.74" read "6.74").
+                # x=0 left-aligns it so it grows inward; the y pair keeps
+                # pyqtgraph's own above/below flip.
+                labelOpts={"position": 0.02, "color": _CROSS,
+                           "fill": _qc(_BG_TIP, 200), "movable": False,
+                           "anchors": [(0, 0), (0, 1)]},
             )
             ln.setVisible(False)
             return ln

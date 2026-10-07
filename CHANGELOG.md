@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.29.3 — the profile hover price was clipped (2026-10-07)
+
+### Fix: the price label ran off the panel's left edge (`analysis/trade_viewer_qt.py`)
+
+`166.74` rendered as `6.74`. `InfLineLabel` picks its anchors automatically and
+for a horizontal line uses `[(0.5, 0), (0.5, 1)]` -- x centred on the position.
+Placed near the panel's left edge, half the box sat outside and was clipped.
+
+The label now anchors at x=0 so it grows inward from the position, with the y
+pair left as pyqtgraph has it so its above/below flip still works.
+
 ## v0.29.2 — CVD fill stops washing out the panel (2026-10-07)
 
 ### Fix: zooming into CVD filled the whole subplot (`analysis/trade_viewer_qt.py`)
