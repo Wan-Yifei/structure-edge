@@ -1929,7 +1929,7 @@ class TradeViewerQt(QMainWindow):
         tb_sess.addWidget(_lbl("Bins:"))
         self._profile_bins_spin = QSpinBox()
         self._profile_bins_spin.setRange(20, 300)
-        self._profile_bins_spin.setValue(60)
+        self._profile_bins_spin.setValue(120)
         self._profile_bins_spin.setFixedWidth(48)
         self._profile_bins_spin.setToolTip(
             "Number of price bins in the session volume profile (right panel) --\n"
@@ -2258,6 +2258,7 @@ class TradeViewerQt(QMainWindow):
         self._plot_cvd.getAxis("bottom").setTextPen(_qc(_FG))
         self._plot_cvd.setMenuEnabled(False)
         self._plot_cvd.setXLink(self._plot_c)
+        self._plot_cvd.vb.sigYRangeChanged.connect(lambda *_: self._sync_cvd_fill())
         # Add zero line reference
         self._plot_cvd.addItem(pg.InfiniteLine(
             pos=0, angle=0, movable=False,
@@ -3988,6 +3989,7 @@ class TradeViewerQt(QMainWindow):
         self._kd_items.append(spread_line)
 
     def _clear_cvd_items(self) -> None:
+        self._cvd_fills = []
         for item in self._cvd_items:
             self._plot_cvd.removeItem(item)
         self._cvd_items.clear()
@@ -4082,6 +4084,33 @@ class TradeViewerQt(QMainWindow):
         for item in (pos_fill, neg_fill, outline):
             self._plot_cvd.addItem(item)
             self._cvd_items.append(item)
+        self._cvd_fills = [pos_fill, neg_fill]
+        self._sync_cvd_fill()
+
+    def _sync_cvd_fill(self) -> None:
+        """Show the zero-referenced fill only while zero is on screen.
+
+        CVD's fill runs from the curve to y=0, which reads as buy- or
+        sell-pressure bias at a glance -- but only while 0 is in view. A day's
+        CVD drifts hundreds of thousands of shares from zero, so any zoom into
+        the recent shape leaves 0 far below the window and the fill washes the
+        whole panel one colour, hiding the line it was meant to decorate.
+
+        The line itself is never hidden, so zooming in gives the shape rather
+        than a solid block.
+        """
+        fills = getattr(self, "_cvd_fills", None)
+        if not fills:
+            return
+        ylo, yhi = self._plot_cvd.vb.viewRange()[1]
+        # bool(), not the bare comparison: viewRange carries numpy scalars once
+        # anything has set the range from numpy data, and the chain then yields
+        # numpy.bool_, which PyQt6's setVisible rejects. The TypeError is raised
+        # inside a signal handler, where Qt prints it to stderr and carries on --
+        # so the fill silently freezes at whatever it last was.
+        on = bool(ylo <= 0.0 <= yhi)
+        for f in fills:
+            f.setVisible(on)
 
     def _draw_dcvd(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
         """Draw DCVD: the CVD slope normalised to [-1, +1].

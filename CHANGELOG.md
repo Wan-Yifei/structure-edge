@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.29.2 — CVD fill stops washing out the panel (2026-10-07)
+
+### Fix: zooming into CVD filled the whole subplot (`analysis/trade_viewer_qt.py`)
+
+CVD's fill runs from the curve down to y=0, which reads as buy/sell bias at a
+glance -- but only while 0 is on screen. A session's CVD drifts hundreds of
+thousands of shares from zero, so any zoom into the recent shape leaves 0 far
+below the window and the fill washes the panel one solid colour, hiding the
+line it was meant to decorate.
+
+The fill now hides itself when 0 leaves the y-range and returns when it comes
+back. The curve is never hidden, so zooming in gives the shape instead of a
+block.
+
+A `numpy.bool_` nearly buried this: `ylo <= 0 <= yhi` yields one once anything
+has set the range from numpy data, and PyQt6's `setVisible` rejects it. The
+TypeError is raised inside a signal handler, where Qt prints it to stderr and
+carries on, so the fill simply froze at whatever it last was -- invisible in a
+GUI, and only found because the check drove the range with a numpy value.
+
+### Change: session profile bins default to 120
+
+Was 60. The range (20-300) is unchanged.
+
 ## v0.29.1 — profile panels track their own cursor (2026-10-07)
 
 ### Feat: hovering a profile panel drives its price line (`analysis/trade_viewer_qt.py`)
