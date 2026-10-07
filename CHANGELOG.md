@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.29.0 — DCVD, the CVD slope normalised to [-1, +1] (2026-10-06)
+
+### Feat: a bounded order-flow oscillator (`analysis/trade_viewer_qt.py`)
+
+CVD's slope says how hard flow is pushing, but its units are shares, so the
+same reading means different things on a quiet day and a busy one. DCVD divides
+that slope by the largest slope the same bars could have produced -- every
+classified trade on one side:
+
+    DCVD = sum(buy - sell) / sum(buy + sell)   over the last DCVD_LOOKBACK bars
+
+Bounded by construction rather than by a fitted scale, so 0.4 reads the same in
+any regime. A new subplot (indicator `DCVD`), green above zero, red below,
+y-axis pinned to the bounds and mouse-zoom disabled on it -- auto-ranging would
+undo the normalisation it exists for.
+
+**Two choices the data settled, both measured on SOXL 1m over three days:**
+
+*NEUTRAL is excluded from both halves,* matching the CVD delta. It is 57.5% of
+the tape; in the denominator it damps the median bar to 0.08 and the range past
+±0.5 goes unused. Excluded, the median is 0.19. The trade-off is that DCVD
+describes flow that could be classified, not all of it.
+
+*Lookback defaults to 10 bars.* At 1 bar, 14.7% of bars pin past |0.9| -- a
+single minute's classified flow is often entirely one-sided, so the indicator
+lives on its rails. At 10 bars that is 0.4%:
+
+| lookback | median | p99 | past 0.9 |
+|---|---|---|---|
+| 1 | 0.477 | 1.000 | 14.7% |
+| 5 | 0.241 | 0.892 | 0.9% |
+| 10 | 0.190 | 0.768 | 0.4% |
+| 30 | 0.143 | 0.744 | 0.0% |
+
+Live over 4,161 bars it ranges -0.944 to +0.920 with 0.41% past |0.9|.
+
+Bars with no tick coverage add to neither sum, so the line holds through a gap
+instead of reading as balanced flow.
+
+**Not a signal on its own:** correlation with the next bar's return is +0.011,
+i.e. none. It measures what flow has done, not what price will do.
+
 ## v0.28.0 — walls show what is left of them (2026-10-06)
 
 ### Feat: wall labels print current size against the peak (`analysis/liq_hm_window.py`)

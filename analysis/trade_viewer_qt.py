@@ -447,6 +447,13 @@ def load_order_book_window(code: str, start: datetime, end: datetime) -> list[di
 # sessions -- the label says 1W because that is the calendar span it covers.
 RANGE_DAYS = {"1d": 1, "2d": 2, "3d": 3, "7d": 5}
 
+# Bars DCVD measures the CVD slope over. Chosen from the distribution on SOXL
+# 1m bars: at a 1-bar lookback 14.7% of bars pin to |DCVD| > 0.9, because a
+# single minute's classified flow is often entirely one-sided. By 10 bars that
+# is 0.4%, with the median at 0.19 and the 99th percentile at 0.77 -- the full
+# range gets used without the indicator living on its rails.
+DCVD_LOOKBACK = 10
+
 
 def load_tick_days(code: str, end_date_str: str, tf: str, days: int,
                    cache: dict | None = None) -> tuple[dict, dict]:
@@ -1818,6 +1825,7 @@ class TradeViewerQt(QMainWindow):
             ("kd",        "KDV"),   # KDV = KD spread-width subplot
             ("cvd",       "CVD"),   # Cumulative Volume Delta subplot
             ("adi",       "A/D"),   # Accumulation/Distribution Line subplot
+            ("dcvd",      "DCVD"),  # normalised CVD slope, bounded -1..+1
             ("ema",       "EMA"),
             ("avwap",     "AVWAP"), # Anchored VWAP -- cumulative from a user-picked date
             ("vol",       "MAVOL"), # Volume subplot toggle
@@ -2273,6 +2281,26 @@ class TradeViewerQt(QMainWindow):
         ))
         # visibility + row-collapse applied below via _set_subplot_row_visible
 
+        self._plot_dcvd: pg.PlotItem = self._chart_widget.addPlot(row=5, col=0)
+        self._plot_dcvd.showGrid(x=True, y=True, alpha=0.10)
+        self._plot_dcvd.setLabel("left", "DCVD", **{"color": _FG})
+        self._plot_dcvd.getAxis("left").setTextPen(_qc(_FG))
+        self._plot_dcvd.getAxis("bottom").setTextPen(_qc(_FG))
+        self._plot_dcvd.setMenuEnabled(False)
+        self._plot_dcvd.setXLink(self._plot_c)
+        # Bounded by construction, so the scale is fixed rather than fitted --
+        # a DCVD of 0.4 means the same thing on any day, which is the point of
+        # normalising. Auto-ranging would throw that away.
+        self._plot_dcvd.setYRange(-1.05, 1.05, padding=0)
+        self._plot_dcvd.vb.setMouseEnabled(y=False)
+        for lvl, style in ((0.0, Qt.PenStyle.SolidLine),
+                           (0.5, Qt.PenStyle.DotLine),
+                           (-0.5, Qt.PenStyle.DotLine)):
+            self._plot_dcvd.addItem(pg.InfiniteLine(
+                pos=lvl, angle=0, movable=False,
+                pen=pg.mkPen(_GREY, width=1, style=style),
+            ))
+
         # Row stretch factors — main chart is fixed; subplot rows collapse to
         # zero height when their indicator is off instead of leaving a gap.
         self._chart_widget.ci.layout.setRowStretchFactor(0, 5)
@@ -2280,6 +2308,7 @@ class TradeViewerQt(QMainWindow):
         self._set_subplot_row_visible(self._plot_kd,  2, False)
         self._set_subplot_row_visible(self._plot_cvd, 3, True)   # CVD on by default
         self._set_subplot_row_visible(self._plot_adi, 4, False)
+        self._set_subplot_row_visible(self._plot_dcvd, 5, False)
 
         # ── Graphics items ────────────────────────────────────────────────────
         self._candle_item = CandlestickItem()
@@ -2397,6 +2426,23 @@ class TradeViewerQt(QMainWindow):
 
         # Stored A/D Line series for crosshair readout (populated by _draw_adi)
         self._adi_arr: np.ndarray | None = None
+
+        self._vline_dcvd = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._vline_dcvd.setVisible(False)
+        self._plot_dcvd.addItem(self._vline_dcvd, ignoreBounds=True)
+
+        self._dcvd_label = pg.TextItem(
+            text="", color=_FG,
+            fill=pg.mkBrush(_qc(_BG_TIP, 200)),
+            anchor=(0.0, 0.5),
+        )
+        self._dcvd_label.setFont(QFont("Monospace", 8))
+        self._dcvd_label.setZValue(100)
+        self._dcvd_label.setVisible(False)
+        self._plot_dcvd.addItem(self._dcvd_label, ignoreBounds=True)
+
+        self._dcvd_items: list = []
+        self._dcvd_arr: np.ndarray | None = None
 
         # Last candle index shown in the tick profile (used to re-render on
         # order-size filter toggle without waiting for the next mouse move).
@@ -2807,6 +2853,10 @@ class TradeViewerQt(QMainWindow):
             code = self._code_edit.text().strip()
             self._plot_adi.setTitle(f"{code}  A/D", color=_FG, size="8pt")
         self._set_subplot_row_visible(self._plot_adi, 4, show_adi)
+        show_dcvd = self._ind("dcvd")
+        if show_dcvd:
+            self._plot_dcvd.setTitle(f"{code}  DCVD", color=_FG, size="8pt")
+        self._set_subplot_row_visible(self._plot_dcvd, 5, show_dcvd)
         if not show_adi:
             self._vline_adi.setVisible(False)
         # Toggle heatmap legend visibility
@@ -3278,6 +3328,11 @@ class TradeViewerQt(QMainWindow):
         self._clear_adi_items()
         if show_adi:
             self._draw_adi(klines)
+
+        # DCVD subplot
+        self._clear_dcvd_items()
+        if self._ind("dcvd"):
+            self._draw_dcvd(klines, buckets, cm)
 
         # Chandelier exit suggestion (bottom-right corner label)
         if self._ind("chandelier"):
@@ -4013,6 +4068,75 @@ class TradeViewerQt(QMainWindow):
         for item in (pos_fill, neg_fill, outline):
             self._plot_cvd.addItem(item)
             self._cvd_items.append(item)
+
+    def _draw_dcvd(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
+        """Draw DCVD: the CVD slope normalised to [-1, +1].
+
+        CVD's slope over N bars is the net delta accumulated across them. The
+        largest slope those same bars could have produced is every classified
+        trade landing on one side, so dividing one by the other is a bound of
+        1 by construction rather than a fitted scale:
+
+            DCVD = sum(buy - sell) / sum(buy + sell)   over the last N bars
+
+        +1 is every classified trade a buy, -1 every one a sell, 0 balanced.
+        Because it is a ratio of volumes it reads the same on a quiet day as a
+        busy one, which an unnormalised slope does not.
+
+        NEUTRAL volume is left out of both halves, matching _draw_cvd's delta.
+        It is the majority of SOXL's tape -- 57.5% measured over three days --
+        and putting it in the denominator would damp DCVD so far that the
+        median bar reads 0.08 and the range above +/-0.5 goes unused. The
+        trade-off is that DCVD describes the flow that could be classified,
+        not all of it.
+
+        Bars with no tick coverage contribute nothing to either sum, so the
+        line holds through a gap rather than dropping to zero.
+        """
+        n = len(klines)
+        buy = np.zeros(n, dtype=float)
+        sell = np.zeros(n, dtype=float)
+        for i, (_, row) in enumerate(klines.iterrows()):
+            try:
+                bar_end = datetime.strptime(
+                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
+            except ValueError:
+                continue
+            pd_ = buckets.get(bk)
+            if not pd_:
+                continue
+            buy[i] = sum(pd_[p]["buy"] for p in pd_)
+            sell[i] = sum(pd_[p]["sell"] for p in pd_)
+
+        look = max(1, min(DCVD_LOOKBACK, n))
+        csum_d = np.concatenate([[0.0], np.cumsum(buy - sell)])
+        csum_t = np.concatenate([[0.0], np.cumsum(buy + sell)])
+        dcvd = np.zeros(n, dtype=float)
+        for i in range(n):
+            j = max(0, i + 1 - look)
+            tot = csum_t[i + 1] - csum_t[j]
+            if tot > 0:
+                dcvd[i] = (csum_d[i + 1] - csum_d[j]) / tot
+        self._dcvd_arr = dcvd
+
+        x = np.arange(n)
+        pos = np.where(dcvd >= 0, dcvd, 0.0)
+        neg = np.where(dcvd < 0, dcvd, 0.0)
+        for ys, col in ((pos, _GREEN), (neg, _RED)):
+            fill = pg.PlotCurveItem(x=x, y=ys, pen=None,
+                                    fillLevel=0.0, brush=_qc(col, 55))
+            self._plot_dcvd.addItem(fill)
+            self._dcvd_items.append(fill)
+        outline = pg.PlotCurveItem(x=x, y=dcvd, pen=pg.mkPen("#ffa726", width=1.3))
+        self._plot_dcvd.addItem(outline)
+        self._dcvd_items.append(outline)
+
+    def _clear_dcvd_items(self) -> None:
+        for item in self._dcvd_items:
+            self._plot_dcvd.removeItem(item)
+        self._dcvd_items.clear()
+        self._dcvd_arr = None
 
     def _clear_adi_items(self) -> None:
         for item in self._adi_items:
@@ -5436,12 +5560,16 @@ class TradeViewerQt(QMainWindow):
                      and self._plot_cvd.sceneBoundingRect().contains(pos))
         in_adi    = (self._plot_adi.isVisible()
                      and self._plot_adi.sceneBoundingRect().contains(pos))
-        in_any    = in_candle or in_vol or in_kd or in_cvd or in_adi
+        in_dcvd   = (self._plot_dcvd.isVisible()
+                     and self._plot_dcvd.sceneBoundingRect().contains(pos))
+        in_any    = (in_candle or in_vol or in_kd or in_cvd or in_adi
+                     or in_dcvd)
 
         if not in_any:
             for line in (self._vline, self._hline,
                          self._vline_v, self._vline_kd, self._vline_cvd,
-                         self._vline_adi,
+                         self._vline_adi, self._vline_dcvd,
+                         self._dcvd_label,
                          self._price_label, self._pair_price_label,
                          self._ohlcv_label,
                          self._vol_label, self._kd_label, self._cvd_label,
@@ -5482,6 +5610,8 @@ class TradeViewerQt(QMainWindow):
             self._vline_cvd.setPos(x); self._vline_cvd.setVisible(True)
         if self._plot_adi.isVisible():
             self._vline_adi.setPos(x); self._vline_adi.setVisible(True)
+        if self._plot_dcvd.isVisible():
+            self._vline_dcvd.setPos(x); self._vline_dcvd.setVisible(True)
 
         # Horizontal line only in candle plot
         self._hline.setPos(y);  self._hline.setVisible(in_candle)
@@ -5617,6 +5747,18 @@ class TradeViewerQt(QMainWindow):
                 self._adi_label.setVisible(True)
             else:
                 self._adi_label.setVisible(False)
+
+            # DCVD: already a fraction, so print it as one rather than
+            # abbreviating -- two decimals is the whole useful resolution.
+            if self._plot_dcvd.isVisible() and self._dcvd_arr is not None:
+                d_idx = max(0, min(idx, len(self._dcvd_arr) - 1))
+                d_val = float(self._dcvd_arr[d_idx])
+                xlo_d, xhi_d = self._plot_dcvd.vb.viewRange()[0]
+                self._dcvd_label.setPos(xlo_d + (xhi_d - xlo_d) * 0.01, d_val)
+                self._dcvd_label.setText(f"{d_val:+.2f}")
+                self._dcvd_label.setVisible(True)
+            else:
+                self._dcvd_label.setVisible(False)
 
     # ── X-axis tick labels ────────────────────────────────────────────────────
 
