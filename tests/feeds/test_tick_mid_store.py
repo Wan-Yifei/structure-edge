@@ -136,3 +136,57 @@ class TestTickReadAttachesThemWithoutRewriting:
                                 datetime(2026, 10, 7, 11), with_mid=True)
         assert got[0]["ts_raw"] == raw
         assert got[0]["mid_dir"] == "BUY", "unpadded timestamp must still match"
+
+
+class TestTickerType:
+    """moomoo's own ticker_type, which the collector discarded for months.
+
+    Its 32 values include OTC_SOLD, DERIVATIVELY_PRICED, BULK and CROSS_MARKET
+    -- the standard conditions for a trade reported away from an exchange. The
+    off-exchange work had to infer venue from sub-penny prices because this was
+    being thrown away; it is recorded now so that inference can be checked, and
+    eventually replaced, against what the feed actually says.
+    """
+
+    def test_stored_and_returned(self, stores):
+        ticks, _, _ = stores
+        r = _tick(0, 100.0, 50, "NEUTRAL")
+        r["ttype"] = "ODD_LOT"
+        ticks.insert_ticks([r])
+        got = ticks.query_ticks(C, T0, T0 + timedelta(minutes=1))
+        assert got[0]["ttype"] == "ODD_LOT"
+
+    def test_absent_is_none_not_an_error(self, stores):
+        """Every row written before 2026-10-07 has no type."""
+        ticks, _, _ = stores
+        ticks.insert_ticks([_tick(0, 100.0, 50, "BUY")])
+        got = ticks.query_ticks(C, T0, T0 + timedelta(minutes=1))
+        assert got[0]["ttype"] is None
+
+    def test_does_not_affect_direction(self, stores):
+        ticks, _, _ = stores
+        r = _tick(0, 100.0, 50, "BUY")
+        r["ttype"] = "OTC_SOLD"
+        ticks.insert_ticks([r])
+        got = ticks.query_ticks(C, T0, T0 + timedelta(minutes=1))
+        assert got[0]["direction"] == "BUY"
+
+    def test_added_to_a_database_that_predates_it(self, tmp_path):
+        """The column goes onto an existing file without rewriting 48M rows."""
+        import sqlite3
+        path = tmp_path / "old.db"
+        con = sqlite3.connect(path)
+        con.executescript(
+            "CREATE TABLE ticks (code TEXT NOT NULL, ts TEXT NOT NULL, "
+            "price REAL NOT NULL, volume INTEGER NOT NULL, "
+            "direction TEXT NOT NULL, UNIQUE(code, ts, price, volume));")
+        con.execute("INSERT INTO ticks VALUES (?,?,?,?,?)",
+                    (C, "2026-10-01 10:00:00", 100.0, 50, "BUY"))
+        con.commit(); con.close()
+
+        ts = TickStore(path)
+        cols = {r[1] for r in ts._con.execute("PRAGMA table_info(ticks)")}
+        assert "ttype" in cols
+        got = ts.query_ticks(C, datetime(2026, 10, 1), datetime(2026, 10, 2))
+        assert got[0]["direction"] == "BUY" and got[0]["ttype"] is None
+        ts.close()

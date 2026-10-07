@@ -59,6 +59,11 @@ def _make_handler(store, state: dict):
                     "price":     float(row["price"]),
                     "volume":    int(row["volume"]),
                     "direction": direction,
+                    # moomoo's own ticker_type -- AUTO_MATCH, ODD_LOT,
+                    # OTC_SOLD, DERIVATIVELY_PRICED and 28 others. Dropping it
+                    # is what left the off-exchange work guessing venue from
+                    # sub-penny prices when the feed states it outright.
+                    "ttype":     row.get("type"),
                 })
             n = store.insert_ticks(rows)
             if n:

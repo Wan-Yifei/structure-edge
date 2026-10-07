@@ -1,7 +1,7 @@
 """SQLite-backed tick storage (WAL mode — concurrent reader + writer safe).
 
 Schema:
-    ticks(code, ts, price, volume, direction, mid_dir)
+    ticks(code, ts, price, volume, direction, mid_dir, ttype)
 
 ts is stored as ISO-8601 string: '2026-05-18 09:30:00.123456'
 Direction values: 'BUY' | 'SELL' | 'NEUTRAL'
@@ -18,6 +18,12 @@ Those sides live in db/tick_mid.db, not here -- see feeds/tick_mid_store.py for
 why. The mid_dir column below is a leftover from the first attempt at keeping
 them in this table and is never written; it could not be dropped because that
 needs the write lock the collector holds.
+
+ttype is moomoo's own ticker_type: AUTO_MATCH, ODD_LOT, OTC_SOLD,
+DERIVATIVELY_PRICED, BULK, CROSS_MARKET and 26 others. The collector discarded
+it for months, which is why the off-exchange work had to infer venue from
+sub-penny prices instead of reading it. NULL on every row written before
+2026-10-07.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ CREATE TABLE IF NOT EXISTS ticks (
     price     REAL    NOT NULL,
     volume    INTEGER NOT NULL,
     direction TEXT    NOT NULL,
+    ttype     TEXT,
     UNIQUE(code, ts, price, volume)
 );
 CREATE INDEX IF NOT EXISTS idx_ticks_code_ts ON ticks (code, ts);
@@ -67,6 +74,24 @@ class TickStore:
         else:
             self._con = sqlite3.connect(str(self._path), check_same_thread=False)
             self._con.executescript(_SETUP_SQL)
+            self._ensure_ttype()
+
+    def _ensure_ttype(self) -> None:
+        """Add ttype to a database created before it existed.
+
+        ALTER TABLE ADD COLUMN is metadata-only in SQLite, so this is instant
+        even on the 48M-row table. It needs the write lock, which the collector
+        holds all session -- hence the try: a reader-side failure here must not
+        stop anything, the column simply stays absent until the collector next
+        restarts and adds it itself.
+        """
+        try:
+            cols = {r[1] for r in self._con.execute("PRAGMA table_info(ticks)")}
+            if "ttype" not in cols:
+                self._con.execute("ALTER TABLE ticks ADD COLUMN ttype TEXT")
+                self._con.commit()
+        except Exception as exc:
+            print(f"[TickStore] could not add ttype: {exc}", flush=True)
 
     # ── write ──────────────────────────────────────────────────────────────
 
@@ -79,6 +104,7 @@ class TickStore:
                 float(r["price"]),
                 int(r["volume"]),
                 str(r["direction"]).upper(),
+                (str(r["ttype"]) if r.get("ttype") else None),
             )
             for r in rows
         ]
@@ -87,8 +113,9 @@ class TickStore:
         # Columns named, not positional: a bare VALUES (?,?,?,?,?) silently
         # became wrong the moment mid_dir was added.
         self._con.executemany(
-            "INSERT OR IGNORE INTO ticks (code, ts, price, volume, direction) "
-            "VALUES (?, ?, ?, ?, ?)", data
+            "INSERT OR IGNORE INTO ticks "
+            "(code, ts, price, volume, direction, ttype) "
+            "VALUES (?, ?, ?, ?, ?, ?)", data
         )
         self._con.commit()
         return len(data)
@@ -123,18 +150,19 @@ class TickStore:
                 print(f"[TickStore] mid-dir unavailable: {exc}", flush=True)
 
         cur = self._con.execute(
-            "SELECT ts, price, volume, direction FROM ticks "
+            "SELECT ts, price, volume, direction, ttype FROM ticks "
             "WHERE code = ? AND ts >= ? AND ts < ? ORDER BY ts",
             [code, _ts_str(start), _ts_str(end)],
         )
         out = []
-        for ts_s, price, vol, d in cur.fetchall():
+        for ts_s, price, vol, d, ttype in cur.fetchall():
             # ts_raw is the string exactly as stored. Parsing and
             # re-serialising normalises it ('...:34.38' becomes
             # '...:34.380000'), so anything keyed on the timestamp -- the
             # side file above -- must use this, not str(ts).
             out.append({"ts": datetime.fromisoformat(ts_s), "ts_raw": ts_s,
                         "price": price, "volume": vol, "direction": d,
+                        "ttype": ttype,
                         "mid_dir": mids.get((ts_s, price, vol)) if mids else None})
         return out
 

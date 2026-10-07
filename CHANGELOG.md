@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.30.2 — record the ticker type the feed was already sending (2026-10-07)
+
+### Fix: the collector discarded moomoo's own trade-type field (`analysis/tick_collector.py`, `feeds/tick_store.py`)
+
+The TICKER push carries a `type` alongside price, volume and direction, and the
+collector had been dropping it. Its 32 values include `OTC_SOLD`,
+`DERIVATIVELY_PRICED`, `AVERAGE_PRICE`, `BULK` and `CROSS_MARKET` -- the
+standard conditions for a trade reported away from an exchange -- as well as
+`AUTO_MATCH` for one that was not.
+
+That is exactly what the off-exchange work spent a day inferring from sub-penny
+prices, and the inference looks shakier next to it: in a 1000-trade sample
+`AUTO_MATCH` carried sub-penny prices on 20.9% of trades against 7.2% for
+`ODD_LOT`, the opposite way round from what the inference assumed. The sample
+is small and from the closing minute, so it does not overturn appendix A's
+conclusion, but it does retire the method.
+
+`ttype` is stored from now on. Rows written before today have NULL and cannot
+be filled -- the field was never kept. The column is added to the existing file
+by `ALTER TABLE`, which is metadata-only, and failure to add it is survivable:
+a reader that cannot take the write lock simply sees no column until the
+collector next restarts.
+
+doc/ORDER_FLOW_GUIDE.md gains appendix A.8 with the correction.
+
 ## v0.30.1 — the scheduler keeps the off-exchange sides current (2026-10-07)
 
 ### Feat: a nightly classify job (`analysis/scheduler.py`, `config/schedule.json`)
