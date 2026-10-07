@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.29.1 — profile panels track their own cursor (2026-10-07)
+
+### Feat: hovering a profile panel drives its price line (`analysis/trade_viewer_qt.py`)
+
+Both profile panels mirrored the main chart's crosshair, which is useless the
+moment the cursor is over the panel: the line freezes wherever the chart last
+left it while you read the histogram, and there is no way to tell what price a
+bar sits at.
+
+Each panel now takes over its own line while the cursor is inside it. They are
+separate PlotWidgets with separate scenes, so the chart's handler is not firing
+then and the two decouple on their own -- hovering a panel leaves the chart's
+crosshair and the other panel exactly where they were.
+
+Y only. The panels' X is volume, and moving the chart's vertical line from here
+would scrub the chart while the user is reading a profile.
+
+The price rides on the line as an `InfiniteLine` label rather than a separate
+item: both panels `clear()` on every rebuild and re-add the line afterwards, in
+seven places between them, and a second item would have to be re-added at each.
+
+### Fix: the price label showed the previous value on first hover
+
+`InfLineLabel.valueChanged` returns early while the label is hidden, so
+positioning a hidden line and then showing it renders whatever it said before
+-- `0.00` on the first hover of a session. Both call sites now make the line
+visible before positioning it.
+
 ## v0.29.0 — DCVD, the CVD slope normalised to [-1, +1] (2026-10-06)
 
 ### Feat: a bounded order-flow oscillator (`analysis/trade_viewer_qt.py`)

@@ -2448,19 +2448,27 @@ class TradeViewerQt(QMainWindow):
         # order-size filter toggle without waiting for the next mouse move).
         self._last_hover_idx: int | None = None
 
-        # Profile panel: horizontal line that follows main chart price (Y)
-        self._profile_hline = pg.InfiniteLine(
-            angle=0, movable=False,
-            pen=pg.mkPen(_CROSS, width=1, style=Qt.PenStyle.DashLine),
-        )
-        self._profile_hline.setVisible(False)
+        # Profile panels: a horizontal line that follows the main chart's price
+        # while the cursor is over the chart, and the panel's own cursor once it
+        # is over the panel -- see _on_profile_hover.
+        #
+        # The price rides on the line as an InfiniteLine label rather than a
+        # separate TextItem: both panels call clear() on every rebuild and
+        # re-add the line afterwards, in seven places between them, and a
+        # second item would have to be re-added at every one of them.
+        def _hline() -> pg.InfiniteLine:
+            ln = pg.InfiniteLine(
+                angle=0, movable=False,
+                pen=pg.mkPen(_CROSS, width=1, style=Qt.PenStyle.DashLine),
+                label="{value:.2f}",
+                labelOpts={"position": 0.04, "color": _CROSS,
+                           "fill": _qc(_BG_TIP, 200), "movable": False},
+            )
+            ln.setVisible(False)
+            return ln
 
-        # Tick profile panel: same crosshair horizontal line
-        self._tick_profile_hline = pg.InfiniteLine(
-            angle=0, movable=False,
-            pen=pg.mkPen(_CROSS, width=1, style=Qt.PenStyle.DashLine),
-        )
-        self._tick_profile_hline.setVisible(False)
+        self._profile_hline = _hline()
+        self._tick_profile_hline = _hline()
 
         # Price label: yellow price tag that tracks cursor Y, left-aligned
         self._price_label = pg.TextItem(
@@ -2530,6 +2538,9 @@ class TradeViewerQt(QMainWindow):
         self._tick_profile_widget.getPlotItem().getAxis("top").setStyle(showValues=False)
         # Add crosshair line (survives until next pw.clear() call; restored in _show_tick_profile)
         self._tick_profile_widget.addItem(self._tick_profile_hline)
+        self._tick_profile_widget.scene().sigMouseMoved.connect(
+            lambda pos: self._on_profile_hover(
+                pos, self._tick_profile_widget, self._tick_profile_hline))
         right_layout.addWidget(self._tick_profile_widget, 1)
 
         # Sync tick profile Y range whenever the main candle chart is panned/zoomed
@@ -2611,6 +2622,9 @@ class TradeViewerQt(QMainWindow):
         self._profile_widget.getPlotItem().getAxis("top").setStyle(showValues=False)
         # Add the crosshair sync line here so it persists across pw.clear() calls
         self._profile_widget.addItem(self._profile_hline)
+        self._profile_widget.scene().sigMouseMoved.connect(
+            lambda pos: self._on_profile_hover(
+                pos, self._profile_widget, self._profile_hline))
         right_layout.addWidget(self._profile_widget, 2)
 
         splitter.addWidget(right)
@@ -5549,6 +5563,26 @@ class TradeViewerQt(QMainWindow):
         implied = pair_ref * (2.0 - price / base_ref)
         return (base_code, pair_code, implied) if implied > 0 else None
 
+    def _on_profile_hover(self, pos, widget: "pg.PlotWidget",
+                          line: pg.InfiniteLine) -> None:
+        """Drive a profile panel's price line from that panel's own cursor.
+
+        The line otherwise mirrors the main chart's crosshair, which is useless
+        the moment the cursor is over the panel -- it freezes wherever the
+        chart last left it while you read the histogram. Each panel is its own
+        PlotWidget with its own scene, so the chart's handler is not firing at
+        all then; this takes over and the two decouple on their own.
+
+        Y only. The panel's X is volume, which has nothing to say about price,
+        and moving the main chart's vertical line from here would scrub the
+        chart while the user is reading a profile.
+        """
+        pi = widget.getPlotItem()
+        if not pi.sceneBoundingRect().contains(pos):
+            return
+        line.setVisible(True)          # before setPos -- see _on_mouse_move
+        line.setPos(pi.vb.mapSceneToView(pos).y())
+
     def _on_mouse_move(self, pos) -> None:
         # pos is QPointF emitted directly by scene.sigMouseMoved
         in_candle = self._plot_c.sceneBoundingRect().contains(pos)
@@ -5617,10 +5651,14 @@ class TradeViewerQt(QMainWindow):
         self._hline.setPos(y);  self._hline.setVisible(in_candle)
 
         # Profile panel sync lines (session profile + tick profile)
-        self._profile_hline.setPos(y)
+        # Visible first, then positioned: pyqtgraph's InfLineLabel.valueChanged
+        # returns early while the label is hidden, so positioning a hidden line
+        # and then showing it displays the previous value -- 0.00 on the first
+        # hover of a session.
         self._profile_hline.setVisible(True)
-        self._tick_profile_hline.setPos(y)
+        self._profile_hline.setPos(y)
         self._tick_profile_hline.setVisible(True)
+        self._tick_profile_hline.setPos(y)
 
         xlo, xhi = self._plot_c.vb.viewRange()[0]
         ylo, yhi = self._plot_c.vb.viewRange()[1]
