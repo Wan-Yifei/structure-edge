@@ -482,6 +482,8 @@ class SchedulerApp(tk.Tk):
         self._ob_proc: subprocess.Popen | None = None
         self._tray:    pystray.Icon | None = None
         self._last_backup_minute: tuple | None = None
+        self._last_classify_minute: tuple | None = None
+        self._classify_proc: subprocess.Popen | None = None
 
         self._build_clock()
         self._build_sessions()
@@ -503,6 +505,16 @@ class SchedulerApp(tk.Tk):
                 self.after(200, self._start_scheduler)
 
     # ── Config I/O ───────────────────────────────────────────────────────────
+
+    # Sides for off-exchange prints, written into db/tick_mid.db. Runs after
+    # the after-hours session closes: order_book.db only retains a few days, so
+    # a trading day has to be classified while its book is still there, and
+    # nothing is gained by doing it mid-session when the day is incomplete.
+    _DEFAULT_CLASSIFY = {
+        "enabled": True,
+        "cron":    "30 20 * * 1-5",
+        "days":    3,
+    }
 
     _DEFAULT_BACKUP = {
         "enabled":          True,
@@ -543,6 +555,7 @@ class SchedulerApp(tk.Tk):
             "target_categories": {},
             "order_book_enabled": True,
             "remote_backup": dict(self._DEFAULT_BACKUP),
+            "tick_classify": dict(self._DEFAULT_CLASSIFY),
         }
 
     def _save_config(self):
@@ -845,6 +858,10 @@ class SchedulerApp(tk.Tk):
         if self.cfg.get("remote_backup", {}).get("enabled"):
             self._check_backup_cron(et)
 
+        # same, for the off-exchange classifier
+        if self.cfg.get("tick_classify", self._DEFAULT_CLASSIFY).get("enabled"):
+            self._check_classify_cron(et)
+
         self._tick_job = self.after(1000, self._tick)
 
     def _check_session_transitions(self, et: datetime):
@@ -1064,6 +1081,59 @@ class SchedulerApp(tk.Tk):
             threading.Thread(target=self._run_backup, daemon=True).start()
         except Exception as exc:
             self._log(f"[backup] Cron parse error: {exc}")
+
+    def _check_classify_cron(self, et: datetime):
+        """Fire the off-exchange classifier if ET matches its cron."""
+        cfg = self.cfg.get("tick_classify", self._DEFAULT_CLASSIFY)
+        parts = str(cfg.get("cron", "")).split()
+        if len(parts) != 5:
+            return
+        try:
+            m_f, h_f, _, _, dow_f = parts
+            cron_dow = et.isoweekday() % 7
+            if not (self._cron_field_match(m_f, et.minute) and
+                    self._cron_field_match(h_f, et.hour) and
+                    self._cron_field_match(dow_f, cron_dow)):
+                return
+            cur_min = (et.year, et.month, et.day, et.hour, et.minute)
+            if cur_min == self._last_classify_minute:
+                return
+            self._last_classify_minute = cur_min
+            threading.Thread(target=self._run_classify, daemon=True).start()
+        except Exception as exc:
+            self._log(f"[classify] Cron parse error: {exc}")
+
+    def _run_classify(self):
+        """Run scripts/classify_ticks.py for each collected target.
+
+        A subprocess rather than an import: it opens its own database handles
+        and a long pass should not sit inside the UI process. One at a time --
+        the previous run is left alone if it is still going, since a slow day
+        is slow for every target.
+        """
+        if self._classify_proc is not None and self._classify_proc.poll() is None:
+            self._log("[classify] previous run still going, skipping")
+            return
+        cfg = self.cfg.get("tick_classify", self._DEFAULT_CLASSIFY)
+        days = int(cfg.get("days", 3) or 3)
+        root = pathlib.Path(__file__).parent.parent
+        script = root / "scripts" / "classify_ticks.py"
+        for code in self.cfg.get("targets", []):
+            cmd = [sys.executable, str(script), "--code", code,
+                   "--days", str(days)]
+            self._log(f"[classify] {code} ({days}d) …")
+            try:
+                self._classify_proc = subprocess.Popen(
+                    cmd, cwd=str(root), stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                out, _ = self._classify_proc.communicate(timeout=1800)
+                tail = [ln for ln in (out or "").splitlines() if ln.strip()][-3:]
+                for ln in tail:
+                    self._log(f"[classify] {ln}")
+            except Exception as exc:
+                self._log(f"[classify] {code} failed: {exc}")
+        self._classify_proc = None
 
     def _run_backup(self):
         """Upload tick and order-book DBs to S3 via aws s3 cp."""

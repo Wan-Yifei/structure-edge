@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.30.1 — the scheduler keeps the off-exchange sides current (2026-10-07)
+
+### Feat: a nightly classify job (`analysis/scheduler.py`, `config/schedule.json`)
+
+`scripts/classify_ticks.py` had to be run by hand, and it cannot be run late:
+order_book.db retains a few days while ticks.db holds months, so a trading day
+has to be classified while its book still exists. The scheduler now runs it on
+its own cron -- `30 20 * * 1-5` by default, half an hour after the after-hours
+session closes, for every configured target.
+
+It reuses the cron matcher the S3 backup already had, so the field syntax is
+the same. A run in progress is not started again; a day that is slow is slow
+for every target.
+
 ## v0.30.0 — off-exchange flow as its own line (2026-10-07)
 
 ### Feat: `OffEx` draws off-exchange flow beside CVD (`analysis/trade_viewer_qt.py`, `feeds/tick_mid_store.py`, `scripts/classify_ticks.py`)

@@ -92,5 +92,10 @@
         "min_pf": 1.5
       }
     }
+  },
+  "tick_classify": {
+    "enabled": true,
+    "cron": "30 20 * * 1-5",
+    "days": 3
   }
 }
