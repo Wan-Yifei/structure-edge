@@ -36,7 +36,7 @@ def fake_disk(monkeypatch):
     reads = []
     disk = {}
 
-    def _load(code, date_str, tf):
+    def _load(code, date_str, tf, with_offex=False):
         reads.append(date_str)
         return disk.get(date_str)
 
@@ -134,6 +134,17 @@ class TestCaching:
         _, new2 = tv.load_tick_days(CODE, END, TF, 4, cache)
         assert END in reads, "today is always re-read"
         assert "2026-09-28" not in reads, "already cached"
+
+    def test_the_cache_key_separates_the_classification(self, fake_disk):
+        """A day loaded without the side file has its off_* counts at zero, so
+        it must not be served to a caller that asked for them."""
+        disk, reads = fake_disk
+        for d in (29, 28):
+            disk[f"2026-09-{d}"] = _buckets(_d(d, 10))
+        _, new = tv.load_tick_days(CODE, END, TF, 2)
+        reads.clear()
+        tv.load_tick_days(CODE, END, TF, 2, dict(new), with_offex=True)
+        assert "2026-09-28" in reads, "with_offex must not reuse the plain cache"
 
     def test_the_cache_key_separates_code_and_timeframe(self, fake_disk):
         disk, reads = fake_disk

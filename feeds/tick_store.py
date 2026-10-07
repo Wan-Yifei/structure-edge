@@ -1,10 +1,23 @@
 """SQLite-backed tick storage (WAL mode — concurrent reader + writer safe).
 
 Schema:
-    ticks(code TEXT, ts TEXT, price REAL, volume INTEGER, direction TEXT)
+    ticks(code, ts, price, volume, direction, mid_dir)
 
 ts is stored as ISO-8601 string: '2026-05-18 09:30:00.123456'
 Direction values: 'BUY' | 'SELL' | 'NEUTRAL'
+
+mid_dir is a side inferred for prints the feed left NEUTRAL, by comparing the
+trade price with the prevailing midpoint. NEUTRAL is the majority of the tape
+-- 57.5% on SOXL -- and it is off-exchange flow rather than noise: 43.9% of
+those prints carry sub-penny prices, which only wholesaler price improvement
+produces. Signed this way it tracks the minute's return about as well as the
+exchange's own tags (+0.253 against +0.276), so leaving it out costs most of
+the signal. See doc/ORDER_FLOW_GUIDE.md appendix A.
+
+Those sides live in db/tick_mid.db, not here -- see feeds/tick_mid_store.py for
+why. The mid_dir column below is a leftover from the first attempt at keeping
+them in this table and is never written; it could not be dropped because that
+needs the write lock the collector holds.
 """
 
 from __future__ import annotations
@@ -19,6 +32,11 @@ _DEFAULT_DB = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
 _SETUP_SQL = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
+-- WAL allows one writer at a time, and the tick collector holds that slot
+-- whenever the market is open. Without a timeout any other writer -- the
+-- offline classifier, say -- fails outright on the first contended statement
+-- instead of waiting the few milliseconds the collector needs.
+PRAGMA busy_timeout=30000;
 CREATE TABLE IF NOT EXISTS ticks (
     code      TEXT    NOT NULL,
     ts        TEXT    NOT NULL,
@@ -45,6 +63,7 @@ class TickStore:
         if read_only:
             # Open without DDL so we never contend with the writer's RESERVED lock.
             self._con = sqlite3.connect(str(self._path), check_same_thread=False)
+            self._con.execute("PRAGMA busy_timeout=30000")
         else:
             self._con = sqlite3.connect(str(self._path), check_same_thread=False)
             self._con.executescript(_SETUP_SQL)
@@ -65,25 +84,59 @@ class TickStore:
         ]
         if not data:
             return 0
+        # Columns named, not positional: a bare VALUES (?,?,?,?,?) silently
+        # became wrong the moment mid_dir was added.
         self._con.executemany(
-            "INSERT OR IGNORE INTO ticks VALUES (?, ?, ?, ?, ?)", data
+            "INSERT OR IGNORE INTO ticks (code, ts, price, volume, direction) "
+            "VALUES (?, ?, ?, ?, ?)", data
         )
         self._con.commit()
         return len(data)
 
     # ── read ───────────────────────────────────────────────────────────────
 
-    def query_ticks(self, code: str, start: datetime, end: datetime) -> list[dict]:
+    def query_ticks(self, code: str, start: datetime, end: datetime,
+                    with_mid: bool = False) -> list[dict]:
+        """Tick rows for *code* in [start, end).
+
+        with_mid attaches "mid_dir", the side inferred for off-exchange prints
+        from the prevailing midpoint. It never rewrites "direction": folding
+        the two together measurably made delta track price *worse* (+0.276 to
+        +0.225 against the minute's return, measured with a fresh book), and
+        merging them also hides the one thing the off-exchange side is good
+        for, which is disagreeing with the exchange side. Callers that want it
+        keep it separate. See doc/ORDER_FLOW_GUIDE.md appendix A.
+        """
+        mids: dict = {}
+        if with_mid:
+            try:
+                from feeds.tick_mid_store import TickMidStore
+                # Beside this ticks.db, not the package default: the sides
+                # describe the trades in *this* file, so a store pointed
+                # elsewhere must not pick up the production side file.
+                side = self._path.parent / "tick_mid.db"
+                with TickMidStore(side, read_only=True) as ms:
+                    mids = ms.load(code, start, end)
+            except Exception as exc:
+                # No side file yet, or it is being rebuilt. Fall back to the
+                # feed's own tags rather than failing the whole load.
+                print(f"[TickStore] mid-dir unavailable: {exc}", flush=True)
+
         cur = self._con.execute(
             "SELECT ts, price, volume, direction FROM ticks "
             "WHERE code = ? AND ts >= ? AND ts < ? ORDER BY ts",
             [code, _ts_str(start), _ts_str(end)],
         )
-        return [
-            {"ts": datetime.fromisoformat(r[0]),
-             "price": r[1], "volume": r[2], "direction": r[3]}
-            for r in cur.fetchall()
-        ]
+        out = []
+        for ts_s, price, vol, d in cur.fetchall():
+            # ts_raw is the string exactly as stored. Parsing and
+            # re-serialising normalises it ('...:34.38' becomes
+            # '...:34.380000'), so anything keyed on the timestamp -- the
+            # side file above -- must use this, not str(ts).
+            out.append({"ts": datetime.fromisoformat(ts_s), "ts_raw": ts_s,
+                        "price": price, "volume": vol, "direction": d,
+                        "mid_dir": mids.get((ts_s, price, vol)) if mids else None})
+        return out
 
     def query_date(self, code: str, day: date) -> list[dict]:
         start = datetime(day.year, day.month, day.day)

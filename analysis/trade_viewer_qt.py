@@ -321,7 +321,8 @@ _BOS_SESSION_GAP: dict[str, int | None] = (
 
 # ── Shared tick-loading helper ────────────────────────────────────────────────
 
-def load_local_ticks(code: str, date_str: str, tf: str) -> dict | None:
+def load_local_ticks(code: str, date_str: str, tf: str,
+                     with_offex: bool = False) -> dict | None:
     """Load tick buckets from ticks.db for a given code and date.
 
     Each price bin contains:
@@ -342,7 +343,8 @@ def load_local_ticks(code: str, date_str: str, tf: str) -> dict | None:
         tick_start     = dt - timedelta(days=1) + timedelta(hours=20)
         tick_end       = dt.replace(hour=23, minute=59, second=59)
         with TickStore(db_path, read_only=True) as store:
-            rows = store.query_ticks(code, tick_start, tick_end)
+            rows = store.query_ticks(code, tick_start, tick_end,
+                                     with_mid=with_offex)
         if not rows:
             return None
 
@@ -368,6 +370,11 @@ def load_local_ticks(code: str, date_str: str, tf: str) -> dict | None:
                 "buy_s": 0, "buy_m": 0, "buy_l": 0,
                 "sell_s": 0, "sell_m": 0, "sell_l": 0,
                 "neutral_s": 0, "neutral_m": 0, "neutral_l": 0,
+                # Off-exchange flow, carried beside the feed's own counts
+                # rather than folded into them: every indicator that reads
+                # buy/sell keeps the exact meaning it had, and the one line
+                # that wants this reads these two.
+                "off_buy": 0, "off_sell": 0,
             }
 
         buckets: dict = defaultdict(lambda: defaultdict(_new_bin))
@@ -380,6 +387,12 @@ def load_local_ticks(code: str, date_str: str, tf: str) -> dict | None:
             vol = r["volume"]
             buckets[bucket][r["price"]][key] += vol
             buckets[bucket][r["price"]][f"{key}_{_size(vol)}"] += vol
+            if key == "neutral":
+                md = r.get("mid_dir")
+                if md == "BUY":
+                    buckets[bucket][r["price"]]["off_buy"] += vol
+                elif md == "SELL":
+                    buckets[bucket][r["price"]]["off_sell"] += vol
         return dict(buckets)
     except Exception:
         return None
@@ -454,9 +467,18 @@ RANGE_DAYS = {"1d": 1, "2d": 2, "3d": 3, "7d": 5}
 # range gets used without the indicator living on its rails.
 DCVD_LOOKBACK = 10
 
+# Resolve NEUTRAL prints to the side inferred from the prevailing midpoint,
+# where scripts/classify_ticks.py has computed one. NEUTRAL is 57.5% of SOXL's
+# volume and is off-exchange flow rather than noise, so delta without it covers
+# about an eighth of the tape; with it, about 92%. Off until the user asks for
+# it from the toolbar, because it changes what every flow indicator reports and
+# the two should be comparable side by side.
+USE_MID_DIR = False
+
 
 def load_tick_days(code: str, end_date_str: str, tf: str, days: int,
-                   cache: dict | None = None) -> tuple[dict, dict]:
+                   cache: dict | None = None,
+                   with_offex: bool = False) -> tuple[dict, dict]:
     """Merged tick buckets for the `days` calendar days ending at end_date_str.
 
     Returns (merged_buckets, newly_loaded) where newly_loaded maps date_str ->
@@ -488,12 +510,15 @@ def load_tick_days(code: str, end_date_str: str, tf: str, days: int,
             break
         d = (end - timedelta(days=back)).strftime("%Y-%m-%d")
         is_newest = back == 0
-        key = (code, tf, d)
+        # with_offex is part of the cache key: a day loaded without the side
+        # file has its off_* counts at zero, and must not be served to a caller
+        # that asked for them.
+        key = (code, tf, d, with_offex)
         if not is_newest and key in cache:
             day = cache[key]
             fresh = False
         else:
-            day = load_local_ticks(code, d, tf) or {}
+            day = load_local_ticks(code, d, tf, with_offex=with_offex) or {}
             fresh = True
         collected.append((key, day) if fresh and not is_newest else (None, day))
         # Count trading days, not calendar days that happen to be non-empty.
@@ -1315,7 +1340,8 @@ class DataFetcher(QThread):
             if historical:
                 ticks, self._new_tick_days = load_tick_days(
                     code, date_str, tf, int(p.get("tick_days", 1) or 1),
-                    p.get("tick_cache"))
+                    p.get("tick_cache"),
+                    with_offex=bool(p.get("with_offex")))
             else:
                 # Live mode: load today's ticks from DB first (covers the whole
                 # trading day even when the viewer is opened after hours), then
@@ -1331,7 +1357,8 @@ class DataFetcher(QThread):
                 # and the curve sat flat at zero until 20:00.
                 ticks, self._new_tick_days = load_tick_days(
                     code, today, tf, int(p.get("tick_days", 1) or 1),
-                    p.get("tick_cache"))
+                    p.get("tick_cache"),
+                    with_offex=bool(p.get("with_offex")))
                 live_snap: dict = p.get("live_ticks") or {}
                 for bk, pd_ in live_snap.items():
                     if bk not in ticks:
@@ -1826,6 +1853,7 @@ class TradeViewerQt(QMainWindow):
             ("cvd",       "CVD"),   # Cumulative Volume Delta subplot
             ("adi",       "A/D"),   # Accumulation/Distribution Line subplot
             ("dcvd",      "DCVD"),  # normalised CVD slope, bounded -1..+1
+            ("offex",     "OffEx"), # off-exchange flow as its own CVD line
             ("ema",       "EMA"),
             ("avwap",     "AVWAP"), # Anchored VWAP -- cumulative from a user-picked date
             ("vol",       "MAVOL"), # Volume subplot toggle
@@ -2445,6 +2473,17 @@ class TradeViewerQt(QMainWindow):
         self._dcvd_items: list = []
         self._dcvd_arr: np.ndarray | None = None
 
+        self._offex_arr: np.ndarray | None = None
+        self._offex_label = pg.TextItem(
+            text="", color="#ab47bc",
+            fill=pg.mkBrush(_qc(_BG_TIP, 200)),
+            anchor=(0.0, 0.5),
+        )
+        self._offex_label.setFont(QFont("Monospace", 8))
+        self._offex_label.setZValue(100)
+        self._offex_label.setVisible(False)
+        self._plot_cvd.addItem(self._offex_label, ignoreBounds=True)
+
         # Last candle index shown in the tick profile (used to re-render on
         # order-size filter toggle without waiting for the next mouse move).
         self._last_hover_idx: int | None = None
@@ -2990,6 +3029,7 @@ class TradeViewerQt(QMainWindow):
             "live_ticks":      live_snap,
             "tick_days":       RANGE_DAYS.get(self._get_range_val(), 1),
             "tick_cache":      dict(self._tick_day_cache),
+            "with_offex":      self._ind("offex"),
             # Only when it is this exact (code, tf); the fetcher additionally
             # refuses to use it if a gap shows up. Historical mode never tops
             # up -- its window is pinned to a date, not rolling.
@@ -3997,6 +4037,7 @@ class TradeViewerQt(QMainWindow):
 
     def _clear_cvd_items(self) -> None:
         self._cvd_fills = []
+        self._offex_arr = None
         for item in self._cvd_items:
             self._plot_cvd.removeItem(item)
         self._cvd_items.clear()
@@ -4064,6 +4105,55 @@ class TradeViewerQt(QMainWindow):
             running += delta[i]
             cvd[i] = running
         self._cvd_arr = cvd
+
+        # Off-exchange flow, accumulated on the same blocks, as its own line.
+        # Kept separate rather than added in: folding the two together made
+        # delta track price worse (+0.276 to +0.225 against the minute's
+        # return), and it hides the only thing this flow is good for -- saying
+        # when the unhurried side disagrees with the aggressive one.
+        #
+        # It is not a direction signal. Scored against the feed's own tags the
+        # midpoint rule is 75.6% right, so the side is real; but its one-minute
+        # autocorrelation is -0.105 against +0.209 for exchange flow (it does
+        # not persist, so nobody is working it), and it *follows* price with a
+        # negative sign -- off-exchange buying leads the next minute's return
+        # at -0.177. Uninformed flow, which is what makes a divergence with the
+        # exchange side worth seeing.
+        off_delta = np.zeros(n, dtype=float)
+        have_off = False
+        for i, (_, row) in enumerate(klines.iterrows()):
+            try:
+                bar_end = datetime.strptime(
+                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
+                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
+            except ValueError:
+                continue
+            pd_ = buckets.get(bk)
+            if not pd_:
+                continue
+            ob = sum(pd_[p].get("off_buy", 0) for p in pd_)
+            os_ = sum(pd_[p].get("off_sell", 0) for p in pd_)
+            if ob or os_:
+                have_off = True
+            off_delta[i] = ob - os_
+
+        self._offex_arr = None
+        if have_off and self._ind("offex"):
+            off = np.zeros(n, dtype=float)
+            running, prev_block = 0.0, None
+            for i in range(n):
+                if day[i] is not None:
+                    b = block[day[i]]
+                    if b != prev_block:
+                        running, prev_block = 0.0, b
+                running += off_delta[i]
+                off[i] = running
+            self._offex_arr = off
+            line = pg.PlotCurveItem(
+                x=np.arange(n), y=off,
+                pen=pg.mkPen("#ab47bc", width=1.3, style=Qt.PenStyle.DashLine))
+            self._plot_cvd.addItem(line)
+            self._cvd_items.append(line)
 
         x = np.arange(n)
 
@@ -5640,6 +5730,7 @@ class TradeViewerQt(QMainWindow):
                          self._vline_v, self._vline_kd, self._vline_cvd,
                          self._vline_adi, self._vline_dcvd,
                          self._dcvd_label,
+                         self._offex_label,
                          self._price_label, self._pair_price_label,
                          self._ohlcv_label,
                          self._vol_label, self._kd_label, self._cvd_label,
@@ -5802,6 +5893,26 @@ class TradeViewerQt(QMainWindow):
                 self._cvd_label.setVisible(True)
             else:
                 self._cvd_label.setVisible(False)
+
+            # Off-exchange line: show it next to CVD so a divergence can be
+            # read off as numbers, not just eyeballed from two curves.
+            off = getattr(self, "_offex_arr", None)
+            if self._plot_cvd.isVisible() and off is not None:
+                o_idx = max(0, min(idx, len(off) - 1))
+                o_val = float(off[o_idx])
+                sign = "+" if o_val >= 0 else ""
+                if abs(o_val) >= 1_000_000:
+                    o_str = f"{sign}{o_val/1_000_000:.2f}M"
+                elif abs(o_val) >= 1_000:
+                    o_str = f"{sign}{o_val/1_000:.0f}K"
+                else:
+                    o_str = f"{sign}{o_val:.0f}"
+                xlo_o, xhi_o = self._plot_cvd.vb.viewRange()[0]
+                self._offex_label.setPos(xlo_o + (xhi_o - xlo_o) * 0.12, o_val)
+                self._offex_label.setText(f"off {o_str}")
+                self._offex_label.setVisible(True)
+            else:
+                self._offex_label.setVisible(False)
 
             # A/D: show accumulation/distribution line value of the hovered bar.
             if self._plot_adi.isVisible() and self._adi_arr is not None:

@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.30.0 — off-exchange flow as its own line (2026-10-07)
+
+### Feat: `OffEx` draws off-exchange flow beside CVD (`analysis/trade_viewer_qt.py`, `feeds/tick_mid_store.py`, `scripts/classify_ticks.py`)
+
+The feed leaves 57.5% of SOXL's volume NEUTRAL, and that volume is
+off-exchange rather than noise: 43.9% of those prints carry sub-penny prices,
+which only wholesaler price improvement produces. `scripts/classify_ticks.py`
+signs them against the prevailing midpoint and stores the result in
+`db/tick_mid.db`; the viewer draws the accumulation as a dashed purple line in
+the CVD subplot.
+
+**Beside CVD, not inside it.** Folding the two together was built first and
+then measured: delta tracked price *worse*, +0.276 to +0.225 against the
+minute's return. It also cancels the one thing this flow is good for -- on
+2026-10-07 the price rose 3.5% while exchange flow accumulated +198K and
+off-exchange flow -243K, a disagreement a merged line would have hidden.
+
+**What it is and is not.** The side is real: scored against the feed's own
+tags, the midpoint rule is 75.6% correct with a book under 0.2s old. But it is
+not a direction signal -- its one-minute autocorrelation is -0.105 against
++0.209 for exchange flow, so nobody is working it, and off-exchange buying
+leads the next minute's return at **-0.177**. Uninformed flow, which is what
+makes a divergence with the exchange side worth looking at.
+
+### Correction: the earlier case for merging was circular
+
+An earlier measurement put the combined correlation at +0.320 against +0.276
+for the feed's tags. That used midpoints of unlimited staleness. Against a
+stale midpoint, "price above the mid" largely restates "price has risen since",
+so correlating it with the return is close to tautological. Tightening the
+limit shows it plainly:
+
+| book staleness | neutral alone | combined |
+|---|---|---|
+| 0.2s | +0.056 | +0.225 |
+| 1s | +0.149 | +0.255 |
+| 5s | +0.196 | +0.284 |
+| unlimited | +0.253 | +0.320 |
+
+A better midpoint should classify better, not worse. It reads the other way
+because the number was measuring the price move.
+
+### Notes
+
+`db/tick_mid.db` is separate from ticks.db on purpose: the tick collector holds
+that file's write lock for the whole session -- 82 attempts over 40 seconds
+with a 30s timeout, all refused -- and derived data that can be rebuilt has no
+business contending for it.
+
+Coverage is bounded by order_book.db's retention, a few days, while ticks.db
+holds months. Older history has no line.
+
 ## v0.29.3 — the profile hover price was clipped (2026-10-07)
 
 ### Fix: the price label ran off the panel's left edge (`analysis/trade_viewer_qt.py`)
