@@ -51,7 +51,16 @@ _LABEL_FILL_RGBA = (13, 17, 23, 200)
 # raw size so they land on exactly the bands the eye picks out -- and so the
 # Gamma control thins them out along with the picture, instead of the two
 # disagreeing about what counts as a wall.
-_WALL_MIN_BRIGHT = 0.5
+# Minimum *average* rendered brightness before Walls will label a row, on the
+# colour ramp's 0-1 scale. Average, not peak: ranking on the largest size a bin
+# ever reached picks out flashes, which is the opposite of what the comment
+# here used to claim. Measured live, a one-column spike at $161.38 reached a
+# peak of 1,578 and ranked third, with its row averaging 0.04 brightness --
+# invisible -- while the solid band at $160.26 averaged 0.16 and ranked fifth.
+# The average is literally how much of the band is painted, so it ranks the
+# bands the eye actually picks out, and Gamma still thins the labels with the
+# picture because the average is taken after the gamma curve.
+_WALL_MIN_BRIGHT = 0.05
 
 # Wall labels print white rather than in the side's colour: teal on teal bands
 # and red on red ones was the same hue as the thing being labelled and hard to
@@ -2084,18 +2093,18 @@ class LiqHmWindow(QWidget):
             norm = _percentile_norm(np.log1p(src))
             if gamma != 1.0:
                 norm = np.power(norm, gamma)
-            bright = norm[lo:hi].max(axis=0)
+            bright = norm[lo:hi].mean(axis=0)       # how much of the row is lit
 
             peak = grid[lo:hi].max(axis=0)          # largest size per price bin
             cur = grid[hi - 1]                      # newest column still in view
-            order = np.argsort(peak)[::-1]
+            order = np.argsort(bright)[::-1]        # rank by what is on screen
             placed: list[int] = []
             for bi in order:
+                if len(placed) >= top_n or bright[bi] < _WALL_MIN_BRIGHT:
+                    break         # sorted by brightness, so the rest are fainter
                 v = float(peak[bi])
-                if v < max(min_vol, 1.0) or len(placed) >= top_n:
-                    break
-                if bright[bi] < _WALL_MIN_BRIGHT:
-                    continue      # faded at this Gamma; not a band the eye sees
+                if v < max(min_vol, 1.0):
+                    continue
                 # Skip a bin touching one already labelled: one wall, one label.
                 if any(abs(int(bi) - q) <= 1 for q in placed):
                     continue

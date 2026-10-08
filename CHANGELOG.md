@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.30.3 — wall labels mark the bands you can see (2026-10-07)
+
+### Fix: ranking by peak size picked out flashes (`analysis/liq_hm_window.py`)
+
+Reported as the labels not lining up with the bands. They were at their stated
+prices -- the bug was which rows got labelled.
+
+Walls ranked each price row by the largest size it ever reached, with a comment
+claiming that stopped a one-snapshot flash outranking a standing wall. Peak
+does the opposite: a flash is exactly a large momentary size. Measured live, a
+single-column spike at $161.38 peaked at 1,578 and took third place with its
+row averaging **0.04** brightness -- invisible -- while the solid band at
+$160.26 averaged 0.16 and ranked fifth. The brightness gate did not catch it
+either, because that also used the peak.
+
+Rows are now ranked by **average** rendered brightness, taken from the same
+`log -> percentile -> gamma` array the image is drawn from. The average is
+literally how much of a band is painted, so it ranks what the eye picks out,
+and Gamma still thins the labels with the picture since the average is taken
+after the gamma curve. The floor moves from 0.5 to 0.05 to suit the new scale.
+
+The size shown is still current / peak; only the choice of row changed.
+
 ## v0.30.2 — record the ticker type the feed was already sending (2026-10-07)
 
 ### Fix: the collector discarded moomoo's own trade-type field (`analysis/tick_collector.py`, `feeds/tick_store.py`)
