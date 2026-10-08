@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.30.4 — a wall label stops outliving its wall (2026-10-08)
+
+### Fix: consumed levels kept their labels for minutes (`analysis/liq_hm_window.py`)
+
+Reported from a live screenshot: a teal `B 156.82±0.02  0 / 2,303` sitting over
+what had since become a solid red ask band, which reads as the label being in
+the wrong place.
+
+Ranking on mean rendered brightness has no notion of *now*. A level consumed
+early in the view keeps its slot until its lit columns scroll off the left
+edge, so the upper bound on a dead label was the whole visible window and the
+measured worst case was **5/6** of it -- 603s of a 720s window. Over a 3-hour
+replay, 35.6% of bid labels and 16.4% of ask labels were reading zero at the
+moment they were drawn.
+
+A candidate is now dropped if it has been completely empty for the whole grace
+period, `max(30s, 5% of the visible span)` -- proportional so a day-long replay
+still labels its history, with a floor so the live 4-minute window does not cut
+to nothing. Driving the real draw across the same replay: labels reading zero
+fall to **10.0%**, the longest-empty label goes from 603s to 36s, and nothing
+exceeds the allowance.
+
+This costs no labels. The freed slot goes to the next candidate essentially
+every time -- 6.0 labels per position before and after, with the count over a
+full pass moving 10,068 to 10,031. `current / peak` is unchanged, so a wall
+eaten seconds ago still shows its `0 / peak`; only the stale ones go.
+
 ## v0.30.3 — wall labels mark the bands you can see (2026-10-07)
 
 ### Fix: ranking by peak size picked out flashes (`analysis/liq_hm_window.py`)

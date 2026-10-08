@@ -74,6 +74,18 @@ _WALL_TEXT_COL = "#ffffff"
 # level that now holds 500 is worse than not labelling it at all.
 _WALL_INTACT_FRAC = 0.9
 
+# How long a level may sit completely empty and still keep its label.
+# Ranking on mean brightness alone lets a consumed wall hold its slot until its
+# lit columns scroll off -- up to 5/6 of the visible window, measured -- and a
+# teal "0 / 2,303" stranded over what is now a red ask band is just clutter.
+# Dropping it costs nothing: the freed slot is taken by the next candidate
+# almost every time (label count fell 10,068 -> 10,031 over a 3h replay) while
+# the share of labels reading zero went 35.6% -> 14.3% on the bid side.
+# Proportional to the window so a day-long replay still shows its history,
+# with a floor so the live 4-minute window does not cut to nothing.
+_WALL_MAX_EMPTY_FRAC = 0.05
+_WALL_MAX_EMPTY_SECS = 30.0
+
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
 # OpenD endpoint for the heatmap's own ORDER_BOOK subscription (same
@@ -2065,6 +2077,10 @@ class LiqHmWindow(QWidget):
         over the same grid the active mode draws (combined, or one side). Size
         alone would label levels the current Gamma has faded to black, and miss
         bright ones; this way raising Gamma culls the labels with the picture.
+
+        Finally, a level that has been empty throughout the grace period is
+        dropped however bright its history still reads -- see
+        _WALL_MAX_EMPTY_SECS.
         """
         if not self._wall_cb.isChecked() or self._bin_size <= 0:
             return
@@ -2082,6 +2098,11 @@ class LiqHmWindow(QWidget):
 
         gamma = self._gamma_spin.value()
         combined = not self._bid_ask_cb.isChecked()
+        col_secs = self._hist_bucket or self._col_secs_spin.value()
+        grace = max(_WALL_MAX_EMPTY_SECS,
+                    (hi - lo) * col_secs * _WALL_MAX_EMPTY_FRAC)
+        # +1: the newest column itself is the first one that can be empty.
+        grace_lo = max(lo, hi - 1 - int(grace / max(col_secs, 1e-9)))
 
         for grid, side, colour in ((self._bid_grid, "B", _TEAL),
                                    (self._ask_grid, "A", _RED)):
@@ -2104,6 +2125,9 @@ class LiqHmWindow(QWidget):
                     break         # sorted by brightness, so the rest are fainter
                 v = float(peak[bi])
                 if v < max(min_vol, 1.0):
+                    continue
+                # Gone for the whole grace period: history, not liquidity.
+                if not grid[grace_lo:hi, bi].any():
                     continue
                 # Skip a bin touching one already labelled: one wall, one label.
                 if any(abs(int(bi) - q) <= 1 for q in placed):
