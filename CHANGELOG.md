@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.30.5 — the off-exchange classifier never ran (2026-10-09)
+
+### Fix: a key the tick store does not return (`scripts/classify_ticks.py`)
+
+Reported as the viewer's OffEx line being invisible. It was invisible because
+there was nothing to draw: `db/tick_mid.db` stopped at 2026-10-07.
+
+`classify_day` filtered on `t["feed_dir"]`, and `query_ticks` returns
+`direction`. The key was wrong in the commit that introduced the script
+(`a1e5727`) -- the rows that made it into the database came from a pre-commit
+version of the file, so the committed one had never worked. The scheduler fired
+it on time both nights, it died about two minutes in, and the traceback went to
+`logs/analysis/scheduler.log`:
+
+```
+2026-10-07 20:30:00  [classify] US.SOXL (3d) ...
+2026-10-07 20:32:17  [classify] KeyError: 'feed_dir'
+2026-10-08 20:30:00  [classify] US.SOXL (3d) ...
+2026-10-08 20:32:22  [classify] KeyError: 'feed_dir'
+```
+
+Backfilled 10-08 and 10-09: 424,915 and 137,173 prints signed, 94.9% and 89.4%
+of each day's NEUTRAL volume. The viewer now has off-exchange flow for every
+day order_book.db still covers.
+
+### Fix: a crashed job read like a finished one (`analysis/scheduler.py`)
+
+`_run_classify` logged the last three lines of the subprocess whatever its exit
+code, so the tail of a traceback arrived looking like the tail of a results
+table. It now checks the return code and says `FAILED (exit N) -- db/tick_mid.db
+was not updated`, with eight lines of context instead of three.
+
+### Tests: the script had none (`tests/scripts/test_classify_ticks.py`)
+
+Nine tests driving `classify_day` against a real `ticks.db` and
+`order_book.db` -- signing above and below the mid, leaving tagged prints
+alone, skipping a stale or crossed book, and reusing the stored timestamp
+string so the viewer finds the row again. Seven of them fail on the old key.
+`tests/scripts/` had no `__init__.py`, which put the test's own directory on
+`sys.path` instead of the repo root and turned `import scripts.classify_ticks`
+into a silent skip.
+
 ## v0.30.4 — a wall label stops outliving its wall (2026-10-08)
 
 ### Fix: consumed levels kept their labels for minutes (`analysis/liq_hm_window.py`)

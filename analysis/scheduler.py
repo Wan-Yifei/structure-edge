@@ -1128,9 +1128,20 @@ class SchedulerApp(tk.Tk):
                     stderr=subprocess.STDOUT, text=True,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 out, _ = self._classify_proc.communicate(timeout=1800)
-                tail = [ln for ln in (out or "").splitlines() if ln.strip()][-3:]
-                for ln in tail:
-                    self._log(f"[classify] {ln}")
+                rc = self._classify_proc.returncode
+                lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+                # A crash used to read like a successful run: the last three
+                # lines of a traceback went out at the same level as the last
+                # three lines of a table. It died two nights running and the
+                # only symptom was the viewer's OffEx line being flat.
+                if rc != 0:
+                    self._log(f"[classify] {code} FAILED (exit {rc}) -- "
+                              f"db/tick_mid.db was not updated")
+                    for ln in lines[-8:]:
+                        self._log(f"[classify]   {ln}")
+                else:
+                    for ln in lines[-3:]:
+                        self._log(f"[classify] {ln}")
             except Exception as exc:
                 self._log(f"[classify] {code} failed: {exc}")
         self._classify_proc = None

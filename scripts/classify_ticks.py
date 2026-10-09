@@ -90,7 +90,8 @@ def classify_day(code: str, day: datetime, store: TickStore,
                 "stale": 0, "at_mid": 0, "secs": t_mid, "note": "no book"}
 
     ticks = store.query_ticks(code, d0, d1)
-    neutral = [t for t in ticks if t["feed_dir"] == "NEUTRAL"]
+    # "direction" is what query_ticks returns; the store never renames it.
+    neutral = [t for t in ticks if t["direction"] == "NEUTRAL"]
 
     updates, stale, at_mid = [], 0, 0
     for t in neutral:
