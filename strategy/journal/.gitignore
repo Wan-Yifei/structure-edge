@@ -1,0 +1,11 @@
+# Nothing under data/ is tracked. The confirmations carry the account number
+# and home address, and this repository has a remote; the rest is personal
+# trading history that has no reason to be in version control either.
+#
+# A fresh clone therefore has no data/ and build.py will say so. Expected
+# layout is in README.md. Note that data/screens.csv is hand-transcribed from
+# the deck's screenshots and is the one file here no script can rebuild.
+data/
+
+# Derived; rebuilt by build.py.
+output/

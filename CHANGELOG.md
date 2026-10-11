@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.31.0 — trade ledger: journal reconciled against the account (2026-10-11)
+
+### New: `strategy/journal/`
+
+Three records of the same trades, reconciled into one table: the daily
+PowerPoint journal (42 trades), the moomoo trade confirmations (108 fills ->
+49 positions), and the R/R designs read off the screenshots pasted in the deck.
+
+```bash
+uv run strategy/journal/build.py        # -> output/ledger.csv
+```
+
+Four things made this more than a join:
+
+**The statement date is a trading day.** Every confirmation puts 20:00-04:00 ET
+in the overnight session, the same boundary the journal uses -- but a position
+opened before 20:00 and closed after it is split across two files. Inventory is
+chained across the whole run; two positions in the current data would otherwise
+be lost.
+
+**Short exposure is long SOXS, never short SOXL.** Naive FIFO invents short
+positions out of the opening sells that close carried-in inventory, and that
+inversion flipped every derived statistic -- payoff ratio read 3.22 instead of
+0.29 on 10/08. The share counts settle it: starting SOXL at the carried-in
+quantity keeps every position non-negative and ends flat.
+
+**Trades with a negligible result are not logged.** `SCRATCH_USD = 2.0`
+separates them; the gap is clean, with scratches at 0.03-0.04% of notional and
+the next real trade at 0.13%. They are carried in flagged rather than dropped.
+
+**The trade index is not chronological** -- the day session is grouped by
+instrument. A match is asserted only when count, win/loss sequence and
+instrument sequence all agree, and written out as `NEEDS REVIEW` otherwise.
+Four of six days match outright; the two that do not are both explained in the
+README.
+
+What the 24 fully reconciled trades show: execution is near exact (winners take
+0.99 of plan, losers sit at -1.01R), and the binding constraints are the size
+of the plan (median R/R 1.20 against a 0.81 break-even) and the size of the
+risk unit (0.046% of equity where 0.5-2% is normal).
+
+Nothing under `data/` or `output/` is tracked: the confirmations carry an
+account number and home address, and this repository has a remote.
+
 ## v0.30.5 — the off-exchange classifier never ran (2026-10-09)
 
 ### Fix: a key the tick store does not return (`scripts/classify_ticks.py`)
