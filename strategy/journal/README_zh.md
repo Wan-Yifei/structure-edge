@@ -18,7 +18,8 @@
 | `data/journal.csv` | 交易想法 | 手工誊抄（仅 10/07–10/09） |
 
 ```bash
-uv run strategy/journal/build.py            # -> output/ledger.csv
+uv run strategy/journal/build.py            # -> output/ledger.csv、
+                                            #    report.html、report_zh.html
 uv run strategy/journal/build.py --crops    # 顺带重切截图
 ```
 

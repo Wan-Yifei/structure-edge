@@ -21,7 +21,8 @@ Reconciles three records of the same trades into one table:
 | `data/journal.csv` | trade idea | the hand transcription (10/07–10/09 only) |
 
 ```bash
-uv run strategy/journal/build.py            # -> output/ledger.csv
+uv run strategy/journal/build.py            # -> output/ledger.csv,
+                                            #    report.html, report_zh.html
 uv run strategy/journal/build.py --crops    # also re-cut the screenshots
 ```
 

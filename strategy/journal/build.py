@@ -151,9 +151,11 @@ def main() -> None:
     done = int(screens.day.astype(str).str.startswith("2026-09").sum())
     total = int((journal.day.astype(str).str.startswith("2026-09")
                  & (journal.result != "NOT TAKEN")).sum())
-    html = report.build(positions, led, reconcile.EQUITY, done, total)
-    (OUT / "report.html").write_text(html, encoding="utf-8")
-    print(f"   wrote {OUT / 'report.html'}  ({len(html)//1024}KB)")
+    for lang, name in (("en", "report.html"), ("zh", "report_zh.html")):
+        page = report.build(positions, led, reconcile.EQUITY, done, total,
+                            lang=lang)
+        (OUT / name).write_text(page, encoding="utf-8")
+        print(f"   wrote {OUT / name}  ({len(page)//1024}KB)")
 
     # R is a ratio, so it cannot be summed or averaged across trades whose
     # dollar risk differs 23-fold. Risk-weighted is the honest aggregate:
