@@ -1,5 +1,71 @@
 # Changelog
 
+## v0.32.0 - journal: September, an HTML report, and stops the account verifies (2026-10-12)
+
+### New: `strategy/journal/report.py` -- one page, every setting
+
+`output/report.html`, rebuilt by `build.py`. Each win rate is a dot with its
+95% Wilson interval against the book's own rate, so a bucket that says nothing
+looks like it says nothing -- which is most of them on two months of data.
+Buckets under 20 trades are greyed. Three sections, because the sources answer
+different questions: the account (unbiased), the journal (a selected sample),
+and the screenshots (what was planned).
+
+Two charts needed a form the tables could not give: a histogram of realised R,
+where the shape is the finding -- a wall at -1R and a long thin tail -- and a
+scatter of planned against realised, which shows the losers sitting on a flat
+line at -1R whatever was planned.
+
+### New: `strategy/journal/levels.py` -- were the entries where the notes say?
+
+Rebuilds the volume profile as it stood at the fill and measures how far the
+entry was from the level the write-up names. IVB anchors at the cash open, so a
+regular-session trade is scored against the profile developing from 09:30 up to
+the fill; outside it, the last completed cash session is carried forward.
+A `side` column says above or below, because distance alone misreads a
+breakout. Of 20 scorable trades the label matches the nearest level on 11.
+
+### Fix: the statement caught two bugs nothing internal would have
+
+**Slide numbers are per-deck.** Keying screenshots on the slide alone handed
+October's trades September's designs -- a 51.30 SOXS stop on a 149.45 SOXL
+entry. Found by checking stopped-out trades against their stop: the exit of a
+stopped-out trade should land on the stop. Now keyed on (day, slide).
+
+**Realised R used the first fill, not the weighted entry.** A buy filling at two
+prices in the same second becomes one position; taking the first print put the
+entry 9 cents below the average, shrank the denominator to a third of the real
+stop distance and turned a 16R trade into a 56R one. Both ends now derive from
+the position's own notional and P&L, which makes `R x risk = P&L` true by
+construction -- it now holds on all 64 rows to within rounding.
+
+With both fixed, 23 of 26 stopped-out trades exit within 0.1% of the recorded
+stop, and the absurd 0.02-0.05% stop widths disappear: they were the
+contamination, not the data. Stop widths run 0.10% to 1.54%, median 0.56%.
+
+### Fix: R was being summed
+
+`total R` and `mean R` are meaningless across trades whose dollar risk differs
+23-fold -- an unweighted mean hands the loudest vote to the smallest bet. One
+trade risking $13 owned the whole average. Replaced with the median and the
+risk-weighted figure, `sum(R x risk) / sum(risk)`, which reduces to
+`sum(P&L) / sum(risk)`: what one dollar of risk returned. It is +0.22R, against
+the +1.12R the unweighted mean reported.
+
+### Data: September transcribed, 197 of 197
+
+Every September screenshot read: timeframe, planned R/R, stop, target, capture
+time. Six carry no recoverable design -- three because the deck reuses an
+earlier slide's image, two hand-cropped past the labels, one with three R/R
+tools drawn at once after the target was raised.
+
+Also: `Setup` split from `Context`. 夹角 is the KD bands pinching shut, a
+condition on an indicator, not a strategy -- the trades taken there were
+ordinary IVB entries at POC, and ranking it beside "3 touch" compared two
+different axes. Direction calls (抄底, 抓反弹) moved to `Context` too. And 30
+slides carry a hand-written index that drifts from deck order; deck order wins
+and `output/journal_renumber.csv` lists the corrections.
+
 ## v0.31.0 — trade ledger: journal reconciled against the account (2026-10-11)
 
 ### New: `strategy/journal/`

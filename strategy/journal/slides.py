@@ -33,7 +33,11 @@ from PIL import Image
 
 _PICTURE = 13                      # MSO_SHAPE_TYPE.PICTURE
 _DAY = re.compile(r"\d{1,2}/\d{1,2}/\d{4}")
-_TITLE = re.compile(r"^(\d+)\s+(SOXL|SOXS),\s*(\w+),\s*(.*?),\s*(WIN|FAIL)\s*$")
+# Six September slides read "- SOXL, long, open & close, -": a setup that was
+# planned and written up but never entered, which is why those days show more
+# planned than executed trades in their summary table. They are kept, with no
+# index and no result, so the plan survives even though no fill exists.
+_TITLE = re.compile(r"^(\d+|-)\s+(SOXL|SOXS),\s*(\w+),\s*(.*?),\s*(WIN|FAIL|-)\s*$")
 
 # Fractions of the full capture.  Stable across the capture sizes in the deck.
 _CHART = (0.0, 0.10, 1.0, 0.66)    # header tail, timeframe row, price chart
@@ -56,13 +60,26 @@ def trades(pptx: pathlib.Path) -> pd.DataFrame:
             continue
         m = _TITLE.match(head.replace("\n", " "))
         if m and day:
+            idx, res = m.group(1), m.group(5)
             rows.append({
-                "day": day, "idx": int(m.group(1)), "sym": m.group(2),
-                "pos_dir": m.group(3), "result": m.group(5), "slide": i + 1,
+                "day": day,
+                "idx": int(idx) if idx != "-" else None,
+                "sym": m.group(2), "pos_dir": m.group(3),
+                "result": res if res != "-" else "NOT TAKEN",
+                "slide": i + 1,
                 "pics": sum(1 for sh in s.shapes if sh.shape_type == _PICTURE),
                 "note": (texts[1] if len(texts) > 1 else "").replace("\n", " "),
             })
-    return pd.DataFrame(rows)
+    t = pd.DataFrame(rows)
+    if t.empty:
+        return t
+    # The hand-written index repeats on three days -- 09/04 has two trades
+    # numbered 2, 09/21 two numbered 3, 09/23 two 15s and three 21s. Deck order
+    # is unambiguous, so `seq` is what everything downstream orders and keys on
+    # while `idx` stays as the number actually written on the slide.
+    t = t.sort_values(["day", "slide"]).reset_index(drop=True)
+    t["seq"] = t.groupby("day").cumcount() + 1
+    return t
 
 
 def extract_images(pptx: pathlib.Path, out: pathlib.Path) -> int:

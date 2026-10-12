@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import pathlib
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 from pypdf import PdfReader
@@ -34,15 +34,23 @@ _DATE = re.compile(r"\d{4}/\d{2}/\d{2}")
 _TIME = re.compile(r"\d\d:\d\d:\d\d")
 
 
-def statement_day(pdf: pathlib.Path) -> datetime:
-    """`oct0826.pdf` -> 2026-10-08.  The month lives in the filename prefix."""
-    m = re.fullmatch(r"([a-z]{3})(\d{2})(\d{2})", pdf.stem.lower())
-    if not m:
-        raise ValueError(f"cannot read a date out of {pdf.name}")
-    months = ["jan", "feb", "mar", "apr", "may", "jun",
-              "jul", "aug", "sep", "oct", "nov", "dec"]
-    return datetime(2000 + int(m.group(3)), months.index(m.group(1)) + 1,
-                    int(m.group(2)))
+def trading_day(ts: datetime) -> date:
+    """The trading day a fill belongs to, under the 20:00 ET boundary.
+
+    Derived from the fill, not from the filename: the current month arrives as
+    one confirmation per day (`oct0826.pdf`) and earlier months as a single
+    monthly statement (`september2026.pdf`), and only the timestamps are
+    common to both.  Checked against the October filenames, which it
+    reproduces exactly.
+
+    The roll forward over a weekend never fires on real data -- the market is
+    shut from Friday 20:00 to Sunday 20:00 -- but a Friday evening fill would
+    otherwise be filed on a Saturday.
+    """
+    d = ts.date() + (timedelta(days=1) if ts.hour >= 20 else timedelta(0))
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
 
 
 def fills(pdf: pathlib.Path) -> pd.DataFrame:
@@ -80,11 +88,52 @@ def fills(pdf: pathlib.Path) -> pd.DataFrame:
 
 def load_fills(folder: pathlib.Path) -> pd.DataFrame:
     """Every confirmation in *folder*, oldest fill first."""
-    pdfs = sorted(folder.glob("*.pdf"), key=statement_day)
+    pdfs = sorted(folder.glob("*.pdf"))
     if not pdfs:
         raise FileNotFoundError(f"no confirmations in {folder}")
     f = pd.concat([fills(p) for p in pdfs], ignore_index=True)
-    return f.sort_values("ts").reset_index(drop=True)
+    return _drop_overlap(f).sort_values("ts").reset_index(drop=True)
+
+
+def _drop_overlap(f: pd.DataFrame) -> pd.DataFrame:
+    """Remove fills a monthly statement shares with a daily confirmation.
+
+    The daily confirmation for 10/01 covers 09/30 20:00 onward, which the
+    September monthly also reports, so those executions arrive twice.
+
+    Deduplicating on the fill itself does not work and silently destroys data:
+    a 150-share order routinely fills as nine prints of 19 shares at the same
+    price in the same second, and those are nine real executions. Dropping
+    them put September's P&L at -943 against a statement that says -170.
+
+    As of the current data this finds nothing: moomoo's monthly statement
+    already stops at the 20:00 boundary -- September ends at 09/30 10:33 and
+    the 10/01 confirmation starts at 09/30 21:34 -- so the two do not in fact
+    overlap. It stays as a guard for a broker that is less careful.
+
+    The overlap is resolved by coverage instead. Each statement's span is
+    its own first and last fill; where two spans intersect, the longer
+    statement's fills inside the shorter one's window are the duplicates, and
+    the more specific statement is kept.
+    """
+    spans = f.groupby("stmt").ts.agg(["min", "max"])
+    spans["len"] = spans["max"] - spans["min"]
+    drop = pd.Series(False, index=f.index)
+    for long_, l in spans.sort_values("len", ascending=False).iterrows():
+        for short, s_ in spans.iterrows():
+            if short == long_ or s_["len"] >= l["len"]:
+                continue
+            # Intersection, not containment: the 10/01 confirmation starts
+            # inside September and ends after it, so requiring the short span
+            # to sit wholly inside the long one matches nothing.
+            if s_["min"] <= l["max"] and l["min"] <= s_["max"]:
+                drop |= ((f.stmt == long_)
+                         & f.ts.between(s_["min"], s_["max"]))
+    if drop.any():
+        n = int(drop.sum())
+        print(f"[confirmations] {n} fills covered by two statements; kept the "
+              f"daily confirmation's copy")
+    return f[~drop]
 
 
 def positions(f: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
@@ -130,6 +179,6 @@ def positions(f: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
                   pnl=("pnl", "sum"), notional=("notional", "sum"),
                   stmt_in=("stmt_in", "first"), stmt_out=("stmt_out", "last"))
              .reset_index().sort_values("open").reset_index(drop=True))
-    pos["day"] = pos.stmt_in.map(lambda s: statement_day(pathlib.Path(s + ".pdf")).date())
+    pos["day"] = pos["open"].map(trading_day)
     pos["mins"] = (pos.close - pos.open).dt.total_seconds() / 60
     return pos, unmatched

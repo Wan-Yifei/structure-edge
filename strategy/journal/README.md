@@ -1,5 +1,16 @@
 # strategy/journal — trade ledger
 
+**The deck is the record; the account is the money.** The journal is written up
+for the trades worth reviewing, not for every fill, so a day with 29 positions
+and 22 write-ups is correct rather than incomplete. The ledger is therefore
+journal-driven: every trade in the deck gets a row, position data attaches only
+where it can be identified beyond doubt, and the positions the deck never
+mentions are carried as their own rows.
+
+Anything computed over journal rows — win rate, R multiples, which setup pays —
+describes the trades thought worth writing up, not the system. Account-level
+expectancy comes from `output/account_days.csv`, which counts every position.
+
 Reconciles three records of the same trades into one table:
 
 | Source | Grain | What only it has |
@@ -29,12 +40,17 @@ positions out of the opening sells that close carried-in inventory. The share
 counts settle it: starting SOXL at the carried-in quantity keeps every
 intermediate position non-negative and ends flat.
 
-**Trades with a negligible result are not logged.** `SCRATCH_USD = 2.0`
-separates them. The gap in the data is clean — scratches come in at 0.03–0.04%
-of notional and the next smallest real trade is 0.13% — so the threshold is not
-a fitted parameter. The scratches are carried into the ledger with
-`Scratch = Y` rather than dropped, because the behaviour they record is
-sometimes the loudest thing about a day (see below).
+**Not every trade is written up.** `SCRATCH_USD = 2.0` sets aside the ones too
+small to be worth reviewing before testing a match, but it is only a filter,
+not the rule: fourteen thresholds were swept, absolute and as a share of
+notional, and none resolved more than 16 of 28 days. Selection is a judgement,
+not a cutoff. Unclaimed positions stay in the ledger as `account only` rows
+because the behaviour they record is sometimes the loudest thing about a day.
+
+**A journal trade is an idea, not a lot.** 10/07's trade 4 is an add-on to
+trade 3. Sign-sequence matching therefore tops out at 26% of trades uniquely
+placed, and the capture timestamp in each screenshot is the only thing that
+resolves the rest — which is why the September screenshots are not optional.
 
 **The trade index is not chronological.** The day session is grouped by
 instrument: slide 6 of 10/08 is the 11:52 SOXL trade while slides 7 and 8 are
@@ -53,6 +69,13 @@ in each crop is what resolves the order by hand.
   is not a scratch — it is the fourth largest loss of that day — so the
   journal's −85.71 understates the account's −98.51 by 13%.
 - **10/09** has no confirmation, so its six trades carry no realised P&L.
+- **September** resolves on only 6 of 21 days. Every failure is a count or
+  order mismatch of the kind the two points above describe, not a parse
+  problem: the monthly statement reconciles to the cent (−169.92 against the
+  statement's −169.90, both symbols netting to zero shares) and agrees with
+  `daily_win_rate.csv` within ±0.02% on 19 of 21 days.
+- Six September slides are titled `- SOXL, long, open & close, -`: planned,
+  written up, never entered. They are kept with no index and no result.
 - Slide 10 is titled SOXS but its chart is SOXL and there is no SOXS position
   that afternoon; `reconcile.SYMBOL_FIXES` corrects it, which is what lets
   10/01 match.
@@ -66,6 +89,13 @@ account equity under each outcome. `Entry` is `-` where the note names no
 profile level (`NA` would be read back as a missing value); `Setup` carries the
 structural pattern for those, since 13 of 42 trades name a shape rather than a
 level.
+
+`ExitMech` standardises how the position was closed, which the single `Exit`
+column could not: `target`, `trailed stop`, `manual early`, `initial stop`,
+`stop blown`. The distinction that matters is the first two — both end in
+profit, but only one reached the level the trade was designed around. Across
+245 write-ups, **of 116 profitable exits only 59 reached the planned target**.
+`TargetHit` is the objective version, `RealizedR >= 0.9 x planned`.
 
 What the current 24 fully-reconciled trades say:
 
