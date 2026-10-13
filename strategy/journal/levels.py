@@ -164,3 +164,76 @@ def summarise(df: pd.DataFrame) -> str:
             out.append(f"     {lv}: n={len(x):>2}  matches {int(x.matches.sum()):>2}"
                        f"  median |dist| {x.dist_bins.abs().median():.1f} bins")
     return "\n".join(out)
+
+
+# ── did the target ever print? ────────────────────────────────────────────────
+
+_SESSION_END = {"overnight": 4.0, "premarket": 9.5, "regular": 16.0,
+                "afterhours": 20.0}
+
+
+def _session_end(ts: pd.Timestamp) -> pd.Timestamp:
+    """When the session the fill sits in closes."""
+    sess = session_of(ts)
+    h = _SESSION_END.get(sess, 20.0)
+    end = ts.normalize() + timedelta(hours=h)
+    if end <= ts:                       # overnight rolls past midnight
+        end += timedelta(days=1)
+    return end
+
+
+def target_reached(ledger: pd.DataFrame,
+                   klines: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """For trades closed short of their planned target, did price get there?
+
+    The journal is full of "提前TP" and "抬高SL": exits taken before the level
+    the trade was designed around. Whether that cost anything is a question
+    about the tape, not about the write-up, and the tape can answer it.
+
+    The window runs from the fill that closed the position to the end of that
+    session -- not to the end of the day, because a target abandoned at 11:00
+    and reached in the overnight session is not the same trade any more.
+
+    Both instruments are held long (SOXS is how a short is expressed), so in
+    every case the question is whether the high ever reached the target.
+    """
+    rows = []
+    for _, r in ledger.iterrows():
+        if r.Source != "journal+account" or pd.isna(r.Target):
+            continue
+        if r.ExitMech in ("target", "initial stop", "stop blown"):
+            continue
+        k = klines.get(r.Symbol)
+        if k is None:
+            continue
+        try:
+            close_t = pd.Timestamp(f"{r.date} {r.Time}")
+        except Exception:
+            continue
+        if close_t.hour >= 20:
+            close_t -= timedelta(days=1)
+        hold = float(r.HoldMins) if pd.notna(r.HoldMins) else 0.0
+        exit_t = close_t + timedelta(minutes=hold)
+        end = _session_end(exit_t)
+        win = k[(k.t > exit_t) & (k.t <= end)]
+        if win.empty:
+            continue
+        tgt = float(r.Target)
+        hit = win[win.high >= tgt]
+        entry = float(r.Notional) / float(r.Qty)
+        got = float(r.RealizedR) if pd.notna(r.RealizedR) else np.nan
+        risk = entry - float(r.Stop) if pd.notna(r.Stop) else np.nan
+        rows.append({
+            "date": r.date, "Time": r.Time, "Symbol": r.Symbol,
+            "Session": r.Session, "ExitMech": r.ExitMech,
+            "entry": round(entry, 3), "target": round(tgt, 3),
+            "exit_px": round(entry + float(r["PnL$"]) / float(r.Qty), 3),
+            "session_high": round(float(win.high.max()), 3),
+            "reached": bool(len(hit)),
+            "mins_after": (round((hit.iloc[0].t - exit_t).total_seconds() / 60, 1)
+                           if len(hit) else np.nan),
+            "got_R": got,
+            "target_R": round((tgt - entry) / risk, 2) if risk and risk > 0 else np.nan,
+            "PnL$": r["PnL$"],
+        })
+    return pd.DataFrame(rows)
