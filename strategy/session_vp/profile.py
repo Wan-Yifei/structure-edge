@@ -8,7 +8,11 @@ deliberately kept independent of ticks.db).
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
 
 
 def compute_value_area(
@@ -67,99 +71,151 @@ def compute_value_area(
     return {"poc": poc, "vah": float(centers[hi_idx]), "val": float(centers[lo_idx])}
 
 
+class Node(NamedTuple):
+    """One high-volume shelf. `peak` is the shelf's own POC."""
+
+    lo: float
+    hi: float
+    peak: float
+    share: float
+
+
+# Bin width as a share of price. The profile must be binned finely enough
+# that the bin width, not the bandwidth below, stops being what separates
+# two shelves -- see bins_for_price().
+BIN_PCT = 0.02
+# Smoothing kernel width, also a share of price. This is the scale at which
+# two busy prices stop being one shelf.
+BW_PCT = 0.10
+# How far the profile must fall between a peak and higher ground before the
+# peak counts as its own shelf, as a fraction of that peak's own height.
+PROMINENCE = 0.25
+# A shelf must hold at least this much of the session's volume.
+MIN_SHARE = 0.05
+
+
+def bins_for_price(low: float, high: float, bin_pct: float = BIN_PCT) -> int:
+    """Bin count giving bins `bin_pct` of price wide over [low, high].
+
+    compute_volume_profile takes a bin *count*, which makes the bin width the
+    session's range divided by that count: a quiet day and a wild one get
+    resolutions that differ severalfold, and no peak rule can be consistent
+    across them. Sizing the count from the price instead keeps the bin width
+    fixed in the only unit that means anything here.
+    """
+    if not (high > low > 0):
+        return 0
+    return max(50, int(round((high - low) / (0.5 * (low + high) * bin_pct / 100))))
+
+
 def find_nodes(
     edges: np.ndarray,
     bin_vols: np.ndarray,
-    min_peak_frac: float = 0.35,
-    half: float = 0.5,
-) -> list[tuple[float, float, float]]:
-    """High-volume nodes as (low_edge, high_edge, share_of_volume), low first.
+    bw_pct: float = BW_PCT,
+    prominence: float = PROMINENCE,
+    min_share: float = MIN_SHARE,
+) -> list[Node]:
+    """High-volume shelves as Node(lo, hi, peak, share), low first.
 
-    A node is a peak in the profile together with the contiguous bins around
-    it holding at least `half` of that peak's volume -- the conventional
-    half-height width -- and overlapping spans are merged into one node.
+    A shelf is a peak of the profile smoothed at `bw_pct` of price, kept when
+    the profile falls at least `prominence` of that peak's height before
+    reaching higher ground, and when the bins between its edges hold at least
+    `min_share` of the session's volume. Edges run from the summit out to half
+    height or to the valley, whichever comes first.
 
     This is a different object from the value area and is not a substitute for
     it. The value area is a single band covering `va_pct` of volume around the
     POC; on a session that traded two separate shelves it stretches across the
     gap between them, so its VAL can sit at a price where nothing changed
-    hands. A node is local: a session with two shelves has two of them, each
-    with its own edges. Measured over the regular session, 40% of profiles
-    carry more than one node, and on those the node's low edge and the
-    statistical VAL differ by about 1.35 against 0.57 when there is only one.
+    hands. A shelf is local: a session with two of them has two nodes, each
+    with its own edges.
 
-    `min_peak_frac` keeps ripples from counting: without it every wobble in a
-    thin profile becomes a node and the nearest one is always within a cent of
-    any price you care to test. Both defaults were confirmed against charts by
-    eye -- they reproduced the band and the edge a trader had drawn on two
-    sessions, one single-node and one with a clear upper and lower shelf.
+    Three things this gets right that counting peaks in a raw histogram did
+    not, each found by drawing SOXL 2026-10-12 and 2026-10-07 and looking:
+
+    * **Bandwidth, not bin count.** The old version read peaks straight off a
+      histogram binned into the session range, so the same session reported
+      one shelf at 30 bins and two at 100. Smoothing at a width stated in
+      price makes the bin count drop out: 100 through 800 bins now agree to
+      within three cents. Bins coarser than the bandwidth defeat this, which
+      is what bins_for_price() is for.
+
+    * **Prominence, not height against the tallest peak.** The old floor
+      required a peak to reach 35% of the session's busiest price, so a small
+      but cleanly separated shelf was never a shelf. This is the same mistake
+      as normalising the liquidity heatmap against its global maximum, which
+      blacked out thin levels. Prominence is local and asks the right
+      question: how far does the profile drop before it climbs again.
+
+    * **Edges stop at the valley.** Half height alone lets a tall peak's skirt
+      run through the dip and up into its neighbour; the spans then overlap
+      and merge back together, so *lowering* the prominence threshold produced
+      one shelf spanning $4 instead of several.
+
+    `prominence` was set by eye against two sessions: 2026-10-12, which reads
+    as one shelf with a shoulder above it, and 2026-10-07, which reads as
+    three. Both are reproduced at 0.25.
 
     Returns [] on an empty or degenerate profile, matching compute_value_area.
     """
     if edges is None or bin_vols is None or bin_vols.size < 3:
         return []
     v = np.asarray(bin_vols, dtype=float)
-    total, top = float(v.sum()), float(v.max())
-    if total <= 0 or top <= 0:
+    total = float(v.sum())
+    if total <= 0 or float(v.max()) <= 0:
         return []
+
     if np.all(v == v[0]):
-        # Nothing stands out, so nothing is a shelf. Without this a flat
-        # profile reports one node spanning the whole range, because every
-        # interior bin ties with its neighbours and counts as a peak.
+        # Nothing stands out, so nothing is a shelf. find_peaks reports the
+        # middle of a plateau as a peak, so without this a perfectly uniform
+        # profile returns one node spanning the whole range.
         return []
 
-    n = len(v)
-    # Endpoints are candidates too: a shelf that runs to the edge of the
-    # profile is still a shelf, and skipping them lost exactly the two-shelf
-    # case this function exists for.
-    peaks = [i for i in range(n)
-             if v[i] >= min_peak_frac * top
-             and v[i] >= (v[i - 1] if i else -1.0)
-             and v[i] >= (v[i + 1] if i + 1 < n else -1.0)]
-    # Tallest first, so a big shelf claims its bins before a ripple beside it
-    # can. Extending from the small peak first let it swallow the large one.
-    peaks.sort(key=lambda i: -v[i])
+    mid = (edges[:-1] + edges[1:]) / 2
+    bin_w = float(edges[1] - edges[0])
+    sigma = (float(np.median(mid)) * bw_pct / 100) / bin_w if bin_w > 0 else 0.0
+    # mode="nearest" rather than zero padding: outside the session's range
+    # there is genuinely no volume, but zero padding also damps a shelf that
+    # runs to the edge of the profile, and such a shelf is still a shelf.
+    s = gaussian_filter1d(v, sigma, mode="nearest") if sigma > 0 else v
 
-    spans: list[list] = []          # [low_edge, high_edge, share, peak_i, peak_h]
-    claimed = np.zeros(n, dtype=bool)
-    for i in peaks:
-        if claimed[i]:
+    # find_peaks ignores the first and last samples, so pad with a floor below
+    # any real volume. For an edge peak this also makes prominence measure the
+    # interior side only, which is the side that can separate it from anything.
+    pad = np.concatenate(([-1.0], s, [-1.0]))
+    idx, props = find_peaks(pad, prominence=0)
+
+    out: list[Node] = []
+    for i, prom in zip(idx - 1, props["prominences"]):
+        if prom < prominence * s[i]:
             continue
-        cut = half * v[i]
-        lo = i
-        while lo > 0 and v[lo - 1] >= cut and v[lo - 1] <= v[lo]:
+        cut = 0.5 * s[i]
+        lo = hi = int(i)
+        while lo > 0 and s[lo - 1] >= cut and s[lo - 1] <= s[lo]:
             lo -= 1
-        hi = i
-        while hi < n - 1 and v[hi + 1] >= cut and v[hi + 1] <= v[hi]:
+        while hi < len(s) - 1 and s[hi + 1] >= cut and s[hi + 1] <= s[hi]:
             hi += 1
-        # Stop at the valley, not at half height alone: `v[j] <= v[j-1]` keeps
-        # the run from climbing back up into the next shelf.
-        claimed[lo:hi + 1] = True
-        spans.append([float(edges[lo]), float(edges[hi + 1]),
-                      float(v[lo:hi + 1].sum() / total), i, float(v[i])])
+        share = float(v[lo:hi + 1].sum() / total)
+        if share < min_share:
+            continue
+        out.append(Node(float(edges[lo]), float(edges[hi + 1]),
+                        float(mid[i]), share))
 
-    # Merge by prominence, not by whether the spans touch. Two peaks belong to
-    # one shelf when the lowest bin between them still holds at least `half`
-    # of the taller peak; a deeper valley than that separates two shelves.
-    # Touch-based merging was tried first and could not tell the two apart:
-    # it joined shelves either side of a real gap on one session while
-    # splitting a single shelf on another.
-    spans.sort(key=lambda s_: s_[0])
-    merged: list[list] = []
-    for span in spans:
-        if merged:
-            pa, pb = merged[-1][3], span[3]
-            valley = float(v[min(pa, pb) + 1: max(pa, pb)].min()) if abs(pa - pb) > 1 else float(min(v[pa], v[pb]))
-            if valley >= half * max(merged[-1][4], span[4]):
-                merged[-1][1] = max(merged[-1][1], span[1])
-                merged[-1][2] = max(merged[-1][2], span[2])
-                if span[4] > merged[-1][4]:
-                    merged[-1][3], merged[-1][4] = span[3], span[4]
-                continue
-        merged.append(span)
-    return [(lo, hi, share) for lo, hi, share, _, _ in merged]
+    # The valley stop already keeps spans apart; this only guards the case of
+    # two summits of equal height sharing one plateau.
+    out.sort(key=lambda t: t.lo)
+    merged: list[Node] = []
+    for node in out:
+        if merged and node.lo <= merged[-1].hi:
+            prev = merged[-1]
+            keep = prev if prev.share >= node.share else node
+            merged[-1] = Node(prev.lo, max(prev.hi, node.hi),
+                              keep.peak, max(prev.share, node.share))
+        else:
+            merged.append(node)
+    return merged
 
 
-def in_node(price: float, nodes: list[tuple[float, float, float]]) -> bool:
+def in_node(price: float, nodes: list[Node]) -> bool:
     """Is *price* inside any node's span (edges inclusive)?"""
-    return any(lo <= price <= hi for lo, hi, _ in nodes)
+    return any(n.lo <= price <= n.hi for n in nodes)

@@ -1,5 +1,88 @@
 # Changelog
 
+## v0.33.0 - shelves that survive a change of bin count, and a cache that admits what it is missing (2026-10-14)
+
+### Rewritten: `strategy/session_vp/profile.py` -- `find_nodes`
+
+The old version read peaks off a histogram binned into the session's range, so
+the bin count decided the answer: SOXL 2026-10-12 reported one shelf at 30 bins
+and two at 100, and the main shelf's share of volume slid from 36% to 18% across
+that range. Nothing about the session changed; an arbitrary parameter did.
+
+Three faults, found by drawing the profile rather than by reasoning about it:
+
+* **Bin width tracked the day's range.** A quiet session and a wild one were cut
+  into bins several times apart, so no peak rule could behave the same way on
+  both. Binning is now anchored to price (`bins_for_price`) and the smoothing is
+  a Gaussian whose width is stated as a share of price. The bin count drops out:
+  100 through 800 bins agree to within three cents, which is a test.
+
+* **`min_peak_frac` measured peaks against the tallest one.** A shelf had to
+  reach 35% of the session's busiest price to count, so a small, cleanly
+  separated shelf never did. This is the same mistake as normalising the
+  liquidity heatmap against its global maximum, which blacked out thin levels.
+  Prominence replaces it -- how far the profile falls before it climbs again,
+  which is local and is the question actually being asked.
+
+* **Edges ran to half height without stopping at the valley.** A tall peak's
+  skirt ran through the dip and up into its neighbour; the spans then overlapped
+  and merged, so *lowering* the prominence threshold returned one shelf spanning
+  $4 instead of several. Edges now stop at half height or the valley, whichever
+  comes first, and shelves cannot overlap by construction.
+
+`find_nodes` returns `Node(lo, hi, peak, share)` -- `peak` being the shelf's own
+POC, which the old 3-tuple had no room for. Prominence 0.25 was set by eye
+against two sessions, 2026-10-12 (one shelf with a shoulder above it) and
+2026-10-07 (three), and both are reproduced.
+
+The 60.2%-against-27.3% result for "did the entry land inside a node" in
+`doc/session_performance.md` was computed with the old definition and needs
+rerunning; the note there says so.
+
+### Fixed: `feeds/fetcher.py`, `feeds/kline_store.py` -- cache coverage
+
+`_cache_covers` compared the requested range against the first and last bar in
+the cache. A cache with holes in the middle passed, `load()` returned short, and
+nothing ever repaired it: once the endpoints are wide, every later request
+matches. The seven-day boundary tolerance, meant for weekends, is longer than a
+trading week, which is how a cache ending 2026-10-07 came to "cover" a request
+running through 2026-10-12.
+
+Six weekdays had gone missing this way between May and October 2026 --
+2026-09-11, 09-29, 09-30, 10-01, 10-08 and 10-09 -- out of 106. They are
+refetched and the window is now complete.
+
+Coverage is recorded per day in a new `kline_coverage` table when a fetch
+completes, which also settles holidays without a calendar: a day inside a span
+that was fetched and holds no bars is a day the market was shut. An existing
+cache seeds itself from the days that hold bars, so its holes stay visible and
+repair themselves on the next request, and `force_refresh=True` clears coverage
+for the range so a fetch that came back empty for the wrong reason can be
+retried.
+
+Sundays are checked as well as weekdays -- the week opens at 20:00 on Sunday and
+those bars carry its date. Days from today onward are never required, and today
+counts as present once it holds a bar, so repeated intraday calls stay off the
+API without a partial session being frozen into the table.
+
+### Fixed: `feeds/kline_store.py` -- a day fetched mid-session was frozen
+
+`missing_days()` carefully refuses to call a running session complete.
+`mark_covered()` walked straight past that and recorded every day in the fetched
+range, today included. A fetch at 12:02 on 2026-10-13 stored 152 of the
+session's 390 bars and marked the day covered, so every later call trusted the
+cache and the afternoon never arrived. The day was invisible to anything that
+required a full session -- which is how it was found: an RSI study reported no
+oversold minutes at all on a day that had plenty.
+
+`seed_coverage()` had the same hole and now takes the same guard. One day was
+affected across 435 covered weekdays; its coverage was cleared and refetched.
+
+A remaining limit is recorded in the tests rather than hidden: seeding knows
+only whether a day holds bars, so it cannot tell a partial day from a whole
+one. That is tolerable because seeding is a one-time migration that no-ops once
+anything is covered -- which is why this truncation came from `mark_covered`.
+
 ## v0.32.0 - journal: September, an HTML report, and stops the account verifies (2026-10-12)
 
 ### New: `strategy/journal/report.py` -- one page, every setting
