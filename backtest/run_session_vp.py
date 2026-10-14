@@ -90,6 +90,12 @@ class RunConfig:
     top_n:     int       = 20
     param_grid: dict     = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Resolve here rather than only in _load_config: --fast with no
+        # --config builds this dataclass directly, and the 0 default reached
+        # ProcessPoolExecutor unresolved, which rejects max_workers=0.
+        self.workers = _resolve_workers(self.workers)
+
 
 def _resolve_workers(w: int) -> int:
     import os
