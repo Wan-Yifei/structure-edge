@@ -1,0 +1,21 @@
+{
+    "_comment": "Short-warmup sweep. The systematic grid only went down to 30 minutes; SOXL's 30-minute opening range is already 3.74% of price and the median day travels only 1.77x it, so a profile frozen at 45 minutes may be formed after most of the day's movement is spent. Other parameters are held to a small set so the warmup effect is read on 336 combos rather than buried in 13,000. TRAIN half.",
+    "code": "US.SOXL",
+    "entry_tf": "1m",
+    "start": "2025-02-13",
+    "end": "2026-03-31",
+    "workers": -1,
+    "top_n": 20,
+    "param_grid": {
+        "warmup_minutes": [10, 15, 20, 25, 30, 45, 60],
+        "va_pct": [0.70],
+        "n_bins": [60, 100],
+        "rsi_period": [6],
+        "rsi_threshold": [20, 25, 30],
+        "tradeable_sessions": [["regular"]],
+        "max_bars": [120, 240],
+        "min_val_poc_dist_pct": [0.001, 0.002],
+        "target_rr": [1.0],
+        "val_proximity_pct": [0.0, 0.001]
+    }
+}

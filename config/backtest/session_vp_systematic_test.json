@@ -1,0 +1,21 @@
+{
+    "_comment": "The held-back half (2026-04-01..2026-10-12) of the systematic sweep. Identical grid to session_vp_systematic_train.json, so every combo can be matched across the two by its label. Run this ONCE, after the train half has been read -- its value is entirely in not having been looked at while the parameters were being chosen.",
+    "code": "US.SOXL",
+    "entry_tf": "1m",
+    "start": "2026-04-01",
+    "end": "2026-10-12",
+    "workers": -1,
+    "top_n": 40,
+    "param_grid": {
+        "warmup_minutes": [30, 45, 60, 75],
+        "va_pct": [0.60, 0.70, 0.80],
+        "n_bins": [60, 100, 200],
+        "rsi_period": [6],
+        "rsi_threshold": [15, 20, 25, 30, 40],
+        "tradeable_sessions": [["regular"]],
+        "max_bars": [60, 120, 240, 390],
+        "min_val_poc_dist_pct": [0.001, 0.002, 0.003],
+        "target_rr": [0.75, 1.0, 1.25],
+        "val_proximity_pct": [0.0, 0.001]
+    }
+}

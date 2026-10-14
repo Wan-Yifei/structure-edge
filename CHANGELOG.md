@@ -1,5 +1,107 @@
 # Changelog
 
+## v0.34.0 - the exit scanned the entry bar, and the book starts being kept (2026-10-14)
+
+### Fixed: `backtest/session_vp_engine.py` -- exits scanned the entry bar
+
+`_find_exit` was called with `from_bar=entry_idx`, and it scans from that bar
+inclusive. The fill is the entry bar's CLOSE, so that bar's low happened before
+the position existed -- yet it was tested against the stop. **20% of trades were
+declared losers on their own entry candle.**
+
+It bit hardest on the setups worth having. A strong reclaim closes near POC,
+which makes `sl_dist` small, which puts the same bar's low below the stop. The
+better the entry looked, the more likely the engine killed it on arrival.
+
+    single combo, average R      -0.1418  ->  +0.0629
+    validation grid, median R    -0.1530  ->  +0.0090
+
+`backtest/engine.py`'s own call is different and correct -- it passes the
+current loop bar for a trade opened on an earlier one, so that bar really is
+part of the holding period. The fix is caller-side only; `_find_exit` is
+unchanged. Seven tests in `tests/backtest/test_session_vp_exit.py` pin the
+boundary, including the case where the entry bar's low is below the stop.
+
+**Algo version.** This changes backtest output for every parameter set, so it
+needs an `svp_v*` tag -- and none has ever existed. `_algo_version()` falls back
+to `svp_unknown`, which is what every session_vp result in the database is
+stamped with, under the broken exit. The first tag, `svp_v1.0`, marks the first
+version whose trades are trustworthy. **Nothing stamped `svp_unknown` is
+comparable with anything after it; treat those runs as void rather than as a
+baseline.**
+
+### New: `feeds/book_ladder.py` -- the order book, level by level, kept
+
+`db/order_book.db` is pruned by ROW COUNT -- about 535,000 snapshots, roughly
+1.4 days at the current rate. `feeds/depth_bars.py` already archived the book
+but only as aggregates (band totals, the touch, the largest level), and those
+cannot answer the question that matters most about a level that vanishes: were
+the shares BOUGHT or WITHDRAWN. On 2026-10-13 a 42,019-share level at 118.00
+disappeared while only 15,501 shares printed there -- about 63% withdrawn, and
+no aggregate column can show it.
+
+So the ladder itself is now archived, one row per price level per second,
+append-only like `depth_bars`. The whole visible book is kept rather than a band
+around the midpoint: the visible book is only about 146 levels, so a 0.3% band
+would save barely half the space while freezing a choice later work cannot
+undo. About 10 MB a day, against 4.6 MB for the aggregates.
+
+Rescued what `order_book.db` still held: 2026-10-12 from 13:00, all of 10-13,
+and 10-14 so far -- 18.1 million rows in 13.9 MB. The 10-12 session lows were
+already gone.
+
+### New: `analysis/scheduler.py` -- the ladder archive runs every six hours
+
+Wired like `tick_classify`, config in `config/schedule.json`. Every six hours
+rather than once a night: a single daily run leaves no margin against a 1.4-day
+window, and one missed run loses a day for good. Re-runs are cheap --
+`append_day` skips seconds already archived, so a second pass over a finished
+day parses no JSON at all and returns in three seconds.
+
+### New: `analysis/trade_viewer_qt.py` -- sell-exhaustion marks (`Exh`)
+
+Marks a burst of aggressive selling that then stops, inside an oversold minute.
+Both gates were chosen by how OFTEN the mark should appear -- about six a
+session over 30 SOXL sessions -- and never by what price did afterwards.
+
+    RSI(6) < 20          admits 3.3% of regular-session minutes
+    burst >= 10x         the session's own median five-second selling
+    then <= 15% of it    within thirty seconds
+
+Either gate alone marks the wrong things: RSI alone let a 677-share "burst" in a
+quiet oversold minute score the same as the 31,499-share flush at 2026-10-13
+11:35; burst size alone marked mid-range flushes with no relation to a low.
+
+1m only. The burst and the collapse both happen inside one minute -- at 11:35
+the selling went from 31,499 shares to 1,582 within thirty seconds -- so a
+coarser bar shows one heavy candle and hides the thing being marked.
+
+**The mark is a fact about flow, not a signal to buy.** Over 2,758 five-second
+windows the same collapse had no relationship to the next fifteen seconds of
+price: rho +0.02, quintiles non-monotone, every band spanning zero.
+
+### Fixed: `analysis/trade_viewer_qt.py` -- the OffEx line ran past its data
+
+`db/tick_mid.db` only reaches the previous close (the classifier cron runs at
+20:30), so the off-exchange curve drew a flat line at -22K across the whole of
+the current day. It now stops at the last classified bar and the hover reads
+`off n/a` beyond it.
+
+### Fixed: `backtest/run_session_vp.py` -- `--fast` without `--config`
+
+`RunConfig` left `workers` at 0, which `ProcessPoolExecutor` rejects.
+
+### Housekeeping
+
+* `pyproject.toml`: `pyarrow` was missing although `feeds/delta_bars.py`
+  already wrote parquet.
+* `.gitignore`: `db/cache/` -- derived parquet rebuilt from `db/*.db`.
+* `doc/ivb_playbook.md`, `doc/level_touch_orderflow.md`: the execution
+  checklist, and four rounds of null order-flow results with the thresholds
+  that produced them.
+* `config/backtest/session_vp_{systematic,warmup}_{train,test}.json`:
+  hand-written grids (generated ones stay out of git).
+
 ## v0.33.0 - shelves that survive a change of bin count, and a cache that admits what it is missing (2026-10-14)
 
 ### Rewritten: `strategy/session_vp/profile.py` -- `find_nodes`

@@ -1,0 +1,21 @@
+{
+    "_comment": "Systematic sweep, regular session, TRAIN half only (2025-02-13..2026-03-31). The held-back half is 2026-04-01..2026-10-12 and is scored separately by session_vp_systematic_test.json. 12,960 combos against roughly 300 trades each, so the best combo is expected to be noise -- the readable outputs are the per-parameter main effects and the distribution, not the argmax.",
+    "code": "US.SOXL",
+    "entry_tf": "1m",
+    "start": "2025-02-13",
+    "end": "2026-03-31",
+    "workers": -1,
+    "top_n": 40,
+    "param_grid": {
+        "warmup_minutes": [30, 45, 60, 75],
+        "va_pct": [0.60, 0.70, 0.80],
+        "n_bins": [60, 100, 200],
+        "rsi_period": [6],
+        "rsi_threshold": [15, 20, 25, 30, 40],
+        "tradeable_sessions": [["regular"]],
+        "max_bars": [60, 120, 240, 390],
+        "min_val_poc_dist_pct": [0.001, 0.002, 0.003],
+        "target_rr": [0.75, 1.0, 1.25],
+        "val_proximity_pct": [0.0, 0.001]
+    }
+}
