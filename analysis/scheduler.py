@@ -484,6 +484,8 @@ class SchedulerApp(tk.Tk):
         self._last_backup_minute: tuple | None = None
         self._last_classify_minute: tuple | None = None
         self._classify_proc: subprocess.Popen | None = None
+        self._last_ladder_minute: tuple | None = None
+        self._ladder_proc: subprocess.Popen | None = None
 
         self._build_clock()
         self._build_sessions()
@@ -514,6 +516,22 @@ class SchedulerApp(tk.Tk):
         "enabled": True,
         "cron":    "30 20 * * 1-5",
         "days":    3,
+    }
+
+    # Per-second order book LADDER into db/cache/book_ladder (parquet).
+    # db/order_book.db is pruned by ROW COUNT -- about 1.4 days at the current
+    # rate -- so a level's history is gone almost as soon as it arrives, and
+    # feeds/depth_bars.py keeps only aggregates, which cannot say whether a
+    # level that vanished was bought or withdrawn.
+    #
+    # Every six hours rather than once a night: a single daily run leaves no
+    # margin against the 1.4-day window, and one missed run would lose a day
+    # for good. Re-runs are cheap because append_day skips seconds already
+    # archived, and idempotent because it only ever adds.
+    _DEFAULT_LADDER = {
+        "enabled": True,
+        "cron":    "5 */6 * * *",
+        "days":    2,
     }
 
     _DEFAULT_BACKUP = {
@@ -556,6 +574,7 @@ class SchedulerApp(tk.Tk):
             "order_book_enabled": True,
             "remote_backup": dict(self._DEFAULT_BACKUP),
             "tick_classify": dict(self._DEFAULT_CLASSIFY),
+            "book_ladder": dict(self._DEFAULT_LADDER),
         }
 
     def _save_config(self):
@@ -862,6 +881,10 @@ class SchedulerApp(tk.Tk):
         if self.cfg.get("tick_classify", self._DEFAULT_CLASSIFY).get("enabled"):
             self._check_classify_cron(et)
 
+        # same, for the per-second order book ladder archive
+        if self.cfg.get("book_ladder", self._DEFAULT_LADDER).get("enabled"):
+            self._check_ladder_cron(et)
+
         self._tick_job = self.after(1000, self._tick)
 
     def _check_session_transitions(self, et: datetime):
@@ -1145,6 +1168,70 @@ class SchedulerApp(tk.Tk):
             except Exception as exc:
                 self._log(f"[classify] {code} failed: {exc}")
         self._classify_proc = None
+
+    def _check_ladder_cron(self, et: datetime):
+        """Fire the order book ladder archive if ET matches its cron."""
+        cfg = self.cfg.get("book_ladder", self._DEFAULT_LADDER)
+        parts = str(cfg.get("cron", "")).split()
+        if len(parts) != 5:
+            return
+        try:
+            m_f, h_f, _, _, dow_f = parts
+            cron_dow = et.isoweekday() % 7
+            if not (self._cron_field_match(m_f, et.minute) and
+                    self._cron_field_match(h_f, et.hour) and
+                    self._cron_field_match(dow_f, cron_dow)):
+                return
+            cur_min = (et.year, et.month, et.day, et.hour, et.minute)
+            if cur_min == self._last_ladder_minute:
+                return
+            self._last_ladder_minute = cur_min
+            threading.Thread(target=self._run_ladder, daemon=True).start()
+        except Exception as exc:
+            self._log(f"[ladder] Cron parse error: {exc}")
+
+    def _run_ladder(self):
+        """Archive the per-second order book ladder for each collected target.
+
+        A subprocess, for the same reasons as the classifier: its own database
+        handles, and a multi-million-row pass has no business inside the UI
+        thread. One at a time -- a run still going is left alone rather than
+        doubled up, since both would read the same snapshots and write the
+        same parquet.
+        """
+        if self._ladder_proc is not None and self._ladder_proc.poll() is None:
+            self._log("[ladder] previous run still going, skipping")
+            return
+        cfg = self.cfg.get("book_ladder", self._DEFAULT_LADDER)
+        days = int(cfg.get("days", 2) or 2)
+        root = pathlib.Path(__file__).parent.parent
+        codes = list(self.cfg.get("targets", []))
+        if not codes:
+            return
+        cmd = [sys.executable, "-m", "feeds.book_ladder",
+               "--codes", *codes, "--days", str(days)]
+        self._log(f"[ladder] {len(codes)} target(s), {days}d …")
+        try:
+            self._ladder_proc = subprocess.Popen(
+                cmd, cwd=str(root), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            out, _ = self._ladder_proc.communicate(timeout=3600)
+            rc = self._ladder_proc.returncode
+            lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+            # Same failure mode the classifier hit: a traceback's last lines
+            # read exactly like a successful summary. Say which it was.
+            if rc != 0:
+                self._log(f"[ladder] FAILED (exit {rc}) -- "
+                          f"db/cache/book_ladder was not updated")
+                for ln in lines[-8:]:
+                    self._log(f"[ladder]   {ln}")
+            else:
+                for ln in lines[-3:]:
+                    self._log(f"[ladder] {ln}")
+        except Exception as exc:
+            self._log(f"[ladder] failed: {exc}")
+        self._ladder_proc = None
 
     def _run_backup(self):
         """Upload tick and order-book DBs to S3 via aws s3 cp."""

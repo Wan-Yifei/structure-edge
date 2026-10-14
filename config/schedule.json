@@ -97,5 +97,10 @@
     "enabled": true,
     "cron": "30 20 * * 1-5",
     "days": 3
+  },
+  "book_ladder": {
+    "enabled": true,
+    "cron": "5 */6 * * *",
+    "days": 2
   }
 }
