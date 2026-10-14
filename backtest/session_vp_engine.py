@@ -277,9 +277,20 @@ def run_backtest_session_vp(
         if sl_dist <= 0:
             continue
 
+        # from_bar is entry_idx + 1, not entry_idx. The fill is this bar's
+        # CLOSE, so its low happened before the position existed and cannot
+        # have stopped it out -- _find_exit scans from from_bar inclusive, so
+        # passing the entry bar declared 20% of trades losers on their own
+        # entry candle. That bites hardest on the best setups: a strong
+        # reclaim closes near POC, which makes R small, which puts the same
+        # bar's low below the stop.
+        #
+        # backtest/engine.py's own call is different and correct: it passes
+        # the current loop bar for a trade opened on an earlier one, so that
+        # bar is genuinely part of the holding period.
         exit_bar, exit_price, outcome = _find_exit(
             lows, highs, closes,
-            from_bar=entry_idx, sl=sl, tp=tp,
+            from_bar=entry_idx + 1, sl=sl, tp=tp,
             direction="bull", max_bars=params.max_bars,
         )
         if outcome == "win":
