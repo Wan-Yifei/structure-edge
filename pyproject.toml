@@ -15,6 +15,7 @@ dependencies = [
     "pillow>=12.2.0",
     "plotly>=6.7.0",
     "pyqt6>=6.11.0",
+    "pyarrow>=18.0.0",
     "pyqtgraph>=0.14.0",
     "pystray>=0.19.5",
     "scipy>=1.17.1",

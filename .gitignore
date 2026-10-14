@@ -56,6 +56,10 @@ db/*.bak*
 # Table dumps taken before a destructive migration (CSV, so *.db misses them)
 db/archive/
 
+# Derived parquet archives rebuilt from db/*.db (feeds/depth_bars.py,
+# feeds/book_ladder.py) -- data, not code, and large
+db/cache/
+
 # API tokens / credentials accidentally dropped in repo root
 github_token.txt
 *_token.txt
