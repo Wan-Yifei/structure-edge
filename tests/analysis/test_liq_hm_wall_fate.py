@@ -142,3 +142,38 @@ class TestItDeclinesToGuess:
         grid[:, WALL_BIN] = 0.0
         assert win._wall_fate(grid, WALL_BIN, 0, N_COLS,
                               1000.0, 0.0, 0.005, "B") == ""
+
+
+class TestTheGateIsReachable:
+    """The first version capped the band at one cent, which no instrument this
+    was written for could reach: the heatmap spans at least +/-1% of mid and
+    cuts it into N_PRICE bins, so SOXL's half-band is about two cents at the
+    default resolution. The feature shipped unable to appear. These pin the
+    arithmetic rather than the constant, so narrowing it again fails here."""
+
+    @staticmethod
+    def _half(mid, n_price):
+        """Half-band at the WIDEST zoom, which is the narrowest band on offer:
+        the window is at least +/-1% of mid, so it is never thinner than this.
+        Mirrors the span/bin arithmetic in _rebuild_grid."""
+        span = mid * 0.02
+        return ((span * 2) / n_price) / 2
+
+    @pytest.mark.parametrize("mid", [45.0, 103.0, 116.0, 130.0])
+    def test_default_resolution_can_show_a_suffix(self, win, mid):
+        from analysis.liq_hm_window import N_PRICE
+        win._absorb_ticks = ticks([(12, 73_072)], price=116.40)
+        half = self._half(mid, N_PRICE)
+        assert fate(win, 73_072, 0, half=half) != "", (
+            f"no suffix at mid={mid} with N_PRICE={N_PRICE} "
+            f"(half={half:.4f}) -- the gate is unreachable again")
+
+    def test_a_quarter_dollar_band_is_still_refused(self, win):
+        win._absorb_ticks = ticks([(12, 10_000)])
+        assert fate(win, 73_072, 0, half=0.25) == ""
+
+    def test_the_cutoff_is_at_least_three_ticks(self):
+        """Three cents is three ticks at US equity tick size; below that the
+        default heatmap resolution stops clearing it."""
+        from analysis.liq_hm_window import _WALL_FATE_MAX_HALF
+        assert _WALL_FATE_MAX_HALF >= 0.03

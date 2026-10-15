@@ -144,6 +144,20 @@ _WALL_TOP1_RATIO = 3.0
 # and the set stays "the nearest few" instead of holding something stale.
 _WALL_RANK_SLACK = 2
 
+# Widest half-band for which "pulled" / "eaten" still means something. A bin
+# aggregates every level inside it, and the prints matched against it are the
+# ones inside the same band, so the two agree as long as the band stays a few
+# ticks wide; past that the suffix starts crediting a neighbour's volume to
+# this wall.
+#
+# This used to be one cent, which no instrument it was written for could
+# reach. The window spans at least +/-1% of mid and is cut into N_PRICE bins,
+# so at the default 100 bins a $103 stock has a half-band of $0.021 -- the
+# suffix could never appear on SOXL at any zoom the user actually runs. Three
+# cents is three ticks at US equity tick size and clears that default while
+# still refusing a quarter-dollar band.
+_WALL_FATE_MAX_HALF = 0.03
+
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
 # OpenD endpoint for the heatmap's own ORDER_BOOK subscription (same
@@ -2314,9 +2328,10 @@ class LiqHmWindow(QWidget):
 
         Returns '' rather than guessing in three cases:
 
-          wide bins   the label already reads '116.00±0.25' when the band
-                      spans more than a cent, and "traded at that price" means
-                      nothing across a quarter of a dollar.
+          wide bins   the label already reads '116.00±0.25' when the band is
+                      wide, and "traded at that price" means nothing across a
+                      quarter of a dollar. The cut-off is _WALL_FATE_MAX_HALF;
+                      see there for why it is not one cent.
           no feed     ticks are only loaded while Aggressor is on, so the
                       suffix rides on that checkbox -- and on a load having
                       FINISHED, since an empty list means "nothing traded
@@ -2336,7 +2351,7 @@ class LiqHmWindow(QWidget):
         appears and fills between frames.
         """
         lost = peak - now
-        if lost <= 0 or half > 0.01:
+        if lost <= 0 or half > _WALL_FATE_MAX_HALF:
             return ""
         if not self._absorb_cb.isChecked() or self._absorb_last_ts is None:
             return ""
