@@ -1,0 +1,757 @@
+<title>盘感训练</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: candles with a profile rail on the right, RSI beneath, then controls. */
+:root{
+  --bg:#f6f7f8; --surface:#fff; --line:#dde2e4; --line-soft:#eef1f2;
+  --ink:#14201f; --ink-2:#4a5a59; --ink-3:#7b8a89;
+  --accent:#0d6e78; --ok:#0d7490; --bad:#c2410c;
+  --stop:#c2410c; --tgt:#0d7490; --prof:#8b96a0; --poc:#a16207; --hm:#2f6d7a;
+  --font:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0d1413; --surface:#151d1c; --line:#293332; --line-soft:#1e2625;
+  --ink:#e5ecea; --ink-2:#a2b0ae; --ink-3:#6e7c7b;
+  --accent:#4cb6bf; --ok:#39a8bd; --bad:#e0743f;
+  --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#0d1413; --surface:#151d1c; --line:#293332; --line-soft:#1e2625;
+  --ink:#e5ecea; --ink-2:#a2b0ae; --ink-3:#6e7c7b;
+  --accent:#4cb6bf; --ok:#39a8bd; --bad:#e0743f;
+  --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--font);
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1100px;margin:0 auto;padding-inline:18px;padding-block:20px 48px}
+h1{font-size:19px;font-weight:600;margin:0;letter-spacing:-.01em}
+.top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+.prog{margin-left:auto;font-family:var(--mono);font-size:13px;color:var(--ink-2)}
+.hint{color:var(--ink-3);font-size:13px;margin:0 0 14px;max-width:70ch}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:4px;
+  padding:14px}
+.meta{display:flex;gap:16px;flex-wrap:wrap;font-family:var(--mono);
+  font-size:12.5px;color:var(--ink-2);margin-bottom:8px}
+.meta b{color:var(--ink);font-weight:500}
+canvas{display:block;width:100%;height:auto;max-width:100%}
+.ctrl{margin-top:14px;display:flex;flex-direction:column;gap:12px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+button{appearance:none;font:500 14px/1 var(--font);padding:10px 18px;
+  border-radius:3px;border:1px solid var(--line);background:var(--surface);
+  color:var(--ink);cursor:pointer}
+button:hover{border-color:var(--ink-3)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);
+  color:#fff}
+button:disabled{opacity:.45;cursor:default}
+.sliders{display:grid;grid-template-columns:auto 1fr auto;gap:10px 12px;
+  align-items:center;max-width:660px}
+.sliders label{font-size:13px;color:var(--ink-2);white-space:nowrap}
+.sliders output{font-family:var(--mono);font-size:12.5px;color:var(--ink);
+  white-space:nowrap;min-width:15ch;text-align:right}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.verdict{margin-top:14px;padding:12px 14px;border-radius:3px;
+  border:1px solid var(--line);border-left-width:3px;background:var(--surface)}
+.verdict.win{border-left-color:var(--ok)}
+.verdict.loss{border-left-color:var(--bad)}
+.verdict.pass{border-left-color:var(--ink-3)}
+.verdict h3{margin:0 0 6px;font-size:14px;font-weight:600}
+.verdict p{margin:0;color:var(--ink-2);font-size:13px;max-width:74ch}
+.verdict .big{font-family:var(--mono);font-size:17px;color:var(--ink)}
+table.score{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+table.score th{font-size:11px;font-weight:500;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--ink-3);text-align:right;padding:0 0 7px;
+  border-bottom:1px solid var(--line)}
+table.score th:first-child{text-align:left}
+table.score td{padding:7px 0;border-bottom:1px solid var(--line-soft);
+  text-align:right;font-family:var(--mono);font-size:13px}
+table.score td:first-child{text-align:left;font-family:var(--font)}
+h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink-3);margin:28px 0 10px}
+.note{color:var(--ink-2);font-size:13px;max-width:72ch}
+.note li{margin-bottom:6px}
+@media (max-width:520px){.sliders{grid-template-columns:1fr;gap:4px}
+  .sliders output{text-align:left}}
+</style>
+
+<div class="wrap">
+  <div class="top">
+    <h1>盘感训练</h1>
+    <span class="prog" id="prog">加载中…</span>
+  </div>
+  <div class="row" style="margin:0 0 10px;gap:8px;align-items:baseline">
+    <span id="saved" class="prog" style="margin:0;color:var(--ink-3)"></span>
+    <button id="b-jump" style="padding:5px 10px;font-size:12px" hidden>跳到未答的</button>
+    <button id="b-report" style="padding:5px 10px;font-size:12px" hidden>看成绩</button>
+    <button id="b-reset" style="padding:5px 10px;font-size:12px"
+      title="清空所有答案，重新开始">清空重做</button>
+    <label style="margin-left:auto;font-size:12px;color:var(--ink-3)">决策位置
+      <select id="conf" style="font-size:12px;padding:4px 6px">
+        <option value="1">最低点之后 1 根（确认）</option>
+        <option value="0">最低点当根</option>
+      </select></label>
+  </div>
+  <p class="hint">SOXL 1 分钟,决策前 120 根、后 60 根。右侧是当时能画出来的筹码分布(只用到决策那根为止),下方是 RSI(6)。
+  上方 <b>Δr</b> 是主动成交失衡的 1 / 5 / 15 分钟回看窗口 —— 都只含已收盘的 K,没有前视。
+  决策前 30 分钟如果有逐秒挂单档位的归档,会以背景热力图画出来(只有开始归档之后的交易日才有)。
+  题目混了两类位置:<b>深回落</b>(从 30 根高点跌掉 1 个 ATR 以上)和<b>浅回调</b>(只是前 10 根最低)。
+  <b>这两类的命中率量下来几乎一样</b>(33% 对 33%,区间重叠),所以标签本身不带信息,
+  这里也不判对错,只算你最后的盈亏。真正分得开的是 <b>delta_r</b>:1 分钟窗口 ≥0 的
+  命中 45%、&lt;0 的只有 25%。
+  默认在<b>最低点之后一根</b>做决定 —— 低点要等它收了才知道是低点,右上角可以切回当根对比。</p>
+
+  <div class="card" id="qcard">
+    <div class="meta" id="meta"></div>
+    <canvas id="cv" width="1040" height="520" aria-label="价格、筹码分布与 RSI"></canvas>
+    <div class="ctrl" id="ctrl">
+      <div class="row">
+        <button id="b-pass">放过</button>
+        <button id="b-enter">入场</button>
+      </div>
+      <div class="sliders" id="sl" hidden>
+        <label for="s-stop">止损</label>
+        <input type="range" id="s-stop" min="0.25" max="2" step="0.05" value="0.75">
+        <output id="o-stop"></output>
+        <label for="s-tgt">目标</label>
+        <input type="range" id="s-tgt" min="0.5" max="4" step="0.25" value="2">
+        <output id="o-tgt"></output>
+      </div>
+      <div class="row">
+        <button class="pri" id="b-go" disabled>提交</button>
+        <button id="b-next" hidden>下一题 →</button>
+      </div>
+    </div>
+    <div class="verdict" id="vd" hidden></div>
+  </div>
+
+  <div id="report" hidden>
+    <h2>成绩</h2>
+    <table class="score"><tbody id="score"></tbody></table>
+    <h2>读法</h2>
+    <ul class="note" id="read"></ul>
+  </div>
+</div>
+
+<script>
+/* Base rates come from rates_c{0,1}.json beside the questions, not from a
+   constant baked in here: they are measured separately for each decision
+   setting, and a rate measured on the low bar does not describe a decision
+   made one bar later. Until the file for the active set loads, the panels
+   that quote a rate stay hidden rather than showing a stale one. */
+let BUCKETS = {}, PA = {}, CROSS = {}, ALLIN = null, RMETA = null;
+
+const FWD = 30, CW = 1040, CH = 520;
+const PRICE_H = 360, RSI_H = 96, GAP_H = 14;
+const PROF_W = 110, LBL_W = 128, PAD_L = 8, PAD_T = 12;
+let QS = [], idx = 0, ans = {}, pick = null, db = null;
+
+const $ = id => document.getElementById(id);
+const fmt = v => v.toFixed(2);
+
+/* Right-anchored boxed tag, the liquidity-heatmap style: a dashed rule across
+   the plot and the number in a bordered chip at the right edge, so a price
+   line always carries its value instead of needing the axis read off. */
+function tag(g, x, y, text, col, ink){
+  g.font = "11px ui-monospace,monospace";
+  const w = g.measureText(text).width + 10, h = 15;
+  const bx = x - w, by = y - h/2;
+  g.fillStyle = ink; g.globalAlpha = .82;
+  g.fillRect(bx, by, w, h); g.globalAlpha = 1;
+  g.strokeStyle = col; g.lineWidth = 1; g.strokeRect(bx+.5, by+.5, w-1, h-1);
+  g.fillStyle = "#fff"; g.textBaseline = "middle"; g.textAlign = "left";
+  g.fillText(text, bx+5, y+.5);
+}
+
+function draw(q, reveal){
+  const cv = $("cv"), g = cv.getContext("2d");
+  const cs = getComputedStyle(document.documentElement);
+  const ink = cs.getPropertyValue("--ink").trim(),
+        ink3 = cs.getPropertyValue("--ink-3").trim(),
+        soft = cs.getPropertyValue("--line-soft").trim(),
+        acc = cs.getPropertyValue("--accent").trim(),
+        stopC = cs.getPropertyValue("--stop").trim(),
+        tgtC = cs.getPropertyValue("--tgt").trim(),
+        profC = cs.getPropertyValue("--prof").trim(),
+        pocC = cs.getPropertyValue("--poc").trim(),
+        hmC = cs.getPropertyValue("--hm").trim(),
+        surf = cs.getPropertyValue("--surface").trim();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = CW*dpr; cv.height = CH*dpr; cv.style.aspectRatio = CW+"/"+CH;
+  g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,CW,CH);
+
+  const last = reveal ? q.c.length : q.mark + 1;
+  const h = q.h.slice(0,last), l = q.l.slice(0,last),
+        o = q.o.slice(0,last), c = q.c.slice(0,last);
+  let lo = Math.min(...l), hi = Math.max(...h);
+  const a = ans[q.id];
+  if (a && a.choice === "enter"){ lo = Math.min(lo, a.stop); hi = Math.max(hi, a.target); }
+  const pd = (hi-lo)*0.06 || 0.1; lo -= pd; hi += pd;
+
+  const W = CW - PAD_L - PROF_W - LBL_W, n = q.c.length;
+  const X = i => PAD_L + (i+0.5)*(W/n);
+  const Y = p => PAD_T + PRICE_H - ((p-lo)/(hi-lo))*PRICE_H;
+  const profX0 = PAD_L + W + 6;
+
+  // ---- profile rail: what could be drawn at the decision bar -------------
+  g.fillStyle = profC; g.globalAlpha = .45;
+  for (const [p, f] of q.prof){
+    if (p < lo || p > hi) continue;
+    const y = Y(p), bh = Math.max(1, PRICE_H/180);
+    g.fillRect(profX0, y - bh/2, Math.max(1, f*PROF_W), bh);
+  }
+  g.globalAlpha = 1;
+  for (const [p, col, nm] of [[q.poc, pocC, "POC"], [q.val, ink3, "VAL"],
+                              [q.vah, ink3, "VAH"]]){
+    if (!p || p < lo || p > hi) continue;
+    const y = Y(p);
+    g.save(); g.setLineDash([3,3]); g.strokeStyle = col; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(PAD_L, y); g.lineTo(profX0 + PROF_W, y); g.stroke();
+    g.restore();
+    g.fillStyle = col; g.font = "10px ui-monospace,monospace";
+    g.textAlign = "left"; g.textBaseline = "bottom";
+    g.fillText(`${nm} ${fmt(p)}`, PAD_L + 3, y - 2);
+  }
+
+  // ---- resting liquidity, behind everything ------------------------------
+  /* Only the days the ladder archive covers carry one; the rest draw without
+     it rather than showing an empty panel. It ends at the decision bar even
+     after the reveal -- the book past that point was never visible. */
+  if (q.hm){
+    const H = q.hm, bytes = atob(H.d);
+    const t0 = q.mark - H.nc*H.sec/60;        // 30 minutes back, in bars
+    for (let r=0; r<H.nb; r++){
+      const p0 = H.lo + (r  /H.nb)*(H.hi-H.lo);
+      const p1 = H.lo + ((r+1)/H.nb)*(H.hi-H.lo);
+      const ya = Y(p1), yb = Y(p0);
+      if (yb < PAD_T || ya > PAD_T+PRICE_H) continue;
+      for (let cI=0; cI<H.nc; cI++){
+        const v = bytes.charCodeAt(r*H.nc + cI);
+        if (v < 6) continue;                   // floor: sub-pixel ink
+        const xa = X(t0 + cI*H.sec/60), xb = X(t0 + (cI+1)*H.sec/60);
+        if (xb < PAD_L) continue;
+        /* Gamma below 1 lifts the thin levels: a linear ramp renders
+           everything but the single biggest wall as near-black. */
+        g.globalAlpha = 0.72 * Math.pow(v/255, 0.45);
+        g.fillStyle = hmC;
+        g.fillRect(xa, ya, Math.max(1, xb-xa), Math.max(1, yb-ya));
+      }
+    }
+    g.globalAlpha = 1;
+  }
+
+  // ---- candles ----------------------------------------------------------
+  const bw = Math.max(1.8, (W/n)*0.62);
+  for (let i=0;i<last;i++){
+    const x = X(i), mk = i === q.mark;
+    g.globalAlpha = i > q.mark ? .95 : (mk ? 1 : .72);
+    g.strokeStyle = mk ? acc : ink; g.lineWidth = mk ? 1.3 : .8;
+    g.beginPath(); g.moveTo(x, Y(h[i])); g.lineTo(x, Y(l[i])); g.stroke();
+    const y1 = Y(Math.max(o[i],c[i])), y2 = Y(Math.min(o[i],c[i]));
+    const bh = Math.max(1, y2-y1);
+    if (c[i] >= o[i]) g.strokeRect(x-bw/2+.4, y1+.4, bw-.8, Math.max(.8,bh-.8));
+    else { g.fillStyle = mk ? acc : ink; g.fillRect(x-bw/2, y1, bw, bh); }
+    g.globalAlpha = 1;
+  }
+  const mx = X(q.mark);
+  g.save(); g.setLineDash([2,3]); g.strokeStyle = acc; g.globalAlpha = .5;
+  g.beginPath(); g.moveTo(mx, PAD_T); g.lineTo(mx, PAD_T+PRICE_H); g.stroke();
+  g.restore(); g.globalAlpha = 1;
+
+  // ---- entry, stop, target ----------------------------------------------
+  const rail = CW - 6;
+  const lines = [[q.entry, acc, `入场 ${fmt(q.entry)}`]];
+  if (a && a.choice === "enter"){
+    lines.push([a.stop, stopC, `止损 ${fmt(a.stop)}  −1R`]);
+    lines.push([a.target, tgtC, `目标 ${fmt(a.target)}  +${a.targetR.toFixed(2)}R`]);
+  }
+  /* With a confirmation bar the entry is above the low that triggered the
+     question. Drawing that low makes the give-up visible instead of leaving
+     it as a number in the reveal. */
+  if (q.confirm > 0 && q.low0 >= lo && q.low0 <= hi){
+    const y = Y(q.low0);
+    g.save(); g.setLineDash([2,4]); g.strokeStyle = ink3; g.lineWidth = 1;
+    g.globalAlpha = .6; g.beginPath();
+    g.moveTo(PAD_L, y); g.lineTo(profX0 + PROF_W, y); g.stroke(); g.restore();
+    g.globalAlpha = 1; g.fillStyle = ink3;
+    g.font = "10px ui-monospace,monospace";
+    g.textAlign = "left"; g.textBaseline = "top";
+    g.fillText(`低点 ${fmt(q.low0)}`, PAD_L + 3, y + 2);
+  }
+  for (const [p, col, txt] of lines){
+    const y = Y(p);
+    if (y < PAD_T-2 || y > PAD_T+PRICE_H+2) continue;
+    g.save(); g.setLineDash(col === acc ? [] : [5,3]);
+    g.strokeStyle = col; g.lineWidth = 1; g.globalAlpha = col === acc ? .55 : .9;
+    g.beginPath(); g.moveTo(PAD_L, y); g.lineTo(profX0 + PROF_W, y); g.stroke();
+    g.restore(); g.globalAlpha = 1;
+    tag(g, rail, y, txt, col, surf === "#fff" ? "#1b2626" : "#0a1110");
+  }
+
+  // ---- RSI ---------------------------------------------------------------
+  const ry0 = PAD_T + PRICE_H + GAP_H;
+  g.strokeStyle = soft; g.lineWidth = 1;
+  g.strokeRect(PAD_L+.5, ry0+.5, W-1, RSI_H-1);
+  const RY = v => ry0 + RSI_H - (v/100)*RSI_H;
+  for (const lv of [20, 50, 80]){
+    const y = RY(lv);
+    g.save(); g.setLineDash([2,4]); g.strokeStyle = lv===20?stopC:ink3;
+    g.globalAlpha = lv===20?.6:.35; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(PAD_L, y); g.lineTo(PAD_L+W, y); g.stroke(); g.restore();
+    g.globalAlpha = 1; g.fillStyle = ink3; g.font = "10px ui-monospace,monospace";
+    g.textAlign = "left"; g.textBaseline = "middle";
+    g.fillText(String(lv), PAD_L+W+4, y);
+  }
+  g.strokeStyle = acc; g.lineWidth = 1.4; g.beginPath();
+  let started = false;
+  for (let i=0;i<last;i++){
+    const v = q.rsi[i];
+    if (v == null){ started = false; continue; }
+    const x = X(i), y = RY(v);
+    if (!started){ g.moveTo(x,y); started = true; } else g.lineTo(x,y);
+  }
+  g.stroke();
+  const rv = q.rsi[q.mark];
+  if (rv != null){
+    g.fillStyle = acc; g.beginPath(); g.arc(mx, RY(rv), 3, 0, 7); g.fill();
+    tag(g, rail, RY(rv), `RSI ${rv.toFixed(1)}`, acc,
+        surf === "#fff" ? "#1b2626" : "#0a1110");
+  }
+  g.textAlign = "left";
+}
+
+function levels(q, stopAtr, targetR){
+  const s = q.dir === "short" ? 1 : -1;        // stop sits against the trade
+  const stop = q.entry + s*stopAtr*q.atr;
+  const risk = Math.abs(q.entry - stop);
+  const target = q.entry - s*targetR*risk;
+  return {stop, target, risk};
+}
+function settle(q, stopAtr, targetR){
+  const {stop, target, risk} = levels(q, stopAtr, targetR);
+  const short = q.dir === "short";
+  for (let j = q.mark+1; j < Math.min(q.c.length, q.mark+1+FWD); j++){
+    const tu = short ? q.l[j] <= target : q.h[j] >= target;
+    const td = short ? q.h[j] >= stop   : q.l[j] <= stop;
+    if (tu && td) return {stop, target, r:-1, how:"同一根里两边都碰到,按最坏算"};
+    if (tu) return {stop, target, r:targetR, how:`第 ${j-q.mark} 根触及目标`};
+    if (td) return {stop, target, r:-1, how:`第 ${j-q.mark} 根触及止损`};
+  }
+  const endI = Math.min(q.c.length-1, q.mark+FWD);
+  const move = short ? (q.entry - q.c[endI]) : (q.c[endI] - q.entry);
+  return {stop, target, r: move/risk, how:`${FWD} 根内都没碰到,按收盘结算`};
+}
+
+function render(){
+  const q = QS[idx];
+  $("prog").textContent = `第 ${idx+1} / ${QS.length} 题`;
+  const rv = q.rsi[q.mark];
+  const dcol = v => v == null ? "var(--ink-3)"
+                  : (v >= 0 ? "var(--ok)" : "var(--bad)");
+  const dtxt = v => v == null ? "—" : `${v>=0?"+":""}${v.toFixed(2)}`;
+  $("meta").innerHTML =
+    `<span>${q.day} <b>${q.tm}</b></span>` +
+    `<span><b>${q.sym}</b> ${q.dir === "short" ? "做空" : "做多"}</span>` +
+    `<span>收盘 <b>${fmt(q.entry)}</b></span>` +
+    `<span>ATR <b>${q.atr.toFixed(3)}</b></span>` +
+    `<span>RSI(6) <b>${rv == null ? "—" : rv.toFixed(1)}</b>` +
+    `<span style="color:var(--ink-3)"> / 5m ` +
+    `${q.rsi5 == null ? "—" : q.rsi5.toFixed(1)}</span></span>` +
+    `<span>Δr <b style="color:${dcol(q.dr1)}">${dtxt(q.dr1)}</b>` +
+    `<span style="color:var(--ink-3)"> / 5m </span>` +
+    `<b style="color:${dcol(q.dr5)}">${dtxt(q.dr5)}</b>` +
+    `<span style="color:var(--ink-3)"> / 15m </span>` +
+    `<b style="color:${dcol(q.dr15)}">${dtxt(q.dr15)}</b></span>` +
+    `<span>距 POC <b>${(100*(q.entry-q.poc)/q.poc).toFixed(2)}%</b></span>`;
+  pick = null;
+  $("b-pass").setAttribute("aria-pressed","false");
+  $("b-enter").setAttribute("aria-pressed","false");
+  $("sl").hidden = true; $("b-go").disabled = true;
+  $("b-go").hidden = false; $("b-next").hidden = true; $("vd").hidden = true;
+  syncOut(); draw(q, false);
+}
+
+function syncOut(){
+  const q = QS[idx];
+  const sa = +$("s-stop").value, tr = +$("s-tgt").value;
+  const {stop, target, risk} = levels(q, sa, tr);
+  $("o-stop").textContent = `${sa.toFixed(2)} ATR → ${fmt(stop)}  (风险 ${risk.toFixed(2)})`;
+  $("o-tgt").textContent = `${tr.toFixed(2)} R → ${fmt(target)}`;
+  if (pick === "enter"){
+    ans[q.id] = {choice:"enter", stop, target, targetR:tr, preview:true};
+    draw(q, false);
+    delete ans[q.id];
+  }
+}
+
+function choose(k){
+  pick = k;
+  $("b-pass").setAttribute("aria-pressed", String(k==="pass"));
+  $("b-enter").setAttribute("aria-pressed", String(k==="enter"));
+  $("sl").hidden = k !== "enter";
+  $("b-go").disabled = false;
+  syncOut();
+  if (k === "pass") draw(QS[idx], false);
+}
+
+function submit(){
+  const q = QS[idx];
+  let rec;
+  if (pick === "pass") rec = {choice:"pass", r:0};
+  else {
+    const sa = +$("s-stop").value, tr = +$("s-tgt").value;
+    const s = settle(q, sa, tr);
+    rec = {choice:"enter", stopAtr:sa, targetR:tr, stop:s.stop,
+           target:s.target, r:s.r, how:s.how};
+  }
+  rec.kind = q.kind; rec.id = q.id;
+  ans[q.id] = rec; save(q.id, rec); draw(q, true);
+  badge();
+
+  const vd = $("vd"); vd.hidden = false;
+  const what = q.kind;
+  /* The marked low and the bar you actually decided on are not the same bar
+     when confirm=1, and the gap between them is information the chart
+     already showed -- worth naming so it is read as a cost, not a freebie. */
+  let mine = "";
+  if (q.confirm > 0){
+    const give = q.entry - q.low0;
+    mine = `<p style="margin-top:8px;color:var(--ink-3);font-size:12px">` +
+           `最低点是 ${fmt(q.low0)}，你在它之后第 ${q.confirm} 根收盘 ` +
+           `${fmt(q.entry)} 做的决定 —— 等这根确认，让掉了 ` +
+           `${fmt(give)}（${(give/q.atr).toFixed(2)} ATR）。</p>`;
+  }
+  if (rec.choice === "pass"){
+    const ref = settle(q, 1.0, 2.0);
+    vd.className = "verdict pass";
+    vd.innerHTML = `<h3>放过 — <span class="big">0.00 R</span></h3>` +
+      `<p>这是${what}。参照一个 1 ATR 止损 / 2R 目标,进场的话是 ` +
+      `<b>${ref.r>=0?"+":""}${ref.r.toFixed(2)} R</b>(${ref.how})。` +
+      `放过不扣分,但这就是它的机会成本。</p>` + mine;
+  } else {
+    const win = rec.r > 0;
+    vd.className = "verdict " + (win ? "win" : "loss");
+    vd.innerHTML = `<h3>入场 — <span class="big">${rec.r>=0?"+":""}${rec.r.toFixed(2)} R</span></h3>` +
+      `<p>${rec.how}。止损 ${fmt(rec.stop)},目标 ${fmt(rec.target)}。这是${what}。</p>` + mine;
+  }
+  vd.innerHTML += context(q);
+  $("b-go").hidden = true; $("b-next").hidden = false; $("b-next").focus();
+}
+
+function context(q){
+  let s = `<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft)">`;
+  const COL = {看涨:"var(--ok)", 看跌:"var(--bad)", 中性:"var(--ink-2)"};
+  s += `<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:4px">结构读数 · 整张图的价格行为</div>`;
+  s += `<p style="margin:0 0 4px;font-size:13px"><b style="color:${COL[q.call]||"var(--ink)"}">${q.call}</b>` +
+       `<span style="font-family:var(--mono);color:var(--ink-3)">　评分 ${q.sc>=0?"+":""}${q.sc}　趋势 ${q.trend}</span></p>`;
+  s += `<ul style="margin:0 0 6px;padding-left:18px;color:var(--ink-2);font-size:12.5px">` +
+       q.why.map(([v, x]) =>
+         `<li><span style="font-family:var(--mono);color:${v>0?"var(--ok)":v<0?"var(--bad)":"var(--ink-3)"}">${v>0?"+":""}${v}</span>　${x}</li>`
+       ).join("") + `</ul>`;
+  const pr = PA[q.call], all = PA["_all"];
+  if (pr){
+    /* Whether the three readings are ordered at all is measured, not
+       assumed: on this question set they are not, so the panel says so
+       instead of implying the label carries information. */
+    const sep = PA["看涨"] && PA["看跌"] &&
+                (PA["看涨"][1] - PA["看跌"][1]) > 0.05;
+    s += `<p style="margin:0 0 10px;color:var(--ink-3);font-size:11.5px">` +
+      `这个读数历史命中率 ${(100*pr[1]).toFixed(0)}%（n=${pr[0]}，[${(100*pr[2]).toFixed(0)}%, ${(100*pr[3]).toFixed(0)}%]），` +
+      `全样本 ${(100*all[1]).toFixed(0)}%。` +
+      (sep ? "" : `<b>在这批题上看涨/中性/看跌三档并没有分开</b>` +
+             `（${["看涨","中性","看跌"].map(c => PA[c] ?
+                `${c} ${(100*PA[c][1]).toFixed(0)}%` : "").join(" · ")}），` +
+             `所以上面的结构理由当解释看，不当信号用。`) +
+      (q.dr1 != null
+        ? (() => { const c = CROSS[`${q.call}|${q.dr1>=0?"+":"-"}`];
+            return c ? `配上 delta_r ${q.dr1>=0?"≥0":"<0"}：${(100*c[1]).toFixed(0)}%（n=${c[0]}）。` : ""; })()
+        : "") + `</p>`;
+  }
+  s += `<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:4px">主动成交失衡 · delta_r</div>`;
+  s += `<p style="margin:0 0 10px;font-family:var(--mono);font-size:12.5px">` +
+    [["1m", q.dr1], ["5m", q.dr5], ["15m", q.dr15]].map(([nm, v]) =>
+      `<span style="display:inline-block;min-width:92px">${nm} ` +
+      (v == null ? `<span style="color:var(--ink-3)">—</span>`
+       : `<b style="color:${v>=0?"var(--ok)":"var(--bad)"}">${v>=0?"+":""}${v.toFixed(2)}</b>`) +
+      `</span>`).join("") +
+    `<br><span style="color:var(--ink-3);font-family:var(--sans);font-size:11.5px">` +
+    `都是截至决策这根的回看窗口。1m 翻得快也噪声大，` +
+    `15m 稳但在转折点上落后。</span></p>`;
+
+  s += `<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:4px">历史基准 · 同类位置，不是对这一笔的预测</div>`;
+  const dr = q.dr1;
+  const key = q.kind && dr != null
+    ? `${q.kind}  delta_r ${dr >= 0 ? "≥ 0" : "< 0"}` : null;
+  const b = key && BUCKETS[key];
+  if (b){
+    const [n, rate, lo, hi] = b;
+    const other = `${q.kind}  delta_r ${dr >= 0 ? "< 0" : "≥ 0"}`;
+    const ob = BUCKETS[other];
+    s += `<p style="margin:0;color:var(--ink-2);font-size:12.5px">` +
+      `<b>${q.kind}</b> · delta_r(1m) ${dr >= 0 ? "+" : ""}${dr.toFixed(2)}<br>` +
+      `n=${n}，到 +2ATR <b>${(100*rate).toFixed(0)}%</b>，` +
+      `95% 区间 [${(100*lo).toFixed(0)}%, ${(100*hi).toFixed(0)}%]` +
+      (ob ? `<br>同类但 delta_r ${dr >= 0 ? "为负" : "为正"} 的是 ${(100*ob[1]).toFixed(0)}%（n=${ob[0]}）` : "") +
+      `</p>`;
+  } else {
+    const bb = BUCKETS[q.kind];
+    s += `<p style="margin:0;color:var(--ink-2);font-size:12.5px"><b>${q.kind}</b>` +
+      (bb ? `，n=${bb[0]}，到 +2ATR ${(100*bb[1]).toFixed(0)}%，` +
+            `95% 区间 [${(100*bb[2]).toFixed(0)}%, ${(100*bb[3]).toFixed(0)}%]` : "") +
+      `。这一根的 delta_r 不可用（该分钟带方向的成交不足 300 股）。</p>`;
+  }
+  if (RMETA){
+    s += `<p style="margin:8px 0 0;color:var(--ink-3);font-size:11.5px">` +
+      `基准率算自 ${RMETA.period[0]} 至 ${RMETA.period[1]} 的 ${RMETA.code}，` +
+      `n=${RMETA.n}／${RMETA.sessions} 个交易日，` +
+      `按<b>${RMETA.confirm ? "最低点之后一根" : "最低点当根"}</b>做的决策测的 ——` +
+      `和你现在这套题是同一个设定。区间按交易日自助法算，宽就说明这个桶本身不确定。` +
+      `这是研究用过的同一批数据，不是新证据。</p>`;
+  }
+  s += `</div>`;
+  return s;
+}
+
+function next(){ if (idx < QS.length-1){ idx++; render(); } else report(); }
+
+function report(){
+  $("qcard").hidden = true; $("report").hidden = false; $("prog").textContent = "完成";
+  const A = QS.filter(q => ans[q.id]).map(q => ({...ans[q.id], q}));
+  const ent = A.filter(a => a.choice === "enter");
+  const totR = A.reduce((s,a) => s + a.r, 0);
+  const wins = ent.filter(a => a.r > 0).length;
+  const avgStop = ent.length ? ent.reduce((s,a)=>s+a.stopAtr,0)/ent.length : NaN;
+  const avgTgt = ent.length ? ent.reduce((s,a)=>s+a.targetR,0)/ent.length : NaN;
+
+  /* Baselines on the SAME questions answered, at a reference 1 ATR stop and
+     2R target. Without them a total R means nothing: +8 R is good against a
+     baseline of +2 and poor against +20. */
+  const allIn = A.reduce((s,a) => s + settle(a.q, 1.0, 2.0).r, 0);
+  const allIn11 = A.reduce((s,a) => s + settle(a.q, 1.0, 1.0).r, 0);
+  /* A spread is cents, not a fraction of R, so it costs most on the tightest
+     stops: 18% of a 24-cent 1R against 3% of a $1.41 one, over 588 events.
+     In and out, hence the doubling. */
+  const SPREAD = 0.04;
+  const costOf = (q, stopAtr) => 2 * SPREAD / (stopAtr * q.atr);
+  const myCost = A.reduce((s,a) =>
+    s + (a.choice === "enter" ? costOf(a.q, a.stopAtr) : 0), 0);
+  const baseCost = A.reduce((s,a) => s + costOf(a.q, 1.0), 0);
+  const byKind = {};
+  for (const a of A){
+    const k = a.q.kind;
+    (byKind[k] = byKind[k] || {n:0, ent:0, r:0, base:0});
+    byKind[k].n++; byKind[k].r += a.r;
+    byKind[k].base += settle(a.q, 1.0, 2.0).r;
+    if (a.choice === "enter") byKind[k].ent++;
+  }
+  const NAME = {real:"深回落", decoy:"浅回调", mine:"你自己的亏损单"};
+
+  const rows = [
+    ["你的总 R", `${totR>=0?"+":""}${totR.toFixed(2)}`],
+    ["每题平均 R", `${totR>=0?"+":""}${(totR/A.length).toFixed(3)}`],
+    ["—— 全部放过", "0.00"],
+    ["—— 全部进场 1:1（1 ATR 止损 / 1R）",
+     `${allIn11>=0?"+":""}${allIn11.toFixed(2)}`],
+    ["—— 全部进场 2:1（1 ATR 止损 / 2R）",
+     `${allIn>=0?"+":""}${allIn.toFixed(2)}`],
+    ["扣 4 分钱价差后 · 你",
+     `${(totR-myCost)>=0?"+":""}${(totR-myCost).toFixed(2)}`],
+    ["扣 4 分钱价差后 · 全进 1:1",
+     `${(allIn11-baseCost)>=0?"+":""}${(allIn11-baseCost).toFixed(2)}`],
+    ["已答题数", `${A.length} / ${QS.length}`],
+    ["入场次数", `${ent.length} / ${A.length}`],
+    ["入场后胜率", ent.length ? `${Math.round(100*wins/ent.length)}%` : "—"],
+    ["平均止损", isNaN(avgStop) ? "—" : `${avgStop.toFixed(2)} ATR`],
+    ["平均目标", isNaN(avgTgt) ? "—" : `${avgTgt.toFixed(2)} R`],
+  ];
+  for (const k of ["real","decoy","mine"]){
+    const b = byKind[k]; if (!b) continue;
+    rows.push([`${NAME[k]}（${b.n} 题，进 ${b.ent}）`,
+               `${b.r>=0?"+":""}${b.r.toFixed(2)} R   基准 ${b.base>=0?"+":""}${b.base.toFixed(2)}`]);
+  }
+  $("score").innerHTML = rows.map(([k,v]) =>
+    `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+
+  const notes = [];
+  notes.push(`<b>你 ${totR>=0?"+":""}${totR.toFixed(2)} R。</b> ` +
+    `同样这些题,全部进场按 1:1 是 ${allIn11>=0?"+":""}${allIn11.toFixed(2)} R,` +
+    `按 2:1 是 ${allIn>=0?"+":""}${allIn.toFixed(2)} R,全部放过是 0 R。` +
+    (totR > allIn11
+      ? "你赢过了 1:1 的无脑全进 —— 挑选或参数之一起了作用。"
+      : "你没赢过 1:1 的无脑全进。这一批里挑选没有加分。") +
+    `<br><span style="color:var(--ink-3)">扣掉 4 分钱价差(进出各一次):你 ` +
+    `${(totR-myCost)>=0?"+":""}${(totR-myCost).toFixed(2)} R,全进 1:1 ` +
+    `${(allIn11-baseCost)>=0?"+":""}${(allIn11-baseCost).toFixed(2)} R。` +
+    `止损越紧,这一刀砍得越深。</span>`);
+  notes.push(`<span style="display:none"></span>` +
+    (totR > allIn && totR > 0
+      ? "你的选择和参数都加了分 —— 比无脑全进更好。"
+     : totR > 0
+      ? "赚了,但不如无脑全进。这一批里你放过的位置整体是赚钱的。"
+     : totR > allIn
+      ? "亏了,不过比无脑全进少亏 —— 挑选起了作用,只是还不够。"
+      : "亏了,而且不如无脑全进。这一批里挑选和参数都没帮上忙。"));
+  if (ent.length){
+    notes.push(`<b>止损平均 ${avgStop.toFixed(2)} ATR</b>。` +
+      (avgStop < 0.5 ? "偏紧 —— 1 分钟图上不到半个 ATR,很多是被噪声打掉而不是被行情打掉。"
+       : avgStop > 1.5 ? "偏宽 —— 每次亏损的绝对金额更大,R 看着好看但仓位得相应缩小。"
+       : "在合理区间。"));
+    notes.push(`<b>目标平均 ${avgTgt.toFixed(2)} R</b>,实际胜率 ${Math.round(100*wins/ent.length)}%,` +
+      `盈亏平衡需要 ${(100/(1+avgTgt)).toFixed(0)}%。` +
+      (wins/ent.length > 1/(1+avgTgt) ? "够覆盖。" : "按这个目标胜率还不够。"));
+  }
+  /* Split by the 5m reading rather than the 1m one: it is the slower signal
+     and the one worth knowing you can act on, so the scorecard reports how
+     you did on each side of it. */
+  for (const [nm, f] of [["delta_r(5m) ≥ 0", a => a.q.dr5 != null && a.q.dr5 >= 0],
+                         ["delta_r(5m) < 0",  a => a.q.dr5 != null && a.q.dr5 < 0]]){
+    const g = A.filter(f), e = g.filter(a => a.choice === "enter");
+    if (!g.length) continue;
+    const r = g.reduce((s,a)=>s+a.r,0);
+    notes.push(`<b>${nm}</b>：${g.length} 题，你进了 ${e.length} 笔，` +
+      `合计 ${r>=0?"+":""}${r.toFixed(2)} R。`);
+  }
+  if (RMETA && RMETA.dr){
+    const rows = ["dr1","dr5","dr15"].map(k => {
+      const a = RMETA.dr[k+"|≥0"], b = RMETA.dr[k+"|<0"];
+      if (!a || !b) return null;
+      return `${k} ≥0 ${(100*a[1]).toFixed(0)}%(n=${a[0]}) / <0 ` +
+             `${(100*b[1]).toFixed(0)}%(n=${b[0]})，差 ` +
+             `${(100*(a[1]-b[1])).toFixed(0)} 点`;
+    }).filter(Boolean);
+    notes.push("<b>这批题里唯一分得开的是 delta_r。</b>" + rows.join("；") +
+      "。窗口越长差距越小 —— 它在转折点上落后。");
+  }
+  notes.push("<b>这里不判对错。</b>深回落和浅回调只是两类位置，量下来命中率几乎一样，" +
+    "区间重叠。谁该进取决于盈亏,不取决于哪个更像\"信号\"。");
+  notes.push(`<b>这不是收益评估。</b>${A.length} 题,样本量只够看倾向,` +
+    "同一套题做第二遍也不算数。");
+  $("read").innerHTML = notes.map(t => `<li>${t}</li>`).join("");
+}
+
+function save(id, rec){
+  try{ localStorage.setItem("drill:"+id, JSON.stringify(rec)); }catch(e){}
+  if (db) db.collection("drill").doc(id).set({...rec, at: Date.now()})
+            .then(badge).catch(()=>{});
+  badge();
+}
+function badge(){
+  const n = QS.filter(q => ans[q.id]).length;
+  $("saved").textContent = `已保存 ${n} / ${QS.length}` + (db ? "（已同步）" : "（本机）");
+  $("b-jump").hidden = n === 0 || n >= QS.length;
+  $("b-report").hidden = n === 0;
+}
+function restore(){
+  for (const q of QS){
+    try{ const raw = localStorage.getItem("drill:"+q.id);
+         if (raw) ans[q.id] = JSON.parse(raw); }catch(e){}
+  }
+  jump();
+}
+function jump(){
+  const i = QS.findIndex(q => !ans[q.id]);
+  idx = i < 0 ? QS.length-1 : i;
+}
+async function pullDb(){
+  if (!db) return;
+  try{
+    const rows = await db.collection("drill").get?.() ?? null;
+    const list = Array.isArray(rows) ? rows : (rows && rows.docs) || [];
+    let got = 0;
+    for (const r of list){
+      const v = r.data ? r.data : r;
+      if (v && v.id && !ans[v.id]){ ans[v.id] = v; got++; }
+    }
+    if (got){ jump(); render(); }
+  }catch(e){}
+  badge();
+}
+function reset(){
+  if (!confirmReset()) return;
+  for (const q of QS){
+    try{ localStorage.removeItem("drill:"+q.id); }catch(e){}
+    if (db) db.collection("drill").doc(q.id).delete().catch(()=>{});
+  }
+  ans = {}; idx = 0;
+  $("report").hidden = true; $("qcard").hidden = false;
+  render(); badge();
+}
+let resetArmed = false;
+function confirmReset(){
+  /* The viewer never shows confirm(), so the button asks for itself. */
+  if (resetArmed){ resetArmed = false; $("b-reset").textContent = "清空重做"; return true; }
+  resetArmed = true;
+  $("b-reset").textContent = "再点一次确认清空";
+  setTimeout(() => { resetArmed = false; $("b-reset").textContent = "清空重做"; }, 4000);
+  return false;
+}
+
+$("b-pass").onclick = () => choose("pass");
+$("b-enter").onclick = () => choose("enter");
+$("b-go").onclick = submit;
+$("b-next").onclick = next;
+$("b-reset").onclick = reset;
+$("b-jump").onclick = () => { jump(); $("report").hidden = true;
+  $("qcard").hidden = false; render(); };
+$("b-report").onclick = report;
+$("s-stop").oninput = syncOut;
+$("s-tgt").oninput = syncOut;
+matchMedia("(prefers-color-scheme:dark)").addEventListener("change",
+  () => draw(QS[idx], !!ans[QS[idx].id]));
+
+/* Loaded through <script> tags rather than fetch(), because fetch() of a
+   sibling file is blocked under file:// and this page is meant to open by
+   double-clicking it. Each data file assigns one global; a tag that is
+   already present resolves from the global it left behind. */
+function grab(src, global){
+  return new Promise(res => {
+    if (window[global] !== undefined) return res(window[global]);
+    const el = document.createElement("script");
+    el.src = src;
+    el.onload = () => res(window[global]);
+    el.onerror = () => res(null);
+    document.head.appendChild(el);
+  });
+}
+
+/* The two sets are separate files and separate answer keys (the ids carry
+   _c0 / _c1), so switching does not mix a decision made on the low bar with
+   one made after the confirmation -- they are different trades. */
+function loadSet(conf){
+  try{ localStorage.setItem("drill:conf", String(conf)); }catch(e){}
+  $("prog").textContent = "加载中…";
+  BUCKETS = {}; PA = {}; CROSS = {}; ALLIN = null; RMETA = null;
+  return Promise.all([grab(`rates_c${conf}.js`, `RATES_c${conf}`),
+                      grab(`questions_c${conf}.js`, `DRILL_c${conf}`)])
+  .then(([R, d]) => {
+    if (R){ BUCKETS = R.buckets||{}; PA = R.pa||{}; CROSS = R.cross||{};
+            ALLIN = R.allin||null; RMETA = R; }
+    QS = d || []; ans = {}; idx = 0;
+    if (!QS.length){
+      $("prog").textContent = "没有题目";
+      $("qcard").hidden = true; $("report").hidden = true;
+      $("saved").innerHTML = `这一套还没生成。跑 ` +
+        `<code>uv run python -m strategy.drill_gen --start … --end … ` +
+        `--confirm ${conf} --out strategy/drill/questions_c${conf}.js</code>`;
+      return;
+    }
+    $("report").hidden = true; $("qcard").hidden = false;
+    restore(); render(); badge();
+    if (QS.length && QS.every(q => ans[q.id])) report();
+    pullDb();
+  }).catch(() => { $("prog").textContent = "题库加载失败"; });
+}
+let conf0 = "1";
+try{ conf0 = localStorage.getItem("drill:conf") || "1"; }catch(e){}
+$("conf").value = conf0;
+$("conf").onchange = () => loadSet($("conf").value);
+loadSet(conf0);
+
+if (typeof claude !== "undefined" && claude.use)
+  claude.use("db").then(x => { db = x; badge(); pullDb(); }).catch(()=>{});
+</script>

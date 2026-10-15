@@ -109,7 +109,12 @@ class TestGracePeriod:
         from analysis.liq_hm_window import _WALL_MAX_EMPTY_SECS
 
         bi = _bin_of(win, 156.82)
-        gone_for = int(_WALL_MAX_EMPTY_SECS) - 5      # 1s per column here
+        # Inside the grace window but not zero: derived from the constant, not
+        # a fixed offset from it. The offset was -5, which silently became
+        # "not empty at all" when the grace dropped from 30s to 5s and the
+        # test then asserted against an intact wall.
+        gone_for = max(1, int(_WALL_MAX_EMPTY_SECS) - 1)   # 1s per column here
+        assert 0 < gone_for < _WALL_MAX_EMPTY_SECS, "fixture outside the grace"
         win._bid_grid[: N_COLS - gone_for, bi] = 2303.0
 
         labels = _priced(_draw(win, qapp), "B")

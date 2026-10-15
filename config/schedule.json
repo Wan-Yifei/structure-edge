@@ -102,5 +102,10 @@
     "enabled": true,
     "cron": "5 */6 * * *",
     "days": 2
+  },
+  "bottom_holdout": {
+    "enabled": true,
+    "cron": "45 20 * * 1-5",
+    "days": 3
   }
 }

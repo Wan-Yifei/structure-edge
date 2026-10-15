@@ -82,9 +82,67 @@ _WALL_INTACT_FRAC = 0.9
 # almost every time (label count fell 10,068 -> 10,031 over a 3h replay) while
 # the share of labels reading zero went 35.6% -> 14.3% on the bid side.
 # Proportional to the window so a day-long replay still shows its history,
-# with a floor so the live 4-minute window does not cut to nothing.
+# with a floor so a tightly zoomed view does not cut to nothing.
+#
+# The floor was 30s, which meant it -- not the proportion -- governed every
+# live view: a 4-minute span is 12s at 5%, so the floor overrode it, and a
+# 10-minute span landed on 30s either way. Thirty seconds does not keep up
+# with the book. Measured on SOXL 2026-10-14 09:30-11:15, price moves a
+# median 19 cents in 30s (p90 54) against 11 cents in 12s (p90 34), so the
+# label was marking a level the market had long left -- while holding one of
+# the top_n slots, which the note above says is taken by a live candidate
+# almost every time it frees up.
+#
+# At 5.0 the proportion governs anything from a 2-minute span up and nothing
+# changes for views of 10 minutes or more; only the tight live spans speed up.
 _WALL_MAX_EMPTY_FRAC = 0.05
-_WALL_MAX_EMPTY_SECS = 30.0
+_WALL_MAX_EMPTY_SECS = 5.0
+
+# Labels rank by DISTANCE to the touch, not by brightness. Brightness still
+# decides what counts as a wall at all (with Min.Vol), but a big wall a dollar
+# away does not help a decision being made at the touch, and there are only
+# top_n slots.
+#
+# That makes the volume gate load-bearing on its own, so it must not move when
+# Gamma does -- Gamma is a display control, and a brightness-coupled gate made
+# the label set jump for a reason unrelated to the book. Min.Vol (shares) is
+# the gate; _WALL_MIN_BRIGHT stays only to drop what is not drawn at all.
+#
+# The gate is a percentile of what is in view, not a share count, and NOT the
+# Min.Vol spinbox: that one filters the grid itself (liq_hm_window line ~1554)
+# plus the iceberg/spoof/imbalance detectors, so raising it to gate labels
+# would erase most of the heatmap -- 89% of levels sit under 1,000 shares.
+#
+# A percentile also travels between sessions, which a share count does not.
+# Measured on SOXL 2026-10-14, the p90 level is 1,041 shares in regular hours,
+# 1,000 after hours and 325 overnight -- the book thins twentyfold by median
+# and any fixed number is wrong in two of the three.
+#
+# Taken over the LATEST SNAPSHOT's levels, not over the grid bins in view: a
+# zoomed-in view can hold only a handful of lit bins, and the 90th percentile
+# of six numbers is just the largest of them, which gated everything out. The
+# snapshot is also independent of zoom, so the same wall qualifies however the
+# chart is framed.
+#
+# Min.Vol still raises it when set: the gate is the larger of the two.
+_WALL_GATE_PCT = 90.0
+
+# One exception to the distance rule: a level that dwarfs everything else in
+# view keeps a label however far away it is. Without it the 73,000-share bid
+# at 116.00 on 2026-10-14 went unlabelled until price had nearly reached it.
+#
+# "Dwarfs" needs a number, because TOP1 is routinely bigger than TOP2 -- the
+# median ratio is 1.64, so a 1.5x or 2x rule would fire half the time and stop
+# being an exception. At 3x it fires 18% of the time, and when it does the
+# level sits a median 49 cents out, exactly where the distance rule would
+# otherwise drop it.
+_WALL_TOP1_RATIO = 3.0
+
+# A label that falls out of the nearest top_n survives until it falls out of
+# top_n + this. Price oscillating between two levels would otherwise flicker
+# labels on and off. Rank slack rather than a timer: no time constant to tune,
+# and the set stays "the nearest few" instead of holding something stale.
+_WALL_RANK_SLACK = 2
 
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
@@ -567,6 +625,10 @@ class LiqHmWindow(QWidget):
         self._simb_items:    list = []
         self._absorb_items:  list = []
         self._wall_items:    list = []
+        # Prices labelled on the previous redraw, per side, so a label that
+        # slips out of the nearest top_n gets rank slack before it is
+        # dropped -- see _WALL_RANK_SLACK.
+        self._wall_prev:     dict = {}
 
         # Tick cache + worker for absorption bubble overlay
         self._absorb_ticks:         list[dict]               = []
@@ -783,7 +845,16 @@ class LiqHmWindow(QWidget):
         self._wall_n_spin.setRange(1, 10)
         self._wall_n_spin.setValue(3)
         self._wall_n_spin.setFixedWidth(42)
-        self._wall_n_spin.setToolTip("How many walls to label on each side")
+        self._wall_n_spin.setToolTip(
+            "How many walls to label on EACH side -- bid and ask are counted\n"
+            "separately, so N=3 labels up to 3 + 3.\n\n"
+            "Ranked by distance to the touch, not by size: a wall a dollar\n"
+            "away does not help a decision being made at the touch, and the\n"
+            "heatmap still paints its band either way.\n\n"
+            "One extra label per side is possible: a level at least 3x the\n"
+            "next biggest in view keeps its label however far out it sits.\n"
+            "So N=3 shows at most 4 a side, 8 in all, and only about a fifth\n"
+            "of the time.")
         self._wall_n_spin.valueChanged.connect(self._on_controls_changed)
         row2.addWidget(self._wall_n_spin)
 
@@ -1199,6 +1270,9 @@ class LiqHmWindow(QWidget):
         self._best_bid  = None
         self._best_ask  = None
         self._live_mid  = None
+        # Rank slack is granted by price, and the prices of one symbol mean
+        # nothing for the next.
+        self._wall_prev.clear()
         for img in (self._img_combined, self._img_bid, self._img_ask):
             img.clear()
         self._price_path_item.setData([], [])
@@ -2104,6 +2178,16 @@ class LiqHmWindow(QWidget):
         # +1: the newest column itself is the first one that can be empty.
         grace_lo = max(lo, hi - 1 - int(grace / max(col_secs, 1e-9)))
 
+        # Levels of the live book, for the wall gate below.
+        snap_vols = np.array(
+            [r["volume"] for r in (self._latest_snap or [])
+             if r.get("volume", 0) > 0], dtype=float)
+
+        # The touch that distances are measured from. None before the first
+        # snapshot arrives, which the ranking below falls back for.
+        mid = (None if self._best_bid is None or self._best_ask is None
+               else (self._best_bid + self._best_ask) / 2.0)
+
         for grid, side, colour in ((self._bid_grid, "B", _TEAL),
                                    (self._ask_grid, "A", _RED)):
             # Brightness as drawn. The reference percentile spans the whole
@@ -2118,22 +2202,73 @@ class LiqHmWindow(QWidget):
 
             peak = grid[lo:hi].max(axis=0)          # largest size per price bin
             cur = grid[hi - 1]                      # newest column still in view
-            order = np.argsort(bright)[::-1]        # rank by what is on screen
-            placed: list[int] = []
-            for bi in order:
-                if len(placed) >= top_n or bright[bi] < _WALL_MIN_BRIGHT:
-                    break         # sorted by brightness, so the rest are fainter
+
+            # What counts as a wall: the top decile of the live book, or
+            # Min.Vol if the user has set it higher. Too few levels to take a
+            # percentile of (an empty or barely-started book) leaves the gate
+            # off rather than guessing.
+            gate = max(min_vol, 1.0)
+            if snap_vols.size >= 20:
+                gate = max(gate,
+                           float(np.percentile(snap_vols, _WALL_GATE_PCT)))
+
+            cands: list[tuple[float, int, float]] = []   # (distance, bin, peak)
+            for bi in range(len(peak)):
                 v = float(peak[bi])
-                if v < max(min_vol, 1.0):
+                if v < gate or bright[bi] < _WALL_MIN_BRIGHT:
                     continue
                 # Gone for the whole grace period: history, not liquidity.
                 if not grid[grace_lo:hi, bi].any():
                     continue
+                p = self._price_min + (bi + 0.5) * self._bin_size
+                cands.append((abs(p - mid) if mid else 0.0, bi, v))
+
+            if mid:
+                cands.sort(key=lambda c: c[0])      # nearest the touch first
+            else:
+                # No touch yet (no snapshot): fall back to the old ranking
+                # rather than ordering by a distance to nothing.
+                cands.sort(key=lambda c: -bright[c[1]])
+
+            # Rank slack is INCUMBENCY, not an extra slot: a label already up
+            # keeps its place against a newcomer that is marginally nearer,
+            # and only loses it once it has slipped _WALL_RANK_SLACK places.
+            # Granting extra slots instead would have done nothing -- the
+            # nearest top_n always fill the budget, so the straggler never
+            # got drawn.
+            prev = self._wall_prev.get(side, set())
+
+            def _eff(item):
+                rank, c = item
+                p = self._price_min + (c[1] + 0.5) * self._bin_size
+                return rank - (_WALL_RANK_SLACK if round(p, 4) in prev else 0)
+
+            ranked = sorted(enumerate(cands), key=_eff)
+            chosen = [c for _, c in ranked[:top_n]]
+
+            # The one exception to distance: a wall that dwarfs the rest keeps
+            # its label wherever it is. Peak, not current size -- it is the
+            # biggest thing that formed in view -- and the grace check above
+            # has already dropped it if it has since been empty throughout.
+            # Placed FIRST so a full slate of near walls cannot crowd it out.
+            if len(cands) >= 2:
+                by_size = sorted(cands, key=lambda c: -c[2])
+                if by_size[0][2] >= _WALL_TOP1_RATIO * max(by_size[1][2], 1.0):
+                    if by_size[0] in chosen:
+                        chosen.remove(by_size[0])
+                    chosen.insert(0, by_size[0])
+
+            placed: list[int] = []
+            shown: set[float] = set()
+            for _, bi, v in chosen:
+                if len(placed) >= top_n + 1:        # top_n near, plus the giant
+                    break
                 # Skip a bin touching one already labelled: one wall, one label.
                 if any(abs(int(bi) - q) <= 1 for q in placed):
                     continue
                 placed.append(int(bi))
                 price = self._price_min + (int(bi) + 0.5) * self._bin_size
+                shown.add(round(price, 4))
                 # The grid only knows the bin, so the price is its centre. That
                 # is sub-penny while the band is narrow, but a day-long replay
                 # spreads ~$25 over 100 bins and a bare "164.00" would then be
@@ -2148,7 +2283,9 @@ class LiqHmWindow(QWidget):
                 size_txt = (f"{v:,.0f}" if c >= v * _WALL_INTACT_FRAC
                             else f"{c:,.0f} / {v:,.0f}")
                 lbl = pg.TextItem(
-                    text=f"{side} {px}  {size_txt}", color=_WALL_TEXT_COL,
+                    text=f"{side} {px}  {size_txt}"
+                         f"{self._wall_fate(grid, bi, lo, hi, v, c, half, side)}",
+                    color=_WALL_TEXT_COL,
                     fill=pg.mkBrush(QColor(*_LABEL_FILL_RGBA)),
                     border=pg.mkPen(colour, width=1),
                     anchor=(1.0, 0.5),          # right edge of the text at the x
@@ -2159,6 +2296,68 @@ class LiqHmWindow(QWidget):
                 self._wall_items.append(lbl)
                 # y is fixed; x is re-pinned on every range change, see below.
                 lbl.setPos(self._wall_label_x(), price)
+
+            # What the next redraw grants rank slack to. Keyed by price, not
+            # bin: a rebuilt price axis renumbers the bins.
+            self._wall_prev[side] = shown
+
+    def _wall_fate(self, grid, bi: int, lo: int, hi: int,
+                   peak: float, now: float, half: float, side: str) -> str:
+        """Why a wall shrank: ' pulled 86%' or ' eaten 73%', or '' if unknown.
+
+        A level that loses size either traded away or was withdrawn, and a
+        snapshot shows only the sum. Matching the loss against what printed AT
+        that price separates them: on 2026-10-14 a 73,072-share bid at 116.00
+        vanished in 588 ms with not one share printing there -- withdrawn,
+        whole. Two hours earlier a level took 2,518 shares and held, which is
+        the opposite event and looks identical in the depth alone.
+
+        Returns '' rather than guessing in three cases:
+
+          wide bins   the label already reads '116.00±0.25' when the band
+                      spans more than a cent, and "traded at that price" means
+                      nothing across a quarter of a dollar.
+          no feed     ticks are only loaded while Aggressor is on, so the
+                      suffix rides on that checkbox -- and on a load having
+                      FINISHED, since an empty list means "nothing traded
+                      there" once it has and "not yet" before. Those are
+                      opposite answers: a level that vanished with no prints
+                      at its price is the purest withdrawal there is.
+          no loss     an intact wall has nothing to explain.
+
+        NEUTRAL volume is excluded: off-exchange prints consume no displayed
+        size, so counting them would read withdrawal as consumption. Only the
+        side that can hit this book counts -- sells into a bid, buys into an
+        ask.
+
+        An estimate, not an observation. Levels refilling and being hit again
+        inside one column net out, and a print cannot be tied to the order it
+        hit without per-order data; a 6.6/s snapshot cannot see a level that
+        appears and fills between frames.
+        """
+        lost = peak - now
+        if lost <= 0 or half > 0.01:
+            return ""
+        if not self._absorb_cb.isChecked() or self._absorb_last_ts is None:
+            return ""
+        col = grid[lo:hi, bi]
+        if not col.any():
+            return ""
+        t0 = self._col_ts[lo + int(np.argmax(col))]
+        price = self._price_min + (bi + 0.5) * self._bin_size
+        want = "SELL" if side == "B" else "BUY"
+        traded = 0.0
+        for tk in reversed(self._absorb_ticks):     # newest first, stop at t0
+            if tk["ts"] < t0:
+                break
+            if tk.get("direction") != want:
+                continue
+            if abs(tk["price"] - price) <= half:
+                traded += tk["volume"]
+        pulled = max(lost - min(lost, traded), 0.0)
+        frac = pulled / lost
+        return (f"  pulled {frac:.0%}" if frac >= 0.5
+                else f"  eaten {1.0 - frac:.0%}")
 
     def _wall_label_x(self) -> float:
         """X for the right-hand wall labels, just inside the view's right edge."""

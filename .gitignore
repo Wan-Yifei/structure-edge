@@ -63,3 +63,6 @@ db/cache/
 # API tokens / credentials accidentally dropped in repo root
 github_token.txt
 *_token.txt
+
+# Drill question sets are generated data, not code
+strategy/drill/questions_c*.js

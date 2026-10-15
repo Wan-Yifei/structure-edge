@@ -486,6 +486,10 @@ class SchedulerApp(tk.Tk):
         self._classify_proc: subprocess.Popen | None = None
         self._last_ladder_minute: tuple | None = None
         self._ladder_proc: subprocess.Popen | None = None
+        self._last_holdout_minute: tuple | None = None
+        self._holdout_proc: subprocess.Popen | None = None
+        self._last_drill_minute: tuple | None = None
+        self._drill_proc: subprocess.Popen | None = None
 
         self._build_clock()
         self._build_sessions()
@@ -534,6 +538,26 @@ class SchedulerApp(tk.Tk):
         "days":    2,
     }
 
+    # Bottom-study holdout: one row per selected event, appended after the
+    # close. 20:45 rather than with the ladder, because it needs the session's
+    # klines complete and delta_bars rebuilt from a finished tick day -- and
+    # because an append-only holdout gains nothing from running four times.
+    _DEFAULT_HOLDOUT = {
+        "enabled": True,
+        "cron":    "45 20 * * 1-5",
+        "days":    3,
+    }
+
+    # Drill questions: append the finished session to both question sets.
+    # 21:00 so it lands after the holdout has rebuilt delta_bars for the day;
+    # the two sets differ only in whether the decision sits on the marked low
+    # or one bar past it, and they are kept apart on purpose.
+    _DEFAULT_DRILL = {
+        "enabled": True,
+        "cron":    "0 21 * * 1-5",
+        "keep":    600,
+    }
+
     _DEFAULT_BACKUP = {
         "enabled":          True,
         "cron":             "0 20 * * 1-5",
@@ -575,6 +599,8 @@ class SchedulerApp(tk.Tk):
             "remote_backup": dict(self._DEFAULT_BACKUP),
             "tick_classify": dict(self._DEFAULT_CLASSIFY),
             "book_ladder": dict(self._DEFAULT_LADDER),
+            "bottom_holdout": dict(self._DEFAULT_HOLDOUT),
+            "drill": dict(self._DEFAULT_DRILL),
         }
 
     def _save_config(self):
@@ -885,6 +911,14 @@ class SchedulerApp(tk.Tk):
         if self.cfg.get("book_ladder", self._DEFAULT_LADDER).get("enabled"):
             self._check_ladder_cron(et)
 
+        # same, for the bottom-study holdout
+        if self.cfg.get("bottom_holdout", self._DEFAULT_HOLDOUT).get("enabled"):
+            self._check_holdout_cron(et)
+
+        # same, for the daily drill questions
+        if self.cfg.get("drill", self._DEFAULT_DRILL).get("enabled"):
+            self._check_drill_cron(et)
+
         self._tick_job = self.after(1000, self._tick)
 
     def _check_session_transitions(self, et: datetime):
@@ -1066,13 +1100,30 @@ class SchedulerApp(tk.Tk):
 
     @staticmethod
     def _cron_field_match(field: str, value: int) -> bool:
-        """Check if a single cron field (e.g. '1-5', '20', '*') matches *value*."""
+        """Check if a cron field ('1-5', '20', '*', '*/6', '0,6,12') matches.
+
+        Step syntax is here because leaving it out is a silent trap: a job
+        configured '5 */6 * * *' never fired and logged a ValueError once a
+        second for twenty hours, because int('*/6') raises and the dedup that
+        would have quietened it sits after the match.
+        """
         if field == "*":
             return True
         for part in field.split(","):
+            step = 1
+            if "/" in part:
+                part, step_s = part.split("/", 1)
+                step = int(step_s)
+                if step <= 0:
+                    continue
+            if part == "*":
+                if value % step == 0:
+                    return True
+                continue
             if "-" in part:
-                lo, hi = part.split("-", 1)
-                if int(lo) <= value <= int(hi):
+                lo_s, hi_s = part.split("-", 1)
+                lo, hi = int(lo_s), int(hi_s)
+                if lo <= value <= hi and (value - lo) % step == 0:
                     return True
             elif int(part) == value:
                 return True
@@ -1114,14 +1165,16 @@ class SchedulerApp(tk.Tk):
         try:
             m_f, h_f, _, _, dow_f = parts
             cron_dow = et.isoweekday() % 7
+            # Claim the minute BEFORE matching: a cron the parser chokes on
+            # otherwise raises once per tick, i.e. once a second.
+            cur_min = (et.year, et.month, et.day, et.hour, et.minute)
+            if cur_min == self._last_classify_minute:
+                return
+            self._last_classify_minute = cur_min        # claimed whether it matches or not
             if not (self._cron_field_match(m_f, et.minute) and
                     self._cron_field_match(h_f, et.hour) and
                     self._cron_field_match(dow_f, cron_dow)):
                 return
-            cur_min = (et.year, et.month, et.day, et.hour, et.minute)
-            if cur_min == self._last_classify_minute:
-                return
-            self._last_classify_minute = cur_min
             threading.Thread(target=self._run_classify, daemon=True).start()
         except Exception as exc:
             self._log(f"[classify] Cron parse error: {exc}")
@@ -1178,14 +1231,16 @@ class SchedulerApp(tk.Tk):
         try:
             m_f, h_f, _, _, dow_f = parts
             cron_dow = et.isoweekday() % 7
+            # Claim the minute BEFORE matching: a cron the parser chokes on
+            # otherwise raises once per tick, i.e. once a second.
+            cur_min = (et.year, et.month, et.day, et.hour, et.minute)
+            if cur_min == self._last_ladder_minute:
+                return
+            self._last_ladder_minute = cur_min        # claimed whether it matches or not
             if not (self._cron_field_match(m_f, et.minute) and
                     self._cron_field_match(h_f, et.hour) and
                     self._cron_field_match(dow_f, cron_dow)):
                 return
-            cur_min = (et.year, et.month, et.day, et.hour, et.minute)
-            if cur_min == self._last_ladder_minute:
-                return
-            self._last_ladder_minute = cur_min
             threading.Thread(target=self._run_ladder, daemon=True).start()
         except Exception as exc:
             self._log(f"[ladder] Cron parse error: {exc}")
@@ -1232,6 +1287,134 @@ class SchedulerApp(tk.Tk):
         except Exception as exc:
             self._log(f"[ladder] failed: {exc}")
         self._ladder_proc = None
+
+    def _check_holdout_cron(self, et: datetime):
+        """Fire the bottom-study holdout append if ET matches its cron."""
+        cfg = self.cfg.get("bottom_holdout", self._DEFAULT_HOLDOUT)
+        parts = str(cfg.get("cron", "")).split()
+        if len(parts) != 5:
+            return
+        try:
+            m_f, h_f, _, _, dow_f = parts
+            cron_dow = et.isoweekday() % 7
+            cur_min = (et.year, et.month, et.day, et.hour, et.minute)
+            if cur_min == self._last_holdout_minute:
+                return
+            self._last_holdout_minute = cur_min
+            if not (self._cron_field_match(m_f, et.minute) and
+                    self._cron_field_match(h_f, et.hour) and
+                    self._cron_field_match(dow_f, cron_dow)):
+                return
+            threading.Thread(target=self._run_holdout, daemon=True).start()
+        except Exception as exc:
+            self._log(f"[holdout] Cron parse error: {exc}")
+
+    def _run_holdout(self):
+        """Append the session's bottom events to the study holdout.
+
+        Append-only and never rebuilt, so this logs how many events went in
+        and nothing about how they turned out: a holdout checked as it fills
+        is not a holdout. Reading it is a deliberate act, months from now.
+        """
+        if self._holdout_proc is not None and self._holdout_proc.poll() is None:
+            self._log("[holdout] previous run still going, skipping")
+            return
+        cfg = self.cfg.get("bottom_holdout", self._DEFAULT_HOLDOUT)
+        days = int(cfg.get("days", 3) or 3)
+        root = pathlib.Path(__file__).parent.parent
+        codes = list(self.cfg.get("targets", []))
+        if not codes:
+            return
+        cmd = [sys.executable, "-m", "strategy.bottom_holdout",
+               "--codes", *codes, "--days", str(days)]
+        self._log(f"[holdout] {len(codes)} target(s), {days}d …")
+        try:
+            self._holdout_proc = subprocess.Popen(
+                cmd, cwd=str(root), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            out, _ = self._holdout_proc.communicate(timeout=1800)
+            rc = self._holdout_proc.returncode
+            lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+            if rc != 0:
+                self._log(f"[holdout] FAILED (exit {rc}) -- "
+                          f"db/cache/bottom_holdout was not updated")
+                for ln in lines[-8:]:
+                    self._log(f"[holdout]   {ln}")
+            else:
+                for ln in lines[-3:]:
+                    self._log(f"[holdout] {ln}")
+        except Exception as exc:
+            self._log(f"[holdout] failed: {exc}")
+        self._holdout_proc = None
+
+    def _check_drill_cron(self, et: datetime):
+        """Fire the daily drill-question append if ET matches its cron."""
+        cfg = self.cfg.get("drill", self._DEFAULT_DRILL)
+        parts = str(cfg.get("cron", "")).split()
+        if len(parts) != 5:
+            return
+        try:
+            m_f, h_f, _, _, dow_f = parts
+            cron_dow = et.isoweekday() % 7
+            cur_min = (et.year, et.month, et.day, et.hour, et.minute)
+            if cur_min == self._last_drill_minute:
+                return
+            self._last_drill_minute = cur_min
+            if not (self._cron_field_match(m_f, et.minute) and
+                    self._cron_field_match(h_f, et.hour) and
+                    self._cron_field_match(dow_f, cron_dow)):
+                return
+            day = et.strftime("%Y-%m-%d")
+            threading.Thread(target=self._run_drill, args=(day,),
+                             daemon=True).start()
+        except Exception as exc:
+            self._log(f"[drill] Cron parse error: {exc}")
+
+    def _run_drill(self, day: str):
+        """Append the session dated `day` (ET) to the drill question sets.
+
+        Both confirm settings are generated, one process after the other
+        rather than at once: each opens the kline cache, and two writers on
+        one DuckDB file block each other.
+
+        `day` comes from ET, not the machine clock, so a box running on
+        another timezone still asks for the session that just closed.
+        """
+        if self._drill_proc is not None and self._drill_proc.poll() is None:
+            self._log("[drill] previous run still going, skipping")
+            return
+        cfg = self.cfg.get("drill", self._DEFAULT_DRILL)
+        keep = int(cfg.get("keep", 600) or 600)
+        root = pathlib.Path(__file__).parent.parent
+        out_dir = root / "strategy" / "drill"
+        for conf in (1, 0):
+            out = out_dir / f"questions_c{conf}.js"
+            # --append derives the real start from the newest day on file, so
+            # --start only matters for a set that does not exist yet.
+            cmd = [sys.executable, "-m", "strategy.drill_gen",
+                   "--start", day, "--end", day,
+                   "--confirm", str(conf), "--keep", str(keep),
+                   "--append", "--out", str(out)]
+            try:
+                self._drill_proc = subprocess.Popen(
+                    cmd, cwd=str(root), stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                out_txt, _ = self._drill_proc.communicate(timeout=1800)
+                rc = self._drill_proc.returncode
+                lines = [ln for ln in (out_txt or "").splitlines() if ln.strip()]
+                if rc != 0:
+                    self._log(f"[drill] c{conf} FAILED (exit {rc}) -- "
+                              f"questions_c{conf}.js was not updated")
+                    for ln in lines[-6:]:
+                        self._log(f"[drill]   {ln}")
+                else:
+                    for ln in lines[-2:]:
+                        self._log(f"[drill] c{conf}: {ln}")
+            except Exception as exc:
+                self._log(f"[drill] c{conf} failed: {exc}")
+            self._drill_proc = None
 
     def _run_backup(self):
         """Upload tick and order-book DBs to S3 via aws s3 cp."""
@@ -1310,7 +1493,19 @@ class SchedulerApp(tk.Tk):
         self._collector_running = True
         self.run_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        self._log("Scheduler started.  Watching session boundaries...")
+        # Say which build this is. "I restarted it but cannot tell whether it
+        # picked up the fix" is otherwise answerable only by comparing the
+        # process start time against the file's mtime from outside.
+        try:
+            root = pathlib.Path(__file__).parent.parent
+            ver = (root / "VERSION").read_text(encoding="utf-8").strip()
+            src = datetime.fromtimestamp(
+                pathlib.Path(__file__).stat().st_mtime)
+            self._log(f"Scheduler started.  v{ver}, "
+                      f"scheduler.py {src:%Y-%m-%d %H:%M:%S}. "
+                      f"Watching session boundaries...")
+        except Exception:
+            self._log("Scheduler started.  Watching session boundaries...")
         if self._tray:
             self._tray.icon = self._make_tray_image(active=True)
         for name in SESSION_ORDER:
