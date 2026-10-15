@@ -26,6 +26,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "scikit-learn>=1.9.1",
 ]
 
 [tool.pytest.ini_options]

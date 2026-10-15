@@ -37,6 +37,7 @@ global.localStorage = {
 global.document = {
   getElementById: (id) => (els[id] ||= mkEl(id)),
   documentElement: {},
+  addEventListener() {},
   createElement: () => ({ src: "", onload: null, onerror: null }),
   head: {
     appendChild(el) {
@@ -54,7 +55,11 @@ global.matchMedia = () => ({ addEventListener() {} });
 global.atob = (s) => Buffer.from(s, "base64").toString("binary");
 global.fetch = () => Promise.reject(new Error("fetch must not be used"));
 
-const api = new Function(code + "\n;return {choose, submit, QS};")();
+global.setInterval = () => 0;
+global.clearInterval = () => {};
+const api = new Function(
+  code + "\n;return {choose, submit, levels, stepTo, getStep: () => step," +
+         "         getQS: () => QS};")();
 
 await new Promise((r) => setTimeout(r, 400));
 
@@ -67,10 +72,37 @@ if (!els.meta.innerHTML.includes("5m"))
   throw new Error("5m delta missing from the meta bar");
 console.log("meta has 5m  : true");
 
+/* The stop must not drag the target. Setting them in ATR made R a derived
+   number; this is the property that was broken before. */
+const q0 = global.window.DRILL_c1[0];
+const a1 = api.levels(q0, 0.5, 1.5);
+const a2 = api.levels(q0, 1.5, 1.5);
+if (Math.abs(a1.target - a2.target) > 1e-9)
+  throw new Error("target moved when only the stop changed");
+if (Math.abs(a1.stop - a2.stop) < 1e-9)
+  throw new Error("stop did not move");
+if (Math.abs(a1.rr - 3.0) > 1e-9 || Math.abs(a2.rr - 1.0) > 1e-9)
+  throw new Error(`R should be derived as tgt/stop, got ${a1.rr} / ${a2.rr}`);
+console.log("ok   止损不再拖动目标，R 由两者相除得出");
+
 els["s-stop"].value = "1.0";
 els["s-tgt"].value = "2.0";
 api.choose("enter");
 api.submit();
+
+/* Playback: the future starts hidden and advances one bar at a time. */
+if (api.getStep() !== 0) throw new Error("future should start hidden");
+api.stepTo(1);
+if (api.getStep() !== 1) throw new Error("step did not advance");
+api.stepTo(999);
+const cur = api.getQS()[0];
+const maxStep = cur.c.length - 1 - cur.mark;
+if (api.getStep() !== maxStep)
+  throw new Error(`step should clamp to ${maxStep}, got ${api.getStep()}`);
+api.stepTo(-5);
+if (api.getStep() !== 0) throw new Error("step should clamp at 0");
+console.log(`ok   逐根播放 0..${maxStep}，两端都收住`);
+api.stepTo(0);
 
 const v = els.vd.innerHTML;
 const need = [

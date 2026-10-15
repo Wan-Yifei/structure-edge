@@ -104,7 +104,10 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
   <b>这两类的命中率量下来几乎一样</b>(33% 对 33%,区间重叠),所以标签本身不带信息,
   这里也不判对错,只算你最后的盈亏。真正分得开的是 <b>delta_r</b>:1 分钟窗口 ≥0 的
   命中 45%、&lt;0 的只有 25%。
-  默认在<b>最低点之后一根</b>做决定 —— 低点要等它收了才知道是低点,右上角可以切回当根对比。</p>
+  默认在<b>最低点之后一根</b>做决定 —— 低点要等它收了才知道是低点,右上角可以切回当根对比。
+  提交之后<b>后面的 K 线不会一次放出来</b>:按 <b>▶ 下一根</b>(或方向键 →)一根一根走,
+  <b>⏩ 自动</b>(空格)会播到结算那一根为止。止损和目标<b>各自独立按 ATR 设</b>,
+  拉止损不会把目标拖着走,盈亏比由两者相除得出。</p>
 
   <div class="card" id="qcard">
     <div class="meta" id="meta"></div>
@@ -119,11 +122,17 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
         <input type="range" id="s-stop" min="0.25" max="2" step="0.05" value="0.75">
         <output id="o-stop"></output>
         <label for="s-tgt">目标</label>
-        <input type="range" id="s-tgt" min="0.5" max="4" step="0.25" value="2">
+        <input type="range" id="s-tgt" min="0.25" max="6" step="0.05" value="1.5">
         <output id="o-tgt"></output>
       </div>
       <div class="row">
         <button class="pri" id="b-go" disabled>提交</button>
+        <span id="play" hidden>
+          <button id="b-step" title="走一根 K（快捷键 →）">▶ 下一根</button>
+          <button id="b-auto" title="自动逐根播放">⏩ 自动</button>
+          <button id="b-all">⏭ 全部</button>
+          <span id="stepn" class="prog" style="margin:0 0 0 6px"></span>
+        </span>
         <button id="b-next" hidden>下一题 →</button>
       </div>
     </div>
@@ -150,6 +159,7 @@ const FWD = 30, CW = 1040, CH = 520;
 const PRICE_H = 360, RSI_H = 96, GAP_H = 14;
 const PROF_W = 110, LBL_W = 128, PAD_L = 8, PAD_T = 12;
 let QS = [], idx = 0, ans = {}, pick = null, db = null;
+let step = 0, timer = null;   // bars of the future played so far
 
 const $ = id => document.getElementById(id);
 const fmt = v => v.toFixed(2);
@@ -185,7 +195,10 @@ function draw(q, reveal){
   cv.width = CW*dpr; cv.height = CH*dpr; cv.style.aspectRatio = CW+"/"+CH;
   g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,CW,CH);
 
-  const last = reveal ? q.c.length : q.mark + 1;
+  /* `step` is how many bars past the decision have been played. The x-scale
+     still spans the whole window so the candles do not jump sideways as they
+     appear -- only the right-hand side fills in. */
+  const last = reveal ? Math.min(q.c.length, q.mark + 1 + step) : q.mark + 1;
   const h = q.h.slice(0,last), l = q.l.slice(0,last),
         o = q.o.slice(0,last), c = q.c.slice(0,last);
   let lo = Math.min(...l), hi = Math.max(...h);
@@ -325,26 +338,35 @@ function draw(q, reveal){
   g.textAlign = "left";
 }
 
-function levels(q, stopAtr, targetR){
+/* Both levels are set in ATR, independently. Earlier the target was set in R,
+   which made it a multiple of the stop distance -- dragging the stop dragged
+   the target with it, so you could never widen a stop while leaving the
+   target where you wanted it. R is now DERIVED (tgtAtr / stopAtr) and shown,
+   rather than being the thing you dial. */
+function levels(q, stopAtr, tgtAtr){
   const s = q.dir === "short" ? 1 : -1;        // stop sits against the trade
   const stop = q.entry + s*stopAtr*q.atr;
+  const target = q.entry - s*tgtAtr*q.atr;
   const risk = Math.abs(q.entry - stop);
-  const target = q.entry - s*targetR*risk;
-  return {stop, target, risk};
+  return {stop, target, risk, rr: tgtAtr / stopAtr};
 }
-function settle(q, stopAtr, targetR){
-  const {stop, target, risk} = levels(q, stopAtr, targetR);
+function settle(q, stopAtr, tgtAtr){
+  const {stop, target, risk, rr} = levels(q, stopAtr, tgtAtr);
   const short = q.dir === "short";
   for (let j = q.mark+1; j < Math.min(q.c.length, q.mark+1+FWD); j++){
     const tu = short ? q.l[j] <= target : q.h[j] >= target;
     const td = short ? q.h[j] >= stop   : q.l[j] <= stop;
-    if (tu && td) return {stop, target, r:-1, how:"同一根里两边都碰到,按最坏算"};
-    if (tu) return {stop, target, r:targetR, how:`第 ${j-q.mark} 根触及目标`};
-    if (td) return {stop, target, r:-1, how:`第 ${j-q.mark} 根触及止损`};
+    if (tu && td) return {stop, target, rr, r:-1, bar:j-q.mark,
+                          how:"同一根里两边都碰到,按最坏算"};
+    if (tu) return {stop, target, rr, r:rr, bar:j-q.mark,
+                    how:`第 ${j-q.mark} 根触及目标`};
+    if (td) return {stop, target, rr, r:-1, bar:j-q.mark,
+                    how:`第 ${j-q.mark} 根触及止损`};
   }
   const endI = Math.min(q.c.length-1, q.mark+FWD);
   const move = short ? (q.entry - q.c[endI]) : (q.c[endI] - q.entry);
-  return {stop, target, r: move/risk, how:`${FWD} 根内都没碰到,按收盘结算`};
+  return {stop, target, rr, r: move/risk, bar: FWD,
+          how:`${FWD} 根内都没碰到,按收盘结算`};
 }
 
 function render(){
@@ -369,6 +391,9 @@ function render(){
     `<b style="color:${dcol(q.dr15)}">${dtxt(q.dr15)}</b></span>` +
     `<span>距 POC <b>${(100*(q.entry-q.poc)/q.poc).toFixed(2)}%</b></span>`;
   pick = null;
+  stopAuto();
+  step = 0;
+  $("play").hidden = true;
   $("b-pass").setAttribute("aria-pressed","false");
   $("b-enter").setAttribute("aria-pressed","false");
   $("sl").hidden = true; $("b-go").disabled = true;
@@ -378,12 +403,12 @@ function render(){
 
 function syncOut(){
   const q = QS[idx];
-  const sa = +$("s-stop").value, tr = +$("s-tgt").value;
-  const {stop, target, risk} = levels(q, sa, tr);
+  const sa = +$("s-stop").value, ta = +$("s-tgt").value;
+  const {stop, target, risk, rr} = levels(q, sa, ta);
   $("o-stop").textContent = `${sa.toFixed(2)} ATR → ${fmt(stop)}  (风险 ${risk.toFixed(2)})`;
-  $("o-tgt").textContent = `${tr.toFixed(2)} R → ${fmt(target)}`;
+  $("o-tgt").textContent = `${ta.toFixed(2)} ATR → ${fmt(target)}  (${rr.toFixed(2)} R)`;
   if (pick === "enter"){
-    ans[q.id] = {choice:"enter", stop, target, targetR:tr, preview:true};
+    ans[q.id] = {choice:"enter", stop, target, targetR:rr, preview:true};
     draw(q, false);
     delete ans[q.id];
   }
@@ -404,13 +429,18 @@ function submit(){
   let rec;
   if (pick === "pass") rec = {choice:"pass", r:0};
   else {
-    const sa = +$("s-stop").value, tr = +$("s-tgt").value;
-    const s = settle(q, sa, tr);
-    rec = {choice:"enter", stopAtr:sa, targetR:tr, stop:s.stop,
-           target:s.target, r:s.r, how:s.how};
+    const sa = +$("s-stop").value, ta = +$("s-tgt").value;
+    const s = settle(q, sa, ta);
+    rec = {choice:"enter", stopAtr:sa, tgtAtr:ta, targetR:s.rr, stop:s.stop,
+           target:s.target, r:s.r, how:s.how, bar:s.bar};
   }
   rec.kind = q.kind; rec.id = q.id;
-  ans[q.id] = rec; save(q.id, rec); draw(q, true);
+  ans[q.id] = rec; save(q.id, rec);
+  /* The future stays hidden and is stepped in one bar at a time -- watching
+     it arrive is the part that trains anything; a chart that jumps straight
+     to the outcome only ever shows you that you were right or wrong. */
+  $("play").hidden = false;
+  stepTo(0);
   badge();
 
   const vd = $("vd"); vd.hidden = false;
@@ -690,6 +720,47 @@ function confirmReset(){
   setTimeout(() => { resetArmed = false; $("b-reset").textContent = "清空重做"; }, 4000);
   return false;
 }
+
+/* Playback. The settled result is already decided and shown; stepping only
+   controls how much of the path you look at, so nothing here can change a
+   score. Auto-play stops on its own at the bar that settled the trade --
+   running past it would just show candles the trade was never in. */
+function stepTo(n){
+  const q = QS[idx];
+  const maxStep = q.c.length - 1 - q.mark;
+  step = Math.max(0, Math.min(maxStep, n));
+  const a = ans[q.id];
+  const settled = a && a.bar ? a.bar : null;
+  $("stepn").textContent = settled
+    ? `第 ${step} / ${maxStep} 根　（第 ${settled} 根结算）`
+    : `第 ${step} / ${maxStep} 根`;
+  $("b-step").disabled = step >= maxStep;
+  draw(q, true);
+}
+function autoPlay(){
+  if (timer){ clearInterval(timer); timer = null; $("b-auto").textContent = "⏩ 自动"; return; }
+  $("b-auto").textContent = "⏸ 暂停";
+  const q = QS[idx];
+  const a = ans[q.id];
+  const stopAt = a && a.bar ? a.bar : (q.c.length - 1 - q.mark);
+  timer = setInterval(() => {
+    if (step >= stopAt){ clearInterval(timer); timer = null;
+                         $("b-auto").textContent = "⏩ 自动"; return; }
+    stepTo(step + 1);
+  }, 420);
+}
+function stopAuto(){
+  if (timer){ clearInterval(timer); timer = null; $("b-auto").textContent = "⏩ 自动"; }
+}
+$("b-step").onclick = () => { stopAuto(); stepTo(step + 1); };
+$("b-auto").onclick = autoPlay;
+$("b-all").onclick = () => { stopAuto(); stepTo(QS[idx].c.length); };
+document.addEventListener("keydown", e => {
+  if ($("play").hidden) return;
+  if (e.key === "ArrowRight"){ e.preventDefault(); stopAuto(); stepTo(step + 1); }
+  if (e.key === "ArrowLeft"){ e.preventDefault(); stopAuto(); stepTo(step - 1); }
+  if (e.key === " "){ e.preventDefault(); autoPlay(); }
+});
 
 $("b-pass").onclick = () => choose("pass");
 $("b-enter").onclick = () => choose("enter");
