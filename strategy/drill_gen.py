@@ -398,6 +398,9 @@ def main() -> None:
         lad = None
         if book_ladder is not None:
             try:
+                # The end bound is a timestamp, not a date: passing `d` here
+                # would keep only rows at or before midnight and silently
+                # drop that session's entire trading day.
                 lad = book_ladder.load(args.code, d,
                                        d + pd.Timedelta(days=1))
                 if lad is None or lad.empty:
