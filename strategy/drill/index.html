@@ -165,8 +165,8 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
    that quote a rate stay hidden rather than showing a stale one. */
 let BUCKETS = {}, PA = {}, CROSS = {}, ALLIN = null, RMETA = null;
 
-const FLOW_H = 150, GAP_H = 14;
-const FWD = 30, CW = 1040, CH = 520 + FLOW_H + GAP_H;
+const FLOW_H = 150, GAP_H = 14, CAP_H = 18, AXIS_H = 16;
+const FWD = 30, CW = 1040, CH = 520 + FLOW_H + GAP_H + CAP_H + AXIS_H;
 const PRICE_H = 360, RSI_H = 96;
 const PROF_W = 110, LBL_W = 128, PAD_L = 8, PAD_T = 12;
 let QS = [], idx = 0, ans = {}, pick = null, db = null;
@@ -401,7 +401,7 @@ function draw(q, reveal){
   g.textAlign = "left";
 
   // ---- order flow strip: 30 minutes before the decision ----------------
-  const fy0 = ry0 + RSI_H + GAP_H;
+  const fy0 = ry0 + RSI_H + GAP_H + CAP_H;
   /* Ends exactly under the decision line above it, so nothing in here can
      ever appear over the chart's hidden future. */
   const FW = mx - PAD_L;
@@ -489,14 +489,17 @@ function draw(q, reveal){
     g.fillText("决策", PAD_L + FW - 12, fy0 + FLOW_H + 3);
     g.textAlign = "left";
 
-    g.fillStyle = ink3;
-    g.fillText((H30 ? "挂单热力" : "成交量分布") +
-               ` + 主动成交气泡　这一条的时间轴是「决策前 30 分钟」，` +
-               `和上方价格图不同轴`, PAD_L + 3, fy0 + 3);
+    /* Above the frame, not inside it: the profile and the bubbles occupy
+       the top-left corner this used to sit in, and the two overprinted. */
+    g.fillStyle = ink3; g.textBaseline = "bottom";
+    g.textAlign = "left";
+    g.fillText((H30 ? "挂单热力" : "成交量分布") + " + 主动成交气泡",
+               PAD_L + 1, fy0 - 4);
+    g.textAlign = "right";
     g.fillText(`每列 ${SEC} 秒` +
-               (q.bubMin ? `，气泡阈值 ${q.bubMin.toLocaleString()} 股净量` : "") +
-               (H30 ? "" : "　（这一天没有挂单归档，背景是成交量分布）"),
-               PAD_L + 3, fy0 + 16);
+               (q.bubMin ? `　气泡 ≥ ${q.bubMin.toLocaleString()} 股净量` : "") +
+               "　与上方价格图不同轴", PAD_L + FW - 1, fy0 - 4);
+    g.textAlign = "left"; g.textBaseline = "top";
   }
   g.textAlign = "left";
 }
@@ -552,7 +555,7 @@ function render(){
     `<b style="color:${dcol(q.dr5)}">${dtxt(q.dr5)}</b>` +
     `<span style="color:var(--ink-3)"> / 15m </span>` +
     `<b style="color:${dcol(q.dr15)}">${dtxt(q.dr15)}</b></span>` +
-    `<span>距 POC <b>${(100*(q.entry-q.poc)/q.poc).toFixed(2)}%</b></span>`;
+    `<span>距 POC <b>${sr(100*(q.entry-q.poc)/q.poc)}%</b></span>`;
   pick = null;
   stopAuto();
   step = 0;
@@ -677,11 +680,17 @@ function verdictFor(q, rec){
     if (q.note) mine += `<br><i style="color:var(--ink-3)">当时复盘：${q.note}</i>`;
     mine += `</div>`;
   } else if (q.confirm > 0){
+    /* The confirmation bar can close BELOW the marked low, in which case
+       waiting cost nothing and bought cheaper -- calling that "让掉" was
+       wrong, and fmt() printed the negative with an ASCII hyphen. */
     const give = q.entry - q.low0;
     mine = `<p style="margin-top:8px;color:var(--ink-3);font-size:12px">` +
            `最低点是 ${fmt(q.low0)}，你在它之后第 ${q.confirm} 根收盘 ` +
-           `${fmt(q.entry)} 做的决定 —— 等这根确认，让掉了 ` +
-           `${fmt(give)}（${(give/q.atr).toFixed(2)} ATR）。</p>`;
+           `${fmt(q.entry)} 做的决定 —— 等这根确认，` +
+           (give >= 0
+             ? `让掉了 ${fmt(give)}（${(give / q.atr).toFixed(2)} ATR）`
+             : `反而比低点还低 ${fmt(-give)}（${(-give / q.atr).toFixed(2)} ATR），` +
+               `等待没有付出代价`) + `。</p>`;
   }
   if (rec.choice === "pass"){
     const ref = settle(q, 1.0, 2.0);
@@ -756,7 +765,7 @@ function context(q){
     const other = `${q.kind}  delta_r ${dr >= 0 ? "< 0" : "≥ 0"}`;
     const ob = BUCKETS[other];
     s += `<p style="margin:0;color:var(--ink-2);font-size:12.5px">` +
-      `<b>${q.kind}</b> · delta_r(1m) ${dr >= 0 ? "+" : ""}${dr.toFixed(2)}<br>` +
+      `<b>${q.kind}</b> · delta_r(1m) ${sr(dr)}<br>` +
       `n=${n}，到 +2ATR <b>${(100*rate).toFixed(0)}%</b>，` +
       `95% 区间 [${(100*lo).toFixed(0)}%, ${(100*hi).toFixed(0)}%]` +
       (ob ? `<br>同类但 delta_r ${dr >= 0 ? "为负" : "为正"} 的是 ${(100*ob[1]).toFixed(0)}%（n=${ob[0]}）` : "") +

@@ -111,7 +111,7 @@ const need = [
   ["15m 窗口", "15m"],
   ["结构读数", "结构读数"],
   ["基准率出处", "自助法"],
-  ["确认让掉的幅度", "让掉"],
+  ["确认那一根的代价", "等这根确认"],
 ];
 for (const [label, token] of need) {
   const ok = v.includes(token);
@@ -261,3 +261,32 @@ if (/FX = c => PAD_L \+ \(c \/ NC\) \* W;/.test(src))
 console.log("ok   订单流条带右边缘对齐决策线，未来区下方留空");
 
 console.log("\nREPORT OK");
+
+/* Layout. Two lines of caption used to be drawn INSIDE the strip's box, in
+   the corner the volume profile and the bubbles occupy, so text and data
+   overprinted. The caption sits above the frame now; this pins the
+   arithmetic so a height change cannot quietly put it back over the data or
+   clip the axis labels off the canvas. */
+{
+  // Parsed without a regex on purpose: every escape in this file has to
+  // survive a shell heredoc to get here, and the backslashes did not.
+  const num = (name) => {
+    const i = src.indexOf(name + " = ");
+    if (i < 0) throw new Error("layout constant missing: " + name);
+    const v = parseInt(src.slice(i + name.length + 3), 10);
+    if (!Number.isFinite(v)) throw new Error("unreadable constant: " + name);
+    return v;
+  };
+  const ry0 = num("PAD_T") + num("PRICE_H") + num("GAP_H");
+  const fy0 = ry0 + num("RSI_H") + num("GAP_H") + num("CAP_H");
+  const CH = 520 + num("FLOW_H") + num("GAP_H") + num("CAP_H") + num("AXIS_H");
+  if (num("CAP_H") < 12)
+    throw new Error("no room above the strip for its caption");
+  if (fy0 <= ry0 + num("RSI_H"))
+    throw new Error("the strip overlaps the RSI panel");
+  if (fy0 + num("FLOW_H") + 14 >= CH)
+    throw new Error("the strip's axis labels fall off the canvas");
+  console.log(`ok   版面：字幕在框外，底部刻度 ${fy0 + num("FLOW_H") + 14} < 画布 ${CH}`);
+}
+
+console.log("\nLAYOUT OK");
