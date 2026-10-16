@@ -58,8 +58,8 @@ global.fetch = () => Promise.reject(new Error("fetch must not be used"));
 global.setInterval = () => 0;
 global.clearInterval = () => {};
 const api = new Function(
-  code + "\n;return {choose, submit, levels, stepTo, getStep: () => step," +
-         "         getQS: () => QS};")();
+  code + "\n;return {choose, submit, levels, stepTo, loadSet," +
+         "         getStep: () => step, getQS: () => QS};")();
 
 await new Promise((r) => setTimeout(r, 400));
 
@@ -122,3 +122,31 @@ console.log(`${sep ? "ok  " : "MISS"} 结构三档未分开的说明`);
 if (!sep) throw new Error("expected the 'not separated' note for these rates");
 
 console.log("\nSMOKE OK");
+
+
+/* The ledger set takes a different path: no rates file, nobase on every
+   question, and the trader's own stop/target revealed only after the answer.
+   A missing rates file must not break the load. */
+await api.loadSet("mine");
+await new Promise((r) => setTimeout(r, 200));
+const mineQ = api.getQS();
+if (!mineQ.length) throw new Error("ledger set did not load");
+if (!mineQ.every((q) => q.nobase))
+  throw new Error("every ledger question must be flagged nobase");
+if (!mineQ.every((q) => q.myStop != null && q.myTarget != null))
+  throw new Error("ledger questions must carry the stop and target used");
+console.log(`ok   我的交易：${mineQ.length} 题，全部 nobase，带当时的止损止盈`);
+
+els["s-stop"].value = "1.0";
+els["s-tgt"].value = "2.0";
+api.choose("enter");
+api.submit();
+const mv = els.vd.innerHTML;
+for (const tok of ["你当时", "没有基准率"]) {
+  if (!mv.includes(tok)) throw new Error(`ledger reveal missing: ${tok}`);
+}
+if (mv.includes("深回落") && mv.includes("到 +2ATR"))
+  throw new Error("base rates must not be quoted at a nobase question");
+console.log("ok   揭晓显示当时参数，且不套用基准率");
+
+console.log("\nMINE OK");

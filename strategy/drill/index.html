@@ -7,6 +7,7 @@
   --ink:#14201f; --ink-2:#4a5a59; --ink-3:#7b8a89;
   --accent:#0d6e78; --ok:#0d7490; --bad:#c2410c;
   --stop:#c2410c; --tgt:#0d7490; --prof:#8b96a0; --poc:#a16207; --hm:#2f6d7a;
+  --up:#1a9e5c; --dn:#d1495b;
   --font:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
   color-scheme:light;
@@ -16,6 +17,7 @@
   --ink:#e5ecea; --ink-2:#a2b0ae; --ink-3:#6e7c7b;
   --accent:#4cb6bf; --ok:#39a8bd; --bad:#e0743f;
   --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
+  --up:#35b87a; --dn:#e0646f;
   color-scheme:dark;
 }}
 :root[data-theme="dark"]{
@@ -23,6 +25,7 @@
   --ink:#e5ecea; --ink-2:#a2b0ae; --ink-3:#6e7c7b;
   --accent:#4cb6bf; --ok:#39a8bd; --bad:#e0743f;
   --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
+  --up:#35b87a; --dn:#e0646f;
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -95,6 +98,7 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
       <select id="conf" style="font-size:12px;padding:4px 6px">
         <option value="1">最低点之后 1 根（确认）</option>
         <option value="0">最低点当根</option>
+        <option value="mine">我自己做过的单</option>
       </select></label>
   </div>
   <p class="hint">SOXL 1 分钟,决策前 120 根、后 60 根。右侧是当时能画出来的筹码分布(只用到决策那根为止),下方是 RSI(6)。
@@ -190,6 +194,8 @@ function draw(q, reveal){
         profC = cs.getPropertyValue("--prof").trim(),
         pocC = cs.getPropertyValue("--poc").trim(),
         hmC = cs.getPropertyValue("--hm").trim(),
+        upC = cs.getPropertyValue("--up").trim(),
+        dnC = cs.getPropertyValue("--dn").trim(),
         surf = cs.getPropertyValue("--surface").trim();
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   cv.width = CW*dpr; cv.height = CH*dpr; cv.style.aspectRatio = CW+"/"+CH;
@@ -261,14 +267,18 @@ function draw(q, reveal){
   // ---- candles ----------------------------------------------------------
   const bw = Math.max(1.8, (W/n)*0.62);
   for (let i=0;i<last;i++){
-    const x = X(i), mk = i === q.mark;
-    g.globalAlpha = i > q.mark ? .95 : (mk ? 1 : .72);
-    g.strokeStyle = mk ? acc : ink; g.lineWidth = mk ? 1.3 : .8;
+    /* Colour AND fill carry the direction, not colour alone: at four pixels
+       wide the hollow/solid difference alone was invisible, which is how
+       every candle ended up looking black. */
+    const x = X(i), mk = i === q.mark, up = c[i] >= o[i];
+    const col = up ? upC : dnC;
+    g.globalAlpha = i > q.mark ? .95 : (mk ? 1 : .80);
+    g.strokeStyle = col; g.lineWidth = mk ? 1.8 : 1.0;
     g.beginPath(); g.moveTo(x, Y(h[i])); g.lineTo(x, Y(l[i])); g.stroke();
     const y1 = Y(Math.max(o[i],c[i])), y2 = Y(Math.min(o[i],c[i]));
     const bh = Math.max(1, y2-y1);
-    if (c[i] >= o[i]) g.strokeRect(x-bw/2+.4, y1+.4, bw-.8, Math.max(.8,bh-.8));
-    else { g.fillStyle = mk ? acc : ink; g.fillRect(x-bw/2, y1, bw, bh); }
+    if (up) g.strokeRect(x-bw/2+.4, y1+.4, bw-.8, Math.max(.8,bh-.8));
+    else { g.fillStyle = col; g.fillRect(x-bw/2, y1, bw, bh); }
     g.globalAlpha = 1;
   }
   const mx = X(q.mark);
@@ -442,6 +452,7 @@ function submit(){
   $("play").hidden = false;
   stepTo(0);
   badge();
+  autoPlay();          // runs itself; ◀ ▶ and ⏸ take over at any point
 
   const vd = $("vd"); vd.hidden = false;
   const what = q.kind;
@@ -449,7 +460,35 @@ function submit(){
      when confirm=1, and the gap between them is information the chart
      already showed -- worth naming so it is read as a cost, not a freebie. */
   let mine = "";
-  if (q.confirm > 0){
+  if (q.kind === "我的交易"){
+    /* Shown only now. Up front it would anchor the answer, which is the one
+       thing this exercise is meant to be free of. */
+    const d = Math.abs(q.entry - q.myStop) / q.atr;
+    const td = Math.abs(q.myTarget - q.entry) / q.atr;
+    const rr = td / (d || 1);
+    mine = `<div style="margin-top:10px;padding:8px 10px;border-left:3px solid var(--ink-3);background:var(--line-soft)">` +
+      `<b>你当时</b>：止损 ${fmt(q.myStop)}（${d.toFixed(2)} ATR）、` +
+      `目标 ${fmt(q.myTarget)}（${td.toFixed(2)} ATR，${rr.toFixed(2)} R），` +
+      `结果 <b>${q.myWL === "win" ? "盈利" : "亏损"}</b>` +
+      (q.myR == null ? "" : ` ${q.myR >= 0 ? "+" : ""}${q.myR} R`) + "。";
+    if (rec.choice === "enter"){
+      const dd = rec.stopAtr - d, tt = rec.tgtAtr - td;
+      mine += `<br>这次你止损 ${rec.stopAtr.toFixed(2)} ATR（` +
+        `${Math.abs(dd) < 0.15 ? "和当时相近" : dd > 0 ? "放宽了" : "收紧了"}）、` +
+        `目标 ${rec.tgtAtr.toFixed(2)} ATR（` +
+        `${Math.abs(tt) < 0.15 ? "和当时相近" : tt > 0 ? "放远了" : "拉近了"}）。`;
+      const ref = settle(q, d, td);
+      mine += `<br><span style="color:var(--ink-3)">同一个入场点，用你当时那套参数重算是 ` +
+        `<b>${ref.r>=0?"+":""}${ref.r.toFixed(2)} R</b>；你这次是 ` +
+        `<b>${rec.r>=0?"+":""}${rec.r.toFixed(2)} R</b>。` +
+        (rec.r > ref.r ? "参数改好了 —— 位置本身没问题。"
+                       : "换一套参数也没救回来 —— 问题多半在位置。") + `</span>`;
+    } else {
+      mine += `<br>这次你放过了。`;
+    }
+    if (q.note) mine += `<br><i style="color:var(--ink-3)">当时复盘：${q.note}</i>`;
+    mine += `</div>`;
+  } else if (q.confirm > 0){
     const give = q.entry - q.low0;
     mine = `<p style="margin-top:8px;color:var(--ink-3);font-size:12px">` +
            `最低点是 ${fmt(q.low0)}，你在它之后第 ${q.confirm} 根收盘 ` +
@@ -513,6 +552,12 @@ function context(q){
     `都是截至决策这根的回看窗口。1m 翻得快也噪声大，` +
     `15m 稳但在转折点上落后。</span></p>`;
 
+  if (q.nobase){
+    s += `<p style="margin:0;color:var(--ink-2);font-size:12.5px">` +
+      `<b>这一类没有基准率。</b>这是你自己选的入场点，不属于我测过的「深回落」` +
+      `或「浅回调」，所以上面那些命中率对它不适用，这里不套用。</p></div>`;
+    return s;
+  }
   s += `<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:4px">历史基准 · 同类位置，不是对这一笔的预测</div>`;
   const dr = q.dr1;
   const key = q.kind && dr != null
@@ -742,7 +787,11 @@ function autoPlay(){
   $("b-auto").textContent = "⏸ 暂停";
   const q = QS[idx];
   const a = ans[q.id];
-  const stopAt = a && a.bar ? a.bar : (q.c.length - 1 - q.mark);
+  /* Play to the end of the window, not to the settling bar: the bars after
+     the trade closed are what tell you whether the exit was early or the
+     location was simply wrong, and that is the part worth watching. The
+     settling bar is still called out in the counter. */
+  const stopAt = q.c.length - 1 - q.mark;
   timer = setInterval(() => {
     if (step >= stopAt){ clearInterval(timer); timer = null;
                          $("b-auto").textContent = "⏩ 自动"; return; }
@@ -797,8 +846,14 @@ function loadSet(conf){
   try{ localStorage.setItem("drill:conf", String(conf)); }catch(e){}
   $("prog").textContent = "加载中…";
   BUCKETS = {}; PA = {}; CROSS = {}; ALLIN = null; RMETA = null;
-  return Promise.all([grab(`rates_c${conf}.js`, `RATES_c${conf}`),
-                      grab(`questions_c${conf}.js`, `DRILL_c${conf}`)])
+  /* The ledger set has no rates file on purpose: these entries are not the
+     structural classes anything was measured on, so there is no base rate
+     that honestly applies to them. Each question carries nobase. */
+  const isMine = conf === "mine";
+  return Promise.all([
+      isMine ? Promise.resolve(null) : grab(`rates_c${conf}.js`, `RATES_c${conf}`),
+      grab(isMine ? "questions_mine.js" : `questions_c${conf}.js`,
+           isMine ? "DRILL_mine" : `DRILL_c${conf}`)])
   .then(([R, d]) => {
     if (R){ BUCKETS = R.buckets||{}; PA = R.pa||{}; CROSS = R.cross||{};
             ALLIN = R.allin||null; RMETA = R; }

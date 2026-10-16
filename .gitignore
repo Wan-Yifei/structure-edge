@@ -66,3 +66,6 @@ github_token.txt
 
 # Drill question sets are generated data, not code
 strategy/drill/questions_c*.js
+
+# Ledger-sourced drill questions are generated data too
+strategy/drill/questions_mine.js
