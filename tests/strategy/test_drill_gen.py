@@ -292,3 +292,63 @@ class TestReadSetRoundTrip:
         p = tmp_path / "q.js"
         p.write_text("", encoding="utf-8")
         assert _read_set(p) == []
+
+
+class TestFlowStripShowsNoFuture:
+    """The strip sits under a chart whose right-hand bars are hidden, so any
+    leak there hands over the answer. Written as the property -- make the
+    future extreme and demand the output is byte-identical -- rather than
+    checking an off-by-one, because an off-by-one check passes while the
+    window is wrong by an hour."""
+
+    @staticmethod
+    def _tape(n_min=60, start="2026-10-14 11:00:00", px=100.0):
+        t0 = pd.Timestamp(start)
+        rows = []
+        for m in range(n_min):
+            for s in range(0, 60, 5):
+                # One side per minute and 3,000 a print, so a 10-second
+                # column nets 6,000 and clears BUBBLE_MIN. Alternating every
+                # print instead left every column at net zero.
+                rows.append((t0 + pd.Timedelta(minutes=m, seconds=s),
+                             px + 0.01 * (m % 7), 3000.0,
+                             "BUY" if m % 2 else "SELL"))
+        return pd.DataFrame(rows, columns=["ts", "price", "volume", "direction"])
+
+    def test_bubbles_ignore_prints_after_the_decision(self):
+        from strategy.drill_gen import bubbles
+        tk = self._tape()
+        t = pd.Timestamp("2026-10-14 11:40:00")
+        before = bubbles(tk, t, 99.0, 101.0)
+        after = tk.copy()
+        m = after.ts > t
+        after.loc[m, "volume"] = 5e6          # a flood, entirely in the future
+        after.loc[m, "price"] = 100.9
+        assert bubbles(after, t, 99.0, 101.0) == before
+
+    def test_traded_profile_ignores_prints_after_the_decision(self):
+        from strategy.drill_gen import traded_profile
+        tk = self._tape()
+        t = pd.Timestamp("2026-10-14 11:40:00")
+        before = traded_profile(tk, t, 99.0, 101.0)
+        after = tk.copy()
+        after.loc[after.ts > t, "volume"] = 5e6
+        assert traded_profile(after, t, 99.0, 101.0) == before
+
+    def test_the_last_bubble_column_is_not_past_the_decision(self):
+        """Column c covers (t_end-30min + c*sec, +sec], so the final column
+        ends exactly at the decision bar's close -- never beyond it."""
+        from strategy.drill_gen import HM_MINS, HM_SECS, bubbles
+        tk = self._tape()
+        t = pd.Timestamp("2026-10-14 11:40:00")
+        b = bubbles(tk, t, 99.0, 101.0)
+        ncol = HM_MINS * 60 // HM_SECS
+        assert b, "expected some bubbles in this fixture"
+        assert max(x[0] for x in b) <= ncol - 1
+
+    def test_a_bubble_cannot_sit_outside_the_declared_price_range(self):
+        from strategy.drill_gen import bubbles
+        tk = self._tape()
+        t = pd.Timestamp("2026-10-14 11:40:00")
+        b = bubbles(tk, t, 100.02, 100.04)
+        assert all(100.02 <= x[1] <= 100.04 for x in b)

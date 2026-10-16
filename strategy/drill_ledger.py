@@ -38,7 +38,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from strategy.drill_gen import (AFTER, BEFORE, BUBBLE_MIN, FWD, RTH,
                                 _profile, _read_set, atr, bubbles, call,
                                 day_ticks, flow, heatmap, label,
-                                load_range, structure)
+                                load_range, structure,
+                                traded_profile)
 
 LEDGER = pathlib.Path(__file__).parent / "journal" / "output" / "ledger.csv"
 SESSIONS = {"regular", "overnight", "afterhours", "premarket"}
@@ -236,6 +237,10 @@ def build(code: str, rows: pd.DataFrame, full: pd.DataFrame,
             if bub:
                 q["bub"] = bub
                 q["bubMin"] = int(BUBBLE_MIN)
+            if not hm:
+                tvp = traded_profile(tk, reg["t"].iloc[i], vlo, vhi)
+                if tvp:
+                    q["tvp"] = tvp
             out.append(q)
     return out
 

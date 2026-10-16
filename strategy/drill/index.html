@@ -92,6 +92,9 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
     <span id="saved" class="prog" style="margin:0;color:var(--ink-3)"></span>
     <button id="b-jump" style="padding:5px 10px;font-size:12px" hidden>跳到未答的</button>
     <button id="b-report" style="padding:5px 10px;font-size:12px" hidden>看成绩</button>
+    <label style="font-size:12px;color:var(--ink-3)">跳到
+      <input id="b-goto" type="number" min="1" style="width:62px;font-size:12px;padding:3px 5px">
+      题</label>
     <button id="b-reset" style="padding:5px 10px;font-size:12px"
       title="清空所有答案，重新开始">清空重做</button>
     <button id="b-shuffle" style="padding:5px 10px;font-size:12px"
@@ -132,6 +135,7 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
         <output id="o-tgt"></output>
       </div>
       <div class="row">
+        <button id="b-prev" title="上一题（快捷键 P）">← 上一题</button>
         <button class="pri" id="b-go" disabled>提交</button>
         <span id="play" hidden>
           <button id="b-step" title="走一根 K（快捷键 →）">▶ 下一根</button>
@@ -398,36 +402,52 @@ function draw(q, reveal){
 
   // ---- order flow strip: 30 minutes before the decision ----------------
   const fy0 = ry0 + RSI_H + GAP_H;
+  /* Ends exactly under the decision line above it, so nothing in here can
+     ever appear over the chart's hidden future. */
+  const FW = mx - PAD_L;
   g.strokeStyle = soft; g.lineWidth = 1;
-  g.strokeRect(PAD_L + .5, fy0 + .5, W - 1, FLOW_H - 1);
+  g.strokeRect(PAD_L + .5, fy0 + .5, FW - 1, FLOW_H - 1);
   const H30 = q.hm, B30 = q.bub;
-  if (!H30 && !(B30 && B30.length)){
+  if (!H30 && !q.tvp && !(B30 && B30.length)){
     g.fillStyle = ink3; g.font = "11px ui-monospace,monospace";
     g.textBaseline = "middle"; g.textAlign = "center";
-    g.fillText("这一天没有订单流归档", PAD_L + W / 2, fy0 + FLOW_H / 2);
+    g.fillText("这一天没有订单流归档", PAD_L + FW / 2, fy0 + FLOW_H / 2);
     g.textAlign = "left";
   } else {
     /* The strip spans the 30 minutes ending at the decision, independent of
        the price chart's x-scale, so the columns are readable. */
-    const NC = (H30 && H30.nc) || 180;
-    const SEC = (H30 && H30.sec) || 10;
-    const flo = (H30 ? H30.lo : lo), fhi = (H30 ? H30.hi : hi);
+    const BG0 = H30 || q.tvp;
+    const NC = (BG0 && BG0.nc) || 180;
+    const SEC = (BG0 && BG0.sec) || 10;
+    const flo = BG0 ? BG0.lo : lo, fhi = BG0 ? BG0.hi : hi;
     const FY = p => fy0 + FLOW_H - ((p - flo) / (fhi - flo || 1)) * FLOW_H;
-    const FX = c => PAD_L + (c / NC) * W;
-    if (H30){
-      const bytes = atob(H30.d);
-      for (let r = 0; r < H30.nb; r++){
-        const p0 = flo + (r / H30.nb) * (fhi - flo);
-        const p1 = flo + ((r + 1) / H30.nb) * (fhi - flo);
+    const FX = c => PAD_L + (c / NC) * FW;
+    /* Traded volume arrives sparse ([row, col, value] triples) because its
+       grid is ~95% empty; the resting book arrives dense. Normalise to one
+       lookup so the drawing loop does not care which it got. */
+    const BG = H30 || q.tvp;
+    if (BG){
+      let at;
+      if (BG.d){
+        const bytes = atob(BG.d);
+        at = (r, c) => bytes.charCodeAt(r * BG.nc + c);
+      } else {
+        const m = new Map();
+        for (const [r, c, v] of BG.s) m.set(r * BG.nc + c, v);
+        at = (r, c) => m.get(r * BG.nc + c) || 0;
+      }
+      for (let r = 0; r < BG.nb; r++){
+        const p0 = flo + (r / BG.nb) * (fhi - flo);
+        const p1 = flo + ((r + 1) / BG.nb) * (fhi - flo);
         const ya = FY(p1), yb = FY(p0);
         for (let c = 0; c < NC; c++){
-          const v = bytes.charCodeAt(r * NC + c);
+          const v = at(r, c);
           if (v < 6) continue;
           /* Gamma under 1 lifts the thin levels; a linear ramp renders
              everything but the single largest wall as near-black. */
           g.globalAlpha = 0.72 * Math.pow(v / 255, 0.45);
           g.fillStyle = hmC;
-          g.fillRect(FX(c), ya, Math.max(1, W / NC), Math.max(1, yb - ya));
+          g.fillRect(FX(c), ya, Math.max(1, FW / NC), Math.max(1, yb - ya));
         }
       }
       g.globalAlpha = 1;
@@ -439,24 +459,44 @@ function draw(q, reveal){
         // Radius on sqrt so AREA tracks volume, which is how the eye reads it.
         const rr = 2 + 7 * Math.sqrt(vol / (vmax || 1));
         g.beginPath();
-        g.arc(FX(c) + W / NC / 2, FY(px), rr, 0, 7);
+        g.arc(FX(c) + FW / NC / 2, FY(px), rr, 0, 7);
         g.fillStyle = side > 0 ? upC : dnC;
         g.globalAlpha = .55; g.fill();
         g.globalAlpha = 1; g.lineWidth = 1;
         g.strokeStyle = side > 0 ? upC : dnC; g.stroke();
       }
     }
-    g.save(); g.setLineDash([2, 3]); g.strokeStyle = acc; g.globalAlpha = .6;
-    g.beginPath(); g.moveTo(PAD_L + W - 1, fy0); g.lineTo(PAD_L + W - 1, fy0 + FLOW_H);
-    g.stroke(); g.restore(); g.globalAlpha = 1;
+    /* This strip has its OWN time axis -- 30 minutes ending at the decision,
+       where the chart above spans three hours. Stacked without saying so,
+       the right-hand side reads as the chart's hidden future. Hence the
+       labelled ticks, the solid wall at the right, and the word 决策. */
+    g.save();
+    g.strokeStyle = acc; g.lineWidth = 2; g.globalAlpha = .85;
+    g.beginPath(); g.moveTo(PAD_L + FW, fy0); g.lineTo(PAD_L + FW, fy0 + FLOW_H);
+    g.stroke();
+    g.restore(); g.globalAlpha = 1;
+
     g.fillStyle = ink3; g.font = "10px ui-monospace,monospace";
-    g.textBaseline = "top";
-    g.fillText(`挂单热力 + 主动成交气泡（决策前 30 分钟，每列 ${SEC} 秒` +
-               (q.bubMin ? `，气泡阈值 ${q.bubMin.toLocaleString()} 股净量` : "") +
-               `）`, PAD_L + 3, fy0 + 3);
-    if (!H30){
-      g.fillText("（这一天没有挂单归档，只有成交气泡）", PAD_L + 3, fy0 + 16);
+    g.textBaseline = "top"; g.textAlign = "center";
+    for (const m of [30, 20, 10]){
+      const x = PAD_L + FW * (1 - m / 30);
+      g.save(); g.setLineDash([2, 4]); g.strokeStyle = soft; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(x, fy0); g.lineTo(x, fy0 + FLOW_H); g.stroke();
+      g.restore();
+      g.fillText(`−${m}分`, x + 14, fy0 + FLOW_H + 3);
     }
+    g.fillStyle = acc;
+    g.fillText("决策", PAD_L + FW - 12, fy0 + FLOW_H + 3);
+    g.textAlign = "left";
+
+    g.fillStyle = ink3;
+    g.fillText((H30 ? "挂单热力" : "成交量分布") +
+               ` + 主动成交气泡　这一条的时间轴是「决策前 30 分钟」，` +
+               `和上方价格图不同轴`, PAD_L + 3, fy0 + 3);
+    g.fillText(`每列 ${SEC} 秒` +
+               (q.bubMin ? `，气泡阈值 ${q.bubMin.toLocaleString()} 股净量` : "") +
+               (H30 ? "" : "　（这一天没有挂单归档，背景是成交量分布）"),
+               PAD_L + 3, fy0 + 16);
   }
   g.textAlign = "left";
 }
@@ -521,7 +561,34 @@ function render(){
   $("b-enter").setAttribute("aria-pressed","false");
   $("sl").hidden = true; $("b-go").disabled = true;
   $("b-go").hidden = false; $("b-next").hidden = true; $("vd").hidden = true;
-  syncOut(); draw(q, false);
+  syncOut();
+  /* Coming back to one already answered: show it as it was left, settled and
+     with the future played out. Re-serving it blank would let a second
+     answer overwrite the first, and the first is the one being measured. */
+  const prior = ans[q.id];
+  if (prior){
+    $("sl").hidden = prior.choice !== "enter";
+    $("b-go").hidden = true;
+    $("b-next").hidden = false;
+    $("play").hidden = false;
+    verdictFor(q, prior);
+    step = q.c.length - 1 - q.mark;
+    stepTo(step);
+  } else {
+    draw(q, false);
+  }
+  $("b-prev").disabled = idx === 0;
+  $("b-goto").value = idx + 1;
+  $("b-goto").max = QS.length;
+}
+
+function prev(){ if (idx > 0){ idx--; render(); } }
+function goto1(n){
+  const i = Math.max(1, Math.min(QS.length, n | 0)) - 1;
+  if (!Number.isFinite(i)) return;
+  idx = i;
+  $("report").hidden = true; $("qcard").hidden = false;
+  render();
 }
 
 function syncOut(){
@@ -567,6 +634,11 @@ function submit(){
   badge();
   autoPlay();          // runs itself; ◀ ▶ and ⏸ take over at any point
 
+  verdictFor(q, rec);
+}
+
+/* The reveal, for a question just answered and for one revisited. */
+function verdictFor(q, rec){
   const vd = $("vd"); vd.hidden = false;
   const what = q.kind;
   /* The marked low and the bar you actually decided on are not the same bar
@@ -625,7 +697,7 @@ function submit(){
       `<p>${rec.how}。止损 ${fmt(rec.stop)},目标 ${fmt(rec.target)}。这是${what}。</p>` + mine;
   }
   vd.innerHTML += context(q);
-  $("b-go").hidden = true; $("b-next").hidden = false; $("b-next").focus();
+  $("b-go").hidden = true; $("b-next").hidden = false;
 }
 
 function context(q){
@@ -958,11 +1030,18 @@ document.addEventListener("keydown", e => {
   if (e.key === "ArrowLeft"){ e.preventDefault(); stopAuto(); stepTo(step - 1); }
   if (e.key === " "){ e.preventDefault(); autoPlay(); }
 });
+document.addEventListener("keydown", e => {
+  if (e.target && e.target.tagName === "INPUT") return;
+  if (e.key === "p" || e.key === "P"){ e.preventDefault(); prev(); }
+  if (e.key === "n" || e.key === "N"){ e.preventDefault(); next(); }
+});
 
 $("b-pass").onclick = () => choose("pass");
 $("b-enter").onclick = () => choose("enter");
 $("b-go").onclick = submit;
 $("b-next").onclick = next;
+$("b-prev").onclick = prev;
+$("b-goto").onchange = () => goto1(+$("b-goto").value);
 $("b-reset").onclick = reset;
 $("b-shuffle").onclick = reshuffle;
 $("b-jump").onclick = () => { jump(); $("report").hidden = true;

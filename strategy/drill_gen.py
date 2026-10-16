@@ -305,6 +305,40 @@ def bubbles(tk, t_end, lo: float, hi: float) -> list:
     return out
 
 
+def traded_profile(tk, t_end, lo: float, hi: float):
+    """Volume executed at each price over the 30 minutes up to `t_end`.
+
+    Same shape as `heatmap()` so the page can draw either. Summed within a
+    cell -- unlike the resting book there is nothing to average, every print
+    is a distinct event rather than a repeated snapshot of one order.
+    """
+    if tk is None or len(tk) == 0 or hi <= lo:
+        return None
+    t0 = t_end - pd.Timedelta(minutes=HM_MINS)
+    w = tk[(tk.ts > t0) & (tk.ts <= t_end) &
+           (tk.price >= lo) & (tk.price <= hi)]
+    if w.empty:
+        return None
+    ncol = HM_MINS * 60 // HM_SECS
+    col = ((w.ts - t0).dt.total_seconds().to_numpy() - 1e-9) // HM_SECS
+    row = (w.price.to_numpy(float) - lo) / (hi - lo) * HM_BINS
+    col = np.clip(col.astype(int), 0, ncol - 1)
+    row = np.clip(row.astype(int), 0, HM_BINS - 1)
+    grid = np.zeros((HM_BINS, ncol), float)
+    np.add.at(grid, (row, col), w.volume.to_numpy(float))
+    top = grid.max()
+    if top <= 0:
+        return None
+    # SPARSE, unlike the resting heatmap. Price visits a narrow band at any
+    # instant, so ~95% of this grid is zero; dense base64 would spend 11.5 KB
+    # a question storing nothing and add 4 MB to the set.
+    q = np.round(grid / top * 255).astype(int)
+    rr, cc = np.nonzero(q >= 6)
+    return {"lo": round(float(lo), 3), "hi": round(float(hi), 3),
+            "nb": HM_BINS, "nc": ncol, "sec": HM_SECS, "top": int(round(top)),
+            "s": [[int(r), int(c), int(q[r, c])] for r, c in zip(rr, cc)]}
+
+
 def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
               kinds=("deep", "shallow"), lad=None, tk=None,
               light=False) -> list[dict]:
@@ -412,6 +446,12 @@ def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
         if bub:
             out[-1]["bub"] = bub
             out[-1]["bubMin"] = int(BUBBLE_MIN)
+        # Only when there is no resting book to show -- it is the better
+        # answer where it exists, and carrying both doubles the payload.
+        if not hm:
+            tvp = traded_profile(tk, reg["t"].iloc[i], vlo, vhi)
+            if tvp:
+                out[-1]["tvp"] = tvp
     return out
 
 

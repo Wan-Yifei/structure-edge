@@ -59,6 +59,7 @@ global.setInterval = () => 0;
 global.clearInterval = () => {};
 const api = new Function(
   code + "\n;return {choose, submit, levels, stepTo, loadSet, report, next," +
+         "         prev, goto1," +
          "         getStep: () => step, getQS: () => QS};")();
 
 await new Promise((r) => setTimeout(r, 400));
@@ -215,5 +216,48 @@ const again = api.getQS();
 if (!again.every((q, i) => q.id === ord[i].id))
   throw new Error("order changed on reload -- the seed is not being kept");
 console.log("ok   重新加载顺序不变（种子已保存）");
+
+/* Going back. An answered question must come back REVEALED -- serving it
+   blank again would let a second answer overwrite the first, and the first
+   is the one being scored. */
+api.loadSet("1");
+await new Promise((r) => setTimeout(r, 300));
+els["s-stop"].value = "1.0";
+els["s-tgt"].value = "2.0";
+api.choose("enter");
+api.submit();
+const firstId = api.getQS()[0].id;
+api.next();
+if (els.vd.hidden !== true && els["b-go"].hidden !== false) {
+  // a fresh question shows the submit button and hides the verdict
+}
+api.prev();
+if (els["b-go"].hidden !== true)
+  throw new Error("a revisited answered question must not offer 提交 again");
+if (els.vd.hidden)
+  throw new Error("a revisited answered question must show its verdict");
+console.log("ok   上一题：已答的题回看时带结果，不能重答");
+
+api.goto1(7);
+if (!/第 7 \//.test(els.prog.textContent))
+  throw new Error(`jump failed: ${els.prog.textContent}`);
+api.goto1(99999);
+if (!new RegExp(`第 ${api.getQS().length} \\/`).test(els.prog.textContent))
+  throw new Error("jump should clamp to the last question");
+api.goto1(-3);
+if (!/第 1 \//.test(els.prog.textContent))
+  throw new Error("jump should clamp to the first question");
+console.log("ok   跳题：越界两端都收住");
+
+/* The strip must not extend past the decision line. Its width is derived
+   from the decision bar's x, so a bubble can never be drawn over the
+   chart's hidden future -- which is what made it LOOK like a leak even
+   though the window (decision-30min, decision] never held one. */
+const src = fs.readFileSync(path.join(dir, "index.html"), "utf8");
+if (!/const FW = mx - PAD_L;/.test(src))
+  throw new Error("the flow strip no longer ends at the decision line");
+if (/FX = c => PAD_L \+ \(c \/ NC\) \* W;/.test(src))
+  throw new Error("the flow strip is spanning the full plot width again");
+console.log("ok   订单流条带右边缘对齐决策线，未来区下方留空");
 
 console.log("\nREPORT OK");
