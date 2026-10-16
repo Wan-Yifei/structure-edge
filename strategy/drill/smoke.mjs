@@ -58,7 +58,7 @@ global.fetch = () => Promise.reject(new Error("fetch must not be used"));
 global.setInterval = () => 0;
 global.clearInterval = () => {};
 const api = new Function(
-  code + "\n;return {choose, submit, levels, stepTo, loadSet," +
+  code + "\n;return {choose, submit, levels, stepTo, loadSet, report, next," +
          "         getStep: () => step, getQS: () => QS};")();
 
 await new Promise((r) => setTimeout(r, 400));
@@ -150,3 +150,26 @@ if (mv.includes("深回落") && mv.includes("到 +2ATR"))
 console.log("ok   揭晓显示当时参数，且不套用基准率");
 
 console.log("\nMINE OK");
+
+
+/* The scorecard. Its per-class rows were keyed on the old schema's names
+   (real/decoy/mine) long after the generator started writing 深回落 /
+   浅回调 / 我的交易, so they matched nothing and silently never rendered --
+   a table that is simply missing rows looks like a table. */
+for (let k = 0; k < 4; k++) {
+  els["s-stop"].value = "1.0";
+  els["s-tgt"].value = "2.0";
+  api.choose(k % 2 ? "pass" : "enter");
+  api.submit();
+  api.next();
+}
+api.report();
+const sc = els.score.innerHTML;
+for (const tok of ["你的总 R", "入场后胜率", "盈亏平衡胜率", "我的交易"]) {
+  if (!sc.includes(tok)) throw new Error(`scorecard missing row: ${tok}`);
+}
+if (!/入场后胜率[\s\S]{0,80}\d+ \/ \d+/.test(sc))
+  throw new Error("win rate must show the count, not just a percentage");
+console.log("ok   成绩页：总 R、胜率带分母、盈亏平衡线、分类统计都在");
+
+console.log("\nREPORT OK");

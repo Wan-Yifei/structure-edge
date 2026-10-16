@@ -622,12 +622,23 @@ function report(){
   const byKind = {};
   for (const a of A){
     const k = a.q.kind;
-    (byKind[k] = byKind[k] || {n:0, ent:0, r:0, base:0});
+    (byKind[k] = byKind[k] || {n:0, ent:0, wins:0, r:0, base:0});
     byKind[k].n++; byKind[k].r += a.r;
     byKind[k].base += settle(a.q, 1.0, 2.0).r;
-    if (a.choice === "enter") byKind[k].ent++;
+    if (a.choice === "enter"){
+      byKind[k].ent++;
+      if (a.r > 0) byKind[k].wins++;
+    }
   }
-  const NAME = {real:"深回落", decoy:"浅回调", mine:"你自己的亏损单"};
+  /* Keyed by q.kind as the generator writes it. These were the old schema's
+     names (real/decoy/mine) and so matched nothing -- the per-class rows
+     silently never rendered. */
+  const KINDS = ["深回落", "浅回调", "我的交易"];
+  /* A win rate only means something against the rate this R:R needs to break
+     even: 60% is strong at a 1.5R target and losing at 0.6R. */
+  const needW = isNaN(avgTgt) ? NaN : 1 / (1 + avgTgt);
+  const passed = A.filter(a => a.choice === "pass");
+  const missed = passed.filter(a => settle(a.q, 1.0, 2.0).r > 0).length;
 
   const rows = [
     ["你的总 R", `${totR>=0?"+":""}${totR.toFixed(2)}`],
@@ -643,14 +654,22 @@ function report(){
      `${(allIn11-baseCost)>=0?"+":""}${(allIn11-baseCost).toFixed(2)}`],
     ["已答题数", `${A.length} / ${QS.length}`],
     ["入场次数", `${ent.length} / ${A.length}`],
-    ["入场后胜率", ent.length ? `${Math.round(100*wins/ent.length)}%` : "—"],
+    ["入场后胜率", ent.length
+      ? `${wins} / ${ent.length} = ${Math.round(100*wins/ent.length)}%` : "—"],
+    ["这个盈亏比的盈亏平衡胜率", isNaN(needW) ? "—"
+      : `${Math.round(100*needW)}%　${ent.length && wins/ent.length >= needW
+          ? "✓ 够了" : "✗ 还不够"}`],
+    ["放过的题里本可盈利的", passed.length
+      ? `${missed} / ${passed.length}　（按 1 ATR 止损 / 2R 算）` : "—"],
     ["平均止损", isNaN(avgStop) ? "—" : `${avgStop.toFixed(2)} ATR`],
     ["平均目标", isNaN(avgTgt) ? "—" : `${avgTgt.toFixed(2)} R`],
   ];
-  for (const k of ["real","decoy","mine"]){
+  for (const k of KINDS){
     const b = byKind[k]; if (!b) continue;
-    rows.push([`${NAME[k]}（${b.n} 题，进 ${b.ent}）`,
-               `${b.r>=0?"+":""}${b.r.toFixed(2)} R   基准 ${b.base>=0?"+":""}${b.base.toFixed(2)}`]);
+    const wr = b.ent ? `${b.wins}/${b.ent} = ${Math.round(100*b.wins/b.ent)}%` : "—";
+    rows.push([`${k}（${b.n} 题，进 ${b.ent}）`,
+               `${b.r>=0?"+":""}${b.r.toFixed(2)} R　胜率 ${wr}　` +
+               `基准 ${b.base>=0?"+":""}${b.base.toFixed(2)}`]);
   }
   $("score").innerHTML = rows.map(([k,v]) =>
     `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
