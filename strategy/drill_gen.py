@@ -349,6 +349,20 @@ def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
     return out
 
 
+def _read_set(path: pathlib.Path) -> list[dict]:
+    """Read a question set back, whether it was written as .json or as .js.
+
+    The .js form is `window.DRILL_c1=[...];` so that the page can load it
+    through a <script> tag under file://. That is not JSON, and --append read
+    it with json.loads -- which is why the 21:00 job failed on its first real
+    run. Parsing both shapes here keeps the two ends from drifting again.
+    """
+    t = path.read_text(encoding="utf-8").strip()
+    if t.startswith("window."):
+        t = t[t.index("=") + 1:].rstrip(";").strip()
+    return json.loads(t) if t else []
+
+
 def main() -> None:
     import argparse
 
@@ -363,13 +377,24 @@ def main() -> None:
                          "than the newest one already in the file")
     ap.add_argument("--keep", type=int, default=600,
                     help="cap on total questions; oldest sessions drop first")
+    ap.add_argument("--replace", action="store_true",
+                    help="regenerate the sessions in --start..--end, dropping "
+                         "what is already on file for those days. Use after a "
+                         "data fix: --append would skip them as already done.")
     args = ap.parse_args()
 
     out = pathlib.Path(args.out)
     prior = []
-    if args.append and out.exists():
-        prior = json.loads(out.read_text(encoding="utf-8"))
-        if prior:
+    if (args.append or args.replace) and out.exists():
+        prior = _read_set(out)
+        if prior and args.replace:
+            lo = str(pd.Timestamp(args.start).date())
+            hi = str(pd.Timestamp(args.end).date())
+            before = len(prior)
+            prior = [r for r in prior if not (lo <= r["day"] <= hi)]
+            print(f"replace: dropped {before - len(prior)} question(s) "
+                  f"in {lo}..{hi}, {len(prior)} kept")
+        elif prior:
             newest = max(r["day"] for r in prior)
             args.start = (pd.Timestamp(newest)
                           + pd.Timedelta(days=1)).strftime("%Y-%m-%d")

@@ -251,3 +251,44 @@ class TestHeatmap:
         lad = self._ladder()
         t = pd.Timestamp("2026-10-14 10:10:00")
         assert heatmap(lad, t, 200.0, 210.0) is None
+
+
+class TestReadSetRoundTrip:
+    """--append reads back what the generator wrote. The two ends drifted
+    once already: output moved to `window.DRILL_c1=[...];` for file:// and
+    the reader was still calling json.loads, so the first scheduled append
+    died on a JSONDecodeError."""
+
+    @staticmethod
+    def _rows():
+        return [{"id": "a_c1", "day": "2026-10-14", "tm": "11:30"},
+                {"id": "b_c1", "day": "2026-10-15", "tm": "13:05"}]
+
+    def test_reads_plain_json(self, tmp_path):
+        import json as _json
+        from strategy.drill_gen import _read_set
+        p = tmp_path / "q.json"
+        p.write_text(_json.dumps(self._rows()), encoding="utf-8")
+        assert _read_set(p) == self._rows()
+
+    def test_reads_the_js_assignment_the_page_loads(self, tmp_path):
+        import json as _json
+        from strategy.drill_gen import _read_set
+        p = tmp_path / "q.js"
+        p.write_text(f"window.DRILL_c1={_json.dumps(self._rows())};",
+                     encoding="utf-8")
+        assert _read_set(p) == self._rows()
+
+    def test_reads_confirm0_naming_too(self, tmp_path):
+        import json as _json
+        from strategy.drill_gen import _read_set
+        p = tmp_path / "q.js"
+        p.write_text(f"window.DRILL_c0={_json.dumps(self._rows())};",
+                     encoding="utf-8")
+        assert len(_read_set(p)) == 2
+
+    def test_empty_file_is_an_empty_set_not_a_crash(self, tmp_path):
+        from strategy.drill_gen import _read_set
+        p = tmp_path / "q.js"
+        p.write_text("", encoding="utf-8")
+        assert _read_set(p) == []

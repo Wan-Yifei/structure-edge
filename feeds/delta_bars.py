@@ -93,15 +93,37 @@ def load(code: str, start: datetime | str, end: datetime | str,
     data it did not.
     """
     start, end = pd.Timestamp(start), pd.Timestamp(end)
+    # A bare date means midnight, so `end="2026-10-14"` used to cut that whole
+    # session's intraday bars out of the answer. Callers pass dates far more
+    # often than timestamps, and the silent version of this bug is the worse
+    # one: the caller gets a frame, just without the last day in it.
+    if end == end.normalize():
+        end = end + pd.Timedelta(days=1) - pd.Timedelta(minutes=1)
     p = _cache_path(code)
+    cached = None
     if p.exists() and not refresh:
-        df = pd.read_parquet(p)
-        if len(df) and df.index.min() <= start and df.index.max() >= end:
-            return df.loc[start:end]
-    df = build(code, start, end)
+        cached = pd.read_parquet(p)
+        if len(cached) and cached.index.min() <= start and cached.index.max() >= end:
+            return cached.loc[start:end]
+
+    # Build only what is missing and MERGE. Overwriting with the built range
+    # shrank the cache to whatever the last caller asked for -- the nightly
+    # holdout job runs with --days 3 and cut five months down to four days,
+    # after which every other caller silently got a near-empty frame.
+    if cached is not None and len(cached) and not refresh \
+            and start >= cached.index.min():
+        gap_start = cached.index.max()
+        fresh = build(code, gap_start, end)
+        df = pd.concat([cached, fresh])
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+    else:
+        df = build(code, start, end)
+        if cached is not None and len(cached) and not refresh:
+            df = pd.concat([cached, df])
+            df = df[~df.index.duplicated(keep="last")].sort_index()
     p.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(p)
-    return df
+    return df.loc[start:end]
 
 
 def coverage(df: pd.DataFrame) -> pd.DataFrame:
