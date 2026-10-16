@@ -93,8 +93,9 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
     <button id="b-jump" style="padding:5px 10px;font-size:12px" hidden>跳到未答的</button>
     <button id="b-report" style="padding:5px 10px;font-size:12px" hidden>看成绩</button>
     <label style="font-size:12px;color:var(--ink-3)">跳到
-      <input id="b-goto" type="number" min="1" style="width:62px;font-size:12px;padding:3px 5px">
-      题</label>
+      <input id="b-goto" type="text" style="width:104px;font-size:12px;padding:3px 5px"
+        title="位置序号，或题目时间如 10-15 11:32。序号只在本次加载内稳定——下次加载时已答的会排到前面。"
+        placeholder="序号或 10-15 11:32"></label>
     <button id="b-reset" style="padding:5px 10px;font-size:12px"
       title="清空所有答案，重新开始">清空重做</button>
     <button id="b-shuffle" style="padding:5px 10px;font-size:12px"
@@ -537,7 +538,10 @@ function settle(q, stopAtr, tgtAtr){
 
 function render(){
   const q = QS[idx];
-  $("prog").textContent = `第 ${idx+1} / ${QS.length} 题`;
+  const nDone = QS.filter(x => ans[x.id]).length;
+  $("prog").textContent = `第 ${idx+1} / ${QS.length} 题` +
+    (nDone && nDone < QS.length
+      ? `　（已答 ${nDone} 题排在前面，第 ${nDone+1} 题起是新的）` : "");
   const rv = q.rsi[q.mark];
   const dcol = v => v == null ? "var(--ink-3)"
                   : (v >= 0 ? "var(--ok)" : "var(--bad)");
@@ -581,14 +585,34 @@ function render(){
     draw(q, false);
   }
   $("b-prev").disabled = idx === 0;
-  $("b-goto").value = idx + 1;
-  $("b-goto").max = QS.length;
+  $("b-goto").value = `${idx + 1}`;
+  $("b-goto").placeholder = `${idx + 1} / ${QS.length}`;
 }
 
 function prev(){ if (idx > 0){ idx--; render(); } }
-function goto1(n){
-  const i = Math.max(1, Math.min(QS.length, n | 0)) - 1;
-  if (!Number.isFinite(i)) return;
+/* Position OR identity. A bare number is a position in the current order,
+   which is only stable within one load: answered questions move to the
+   front on the next one, so "第 52 题" points somewhere else tomorrow. A
+   date and time addresses the question itself and keeps working -- which is
+   what you want when you noted one down to come back to. */
+function goto1(v){
+  const s = String(v == null ? "" : v).trim();
+  if (!s) return;
+  let i = -1;
+  // A leading minus is still a position attempt, not a date -- clamp it.
+  if (/^-?[0-9]+$/.test(s)){
+    i = Math.max(1, Math.min(QS.length, parseInt(s, 10))) - 1;
+  } else {
+    const key = s.replace(/[^0-9:]/g, "");     // 10-15 11:32 -> 101511:32
+    i = QS.findIndex(q => (q.day.slice(5).replace(/-/g, "") + q.tm)
+                            .replace(/[^0-9:]/g, "") === key);
+    if (i < 0) i = QS.findIndex(q => q.tm === s);
+    if (i < 0){
+      $("saved").textContent = `找不到 ${s}（可输入位置序号，或「10-15 11:32」）`;
+      return;
+    }
+  }
+  if (!Number.isFinite(i) || i < 0) return;
   idx = i;
   $("report").hidden = true; $("qcard").hidden = false;
   render();
@@ -955,7 +979,19 @@ function restore(){
     try{ const raw = localStorage.getItem("drill:"+q.id);
          if (raw) ans[q.id] = JSON.parse(raw); }catch(e){}
   }
+  partition();
   jump();
+}
+/* Answered to the front, unanswered behind, so walking forward from the
+   boundary only ever meets new questions. Done once per load: doing it on
+   every submit would move the question currently under the cursor. */
+function partition(){
+  const done = QS.filter(q => ans[q.id]);
+  const todo = QS.filter(q => !ans[q.id]);
+  /* Re-spread the unanswered group. Spreading the whole list and then
+     splitting it leaves same-session neighbours in the back half wherever
+     the front half took away the questions that had separated them. */
+  QS = done.concat(spreadByDay(todo));
 }
 function jump(){
   const i = QS.findIndex(q => !ans[q.id]);
@@ -1050,7 +1086,7 @@ $("b-enter").onclick = () => choose("enter");
 $("b-go").onclick = submit;
 $("b-next").onclick = next;
 $("b-prev").onclick = prev;
-$("b-goto").onchange = () => goto1(+$("b-goto").value);
+$("b-goto").onchange = () => goto1($("b-goto").value);
 $("b-reset").onclick = reset;
 $("b-shuffle").onclick = reshuffle;
 $("b-jump").onclick = () => { jump(); $("report").hidden = true;

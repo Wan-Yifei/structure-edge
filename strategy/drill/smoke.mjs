@@ -59,7 +59,7 @@ global.setInterval = () => 0;
 global.clearInterval = () => {};
 const api = new Function(
   code + "\n;return {choose, submit, levels, stepTo, loadSet, report, next," +
-         "         prev, goto1," +
+         "         prev, goto1, isAnswered: (id) => !!ans[id], getIdx: () => idx," +
          "         getStep: () => step, getQS: () => QS};")();
 
 await new Promise((r) => setTimeout(r, 400));
@@ -290,3 +290,77 @@ console.log("\nREPORT OK");
 }
 
 console.log("\nLAYOUT OK");
+
+/* Answered questions belong at the front. next() is idx++ and does not look
+   at whether a question is answered, so without the partition, walking
+   forward from anywhere lands on ones already done -- answered in an earlier
+   session, or reached by a jump. */
+{
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  const qs = api.getQS();
+  // Answer a scatter of them, then reload so the partition runs on restore.
+  for (const i of [3, 11, 25, 40, 61]) {
+    api.goto1(i + 1);
+    els["s-stop"].value = "1.0";
+    els["s-tgt"].value = "2.0";
+    api.choose(i % 2 ? "pass" : "enter");
+    api.submit();
+  }
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  const after = api.getQS();
+  const answered = after.map((q) => api.isAnswered(q.id));
+  const firstTodo = answered.indexOf(false);
+  if (firstTodo < 5)
+    throw new Error(`expected 5 answered at the front, got ${firstTodo}`);
+  if (answered.slice(firstTodo).some(Boolean))
+    throw new Error("an answered question is sitting behind the boundary");
+  console.log(`ok   已答的 ${firstTodo} 题排在最前，之后全是新题`);
+
+  // The unanswered run must still keep sessions apart.
+  const todo = after.slice(firstTodo);
+  let adj = 0;
+  for (let i = 1; i < todo.length; i++)
+    if (todo[i].day === todo[i - 1].day) adj++;
+  if (adj > 0)
+    throw new Error(`${adj} same-session neighbours in the unanswered run`);
+  console.log("ok   未答区间内相邻同日仍为 0");
+}
+
+console.log("\nPARTITION OK");
+
+/* Jumping by identity. A position number is only stable within one load --
+   the next one moves answered questions to the front -- so the box also
+   takes the question's own date and time, which does not move. */
+{
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  const qs = api.getQS();
+  const target = qs[40];
+  const label = target.day.slice(5) + " " + target.tm;   // MM-DD HH:MM
+
+  api.goto1(label);
+  if (api.getQS()[api.getIdx()].id !== target.id)
+    throw new Error(`jump by "${label}" landed on the wrong question`);
+  console.log(`ok   按时间跳题：「${label}」命中`);
+
+  // And it survives a reorder, which a position number does not.
+  els["s-stop"].value = "1.0";
+  els["s-tgt"].value = "2.0";
+  api.goto1(1); api.choose("pass"); api.submit();
+  api.goto1(2); api.choose("pass"); api.submit();
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  api.goto1(label);
+  if (api.getQS()[api.getIdx()].id !== target.id)
+    throw new Error("jump by date/time broke after the order changed");
+  console.log("ok   重排之后按时间跳题仍然命中同一题");
+
+  api.goto1("99-99 99:99");
+  if (!/找不到/.test(els.saved.textContent))
+    throw new Error("an unmatched time should say so, not jump silently");
+  console.log("ok   跳到不存在的时间会提示，而不是静默乱跳");
+}
+
+console.log("\nJUMP OK");
