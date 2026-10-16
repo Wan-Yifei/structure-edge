@@ -167,6 +167,10 @@ let step = 0, timer = null;   // bars of the future played so far
 
 const $ = id => document.getElementById(id);
 const fmt = v => v.toFixed(2);
+/* Signed, with a real minus sign (U+2212) so + and − have the
+   same visual weight. A short ASCII hyphen next to a bold number
+   is easy to miss, which is how "入场 — +0.50 R" read as negative. */
+const sr = (v, d = 2) => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(d);
 
 /* Right-anchored boxed tag, the liquidity-heatmap style: a dashed rule across
    the plot and the number in a bordered chip at the right edge, so a price
@@ -385,7 +389,7 @@ function render(){
   const rv = q.rsi[q.mark];
   const dcol = v => v == null ? "var(--ink-3)"
                   : (v >= 0 ? "var(--ok)" : "var(--bad)");
-  const dtxt = v => v == null ? "—" : `${v>=0?"+":""}${v.toFixed(2)}`;
+  const dtxt = v => v == null ? "—" : `${sr(v, 2)}`;
   $("meta").innerHTML =
     `<span>${q.day} <b>${q.tm}</b></span>` +
     `<span><b>${q.sym}</b> ${q.dir === "short" ? "做空" : "做多"}</span>` +
@@ -482,8 +486,8 @@ function submit(){
         `${Math.abs(tt) < 0.15 ? "和当时相近" : tt > 0 ? "放远了" : "拉近了"}）。`;
       const ref = settle(q, d, td);
       mine += `<br><span style="color:var(--ink-3)">同一个入场点，用你当时那套参数重算是 ` +
-        `<b>${ref.r>=0?"+":""}${ref.r.toFixed(2)} R</b>；你这次是 ` +
-        `<b>${rec.r>=0?"+":""}${rec.r.toFixed(2)} R</b>。` +
+        `<b>${sr(ref.r, 2)} R</b>；你这次是 ` +
+        `<b>${sr(rec.r, 2)} R</b>。` +
         (rec.r > ref.r ? "参数改好了 —— 位置本身没问题。"
                        : "换一套参数也没救回来 —— 问题多半在位置。") + `</span>`;
     } else {
@@ -501,14 +505,14 @@ function submit(){
   if (rec.choice === "pass"){
     const ref = settle(q, 1.0, 2.0);
     vd.className = "verdict pass";
-    vd.innerHTML = `<h3>放过 — <span class="big">0.00 R</span></h3>` +
+    vd.innerHTML = `<h3>放过：<span class="big">0.00 R</span></h3>` +
       `<p>这是${what}。参照一个 1 ATR 止损 / 2R 目标,进场的话是 ` +
-      `<b>${ref.r>=0?"+":""}${ref.r.toFixed(2)} R</b>(${ref.how})。` +
+      `<b>${sr(ref.r, 2)} R</b>(${ref.how})。` +
       `放过不扣分,但这就是它的机会成本。</p>` + mine;
   } else {
     const win = rec.r > 0;
     vd.className = "verdict " + (win ? "win" : "loss");
-    vd.innerHTML = `<h3>入场 — <span class="big">${rec.r>=0?"+":""}${rec.r.toFixed(2)} R</span></h3>` +
+    vd.innerHTML = `<h3>入场：<span class="big">${sr(rec.r, 2)} R</span></h3>` +
       `<p>${rec.how}。止损 ${fmt(rec.stop)},目标 ${fmt(rec.target)}。这是${what}。</p>` + mine;
   }
   vd.innerHTML += context(q);
@@ -520,10 +524,10 @@ function context(q){
   const COL = {看涨:"var(--ok)", 看跌:"var(--bad)", 中性:"var(--ink-2)"};
   s += `<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:4px">结构读数 · 整张图的价格行为</div>`;
   s += `<p style="margin:0 0 4px;font-size:13px"><b style="color:${COL[q.call]||"var(--ink)"}">${q.call}</b>` +
-       `<span style="font-family:var(--mono);color:var(--ink-3)">　评分 ${q.sc>=0?"+":""}${q.sc}　趋势 ${q.trend}</span></p>`;
+       `<span style="font-family:var(--mono);color:var(--ink-3)">　评分 ${sr(q.sc, 0)}　趋势 ${q.trend}</span></p>`;
   s += `<ul style="margin:0 0 6px;padding-left:18px;color:var(--ink-2);font-size:12.5px">` +
        q.why.map(([v, x]) =>
-         `<li><span style="font-family:var(--mono);color:${v>0?"var(--ok)":v<0?"var(--bad)":"var(--ink-3)"}">${v>0?"+":""}${v}</span>　${x}</li>`
+         `<li><span style="font-family:var(--mono);color:${v>0?"var(--ok)":v<0?"var(--bad)":"var(--ink-3)"}">${sr(v, 0)}</span>　${x}</li>`
        ).join("") + `</ul>`;
   const pr = PA[q.call], all = PA["_all"];
   if (pr){
@@ -549,7 +553,7 @@ function context(q){
     [["1m", q.dr1], ["5m", q.dr5], ["15m", q.dr15]].map(([nm, v]) =>
       `<span style="display:inline-block;min-width:92px">${nm} ` +
       (v == null ? `<span style="color:var(--ink-3)">—</span>`
-       : `<b style="color:${v>=0?"var(--ok)":"var(--bad)"}">${v>=0?"+":""}${v.toFixed(2)}</b>`) +
+       : `<b style="color:${v>=0?"var(--ok)":"var(--bad)"}">${sr(v, 2)}</b>`) +
       `</span>`).join("") +
     `<br><span style="color:var(--ink-3);font-family:var(--sans);font-size:11.5px">` +
     `都是截至决策这根的回看窗口。1m 翻得快也噪声大，` +
@@ -641,17 +645,17 @@ function report(){
   const missed = passed.filter(a => settle(a.q, 1.0, 2.0).r > 0).length;
 
   const rows = [
-    ["你的总 R", `${totR>=0?"+":""}${totR.toFixed(2)}`],
-    ["每题平均 R", `${totR>=0?"+":""}${(totR/A.length).toFixed(3)}`],
-    ["—— 全部放过", "0.00"],
-    ["—— 全部进场 1:1（1 ATR 止损 / 1R）",
-     `${allIn11>=0?"+":""}${allIn11.toFixed(2)}`],
-    ["—— 全部进场 2:1（1 ATR 止损 / 2R）",
-     `${allIn>=0?"+":""}${allIn.toFixed(2)}`],
+    ["你的总 R", `${sr(totR, 2)}`],
+    ["每题平均 R", sr(totR / A.length, 3)],
+    ["／ 全部放过", "0.00"],
+    ["／ 全部进场 1:1（1 ATR 止损 / 1R）",
+     `${sr(allIn11, 2)}`],
+    ["／ 全部进场 2:1（1 ATR 止损 / 2R）",
+     `${sr(allIn, 2)}`],
     ["扣 4 分钱价差后 · 你",
-     `${(totR-myCost)>=0?"+":""}${(totR-myCost).toFixed(2)}`],
+     `${sr(totR-myCost, 2)}`],
     ["扣 4 分钱价差后 · 全进 1:1",
-     `${(allIn11-baseCost)>=0?"+":""}${(allIn11-baseCost).toFixed(2)}`],
+     `${sr(allIn11-baseCost, 2)}`],
     ["已答题数", `${A.length} / ${QS.length}`],
     ["入场次数", `${ent.length} / ${A.length}`],
     ["入场后胜率", ent.length
@@ -668,22 +672,22 @@ function report(){
     const b = byKind[k]; if (!b) continue;
     const wr = b.ent ? `${b.wins}/${b.ent} = ${Math.round(100*b.wins/b.ent)}%` : "—";
     rows.push([`${k}（${b.n} 题，进 ${b.ent}）`,
-               `${b.r>=0?"+":""}${b.r.toFixed(2)} R　胜率 ${wr}　` +
-               `基准 ${b.base>=0?"+":""}${b.base.toFixed(2)}`]);
+               `${sr(b.r, 2)} R　胜率 ${wr}　` +
+               `基准 ${sr(b.base, 2)}`]);
   }
   $("score").innerHTML = rows.map(([k,v]) =>
     `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
 
   const notes = [];
-  notes.push(`<b>你 ${totR>=0?"+":""}${totR.toFixed(2)} R。</b> ` +
-    `同样这些题,全部进场按 1:1 是 ${allIn11>=0?"+":""}${allIn11.toFixed(2)} R,` +
-    `按 2:1 是 ${allIn>=0?"+":""}${allIn.toFixed(2)} R,全部放过是 0 R。` +
+  notes.push(`<b>你 ${sr(totR, 2)} R。</b> ` +
+    `同样这些题,全部进场按 1:1 是 ${sr(allIn11, 2)} R,` +
+    `按 2:1 是 ${sr(allIn, 2)} R,全部放过是 0 R。` +
     (totR > allIn11
       ? "你赢过了 1:1 的无脑全进 —— 挑选或参数之一起了作用。"
       : "你没赢过 1:1 的无脑全进。这一批里挑选没有加分。") +
     `<br><span style="color:var(--ink-3)">扣掉 4 分钱价差(进出各一次):你 ` +
-    `${(totR-myCost)>=0?"+":""}${(totR-myCost).toFixed(2)} R,全进 1:1 ` +
-    `${(allIn11-baseCost)>=0?"+":""}${(allIn11-baseCost).toFixed(2)} R。` +
+    `${sr(totR-myCost, 2)} R,全进 1:1 ` +
+    `${sr(allIn11-baseCost, 2)} R。` +
     `止损越紧,这一刀砍得越深。</span>`);
   notes.push(`<span style="display:none"></span>` +
     (totR > allIn && totR > 0
@@ -711,7 +715,7 @@ function report(){
     if (!g.length) continue;
     const r = g.reduce((s,a)=>s+a.r,0);
     notes.push(`<b>${nm}</b>：${g.length} 题，你进了 ${e.length} 笔，` +
-      `合计 ${r>=0?"+":""}${r.toFixed(2)} R。`);
+      `合计 ${sr(r, 2)} R。`);
   }
   if (RMETA && RMETA.dr){
     const rows = ["dr1","dr5","dr15"].map(k => {

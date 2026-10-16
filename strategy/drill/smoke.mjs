@@ -172,4 +172,19 @@ if (!/入场后胜率[\s\S]{0,80}\d+ \/ \d+/.test(sc))
   throw new Error("win rate must show the count, not just a percentage");
 console.log("ok   成绩页：总 R、胜率带分母、盈亏平衡线、分类统计都在");
 
+/* Signs. "入场 — +0.50 R" read as negative: the em dash sat exactly where a
+   minus would, and the ASCII hyphen used for negatives is visually lighter
+   than the plus beside it. Every signed R now goes through one formatter. */
+const vd = els.vd.innerHTML;
+if (/入场\s*—|放过\s*—/.test(vd))
+  throw new Error("verdict heading still separates with a dash");
+if (!/入场：|放过：/.test(vd))
+  throw new Error("verdict heading should separate with a colon");
+const allText = vd + els.score.innerHTML;
+if (!/[+\u2212]\d/.test(allText))
+  throw new Error("expected signed numbers in the verdict or scorecard");
+if (/(^|[\s>(])-\d+\.\d+/.test(allText))
+  throw new Error("a negative number still uses an ASCII hyphen, not U+2212");
+console.log("ok   正负号：冒号分隔，负号用 \u2212，加减视觉等重");
+
 console.log("\nREPORT OK");
