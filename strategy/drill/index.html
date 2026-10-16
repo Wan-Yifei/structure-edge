@@ -161,8 +161,9 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
    that quote a rate stay hidden rather than showing a stale one. */
 let BUCKETS = {}, PA = {}, CROSS = {}, ALLIN = null, RMETA = null;
 
-const FWD = 30, CW = 1040, CH = 520;
-const PRICE_H = 360, RSI_H = 96, GAP_H = 14;
+const FLOW_H = 150, GAP_H = 14;
+const FWD = 30, CW = 1040, CH = 520 + FLOW_H + GAP_H;
+const PRICE_H = 360, RSI_H = 96;
 const PROF_W = 110, LBL_W = 128, PAD_L = 8, PAD_T = 12;
 let QS = [], idx = 0, ans = {}, pick = null, db = null;
 let step = 0, timer = null;   // bars of the future played so far
@@ -312,33 +313,6 @@ function draw(q, reveal){
     g.fillText(`${nm} ${fmt(p)}`, PAD_L + 3, y - 2);
   }
 
-  // ---- resting liquidity, behind everything ------------------------------
-  /* Only the days the ladder archive covers carry one; the rest draw without
-     it rather than showing an empty panel. It ends at the decision bar even
-     after the reveal -- the book past that point was never visible. */
-  if (q.hm){
-    const H = q.hm, bytes = atob(H.d);
-    const t0 = q.mark - H.nc*H.sec/60;        // 30 minutes back, in bars
-    for (let r=0; r<H.nb; r++){
-      const p0 = H.lo + (r  /H.nb)*(H.hi-H.lo);
-      const p1 = H.lo + ((r+1)/H.nb)*(H.hi-H.lo);
-      const ya = Y(p1), yb = Y(p0);
-      if (yb < PAD_T || ya > PAD_T+PRICE_H) continue;
-      for (let cI=0; cI<H.nc; cI++){
-        const v = bytes.charCodeAt(r*H.nc + cI);
-        if (v < 6) continue;                   // floor: sub-pixel ink
-        const xa = X(t0 + cI*H.sec/60), xb = X(t0 + (cI+1)*H.sec/60);
-        if (xb < PAD_L) continue;
-        /* Gamma below 1 lifts the thin levels: a linear ramp renders
-           everything but the single biggest wall as near-black. */
-        g.globalAlpha = 0.72 * Math.pow(v/255, 0.45);
-        g.fillStyle = hmC;
-        g.fillRect(xa, ya, Math.max(1, xb-xa), Math.max(1, yb-ya));
-      }
-    }
-    g.globalAlpha = 1;
-  }
-
   // ---- candles ----------------------------------------------------------
   const bw = Math.max(1.8, (W/n)*0.62);
   for (let i=0;i<last;i++){
@@ -419,6 +393,70 @@ function draw(q, reveal){
     g.fillStyle = acc; g.beginPath(); g.arc(mx, RY(rv), 3, 0, 7); g.fill();
     tag(g, rail, RY(rv), `RSI ${rv.toFixed(1)}`, acc,
         surf === "#fff" ? "#1b2626" : "#0a1110");
+  }
+  g.textAlign = "left";
+
+  // ---- order flow strip: 30 minutes before the decision ----------------
+  const fy0 = ry0 + RSI_H + GAP_H;
+  g.strokeStyle = soft; g.lineWidth = 1;
+  g.strokeRect(PAD_L + .5, fy0 + .5, W - 1, FLOW_H - 1);
+  const H30 = q.hm, B30 = q.bub;
+  if (!H30 && !(B30 && B30.length)){
+    g.fillStyle = ink3; g.font = "11px ui-monospace,monospace";
+    g.textBaseline = "middle"; g.textAlign = "center";
+    g.fillText("这一天没有订单流归档", PAD_L + W / 2, fy0 + FLOW_H / 2);
+    g.textAlign = "left";
+  } else {
+    /* The strip spans the 30 minutes ending at the decision, independent of
+       the price chart's x-scale, so the columns are readable. */
+    const NC = (H30 && H30.nc) || 180;
+    const SEC = (H30 && H30.sec) || 10;
+    const flo = (H30 ? H30.lo : lo), fhi = (H30 ? H30.hi : hi);
+    const FY = p => fy0 + FLOW_H - ((p - flo) / (fhi - flo || 1)) * FLOW_H;
+    const FX = c => PAD_L + (c / NC) * W;
+    if (H30){
+      const bytes = atob(H30.d);
+      for (let r = 0; r < H30.nb; r++){
+        const p0 = flo + (r / H30.nb) * (fhi - flo);
+        const p1 = flo + ((r + 1) / H30.nb) * (fhi - flo);
+        const ya = FY(p1), yb = FY(p0);
+        for (let c = 0; c < NC; c++){
+          const v = bytes.charCodeAt(r * NC + c);
+          if (v < 6) continue;
+          /* Gamma under 1 lifts the thin levels; a linear ramp renders
+             everything but the single largest wall as near-black. */
+          g.globalAlpha = 0.72 * Math.pow(v / 255, 0.45);
+          g.fillStyle = hmC;
+          g.fillRect(FX(c), ya, Math.max(1, W / NC), Math.max(1, yb - ya));
+        }
+      }
+      g.globalAlpha = 1;
+    }
+    if (B30 && B30.length){
+      const vmax = Math.max(...B30.map(b => b[2]));
+      for (const [c, px, vol, side] of B30){
+        if (px < flo || px > fhi) continue;
+        // Radius on sqrt so AREA tracks volume, which is how the eye reads it.
+        const rr = 2 + 7 * Math.sqrt(vol / (vmax || 1));
+        g.beginPath();
+        g.arc(FX(c) + W / NC / 2, FY(px), rr, 0, 7);
+        g.fillStyle = side > 0 ? upC : dnC;
+        g.globalAlpha = .55; g.fill();
+        g.globalAlpha = 1; g.lineWidth = 1;
+        g.strokeStyle = side > 0 ? upC : dnC; g.stroke();
+      }
+    }
+    g.save(); g.setLineDash([2, 3]); g.strokeStyle = acc; g.globalAlpha = .6;
+    g.beginPath(); g.moveTo(PAD_L + W - 1, fy0); g.lineTo(PAD_L + W - 1, fy0 + FLOW_H);
+    g.stroke(); g.restore(); g.globalAlpha = 1;
+    g.fillStyle = ink3; g.font = "10px ui-monospace,monospace";
+    g.textBaseline = "top";
+    g.fillText(`挂单热力 + 主动成交气泡（决策前 30 分钟，每列 ${SEC} 秒` +
+               (q.bubMin ? `，气泡阈值 ${q.bubMin.toLocaleString()} 股净量` : "") +
+               `）`, PAD_L + 3, fy0 + 3);
+    if (!H30){
+      g.fillText("（这一天没有挂单归档，只有成交气泡）", PAD_L + 3, fy0 + 16);
+    }
   }
   g.textAlign = "left";
 }
@@ -687,10 +725,15 @@ function report(){
   const allIn = A.reduce((s,a) => s + settle(a.q, 1.0, 2.0).r, 0);
   const allIn11 = A.reduce((s,a) => s + settle(a.q, 1.0, 1.0).r, 0);
   /* A spread is cents, not a fraction of R, so it costs most on the tightest
-     stops: 18% of a 24-cent 1R against 3% of a $1.41 one, over 588 events.
-     In and out, hence the doubling. */
-  const SPREAD = 0.04;
-  const costOf = (q, stopAtr) => 2 * SPREAD / (stopAtr * q.atr);
+     stops: at a 24-cent 1R it is 12%, at a $1.41 one 2%.
+     A round trip costs ONE spread, not two: buying at the ask is half a
+     spread above the mid and selling at the bid is half below, and they sum
+     to the quoted gap. This used to charge two, overstating the cost 2x.
+     0.03 is the measured RTH median over 154,263 book snapshots (p25 0.02,
+     p75 0.04, p90 0.05) -- 2 sessions, so treat it as the right order of
+     magnitude rather than a precise constant. */
+  const SPREAD = 0.03;
+  const costOf = (q, stopAtr) => SPREAD / (stopAtr * q.atr);
   const myCost = A.reduce((s,a) =>
     s + (a.choice === "enter" ? costOf(a.q, a.stopAtr) : 0), 0);
   const baseCost = A.reduce((s,a) => s + costOf(a.q, 1.0), 0);
@@ -717,18 +760,26 @@ function report(){
 
   const rows = [
     ["你的总 R", `${sr(totR, 2)}`],
-    ["每题平均 R", sr(totR / A.length, 3)],
+    /* Two denominators, because they answer different questions. Per
+       QUESTION divides by everything looked at, passes included, and is the
+       one comparable to the baselines below -- they also run over the whole
+       set. Per TRADE divides by entries only. A selective trader who enters
+       2 of 20 for +4 R reads +0.20 on the first and +2.00 on the second;
+       showing one without the other flatters or buries them. */
+    ["每题平均 R（含放过的，分母 " + A.length + "）", sr(totR / A.length, 3)],
+    ["每笔平均 R（只看进场，分母 " + ent.length + "）",
+     ent.length ? sr(totR / ent.length, 3) : "—"],
     ["／ 全部放过", "0.00"],
     ["／ 全部进场 1:1（1 ATR 止损 / 1R）",
      `${sr(allIn11, 2)}`],
     ["／ 全部进场 2:1（1 ATR 止损 / 2R）",
      `${sr(allIn, 2)}`],
-    ["扣 4 分钱价差后 · 你",
+    ["扣价差后（3 分钱／来回）· 你",
      `${sr(totR-myCost, 2)}`],
-    ["扣 4 分钱价差后 · 全进 1:1",
+    ["扣价差后（3 分钱／来回）· 全进 1:1",
      `${sr(allIn11-baseCost, 2)}`],
     ["已答题数", `${A.length} / ${QS.length}`],
-    ["入场次数", `${ent.length} / ${A.length}`],
+    ["入场 / 放过", `${ent.length} 进　${A.length - ent.length} 放过`],
     ["入场后胜率", ent.length
       ? `${wins} / ${ent.length} = ${Math.round(100*wins/ent.length)}%` : "—"],
     ["这个盈亏比的盈亏平衡胜率", isNaN(needW) ? "—"
@@ -756,7 +807,7 @@ function report(){
     (totR > allIn11
       ? "你赢过了 1:1 的无脑全进 —— 挑选或参数之一起了作用。"
       : "你没赢过 1:1 的无脑全进。这一批里挑选没有加分。") +
-    `<br><span style="color:var(--ink-3)">扣掉 4 分钱价差(进出各一次):你 ` +
+    `<br><span style="color:var(--ink-3)">扣掉一个价差（3 分钱，买卖各担一半）后：你 ` +
     `${sr(totR-myCost, 2)} R,全进 1:1 ` +
     `${sr(allIn11-baseCost, 2)} R。` +
     `止损越紧,这一刀砍得越深。</span>`);

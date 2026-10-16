@@ -35,9 +35,10 @@ import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
-from strategy.drill_gen import (AFTER, BEFORE, FWD, RTH, _profile, _read_set,
-                                atr, call, flow, heatmap, label, load_range,
-                                structure)
+from strategy.drill_gen import (AFTER, BEFORE, BUBBLE_MIN, FWD, RTH,
+                                _profile, _read_set, atr, bubbles, call,
+                                day_ticks, flow, heatmap, label,
+                                load_range, structure)
 
 LEDGER = pathlib.Path(__file__).parent / "journal" / "output" / "ledger.csv"
 SESSIONS = {"regular", "overnight", "afterhours", "premarket"}
@@ -113,7 +114,7 @@ def _dist_atr(level: float, entry_ref: float, soxl_entry: float,
 
 
 def build(code: str, rows: pd.DataFrame, full: pd.DataFrame,
-          book_ladder=None) -> list[dict]:
+          book_ladder=None, with_ticks: bool = True) -> list[dict]:
     """One question per ledger row whose minute is in `full`."""
     from strategy.session_vp.reversal import compute_rsi
 
@@ -124,6 +125,9 @@ def build(code: str, rows: pd.DataFrame, full: pd.DataFrame,
             continue
         # Per day, not per range: the ladder is ~7.5M rows a day. Most of
         # these trades predate the archive, so this is usually empty.
+        # Bubbles need only the tape, which goes back five months, so these
+        # get them even though the book archive starts 2026-10-12.
+        tk = day_ticks(code, day) if with_ticks else None
         lad = None
         if book_ladder is not None:
             try:
@@ -228,6 +232,10 @@ def build(code: str, rows: pd.DataFrame, full: pd.DataFrame,
             hm = heatmap(lad, reg["t"].iloc[i], vlo, vhi)
             if hm:
                 q["hm"] = hm
+            bub = bubbles(tk, reg["t"].iloc[i], vlo, vhi)
+            if bub:
+                q["bub"] = bub
+                q["bubMin"] = int(BUBBLE_MIN)
             out.append(q)
     return out
 

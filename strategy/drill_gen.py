@@ -200,6 +200,10 @@ def load_range(code: str, start: str, end: str) -> pd.DataFrame:
 
 
 HM_MINS, HM_SECS, HM_BINS = 30, 10, 48
+# Net aggressor volume a 10s column needs to raise a bubble. The viewer
+# defaults to 500, which on SOXL marks most columns and so says little;
+# 5000 picks out the ones worth looking at.
+BUBBLE_MIN = 5000.0
 
 
 def heatmap(lad, t_end, lo, hi):
@@ -244,8 +248,66 @@ def heatmap(lad, t_end, lo, hi):
             "d": base64.b64encode(q.tobytes()).decode("ascii")}
 
 
+def day_ticks(code: str, day) -> pd.DataFrame:
+    """Raw prints for one session, for the bubble columns."""
+    import sqlite3
+    d0 = pd.Timestamp(day).normalize()
+    db = _ROOT / "db" / "ticks.db"
+    if not db.exists():
+        return pd.DataFrame()
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        d = pd.read_sql(
+            "select ts,price,volume,direction from ticks where code=? "
+            "and ts>=? and ts<? order by ts", con,
+            params=(code, f"{d0:%Y-%m-%d} 00:00:00",
+                    f"{d0 + pd.Timedelta(days=1):%Y-%m-%d} 00:00:00"))
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        con.close()
+    if d.empty:
+        return d
+    d["ts"] = pd.to_datetime(d.ts, errors="coerce")
+    return d.dropna(subset=["ts"]).sort_values("ts")
+
+
+def bubbles(tk, t_end, lo: float, hi: float) -> list:
+    """Columns whose net aggressor volume clears BUBBLE_MIN.
+
+    Returns [col, price, net, side], side +1 buying and -1 selling. The price
+    is the column's last print, which always exists; the viewer uses the
+    book's mid, which only exists for the days the ladder archive covers.
+    """
+    if tk is None or len(tk) == 0:
+        return []
+    t0 = t_end - pd.Timedelta(minutes=HM_MINS)
+    w = tk[(tk.ts > t0) & (tk.ts <= t_end)]
+    w = w[w.direction.isin(("BUY", "SELL"))]
+    if w.empty:
+        return []
+    ncol = HM_MINS * 60 // HM_SECS
+    col = ((w.ts - t0).dt.total_seconds().to_numpy() - 1e-9) // HM_SECS
+    col = np.clip(col.astype(int), 0, ncol - 1)
+    sign = np.where(w.direction.to_numpy() == "BUY", 1.0, -1.0)
+    net = np.bincount(col, weights=sign * w.volume.to_numpy(float),
+                      minlength=ncol)
+    last = np.full(ncol, np.nan)
+    for c, v in zip(col, w.price.to_numpy(float)):
+        last[c] = v
+    out = []
+    for c in np.nonzero(np.abs(net) >= BUBBLE_MIN)[0]:
+        pxc = last[c]
+        if not np.isfinite(pxc) or pxc < lo or pxc > hi:
+            continue
+        out.append([int(c), round(float(pxc), 2), int(abs(net[c])),
+                    1 if net[c] > 0 else -1])
+    return out
+
+
 def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
-              kinds=("deep", "shallow"), lad=None, light=False) -> list[dict]:
+              kinds=("deep", "shallow"), lad=None, tk=None,
+              light=False) -> list[dict]:
     """Questions for one session. `confirm` bars past the marked low.
 
     `light` drops the chart arrays, the volume profile and the heatmap and
@@ -346,6 +408,10 @@ def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
         hm = heatmap(lad, reg["t"].iloc[i], vlo, vhi)
         if hm:
             out[-1]["hm"] = hm
+        bub = bubbles(tk, reg["t"].iloc[i], vlo, vhi)
+        if bub:
+            out[-1]["bub"] = bub
+            out[-1]["bubMin"] = int(BUBBLE_MIN)
     return out
 
 
@@ -432,7 +498,9 @@ def main() -> None:
                     lad = None
             except Exception:
                 lad = None
-        got = build_day(args.code, d, full, confirm=args.confirm, lad=lad)
+        tk = day_ticks(args.code, d)
+        got = build_day(args.code, d, full, confirm=args.confirm,
+                        lad=lad, tk=tk)
         if got:
             print(f"  {d.date()}: {len(got)}", flush=True)
             rows.extend(got)
