@@ -94,6 +94,8 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
     <button id="b-report" style="padding:5px 10px;font-size:12px" hidden>看成绩</button>
     <button id="b-reset" style="padding:5px 10px;font-size:12px"
       title="清空所有答案，重新开始">清空重做</button>
+    <button id="b-shuffle" style="padding:5px 10px;font-size:12px"
+      title="重新打乱出题顺序，不影响已答的记录">重新洗牌</button>
     <label style="margin-left:auto;font-size:12px;color:var(--ink-3)">决策位置
       <select id="conf" style="font-size:12px;padding:4px 6px">
         <option value="1">最低点之后 1 根（确认）</option>
@@ -164,6 +166,75 @@ const PRICE_H = 360, RSI_H = 96, GAP_H = 14;
 const PROF_W = 110, LBL_W = 128, PAD_L = 8, PAD_T = 12;
 let QS = [], idx = 0, ans = {}, pick = null, db = null;
 let step = 0, timer = null;   // bars of the future played so far
+
+/* Questions arrive sorted by day and time, so walking them in order served
+   adjacent minutes of one session back to back -- by the third you have
+   already read that chart, and the exercise tests recall instead of
+   judgement. They are shuffled, then spread so that no two neighbours come
+   from the same session.
+
+   The shuffle is SEEDED and the seed is kept, so the order is stable across
+   reloads: "jump to the first unanswered" has to mean the same place
+   tomorrow. "重新洗牌" draws a new seed. */
+function rngFrom(seed){            // mulberry32
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let x = Math.imul(a ^ (a >>> 15), 1 | a);
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function shuffled(arr, seed){
+  const a = arr.slice(), rnd = rngFrom(seed);
+  for (let i = a.length - 1; i > 0; i--){
+    const j = Math.floor(rnd() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+/* Greedy spread: always take from the session with the most left that is not
+   the one just placed. Same shape as rearranging a string so no two equal
+   characters touch -- it succeeds whenever any arrangement can, and when one
+   session holds more than half the questions it places what it can and lets
+   the rest fall where they must. */
+function spreadByDay(qs){
+  const byDay = new Map();
+  for (const q of qs){
+    if (!byDay.has(q.day)) byDay.set(q.day, []);
+    byDay.get(q.day).push(q);
+  }
+  const out = [];
+  let prev = null;
+  while (out.length < qs.length){
+    let pick = null, best = -1;
+    for (const [day, list] of byDay){
+      if (!list.length || day === prev) continue;
+      if (list.length > best){ best = list.length; pick = day; }
+    }
+    if (pick === null){                    // only the previous day is left
+      for (const [day, list] of byDay) if (list.length){ pick = day; break; }
+    }
+    out.push(byDay.get(pick).shift());
+    prev = pick;
+  }
+  return out;
+}
+function orderFor(conf, qs){
+  const key = "drill:seed:" + conf;
+  let seed = 0;
+  try{ seed = parseInt(localStorage.getItem(key) || "0", 10) || 0; }catch(e){}
+  if (!seed){
+    seed = (Math.random() * 0xFFFFFFFF) >>> 0;
+    try{ localStorage.setItem(key, String(seed)); }catch(e){}
+  }
+  return spreadByDay(shuffled(qs, seed));
+}
+function reshuffle(){
+  const conf = $("conf").value;
+  try{ localStorage.removeItem("drill:seed:" + conf); }catch(e){}
+  loadSet(conf);
+}
 
 const $ = id => document.getElementById(id);
 const fmt = v => v.toFixed(2);
@@ -842,6 +913,7 @@ $("b-enter").onclick = () => choose("enter");
 $("b-go").onclick = submit;
 $("b-next").onclick = next;
 $("b-reset").onclick = reset;
+$("b-shuffle").onclick = reshuffle;
 $("b-jump").onclick = () => { jump(); $("report").hidden = true;
   $("qcard").hidden = false; render(); };
 $("b-report").onclick = report;
@@ -883,7 +955,7 @@ function loadSet(conf){
   .then(([R, d]) => {
     if (R){ BUCKETS = R.buckets||{}; PA = R.pa||{}; CROSS = R.cross||{};
             ALLIN = R.allin||null; RMETA = R; }
-    QS = d || []; ans = {}; idx = 0;
+    QS = orderFor(conf, d || []); ans = {}; idx = 0;
     if (!QS.length){
       $("prog").textContent = "没有题目";
       $("qcard").hidden = true; $("report").hidden = true;

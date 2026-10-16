@@ -187,4 +187,33 @@ if (/(^|[\s>(])-\d+\.\d+/.test(allText))
   throw new Error("a negative number still uses an ASCII hyphen, not U+2212");
 console.log("ok   正负号：冒号分隔，负号用 \u2212，加减视觉等重");
 
+/* Order. Questions ship sorted by day and time, so in file order the first
+   few come from adjacent minutes of one session -- the chart is already
+   familiar by the second and the drill stops testing judgement. */
+await api.loadSet("1");
+await new Promise((r) => setTimeout(r, 300));
+const ord = api.getQS();
+if (ord.length < 50) throw new Error("expected the full generated set");
+
+const fileOrder = [...ord].sort((a, b) =>
+  a.day === b.day ? a.tm.localeCompare(b.tm) : a.day.localeCompare(b.day));
+const sameAsFile = ord.every((q, i) => q.id === fileOrder[i].id);
+if (sameAsFile) throw new Error("the set is still in file order");
+
+let adjacent = 0;
+for (let i = 1; i < ord.length; i++)
+  if (ord[i].day === ord[i - 1].day) adjacent++;
+if (adjacent > 0)
+  throw new Error(`${adjacent} neighbouring pairs share a session`);
+console.log(`ok   出题顺序：${ord.length} 题已打乱，相邻同日 0 对`);
+
+/* Stable across reloads: "jump to the first unanswered" has to mean the same
+   place tomorrow, so the seed is kept. */
+await api.loadSet("1");
+await new Promise((r) => setTimeout(r, 300));
+const again = api.getQS();
+if (!again.every((q, i) => q.id === ord[i].id))
+  throw new Error("order changed on reload -- the seed is not being kept");
+console.log("ok   重新加载顺序不变（种子已保存）");
+
 console.log("\nREPORT OK");
