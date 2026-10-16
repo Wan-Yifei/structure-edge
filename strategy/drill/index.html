@@ -123,10 +123,10 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
       </div>
       <div class="sliders" id="sl" hidden>
         <label for="s-stop">止损</label>
-        <input type="range" id="s-stop" min="0.25" max="2" step="0.05" value="0.75">
+        <input type="range" id="s-stop" min="0.25" max="5" step="0.05" value="1.00">
         <output id="o-stop"></output>
         <label for="s-tgt">目标</label>
-        <input type="range" id="s-tgt" min="0.25" max="6" step="0.05" value="1.5">
+        <input type="range" id="s-tgt" min="0.25" max="8" step="0.05" value="2.00">
         <output id="o-tgt"></output>
       </div>
       <div class="row">
@@ -463,13 +463,16 @@ function submit(){
   if (q.kind === "我的交易"){
     /* Shown only now. Up front it would anchor the answer, which is the one
        thing this exercise is meant to be free of. */
-    const d = Math.abs(q.entry - q.myStop) / q.atr;
-    const td = Math.abs(q.myTarget - q.entry) / q.atr;
-    const rr = td / (d || 1);
+    /* Stored as ATR distances from the real fill, which is not this bar's
+       close -- matching absolute levels put the stop on the wrong side of
+       half the rows. Distance is what carries across. */
+    const d = q.myStopAtr, td = q.myTgtAtr, rr = q.myRR;
     mine = `<div style="margin-top:10px;padding:8px 10px;border-left:3px solid var(--ink-3);background:var(--line-soft)">` +
       `<b>你当时</b>：止损 ${fmt(q.myStop)}（${d.toFixed(2)} ATR）、` +
       `目标 ${fmt(q.myTarget)}（${td.toFixed(2)} ATR，${rr.toFixed(2)} R），` +
       `结果 <b>${q.myWL === "win" ? "盈利" : "亏损"}</b>` +
+      (q.onSoxs ? `<br><span style="color:var(--ink-3)">这一笔你是买 SOXS 表达的；` +
+                  `图和订单流都是 SOXL，止损止盈按实测 beta −1.008 折过来。</span>` : "") +
       (q.myR == null ? "" : ` ${q.myR >= 0 ? "+" : ""}${q.myR} R`) + "。";
     if (rec.choice === "enter"){
       const dd = rec.stopAtr - d, tt = rec.tgtAtr - td;

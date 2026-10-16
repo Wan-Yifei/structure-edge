@@ -41,16 +41,27 @@ from strategy.drill_gen import (AFTER, BEFORE, FWD, RTH, _profile, _read_set,
 
 LEDGER = pathlib.Path(__file__).parent / "journal" / "output" / "ledger.csv"
 SESSIONS = {"regular", "overnight", "afterhours", "premarket"}
+# Measured, not assumed: regression of 1m SOXS returns on SOXL returns over
+# 2026-09-01..10-10 RTH. Used to carry a SOXS stop/target onto SOXL.
+SOXS_BETA = -1.008
 
 
 def read_ledger(path: pathlib.Path = LEDGER,
-                symbols=("SOXL",)) -> pd.DataFrame:
+                symbols=("SOXL", "SOXS")) -> pd.DataFrame:
     """Trades with an entry time, a stop and a target, on `symbols`.
 
-    SOXL only by default. The collector's targets list holds just US.SOXL, so
-    `ticks.db` has 52 million SOXL prints and 52 thousand SOXS ones -- a
-    single day from July. SOXS questions would carry no delta at all, and
-    delta_r is the one feature that has survived every control.
+    SOXS trades are kept and expressed as SOXL. The decision is made on
+    SOXL's order flow -- SOXS is only the vehicle -- and the two are inverse
+    to within measurement error: over 10,920 shared RTH minutes the 1-minute
+    return correlation is -0.9898, the regression slope -1.008, and on the
+    largest 20% of SOXL moves the signs disagree 100% of the time. So a short
+    in SOXS is read as a long in SOXL, and the stop and target convert as
+    percentages of entry.
+
+    That also rescues them: the collector's targets list holds only US.SOXL,
+    so `ticks.db` has 52 million SOXL prints against 52 thousand SOXS ones --
+    one day in July. Charted as SOXS these questions would have no delta at
+    all, and delta_r is the one feature that has survived every control.
     """
     d = pd.read_csv(path)
     d.columns = [c.strip().lstrip("﻿") for c in d.columns]
@@ -61,7 +72,44 @@ def read_ledger(path: pathlib.Path = LEDGER,
     d = d.assign(st=pd.to_datetime(d.ShotTime, errors="coerce"))
     d = d.dropna(subset=["st"])
     d = d[d["W/L"].isin(("win", "loss"))]
+    # itertuples cannot address "INIT R/R" -- the space and slash become a
+    # positional name -- and the entry recovery needs it by name.
+    d = d.rename(columns={"INIT R/R": "init_rr"})
+    d = d[d.init_rr.notna()]
     return d.sort_values("st").reset_index(drop=True)
+
+
+def recover_entry(stop: float, target: float, rr: float) -> float:
+    """The fill price, from the stop, the target and the planned R/R.
+
+    The ledger's `Entry` column is a dash on nearly every row, and the
+    screenshot timestamp is not the fill -- using that minute's close put
+    both the stop and the target on the same side of "entry" and produced
+    levels that made sense for neither direction. But |target-entry| =
+    rr * |entry-stop| solves for entry, and the result lands between the two
+    levels on 100% of rows, which the close did not.
+    """
+    return (target + rr * stop) / (1.0 + rr)
+
+
+def _dist_atr(level: float, entry_ref: float, soxl_entry: float,
+              atr_val: float, on_soxs: bool) -> float:
+    """How far a recorded level sat from the fill, in ATR of the SOXL chart.
+
+    Distances transfer where absolute levels do not. The fill price is not
+    the close of the screenshot's minute -- matching the two put the stop on
+    the wrong side of "entry" on half the SOXL rows -- but how far the stop
+    sat from wherever the fill actually was carries over cleanly, and in ATR
+    it is directly comparable to the sliders, which are also in ATR.
+
+    SOXS distances invert through the measured beta on the way across.
+    """
+    if entry_ref <= 0 or atr_val <= 0:
+        return float("nan")
+    pct = (float(level) - entry_ref) / entry_ref
+    if on_soxs:
+        pct = pct / SOXS_BETA
+    return abs(pct) * soxl_entry / atr_val
 
 
 def build(code: str, rows: pd.DataFrame, full: pd.DataFrame,
@@ -106,6 +154,19 @@ def build(code: str, rows: pd.DataFrame, full: pd.DataFrame,
             a = A[i]
             if not np.isfinite(a) or a <= 0:
                 continue
+            # `Direction` is the view on the MARKET, not the side taken on
+            # the instrument: a "short" row on SOXS is a long position in
+            # SOXS expressing a bearish SOXL view. Checked against the data --
+            # SOXS targets sit above the SOXS entry 92.5% of the time, which
+            # is a long in SOXS. So the column already reads in SOXL terms
+            # and needs no flip; only the price levels have to be carried
+            # across, and those invert.
+            # The instrument is decided by the PRICE, not the Symbol column:
+            # some rows carry SOXS-level stops under Symbol=SOXL. `_on_soxs`
+            # and `_entry_ref` are attached in main() by comparing the
+            # recovered fill against both closes at that minute.
+            on_soxs = bool(r._on_soxs)
+            entry_ref = float(r._entry_ref)
             short = str(r.Direction).lower() == "short"
             y = label(H, L, C, i, a)
             s, e = i - BEFORE, min(len(reg), i + AFTER + 1)
@@ -114,7 +175,7 @@ def build(code: str, rows: pd.DataFrame, full: pd.DataFrame,
             prof, va = _profile(reg.iloc[:i + 1])
             q = {
                 "id": f"mine_{r.st:%Y%m%d_%H%M}_{r.Symbol}",
-                "kind": "我的交易", "sym": r.Symbol,
+                "kind": "我的交易", "sym": "SOXL", "vehicle": r.Symbol,
                 "dir": "short" if short else "long",
                 "day": str(day.date()), "tm": f"{reg['t'].iloc[i]:%H:%M}",
                 "confirm": 0, "mark": i - s,
@@ -134,9 +195,19 @@ def build(code: str, rows: pd.DataFrame, full: pd.DataFrame,
                 "poc": round(float(va["poc"]), 3),
                 "vah": round(float(va["vah"]), 3),
                 "val": round(float(va["val"]), 3),
-                # Revealed only after the answer is submitted.
-                "myStop": round(float(r.Stop), 3),
-                "myTarget": round(float(r.Target), 3),
+                # Revealed only after the answer is submitted. A SOXS
+                # stop/target is carried over as a percentage of entry and
+                # divided by the measured beta, which is the only honest way
+                # to put the two instruments on one axis.
+                # Their parameters as ATR distances, then placed on this
+                # question's entry -- which puts them on the correct side by
+                # construction instead of by luck.
+                "myStopAtr": round(_dist_atr(r.Stop, entry_ref, C[i], a, on_soxs), 3),
+                "myTgtAtr": round(_dist_atr(r.Target, entry_ref, C[i], a, on_soxs), 3),
+                "myRR": round(float(r.init_rr), 2),
+                "onSoxs": bool(on_soxs),
+                "rawStop": round(float(r.Stop), 3),
+                "rawTarget": round(float(r.Target), 3),
                 "myWL": str(r["W/L"]),
                 "myR": (None if pd.isna(r.get("RealizedR"))
                         else round(float(r["RealizedR"]), 2)),
@@ -149,6 +220,9 @@ def build(code: str, rows: pd.DataFrame, full: pd.DataFrame,
                 "rsi": [None if not np.isfinite(v) else round(float(v), 1)
                         for v in rsi1[s:e]],
             }
+            sgn = 1.0 if short else -1.0
+            q["myStop"] = round(C[i] + sgn * q["myStopAtr"] * a, 3)
+            q["myTarget"] = round(C[i] - sgn * q["myTgtAtr"] * a, 3)
             vlo = float(min(L[s:i + 1])) - 0.02 * a
             vhi = float(max(H[s:i + 1])) + 0.02 * a
             hm = heatmap(lad, reg["t"].iloc[i], vlo, vhi)
@@ -169,9 +243,9 @@ def main() -> None:
                          "every session.")
     ap.add_argument("--out", default="strategy/drill/questions_mine.js")
     ap.add_argument("--ledger", default=str(LEDGER))
-    ap.add_argument("--symbols", default="SOXL",
-                    help="comma-separated. SOXL only by default -- SOXS has "
-                         "no tick history, so its questions have no delta.")
+    ap.add_argument("--symbols", default="SOXL,SOXS",
+                    help="comma-separated ledger symbols to draw from. Both "
+                         "by default; SOXS trades are charted as SOXL.")
     args = ap.parse_args()
 
     d = read_ledger(pathlib.Path(args.ledger),
@@ -185,20 +259,50 @@ def main() -> None:
 
     lo = (d.st.min() - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
     hi = (d.st.max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    rows = []
     try:
         from feeds import book_ladder
     except Exception:
         book_ladder = None
-    for code, sub in d.groupby("Symbol"):
-        full = load_range(f"US.{code}", lo, hi)
-        if full.empty:
-            print(f"  {code}: 没有 K 线")
-            continue
-        got = build(f"US.{code}", sub, full, book_ladder=book_ladder)
-        nhm = sum(1 for q in got if "hm" in q)
-        print(f"  {code}: {len(got)} 题（{nhm} 题有热力图）")
-        rows.extend(got)
+
+    # Every question is charted on SOXL, because that is the book the
+    # decision was read from. A SOXS row needs its own close at the fill
+    # minute to turn its stop and target into percentages.
+    from feeds.fetcher import fetch_klines
+    closes = {}
+    for sym in ("SOXL", "SOXS"):
+        k = fetch_klines(f"US.{sym}", "1m", lo, hi)
+        k["t"] = pd.to_datetime(k.time_key)
+        closes[sym] = k.set_index("t").close
+
+    on_soxs, entry_ref, keep = [], [], []
+    for r in d.itertuples():
+        e = recover_entry(float(r.Stop), float(r.Target), float(r.init_rr))
+        m = r.st.ceil("1min")
+        cl, cs = closes["SOXL"].get(m), closes["SOXS"].get(m)
+        dl = abs(e / cl - 1) if cl and cl > 0 else 9.9
+        ds = abs(e / cs - 1) if cs and cs > 0 else 9.9
+        is_s = ds < dl
+        on_soxs.append(is_s)
+        entry_ref.append(e)
+        keep.append(min(dl, ds) <= 0.03)      # 3% of the close, or unusable
+    d = d.assign(_on_soxs=on_soxs, _entry_ref=entry_ref, _keep=keep)
+    bad = (~d._keep).sum()
+    if bad:
+        print(f"  {bad} 笔的解出入场价和两个标的当时价格都差 3% 以上，丢掉")
+    d = d[d._keep]
+    mism = (d._on_soxs != (d.Symbol == "SOXS")).sum()
+    if mism:
+        print(f"  {mism} 笔的 Symbol 列和价位对不上，按价位判定")
+
+    full = load_range("US.SOXL", lo, hi)
+    if full.empty:
+        print("没有 SOXL K 线")
+        return
+    rows = build("US.SOXL", d, full, book_ladder=book_ladder)
+    nhm = sum(1 for q in rows if "hm" in q)
+    byv = {"SOXL 原单": sum(1 for q in rows if not q["onSoxs"]),
+           "SOXS 换算": sum(1 for q in rows if q["onSoxs"])}
+    print(f"  {len(rows)} 题（{nhm} 题有热力图） {byv}")
 
     rows.sort(key=lambda r: (r["day"], r["tm"]))
     out = pathlib.Path(args.out)
