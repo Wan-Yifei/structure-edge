@@ -117,7 +117,6 @@ _OB_BULL  = "#26a69a"   # bull OB teal
 _OB_BEAR  = "#ef5350"   # bear OB red
 _OB_BREAK = "#9e9e9e"   # breaker OB grey
 _OB_MIT   = "#ffa726"   # mitigation OB amber
-_EXH_COL  = "#4dd0e1"   # sell-exhaustion marks -- cyan, unused by any overlay
 _EMA_COLS = ["#42a5f5", "#ab47bc", "#ffa726"]  # EMA 20/50/200
 
 # Inverse-leveraged pairs. Hovering a price level on the key symbol also shows
@@ -397,127 +396,6 @@ def load_local_ticks(code: str, date_str: str, tf: str,
         return dict(buckets)
     except Exception:
         return None
-
-
-# ── Sell exhaustion ──────────────────────────────────────────────────────────
-# A burst of aggressive selling that then stops, inside an oversold minute.
-#
-# Both gates are set by how OFTEN the mark should appear -- a handful a
-# session -- and never by what price did afterwards. Measured over 30 SOXL
-# sessions: RSI(6) < 20 admits 3.3% of regular-session minutes, and requiring
-# the burst to reach 10x that session's median five-second selling removes the
-# quiet oversold minutes, where 677 shares "collapsing" scored the same as the
-# 31,499-share flush at 2026-10-13 11:35. Together they mark 6.1 times a
-# session, with no session left blank. At 20x it is 3.7 a session.
-#
-# The mark states a fact about flow: selling surged and then stopped. It is
-# NOT a signal to buy -- over 2,758 five-second windows the same collapse had
-# no relationship to the next fifteen seconds of price (rho +0.02, quintiles
-# non-monotone, every band spanning zero).
-EXH_RSI_MAX    = 20.0    # RSI(6) on the 1m bar holding the burst
-EXH_BURST_MULT = 10.0    # burst >= this many x the session's median 5s sell
-EXH_DROP       = 0.15    # ... then falls to this fraction of itself
-EXH_WAIT       = 30      # seconds the collapse is allowed to take
-EXH_MERGE      = 120     # one flush gives one mark, not six
-
-
-def exhaustion_rsi_map(klines: pd.DataFrame) -> dict:
-    """{(date, 'HH:MM'): RSI(6)} over each session's regular-hours closes.
-
-    Keyed by the minute the TICKS fall in, not the kline's label: time_key is
-    the bar's END, so the bar labelled 11:36 holds 11:35:00-11:35:59.
-    """
-    from strategy.session_vp.reversal import compute_rsi
-    try:
-        t = pd.to_datetime(klines["time_key"])
-    except (KeyError, ValueError):
-        return {}
-    df = pd.DataFrame({"t": t, "close": klines["close"].astype(float)})
-    df = df.dropna().sort_values("t")
-    out: dict = {}
-    for day, g in df.groupby(df.t.dt.date):
-        hh = g.t.dt.hour + g.t.dt.minute / 60
-        reg = g[(hh > 9.5) & (hh <= 16.0)]
-        if len(reg) < 30:
-            continue
-        rsi = compute_rsi(reg.close.reset_index(drop=True), 6)
-        for ts, v in zip(reg.t, rsi):
-            if v is not None and np.isfinite(v):
-                tick_min = ts - timedelta(minutes=1)
-                out[(day, tick_min.strftime("%H:%M"))] = float(v)
-    return out
-
-
-def compute_exhaustion_marks(rows: list[dict], rsi_map: dict,
-                             rsi_max: float = EXH_RSI_MAX,
-                             burst_mult: float = EXH_BURST_MULT) -> list[dict]:
-    """Marks for one day's raw ticks: [{ts, burst, burst_x, lull, rsi}].
-
-    `rows` is load_raw_ticks() output; `rsi_map` comes from
-    exhaustion_rsi_map(). Returns [] rather than raising when the day is too
-    thin to establish a scale.
-    """
-    if not rows or not rsi_map:
-        return []
-    secs, vols, days = [], [], []
-    for r in rows:
-        if str(r.get("direction", "")).upper() != "SELL":
-            continue
-        ts = (r["ts"] if isinstance(r["ts"], datetime)
-              else datetime.fromisoformat(str(r["ts"])))
-        hh = ts.hour + ts.minute / 60
-        if not (9.5 <= hh < 16.0):
-            continue
-        secs.append(ts.hour * 3600 + ts.minute * 60 + ts.second)
-        vols.append(float(r["volume"]))
-        days.append(ts.date())
-    if len(secs) < 500:
-        return []
-
-    out: list[dict] = []
-    s = np.asarray(secs)
-    v = np.asarray(vols)
-    d = np.asarray(days)
-    base = int(9.5 * 3600)
-    for day in np.unique(d):
-        m = d == day
-        slot = (s[m] - base) // 5
-        n = int((16.0 - 9.5) * 3600 // 5)
-        agg = np.bincount(np.clip(slot, 0, n - 1), weights=v[m], minlength=n)
-        nz = agg[agg > 0]
-        if len(nz) < 50:
-            continue
-        scale = float(np.median(nz))
-        if scale <= 0:
-            continue
-        w = EXH_WAIT // 5
-        cand = []
-        for i in range(len(agg) - w):
-            if agg[i] < burst_mult * scale:
-                continue
-            key = (day, (datetime.min + timedelta(
-                seconds=int(base + i * 5))).strftime("%H:%M"))
-            r6 = rsi_map.get(key)
-            if r6 is None or r6 >= rsi_max:
-                continue
-            after = agg[i + 1:i + 1 + w]
-            j = int(np.argmin(after))
-            if after[j] > EXH_DROP * agg[i]:
-                continue
-            cand.append((agg[i], i, i + 1 + j, r6))
-        cand.sort(key=lambda c: -c[0])
-        used: list[int] = []
-        for burst, i, j, r6 in cand:
-            if any(abs(i - u) * 5 < EXH_MERGE for u in used):
-                continue
-            used.append(i)
-            out.append({
-                "ts": datetime.combine(day, datetime.min.time())
-                + timedelta(seconds=int(base + j * 5)),
-                "burst": float(burst), "burst_x": float(burst / scale),
-                "lull": float(agg[j]), "rsi": r6,
-            })
-    return sorted(out, key=lambda r: r["ts"])
 
 
 def load_raw_ticks(code: str, date_str: str) -> list[dict]:
@@ -2034,7 +1912,6 @@ class TradeViewerQt(QMainWindow):
         for key, label in [
             ("heatmap",   "Heatmap"),
             ("delta",     "Δ Delta"),
-            ("exhaust",   "Exh"),   # sell-exhaustion marks (1m only)
             ("kd_band",   "KD"),    # KD fast/slow midline ribbon on main chart
             ("kd",        "KDV"),   # KDV = KD spread-width subplot
             ("cvd",       "CVD"),   # Cumulative Volume Delta subplot
@@ -2559,8 +2436,6 @@ class TradeViewerQt(QMainWindow):
 
         self._bos_items:     list = []  # PlotCurveItem + TextItem per signal
         self._delta_items:   list = []  # TextItem per candle
-        self._exhaust_items: list = []  # sell-exhaustion marks
-        self._exh_cache:     dict = {}  # (code, date) -> (marks, built_at)
         self._ema_items:     list = []  # PlotCurveItem per EMA period
         self._avwap_items:   list = []  # anchored-VWAP curve + anchor line + label
         self._option_wall_items: list = []  # Call/Put Wall + Zero Gamma lines -- cleared+redrawn each update
@@ -3563,11 +3438,6 @@ class TradeViewerQt(QMainWindow):
         if show_delta and buckets:
             self._draw_delta(klines, buckets, cm)
 
-        # Sell-exhaustion marks
-        self._clear_exhaust_items()
-        if self._ind("exhaust"):
-            self._draw_exhaust(klines, self._code_edit.text().strip())
-
         # EMA overlays
         self._clear_ema_items()
         if show_ema:
@@ -3859,107 +3729,6 @@ class TradeViewerQt(QMainWindow):
     def _on_liq_hm_closed(self) -> None:
         self._liq_hm_window = None
         self._liq_hm_btn.setChecked(False)
-
-    def _clear_exhaust_items(self) -> None:
-        for item in self._exhaust_items:
-            self._plot_c.removeItem(item)
-        self._exhaust_items.clear()
-
-    def _exhaustion_marks(self, code: str, klines: pd.DataFrame) -> dict:
-        """{bar_end_datetime: mark} for the days on screen.
-
-        Cached per day because the pass reads every tick of a session --
-        three quarters of a million rows on a busy one -- and the chart
-        redraws on a one-second timer. A finished day never changes, so it is
-        computed once; the running day is refreshed at most every 30 seconds,
-        which is far finer than a mark's own five-second resolution.
-        """
-        try:
-            t = pd.to_datetime(klines["time_key"])
-        except (KeyError, ValueError):
-            return {}
-        days = sorted({d for d in t.dt.date})
-        if not days:
-            return {}
-        rsi_map = exhaustion_rsi_map(klines)
-        if not rsi_map:
-            return {}
-
-        today = datetime.now().date()
-        now = time.time()
-        marks: list = []
-        for day in days:
-            key = (code, day)
-            hit = self._exh_cache.get(key)
-            stale = hit is None or (day >= today and now - hit[1] > 30)
-            if stale:
-                try:
-                    rows = load_raw_ticks(code, day.strftime("%Y-%m-%d"))
-                    got = compute_exhaustion_marks(rows, rsi_map)
-                except Exception:
-                    got = []
-                self._exh_cache[key] = (got, now)
-                hit = self._exh_cache[key]
-            marks.extend(hit[0])
-
-        _, cm = TIMEFRAME_MAP[self._tf_combo.currentText()]
-        out: dict = {}
-        for m in marks:
-            # time_key is the bar's END, so a tick at 11:35:55 belongs to the
-            # bar labelled 11:36.
-            bar_end = candle_start(m["ts"], cm) + timedelta(minutes=cm)
-            prev = out.get(bar_end)
-            if prev is None or m["burst"] > prev["burst"]:
-                out[bar_end] = m
-        return out
-
-    def _draw_exhaust(self, klines: pd.DataFrame, code: str) -> None:
-        """Mark bars where a burst of aggressive selling then stopped.
-
-        Only on 1m: the burst and the collapse both happen inside a single
-        minute -- at 2026-10-13 11:35 the selling went from 31,499 shares to
-        1,582 within thirty seconds -- so a coarser bar shows one heavy bar
-        and hides the thing being marked. The RSI gate was measured on 1m
-        closes too.
-        """
-        _, cm = TIMEFRAME_MAP[self._tf_combo.currentText()]
-        if cm != 1:
-            return
-        marks = self._exhaustion_marks(code, klines)
-        if not marks:
-            return
-        xs, ys, hits = [], [], []
-        for i, (_, row) in enumerate(klines.iterrows()):
-            try:
-                bar_end = datetime.strptime(
-                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-            except ValueError:
-                continue
-            m = marks.get(bar_end)
-            if m is None:
-                continue
-            xs.append(i)
-            ys.append(float(row["low"]))
-            hits.append(m)
-        if not xs:
-            return
-
-        lo, hi = float(klines["low"].min()), float(klines["high"].max())
-        pad = max((hi - lo) * 0.012, 0.01)
-        sc = pg.ScatterPlotItem(
-            x=xs, y=[y - pad for y in ys], symbol="t1", size=9,
-            brush=pg.mkBrush(_EXH_COL), pen=pg.mkPen(_EXH_COL),
-        )
-        self._plot_c.addItem(sc, ignoreBounds=True)
-        self._exhaust_items.append(sc)
-
-        for x, y, m in zip(xs, ys, hits):
-            lbl = pg.TextItem(
-                text=f"{m['burst_x']:.0f}x", color=_EXH_COL, anchor=(0.5, 0.0))
-            lbl.setFont(QFont("Monospace", 6))
-            lbl.setPos(x, y - pad * 2.1)
-            self._plot_c.addItem(lbl, ignoreBounds=True)
-            self._exhaust_items.append(lbl)
 
     def _clear_ema_items(self) -> None:
         for item in self._ema_items:
