@@ -582,12 +582,46 @@ def load_order_book_window(code: str, start: datetime, end: datetime) -> list[di
 # sessions -- the label says 1W because that is the calendar span it covers.
 RANGE_DAYS = {"1d": 1, "2d": 2, "3d": 3, "7d": 5}
 
-# Bars DCVD measures the CVD slope over. Chosen from the distribution on SOXL
-# 1m bars: at a 1-bar lookback 14.7% of bars pin to |DCVD| > 0.9, because a
-# single minute's classified flow is often entirely one-sided. By 10 bars that
-# is 0.4%, with the median at 0.19 and the 99th percentile at 0.77 -- the full
-# range gets used without the indicator living on its rails.
-DCVD_LOOKBACK = 5
+# Bars DCVD measures the CVD slope over.
+#
+# This was 5, on the grounds that a 1-bar lookback pins 14.7% of bars to
+# |DCVD| > 0.9. That figure was measured over ALL bars including pre- and
+# post-market, where 88,418 thin bars push it to 17.3%; across RTH alone it
+# is 1.6%, and the extended session is not traded here. It also contradicted
+# DCVD_SCALE below in this same file, whose 1-bar p99 of 0.93 leaves no room
+# for 14.7% of readings above 0.9.
+#
+# The window is 1 because that is the one that predicts. Over 60 walk-forward
+# out-of-sample sessions, entering on |DCVD| >= 0.4 and risking 1 ATR for 1.5
+# returns +0.207 R a trade long and +0.247 short, against -0.101 and -0.062
+# for entering on every minute. The 5-bar version of the same rule is worth
+# nothing: averaging over five minutes removes the imbalance it is measuring.
+DCVD_LOOKBACK = 1
+
+# Signed volume a bar needs before its DCVD means anything. Below it a single
+# small print swings the ratio to +/-1, so the bar is drawn as a gap instead.
+# It costs almost nothing -- 87 of 38,049 RTH bars, 0.2% -- but it keeps the
+# panel showing the same quantity the backtest traded, which applies the same
+# floor and never trades a bar below it.
+DCVD_MIN_SIGNED = 300.0
+
+# A slower reading drawn behind the bars for context. The bars are each
+# minute's own imbalance; this is the direction of the stretch around them.
+# It is deliberately not the decision value -- see the note on the window.
+DCVD_CONTEXT = 5
+
+# The threshold the backtest validated, drawn on both sides: the long and
+# short rules are symmetric, their lift over their own baselines measured at
+# +0.308 and +0.309 across reward ratios from 1:1 to 1:2.
+DCVD_DECISION = 0.4
+
+# Panel colours. The bars carry the sign, so they reuse the chart's own
+# buy/sell pair; the context line takes a hue used nowhere else so it cannot
+# be read as a third direction, and the decision line is warmer still,
+# because a reference line sharing a series' hue is what made the earlier
+# panel ambiguous.
+_DCVD_CONTEXT_COL = "#b39ddb"
+_DCVD_DECISION_COL = "#ffd54f"
 
 # |DCVD| quantiles by window, measured over 38,049 RTH minutes / 104 sessions
 # of SOXL (2026-05-19..10-16): {bars: (p75, p90, p99)}. The panel is scaled
@@ -2018,21 +2052,27 @@ class TradeViewerQt(QMainWindow):
             self._ind_checks[key] = cb
             tb_ind.addWidget(cb)
             if key == "dcvd":
-                # Measured: a 1-bar reading separates outcomes by 13.1
-                # points, 5 bars by 7.2, 15 by 1.5 -- long windows lag the
-                # turn. The panel rescales with the window, so a short one
-                # stays readable instead of clipping off the top.
+                # 1 is the window that predicts; widening it is for looking
+                # around, not for deciding. The panel rescales with the
+                # window so either stays readable.
                 self._dcvd_spin = QSpinBox()
                 self._dcvd_spin.setRange(1, 30)
                 self._dcvd_spin.setValue(DCVD_LOOKBACK)
                 self._dcvd_spin.setFixedWidth(48)
                 self._dcvd_spin.setToolTip(
-                    "DCVD lookback, in bars.\n"
-                    "Measured separation: 1 bar +13.1 points, 5 bars +7.2, "
-                    "15 bars +1.5 --\n"
-                    "a longer window is flatter and lags the turn.\n"
-                    "The y-axis follows the window (measured p99), so changing "
-                    "it\nneither squashes the line nor clips its peaks.")
+                    "DCVD lookback, in bars (the coloured bars).\n"
+                    f"The {DCVD_CONTEXT}-bar line behind them is context "
+                    "only.\n\n"
+                    "Over 60 walk-forward out-of-sample sessions, entering "
+                    "on\n"
+                    f"|DCVD| >= {DCVD_DECISION} at a 1-bar window returned "
+                    "+0.207 R long\n"
+                    "and +0.247 R short, risking 1 ATR to make 1.5. The same"
+                    "\nrule on a 5-bar window is worth nothing: averaging "
+                    "over\nfive minutes removes the imbalance it measures.\n\n"
+                    "The y-axis follows the window (measured p99), so "
+                    "changing it\nneither squashes the bars nor clips their "
+                    "peaks.")
                 self._dcvd_spin.valueChanged.connect(
                     self._on_dcvd_lookback_changed)
                 tb_ind.addWidget(self._dcvd_spin)
@@ -4511,13 +4551,21 @@ class TradeViewerQt(QMainWindow):
         for item in getattr(self, "_dcvd_guides", []):
             self._plot_dcvd.removeItem(item)
         self._dcvd_guides = []
-        for lvl, style in ((0.0, Qt.PenStyle.SolidLine),
-                           (p75, Qt.PenStyle.DotLine),
-                           (-p75, Qt.PenStyle.DotLine),
-                           (p90, Qt.PenStyle.DashLine),
-                           (-p90, Qt.PenStyle.DashLine)):
+        # p75 is dropped: at the 1-bar window it sits at 0.517, close enough
+        # to the 0.40 decision line that the two read as one thick band and
+        # neither can be told from the other. p90 stays as the "unusual"
+        # marker, well clear of it.
+        guides = [(0.0, _GREY, 1, Qt.PenStyle.SolidLine),
+                  (p90, _GREY, 1, Qt.PenStyle.DotLine),
+                  (-p90, _GREY, 1, Qt.PenStyle.DotLine)]
+        if DCVD_DECISION < p99:
+            guides += [
+                (DCVD_DECISION, _DCVD_DECISION_COL, 1.4, Qt.PenStyle.DashLine),
+                (-DCVD_DECISION, _DCVD_DECISION_COL, 1.4,
+                 Qt.PenStyle.DashLine)]
+        for lvl, col, wid, style in guides:
             ln = pg.InfiniteLine(pos=lvl, angle=0, movable=False,
-                                 pen=pg.mkPen(_GREY, width=1, style=style))
+                                 pen=pg.mkPen(col, width=wid, style=style))
             self._plot_dcvd.addItem(ln)
             self._dcvd_guides.append(ln)
         self._plot_dcvd.setLabel(
@@ -4549,8 +4597,11 @@ class TradeViewerQt(QMainWindow):
         trade-off is that DCVD describes the flow that could be classified,
         not all of it.
 
-        Bars with no tick coverage contribute nothing to either sum, so the
-        line holds through a gap rather than dropping to zero.
+        A bar whose signed volume falls under DCVD_MIN_SIGNED is drawn as a
+        gap, not as zero and not as the rail a single small print would put
+        it on. Roughly 6% of RTH minutes have no ticks at all, and they
+        arrive in long stretches rather than scattered, so a gap that reads
+        as a gap is the honest picture.
         """
         n = len(klines)
         buy = np.zeros(n, dtype=float)
@@ -4568,28 +4619,49 @@ class TradeViewerQt(QMainWindow):
             buy[i] = sum(pd_[p]["buy"] for p in pd_)
             sell[i] = sum(pd_[p]["sell"] for p in pd_)
 
-        look = max(1, min(self._dcvd_lookback(), n))
         csum_d = np.concatenate([[0.0], np.cumsum(buy - sell)])
         csum_t = np.concatenate([[0.0], np.cumsum(buy + sell)])
-        dcvd = np.zeros(n, dtype=float)
-        for i in range(n):
-            j = max(0, i + 1 - look)
-            tot = csum_t[i + 1] - csum_t[j]
-            if tot > 0:
-                dcvd[i] = (csum_d[i + 1] - csum_d[j]) / tot
-        self._dcvd_arr = dcvd
 
+        def series(look: int) -> np.ndarray:
+            look = max(1, min(look, n))
+            out = np.full(n, np.nan)
+            for i in range(n):
+                j = max(0, i + 1 - look)
+                tot = csum_t[i + 1] - csum_t[j]
+                if tot >= DCVD_MIN_SIGNED:
+                    out[i] = (csum_d[i + 1] - csum_d[j]) / tot
+            return out
+
+        look = max(1, min(self._dcvd_lookback(), n))
+        dcvd = series(look)
+        self._dcvd_arr = dcvd
         x = np.arange(n)
-        pos = np.where(dcvd >= 0, dcvd, 0.0)
-        neg = np.where(dcvd < 0, dcvd, 0.0)
-        for ys, col in ((pos, _GREEN), (neg, _RED)):
-            fill = pg.PlotCurveItem(x=x, y=ys, pen=None,
-                                    fillLevel=0.0, brush=_qc(col, 55))
-            self._plot_dcvd.addItem(fill)
-            self._dcvd_items.append(fill)
-        outline = pg.PlotCurveItem(x=x, y=dcvd, pen=pg.mkPen("#ffa726", width=1.3))
-        self._plot_dcvd.addItem(outline)
-        self._dcvd_items.append(outline)
+
+        # Each bar is one minute's own reading, not a point on a path between
+        # readings. A line drawn through them invents the segment in between,
+        # and the shorter the window the more of the picture is invented --
+        # which is what made this panel look like noise at a 1-bar window.
+        drawn = np.isfinite(dcvd)
+        for sign, col in ((1, _GREEN), (-1, _RED)):
+            sel = drawn & ((dcvd >= 0) if sign > 0 else (dcvd < 0))
+            if not sel.any():
+                continue
+            bars = pg.BarGraphItem(x=x[sel], height=dcvd[sel], width=0.78,
+                                   brush=_qc(col, 210), pen=None)
+            self._plot_dcvd.addItem(bars)
+            self._dcvd_items.append(bars)
+
+        # The slower reading sits behind as context. 'finite' breaks the line
+        # at bars the floor rejected rather than bridging them.
+        if DCVD_CONTEXT > look:
+            ctx = series(DCVD_CONTEXT)
+            if np.isfinite(ctx).any():
+                line = pg.PlotCurveItem(
+                    x=x, y=ctx, connect="finite",
+                    pen=pg.mkPen(_DCVD_CONTEXT_COL, width=1.6))
+                line.setZValue(5)
+                self._plot_dcvd.addItem(line)
+                self._dcvd_items.append(line)
 
     def _clear_dcvd_items(self) -> None:
         for item in self._dcvd_items:

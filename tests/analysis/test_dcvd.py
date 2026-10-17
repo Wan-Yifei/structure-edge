@@ -8,6 +8,20 @@ the whole point, since it means 0.4 reads the same on a quiet day as a busy one.
 NEUTRAL volume is excluded from both halves, matching the CVD delta. It is the
 majority of SOXL's tape (57.5% measured), and including it would pin the median
 bar near 0.08 and leave the range beyond +/-0.5 unused.
+
+Two properties the panel gained once the backtest had something to say:
+
+  A FLOOR. Under DCVD_MIN_SIGNED a bar reads NaN and is drawn as a gap. Below
+  that volume a single small print swings the ratio to a rail, and the floor
+  is also what the backtest applies -- a panel showing a quantity the measured
+  rule never traded would be the wrong panel.
+
+  BARS, NOT A LINE. Each reading belongs to its own minute; a line between two
+  of them draws a segment that was never measured, and at a 1-bar window that
+  invented segment is most of the picture.
+
+Volumes here are scaled past the floor by default (see `_run`), so the ratio
+tests exercise the ratio and the floor tests can ask for raw sizes.
 """
 
 import os
@@ -25,6 +39,7 @@ from PyQt6.QtWidgets import QApplication   # noqa: E402
 
 CM = 1
 T0 = datetime(2026, 10, 5, 10, 0)
+SCALE = 100          # lifts the toy flows clear of DCVD_MIN_SIGNED
 
 
 @pytest.fixture(scope="module")
@@ -48,12 +63,25 @@ def viewer(qapp):
     qapp.processEvents()
 
 
-def _bars(flows):
+@pytest.fixture(autouse=True)
+def _reset_window(viewer):
+    """The window is a spinbox, and a test that widens it used to leave it
+    widened for everything after -- an ordering dependency that hid itself
+    for as long as the order happened to work."""
+    from analysis.trade_viewer_qt import DCVD_LOOKBACK
+
+    viewer._dcvd_spin.setValue(DCVD_LOOKBACK)
+    yield
+    viewer._dcvd_spin.setValue(DCVD_LOOKBACK)
+
+
+def _bars(flows, scale=SCALE):
     """flows: list of (buy, sell, neutral) per bar -> (klines, buckets)."""
     from core.time_utils import candle_start
 
     rows, buckets = [], {}
     for i, (b, s, n) in enumerate(flows):
+        b, s, n = b * scale, s * scale, n * scale
         bar_end = T0 + timedelta(minutes=CM * (i + 1))
         rows.append((bar_end.strftime("%Y-%m-%d %H:%M"),
                      100.0, 101.0, 99.0, 100.0, float(b + s + n)))
@@ -66,8 +94,14 @@ def _bars(flows):
     return kl, buckets
 
 
-def _run(v, flows):
-    kl, buckets = _bars(flows)
+def _run(v, flows, scale=SCALE, look=None):
+    if look is not None:
+        v._dcvd_spin.setValue(look)
+    kl, buckets = _bars(flows, scale)
+    # The render path clears before it draws; without that the items pile up
+    # across calls and any assertion about what got drawn sees every earlier
+    # test's leftovers too.
+    v._clear_dcvd_items()
     v._draw_dcvd(kl, buckets, CM)
     return np.asarray(v._dcvd_arr, dtype=float)
 
@@ -87,7 +121,7 @@ class TestBounds:
         flows = [(int(rng.integers(0, 5000)), int(rng.integers(0, 5000)),
                   int(rng.integers(0, 9000))) for _ in range(300)]
         d = _run(viewer, flows)
-        assert d.min() >= -1.0 and d.max() <= 1.0
+        assert np.nanmin(d) >= -1.0 and np.nanmax(d) <= 1.0
 
     def test_a_single_huge_bar_cannot_push_it_out(self, viewer):
         """An unnormalised slope would spike; this cannot exceed 1 by design."""
@@ -105,14 +139,13 @@ class TestNormalisation:
         assert small == pytest.approx(0.4)
 
     def test_equals_the_slope_over_the_max_possible_slope(self, viewer):
-        from analysis.trade_viewer_qt import DCVD_LOOKBACK
-
         flows = [(80, 20, 0), (60, 40, 0), (90, 10, 0)] * 10
-        d = _run(viewer, flows)
+        look = 5
+        d = _run(viewer, flows, look=look)
         buy = np.array([f[0] for f in flows], dtype=float)
         sell = np.array([f[1] for f in flows], dtype=float)
         i = len(flows) - 1
-        j = max(0, i + 1 - DCVD_LOOKBACK)
+        j = max(0, i + 1 - look)
         slope = (buy[j:i + 1] - sell[j:i + 1]).sum()
         cap = (buy[j:i + 1] + sell[j:i + 1]).sum()
         assert d[-1] == pytest.approx(slope / cap)
@@ -125,40 +158,138 @@ class TestNormalisation:
 
 
 class TestLookback:
-    def test_only_the_last_N_bars_count(self, viewer):
+    def test_default_window_is_one_bar(self):
+        """The window that predicts. A 5-bar version of the measured rule
+        returned nothing out of sample; averaging removes the imbalance."""
         from analysis.trade_viewer_qt import DCVD_LOOKBACK
 
-        flows = [(100, 0, 0)] * 50 + [(0, 100, 0)] * DCVD_LOOKBACK
-        assert _run(viewer, flows)[-1] == pytest.approx(-1.0), (
+        assert DCVD_LOOKBACK == 1
+
+    def test_one_bar_window_reads_only_its_own_bar(self, viewer):
+        flows = [(100, 0, 0)] * 50 + [(0, 100, 0)]
+        assert _run(viewer, flows, look=1)[-1] == pytest.approx(-1.0)
+
+    def test_only_the_last_N_bars_count(self, viewer):
+        look = 5
+        flows = [(100, 0, 0)] * 50 + [(0, 100, 0)] * look
+        assert _run(viewer, flows, look=look)[-1] == pytest.approx(-1.0), (
             "older buying must have rolled out of the window")
 
     def test_turns_over_as_the_window_fills(self, viewer):
-        from analysis.trade_viewer_qt import DCVD_LOOKBACK
-
-        n = DCVD_LOOKBACK
-        d = _run(viewer, [(100, 0, 0)] * n + [(0, 100, 0)] * n)
-        assert d[n - 1] == pytest.approx(1.0)
-        assert d[2 * n - 1] == pytest.approx(-1.0)
-        assert d[n + n // 2 - 1] < d[n - 1], "must be falling through the flip"
+        look = 5
+        d = _run(viewer, [(100, 0, 0)] * look + [(0, 100, 0)] * look,
+                 look=look)
+        assert d[look - 1] == pytest.approx(1.0)
+        assert d[2 * look - 1] == pytest.approx(-1.0)
+        assert d[look + look // 2 - 1] < d[look - 1], \
+            "must be falling through the flip"
 
     def test_short_history_uses_what_there_is(self, viewer):
         d = _run(viewer, [(100, 0, 0)] * 3)
         assert len(d) == 3 and d[-1] == pytest.approx(1.0)
 
 
-class TestGaps:
-    def test_bars_without_ticks_contribute_nothing(self, viewer):
-        """A coverage gap must not read as balanced flow."""
-        flows = [(100, 0, 0)] * 5 + [(0, 0, 0)] * 3
-        assert _run(viewer, flows)[-1] == pytest.approx(1.0)
+class TestFloor:
+    def test_floor_matches_the_backtest(self):
+        """The panel and the measured rule must apply the same floor, or the
+        panel is showing a quantity the rule never traded."""
+        from analysis.trade_viewer_qt import DCVD_MIN_SIGNED
 
-    def test_no_ticks_at_all_is_flat_zero(self, viewer):
-        d = _run(viewer, [(0, 0, 0)] * 10)
-        assert np.all(d == 0.0)
+        assert DCVD_MIN_SIGNED == 300.0
+
+    def test_a_thin_bar_is_a_gap_not_a_rail(self, viewer):
+        """40 shares one way is not a +1 reading, it is no reading."""
+        d = _run(viewer, [(40, 0, 0)] * 10, scale=1)
+        assert np.all(np.isnan(d))
+
+    def test_a_bar_at_the_floor_reads(self, viewer):
+        from analysis.trade_viewer_qt import DCVD_MIN_SIGNED
+
+        d = _run(viewer, [(int(DCVD_MIN_SIGNED), 0, 0)] * 5, scale=1)
+        assert np.isfinite(d).all() and d[-1] == pytest.approx(1.0)
+
+    def test_a_wider_window_can_clear_what_one_bar_cannot(self, viewer):
+        """The floor is on the window's total, not on each bar, so thin bars
+        still contribute once enough of them are summed."""
+        thin = [(100, 0, 0)] * 6
+        assert np.all(np.isnan(_run(viewer, thin, scale=1, look=1)))
+        d5 = _run(viewer, thin, scale=1, look=5)
+        assert np.isfinite(d5[-1]) and d5[-1] == pytest.approx(1.0)
+
+
+class TestGaps:
+    def test_a_bar_with_no_ticks_is_nan_not_zero(self, viewer):
+        """Zero would read as balanced flow, which is a claim about the tape
+        rather than an absence of one."""
+        d = _run(viewer, [(100, 0, 0)] * 5 + [(0, 0, 0)])
+        assert np.isnan(d[-1])
+
+    def test_no_ticks_at_all_is_all_gap(self, viewer):
+        assert np.all(np.isnan(_run(viewer, [(0, 0, 0)] * 10)))
 
     def test_neutral_only_bars_are_not_directional(self, viewer):
-        d = _run(viewer, [(0, 0, 5000)] * 10)
-        assert np.all(d == 0.0)
+        """Neutral is in neither half, so such a bar has no signed volume at
+        all and cannot clear the floor."""
+        assert np.all(np.isnan(_run(viewer, [(0, 0, 5000)] * 10)))
+
+    def test_a_gap_does_not_poison_the_bars_after_it(self, viewer):
+        d = _run(viewer, [(100, 0, 0)] * 3 + [(0, 0, 0)] + [(0, 100, 0)] * 3)
+        assert np.isnan(d[3])
+        assert d[-1] == pytest.approx(-1.0)
+
+
+class TestDrawing:
+    def _kinds(self, viewer):
+        return [type(i).__name__ for i in viewer._dcvd_items]
+
+    def test_readings_are_bars_not_a_line(self, viewer):
+        """A line between two readings draws a segment nobody measured, and
+        at a 1-bar window that invented segment is most of the panel."""
+        _run(viewer, [(70, 30, 0)] * 10 + [(30, 70, 0)] * 10, look=1)
+        assert "BarGraphItem" in self._kinds(viewer)
+
+    def test_context_line_is_drawn_behind_the_bars(self, viewer):
+        from analysis.trade_viewer_qt import DCVD_CONTEXT
+
+        assert DCVD_CONTEXT > 1
+        _run(viewer, [(70, 30, 0)] * 20, look=1)
+        assert "PlotCurveItem" in self._kinds(viewer)
+
+    def test_no_context_line_once_the_window_reaches_it(self, viewer):
+        """Drawing the same series twice would say there are two readings."""
+        from analysis.trade_viewer_qt import DCVD_CONTEXT
+
+        _run(viewer, [(70, 30, 0)] * 20, look=DCVD_CONTEXT)
+        assert "PlotCurveItem" not in self._kinds(viewer)
+
+    def test_thin_bars_draw_nothing(self, viewer):
+        _run(viewer, [(40, 0, 0)] * 10, scale=1, look=1)
+        assert "BarGraphItem" not in self._kinds(viewer)
+
+
+class TestGuides:
+    def _levels(self, viewer):
+        return sorted(round(float(g.value()), 4)
+                      for g in viewer._dcvd_guides)
+
+    def test_decision_threshold_is_marked_both_ways(self, viewer):
+        """Long and short were measured symmetric, so one side would be half
+        the instruction."""
+        from analysis.trade_viewer_qt import DCVD_DECISION
+
+        lv = self._levels(viewer)
+        assert DCVD_DECISION in lv and -DCVD_DECISION in lv
+
+    def test_p75_is_gone(self, viewer):
+        """At the 1-bar window p75 is 0.517, close enough to the 0.40 line
+        that the two read as one band and neither can be identified."""
+        from analysis.trade_viewer_qt import dcvd_scale
+
+        p75, _, _ = dcvd_scale(viewer._dcvd_lookback())
+        assert round(p75, 4) not in self._levels(viewer)
+
+    def test_zero_is_marked(self, viewer):
+        assert 0.0 in self._levels(viewer)
 
 
 class TestWiring:
@@ -199,3 +330,16 @@ class TestWiring:
         long_ = viewer._plot_dcvd.vb.viewRange()[1][1]
         assert long_ < short, \
             "averaging more bars flattens DCVD, so the axis must tighten"
+
+    def test_decision_line_hides_when_the_axis_drops_below_it(self, viewer):
+        """At long windows p99 falls under 0.40 and a guide pinned to the
+        frame edge would read as a reachable level."""
+        from analysis.trade_viewer_qt import DCVD_DECISION, dcvd_scale
+
+        viewer._dcvd_spin.setValue(30)
+        _, _, p99 = dcvd_scale(30)
+        lv = sorted(round(float(g.value()), 4) for g in viewer._dcvd_guides)
+        if p99 <= DCVD_DECISION:
+            assert DCVD_DECISION not in lv
+        else:
+            assert DCVD_DECISION in lv
