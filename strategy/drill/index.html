@@ -906,6 +906,25 @@ function report(){
           ? "✓ 够了" : "✗ 还不够"}`],
     ["放过的题里本可盈利的", passed.length
       ? `${missed} / ${passed.length}　（按 1 ATR 止损 / 2R 算）` : "—"],
+    /* delta_r is the one feature that survived every control (42.8% vs
+       25.3% on the measured set). If the entries already line up with it,
+       the instinct is doing its job and the indicator adds nothing; if they
+       do not, the two may be independent and worth combining. Either way
+       the comparison has to be against the rate in the whole pool, not
+       against 50%. */
+    ...(() => {
+      const hasDr = (a) => a.q.dr1 != null;
+      const entDr = ent.filter(hasDr), allDr = A.filter(hasDr);
+      if (entDr.length < 5 || allDr.length < 20) return [];
+      const posE = entDr.filter(a => a.q.dr1 >= 0).length / entDr.length;
+      const posA = allDr.filter(a => a.q.dr1 >= 0).length / allDr.length;
+      const lift = 100 * (posE - posA);
+      return [["你进场的题里 delta_r ≥ 0 的比例",
+        `${Math.round(100*posE)}%　（题库里是 ${Math.round(100*posA)}%，` +
+        `${Math.abs(lift) < 5 ? "基本没有偏好"
+          : lift > 0 ? `你偏向 +${Math.round(lift)} 个点`
+                     : `你反而偏开 ${Math.round(-lift)} 个点`}）`]];
+    })(),
     ["平均止损", isNaN(avgStop) ? "—" : `${avgStop.toFixed(2)} ATR`],
     ["平均目标", isNaN(avgTgt) ? "—" : `${avgTgt.toFixed(2)} R`],
   ];
