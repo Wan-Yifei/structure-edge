@@ -126,16 +126,33 @@ def structure(O, H, L, C, i, a, span=60):
     else:
         out.append((-1, f"收在前摆动低 {l1:.2f} 之下，支撑失守"))
 
-    prev_leg = abs(H[sh[-1]] - L[sl[-1] if sh[-1] < sl[-1] else sl[-2]])
-    cur_leg = peak - L[i]
-    if prev_leg > 0:
+    # Both legs run from the MOST RECENT swing high. The current one used to
+    # start at max(h1, h2) while the previous started at H[sh[-1]]; when the
+    # older high was the higher of the two those are different points and
+    # the ratio compared two moves measured from different anchors.
+    hi_i = sh[-1]
+    lo_i = sl[-1] if hi_i < sl[-1] else sl[-2]
+    prev_from, prev_to = H[hi_i], L[lo_i]
+    prev_leg = abs(prev_from - prev_to)
+    cur_from = H[hi_i]
+    cur_leg = cur_from - L[i]
+    if cur_leg <= 0:
+        # The low is ABOVE the swing high it would retrace from: a breakout,
+        # not a pullback, with no retracement to compare. Reported as one it
+        # read "本段下跌 -1.2 ATR，是前一段的 -29%，推动在减弱" -- a negative
+        # drop, and exactly backwards.
+        out.append((1, f"低点 {L[i]:.2f} 站在前高 {cur_from:.2f} 之上，"
+                       f"是突破不是回调"))
+    elif prev_leg > 0:
         ratio = cur_leg / prev_leg
+        seg = (f"本段（前高 {cur_from:.2f} → 当前低 {L[i]:.2f}）"
+               f"跌 {cur_leg/a:.1f} ATR，"
+               f"前一段（{prev_from:.2f} → {prev_to:.2f}）"
+               f"跌 {prev_leg/a:.1f} ATR")
         if ratio < 0.7:
-            out.append((1, f"本段下跌 {cur_leg/a:.1f} ATR，是前一段的 {ratio:.0%}，"
-                           f"推动在减弱"))
+            out.append((1, f"{seg}，本段只有 {ratio:.0%}，推动在减弱"))
         elif ratio > 1.4:
-            out.append((-1, f"本段下跌 {cur_leg/a:.1f} ATR，是前一段的 {ratio:.0%}，"
-                            f"推动在加速"))
+            out.append((-1, f"{seg}，本段是 {ratio:.0%}，推动在加速"))
 
     touches = sum(1 for j in sl if abs(L[j] - L[i]) <= 0.5 * a)
     if touches == 1:
@@ -153,6 +170,22 @@ def structure(O, H, L, C, i, a, span=60):
 
 def call(score):
     return "看涨" if score >= 2 else ("看跌" if score <= -1 else "中性")
+
+
+def flow_series(buy, sell, n, lo, hi):
+    """delta_r over a trailing n bars, for every bar in [lo, hi).
+
+    Each point reads only bars at or before itself, so the series carries
+    the same no-lookahead property the single reading has.
+    """
+    out = []
+    for i in range(lo, hi):
+        a = max(0, i - n + 1)
+        b, s = buy[a:i + 1].sum(), sell[a:i + 1].sum()
+        tot = b + s
+        out.append(None if tot < MIN_SIGNED
+                   else round(float((b - s) / tot), 3))
+    return out
 
 
 def flow(buy, sell, i, n):
@@ -436,6 +469,11 @@ def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
             "l": [round(v, 2) for v in w.low], "c": [round(v, 2) for v in w.close],
             "rsi": [None if not np.isfinite(v) else round(float(v), 1)
                     for v in rsi1[s:e]],
+            # The delta_r line. 1 bar is the sharpest reading and 5 keeps
+            # most of it; 15 was measured at 1.5 points of separation and
+            # stays a header number rather than earning a line.
+            "drs1": flow_series(buy, sell, 1, s, e),
+            "drs5": flow_series(buy, sell, 5, s, e),
         })
         vlo = float(min(L[s:i + 1])) - 0.02 * a
         vhi = float(max(H[s:i + 1])) + 0.02 * a

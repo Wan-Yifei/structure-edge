@@ -38,8 +38,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from strategy.drill_gen import (AFTER, BEFORE, BUBBLE_MIN, FWD, RTH,
                                 _profile, _read_set, atr, bubbles, call,
                                 day_ticks, flow, heatmap, label,
-                                load_range, structure,
-                                traded_profile)
+                                flow_series, load_range,
+                                structure, traded_profile)
 
 LEDGER = pathlib.Path(__file__).parent / "journal" / "output" / "ledger.csv"
 SESSIONS = {"regular", "overnight", "afterhours", "premarket"}
@@ -224,6 +224,8 @@ def build(code: str, rows: pd.DataFrame, full: pd.DataFrame,
                 "l": [round(v, 2) for v in w.low], "c": [round(v, 2) for v in w.close],
                 "rsi": [None if not np.isfinite(v) else round(float(v), 1)
                         for v in rsi1[s:e]],
+                "drs1": flow_series(buy, sell, 1, s, e),
+                "drs5": flow_series(buy, sell, 5, s, e),
             }
             sgn = 1.0 if short else -1.0
             q["myStop"] = round(C[i] + sgn * q["myStopAtr"] * a, 3)

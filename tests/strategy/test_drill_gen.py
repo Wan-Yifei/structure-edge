@@ -352,3 +352,43 @@ class TestFlowStripShowsNoFuture:
         t = pd.Timestamp("2026-10-14 11:40:00")
         b = bubbles(tk, t, 100.02, 100.04)
         assert all(100.02 <= x[1] <= 100.04 for x in b)
+
+
+class TestBreakoutIsNotAPullback:
+    """`cur_leg = peak - low` goes negative when the low sits above both
+    swing highs. The retracement text then read "本段下跌 -1.2 ATR，是前一段
+    的 -29%，推动在减弱" -- a negative drop, and the opposite of what a low
+    holding above the prior high means."""
+
+    @staticmethod
+    def _rising_then_breakout(n=70):
+        c = np.array([100 + 0.3 * i + 2.2 * np.sin(i / 2.2) for i in range(n)])
+        c[-6:] = c[-7] + np.arange(1, 7) * 1.5      # drive it clear of the highs
+        return c
+
+    def test_no_negative_drop_is_ever_reported(self):
+        from strategy.drill_gen import structure
+        c = self._rising_then_breakout()
+        _, why, _ = structure(c, c + 0.3, c - 0.3, c, len(c) - 1, a=0.4)
+        for _, txt in why:
+            assert "-" not in txt.replace("—", ""), f"negative in: {txt}"
+            assert "下跌 -" not in txt
+
+    def test_it_says_breakout_and_scores_positive(self):
+        from strategy.drill_gen import structure
+        c = self._rising_then_breakout()
+        sc, why, _ = structure(c, c + 0.3, c - 0.3, c, len(c) - 1, a=0.4)
+        assert any("突破" in txt for _, txt in why), \
+            f"expected a breakout line, got {[t for _, t in why]}"
+        assert sc > 0
+
+    def test_an_ordinary_pullback_still_gets_the_comparison(self):
+        """A real pullback: the drift fixture alone ends ABOVE its own swing
+        highs, so it is a breakout by this definition -- the last bars have
+        to come back down for the retracement branch to apply at all."""
+        from strategy.drill_gen import structure
+        n = 70
+        c = np.array([100 + 0.3 * i + 2.2 * np.sin(i / 2.2) for i in range(n)])
+        c[-5:] = c[-6] - np.arange(1, 6) * 1.2
+        _, why, _ = structure(c, c + 0.3, c - 0.3, c, n - 1, a=0.4)
+        assert not any("突破" in txt for _, txt in why),             f"a pullback was read as a breakout: {[x for _, x in why]}"

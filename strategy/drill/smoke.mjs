@@ -185,8 +185,9 @@ if (!/入场：|放过：/.test(vd))
 const allText = vd + els.score.innerHTML;
 if (!/[+\u2212]\d/.test(allText))
   throw new Error("expected signed numbers in the verdict or scorecard");
-if (/(^|[\s>(])-\d+\.\d+/.test(allText))
-  throw new Error("a negative number still uses an ASCII hyphen, not U+2212");
+const bad = allText.match(/(^|[\s>(])-\d+\.\d+[^<]{0,24}/);
+if (bad)
+  throw new Error("ASCII hyphen on a negative: " + JSON.stringify(bad[0]));
 console.log("ok   正负号：冒号分隔，负号用 \u2212，加减视觉等重");
 
 /* Order. Questions ship sorted by day and time, so in file order the first

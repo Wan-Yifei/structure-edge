@@ -166,12 +166,19 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
    that quote a rate stay hidden rather than showing a stale one. */
 let BUCKETS = {}, PA = {}, CROSS = {}, ALLIN = null, RMETA = null;
 
-const FLOW_H = 150, GAP_H = 14, CAP_H = 18, AXIS_H = 16;
-const FWD = 30, CW = 1040, CH = 520 + FLOW_H + GAP_H + CAP_H + AXIS_H;
+const FLOW_H = 150, GAP_H = 14, CAP_H = 18, AXIS_H = 16, DR_H = 104;
+/* |delta_r| quantiles by window, measured over 38,049 RTH minutes / 104
+   sessions of SOXL (2026-05-19..10-16): [p75, p90, p99]. The panel is
+   scaled from these, never from the question on screen -- +0.30 has to mean
+   the same thing everywhere, which is the entire point of a ratio. */
+const DR_SCALE = {1: [0.517, 0.700, 0.93], 5: [0.316, 0.448, 0.68]};
+const FWD = 30, CW = 1040,
+      CH = 520 + DR_H + GAP_H + FLOW_H + GAP_H + CAP_H + AXIS_H;
 const PRICE_H = 360, RSI_H = 96;
 const PROF_W = 110, LBL_W = 128, PAD_L = 8, PAD_T = 12;
 let QS = [], idx = 0, ans = {}, pick = null, db = null;
 let step = 0, timer = null;   // bars of the future played so far
+let _geo = null, _hover = null;   // chart geometry + cursor, for the crosshair
 
 /* Questions arrive sorted by day and time, so walking them in order served
    adjacent minutes of one session back to back -- by the third you have
@@ -335,10 +342,17 @@ function draw(q, reveal){
     else { g.fillStyle = col; g.fillRect(x-bw/2, y1, bw, bh); }
     g.globalAlpha = 1;
   }
+  /* Kept so the crosshair can map pixels back to price and bar without
+     recomputing the layout. */
+  _geo = {lo, hi, n, last, PAD_L, W, Y0: PAD_T, H: PRICE_H, X, Y};
   const mx = X(q.mark);
+  /* Just PAST the decision bar, not through it. Drawn down the bar's centre
+     it split the candle in two and the body stopped being distinguishable
+     from the wicks -- on the one bar the whole question is about. */
+  const mxEdge = mx + Math.max(bw / 2 + 2, (W / n) / 2);
   g.save(); g.setLineDash([2,3]); g.strokeStyle = acc; g.globalAlpha = .5;
-  g.beginPath(); g.moveTo(mx, PAD_T); g.lineTo(mx, PAD_T+PRICE_H); g.stroke();
-  g.restore(); g.globalAlpha = 1;
+  g.beginPath(); g.moveTo(mxEdge, PAD_T); g.lineTo(mxEdge, PAD_T+PRICE_H);
+  g.stroke(); g.restore(); g.globalAlpha = 1;
 
   // ---- entry, stop, target ----------------------------------------------
   const rail = CW - 6;
@@ -368,6 +382,21 @@ function draw(q, reveal){
     g.beginPath(); g.moveTo(PAD_L, y); g.lineTo(profX0 + PROF_W, y); g.stroke();
     g.restore(); g.globalAlpha = 1;
     tag(g, rail, y, txt, col, surf === "#fff" ? "#1b2626" : "#0a1110");
+  }
+
+  /* The decision candle again, over the entry/stop/target rules, so the
+     bar being judged is the clearest thing on the chart. */
+  {
+    const i = q.mark, up = c[i] >= o[i], col = up ? upC : dnC, x = X(i);
+    g.strokeStyle = col; g.lineWidth = 1.8;
+    g.beginPath(); g.moveTo(x, Y(h[i])); g.lineTo(x, Y(l[i])); g.stroke();
+    const y1 = Y(Math.max(o[i],c[i])), y2 = Y(Math.min(o[i],c[i]));
+    const bh = Math.max(1, y2 - y1);
+    // A surface-coloured pad under the body keeps a rule from showing
+    // through a hollow up-candle.
+    g.fillStyle = surf; g.fillRect(x-bw/2, y1, bw, bh);
+    if (up) g.strokeRect(x-bw/2+.4, y1+.4, bw-.8, Math.max(.8, bh-.8));
+    else { g.fillStyle = col; g.fillRect(x-bw/2, y1, bw, bh); }
   }
 
   // ---- RSI ---------------------------------------------------------------
@@ -401,8 +430,105 @@ function draw(q, reveal){
   }
   g.textAlign = "left";
 
+  // ---- crosshair ---------------------------------------------------------
+  if (_hover && _hover.x >= PAD_L && _hover.x <= PAD_L + W
+             && _hover.y >= PAD_T && _hover.y <= PAD_T + PRICE_H){
+    const px = lo + (PAD_T + PRICE_H - _hover.y) / PRICE_H * (hi - lo);
+    const bi = Math.max(0, Math.min(last - 1,
+                                    Math.round((_hover.x - PAD_L) / (W/n) - .5)));
+    g.save();
+    g.setLineDash([3, 3]); g.strokeStyle = ink3; g.lineWidth = 1;
+    g.globalAlpha = .7;
+    g.beginPath();
+    g.moveTo(PAD_L, _hover.y); g.lineTo(PAD_L + W, _hover.y);
+    g.moveTo(X(bi), PAD_T); g.lineTo(X(bi), PAD_T + PRICE_H);
+    g.stroke();
+    g.restore(); g.globalAlpha = 1;
+    tag(g, rail, _hover.y, fmt(px), ink3,
+        surf === "#fff" ? "#1b2626" : "#0a1110");
+    g.fillStyle = ink3; g.font = "11px ui-monospace,monospace";
+    g.textAlign = "left"; g.textBaseline = "top";
+    g.fillText(`${q.t[bi]}　开 ${fmt(o[bi])}　高 ${fmt(h[bi])}　` +
+               `低 ${fmt(l[bi])}　收 ${fmt(c[bi])}`, PAD_L + 3, PAD_T + 2);
+  }
+
+  // ---- delta_r ----------------------------------------------------------
+  const dy0 = ry0 + RSI_H + GAP_H;
+  g.strokeStyle = soft; g.lineWidth = 1;
+  g.strokeRect(PAD_L + .5, dy0 + .5, W - 1, DR_H - 1);
+  {
+    // The 1-bar reading is the line that matters, so the axis is ITS scale.
+    // On the 5-bar scale (p99 0.68) a 1-bar series running to +-0.93 spends
+    // its time clipped against the frame, which is most of why this panel
+    // was unreadable.
+    const [p75, p90, p99] = DR_SCALE[1];
+    const DY = v => dy0 + DR_H/2 - (v / (p99 * 1.05)) * (DR_H/2);
+    for (const [lv, st] of [[0, []], [p75, [2,3]], [-p75, [2,3]],
+                            [p90, [5,3]], [-p90, [5,3]]]){
+      g.save(); g.setLineDash(st);
+      g.strokeStyle = lv === 0 ? ink3 : soft;
+      g.globalAlpha = lv === 0 ? .55 : .9; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(PAD_L, DY(lv)); g.lineTo(PAD_L+W, DY(lv));
+      g.stroke(); g.restore(); g.globalAlpha = 1;
+    }
+    // Minutes with no ticks are neither zero nor a flat line. An
+    // unexplained break reads as a broken chart -- about 6% of RTH minutes
+    // are missing, in a few long outages rather than scattered, so say so
+    // where it happens instead of leaving a hole.
+    {
+      const ser = q.drs1 || [];
+      let st = -1;
+      for (let i = 0; i <= last; i++){
+        const miss = i < last && ser[i] == null;
+        if (miss && st < 0) st = i;
+        if (!miss && st >= 0){
+          const x0 = X(st), x1 = X(i);
+          g.save();
+          g.fillStyle = soft; g.globalAlpha = .55;
+          g.fillRect(x0, dy0 + 1, Math.max(2, x1 - x0), DR_H - 2);
+          if (x1 - x0 > 54){
+            g.fillStyle = ink3; g.globalAlpha = .8;
+            g.font = "9px ui-monospace,monospace";
+            g.textAlign = "center"; g.textBaseline = "middle";
+            g.fillText("无逐笔数据", (x0 + x1) / 2, dy0 + DR_H / 2);
+          }
+          g.restore();
+          st = -1;
+        }
+      }
+    }
+    for (const [key, col, wdt, alpha] of [["drs5", ink3, 1.0, .40],
+                                          ["drs1", acc, 1.6, 1]]){
+      const ser = q[key];
+      if (!ser) continue;
+      g.strokeStyle = col; g.lineWidth = wdt; g.globalAlpha = alpha;
+      g.beginPath();
+      let on = false;
+      for (let i = 0; i < last; i++){
+        const v = ser[i];
+        if (v == null){ on = false; continue; }
+        const yy = DY(Math.max(-p99*1.05, Math.min(p99*1.05, v)));
+        if (!on){ g.moveTo(X(i), yy); on = true; } else g.lineTo(X(i), yy);
+      }
+      g.stroke(); g.globalAlpha = 1;
+    }
+    const dv = q.drs1 ? q.drs1[q.mark] : null;
+    if (dv != null){
+      g.fillStyle = acc;
+      g.beginPath(); g.arc(mx, DY(dv), 3, 0, 7); g.fill();
+      tag(g, rail, DY(dv), `Δr1 ${sr(dv)}`, acc,
+          surf === "#fff" ? "#1b2626" : "#0a1110");
+    }
+    g.fillStyle = ink3; g.font = "10px ui-monospace,monospace";
+    g.textAlign = "left"; g.textBaseline = "top";
+    g.fillText(`Δr　粗线 1 根 / 细线 5 根　虚线是实测 p75 ${p75.toFixed(2)}、` +
+               `p90 ${p90.toFixed(2)}（固定刻度，题与题可比）` +
+               (dv == null ? "　决策点无逐笔数据" : ""),
+               PAD_L + 3, dy0 + 3);
+  }
+
   // ---- order flow strip: 30 minutes before the decision ----------------
-  const fy0 = ry0 + RSI_H + GAP_H + CAP_H;
+  const fy0 = ry0 + RSI_H + GAP_H + DR_H + GAP_H + CAP_H;
   /* Ends exactly under the decision line above it, so nothing in here can
      ever appear over the chart's hidden future. */
   const FW = mx - PAD_L;
@@ -1122,6 +1248,26 @@ document.addEventListener("keydown", e => {
   if (e.key === "p" || e.key === "P"){ e.preventDefault(); prev(); }
   if (e.key === "n" || e.key === "N"){ e.preventDefault(); next(); }
 });
+
+/* Redraws the whole canvas per move. At this size that is a fraction of a
+   millisecond, and the alternative -- a second overlay canvas -- buys
+   nothing but a second set of coordinates to keep in sync. Suppressed while
+   the future is playing so the line does not fight the animation. */
+{
+  const cv = $("cv");
+  const redraw = () => {
+    const q = QS[idx];
+    if (q) draw(q, !!ans[q.id]);
+  };
+  cv.onmousemove = (e) => {
+    if (timer) return;
+    const r = cv.getBoundingClientRect();
+    _hover = {x: (e.clientX - r.left) * (CW / r.width),
+              y: (e.clientY - r.top) * (CH / r.height)};
+    redraw();
+  };
+  cv.onmouseleave = () => { _hover = null; redraw(); };
+}
 
 $("b-pass").onclick = () => choose("pass");
 $("b-enter").onclick = () => choose("enter");
