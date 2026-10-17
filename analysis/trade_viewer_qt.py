@@ -937,7 +937,7 @@ class CandlestickItem(pg.GraphicsObject):
         self._buckets:     dict | None         = None
         self._candle_mins: int                 = 1
         self._show_heatmap: bool               = True
-        self._red_up:      bool                = False   # True = 红涨绿跌
+        self._red_up:      bool                = False   # True = red up, green down
         self._picture:     QPicture | None     = None
         self._rect:        QRectF              = QRectF()
 
@@ -2027,10 +2027,12 @@ class TradeViewerQt(QMainWindow):
                 self._dcvd_spin.setValue(DCVD_LOOKBACK)
                 self._dcvd_spin.setFixedWidth(48)
                 self._dcvd_spin.setToolTip(
-                    "DCVD 的回看根数。\n"
-                    "实测区分力：1 根 +13.1 点，5 根 +7.2 点，15 根 +1.5 点，\n"
-                    "窗口越长越钝，转折点上尤其落后。\n"
-                    "纵轴跟着窗口走（按实测 p99），换窗口不会把线压扁或削顶。")
+                    "DCVD lookback, in bars.\n"
+                    "Measured separation: 1 bar +13.1 points, 5 bars +7.2, "
+                    "15 bars +1.5 --\n"
+                    "a longer window is flatter and lags the turn.\n"
+                    "The y-axis follows the window (measured p99), so changing "
+                    "it\nneither squashes the line nor clips its peaks.")
                 self._dcvd_spin.valueChanged.connect(
                     self._on_dcvd_lookback_changed)
                 tb_ind.addWidget(self._dcvd_spin)
@@ -4519,7 +4521,7 @@ class TradeViewerQt(QMainWindow):
             self._plot_dcvd.addItem(ln)
             self._dcvd_guides.append(ln)
         self._plot_dcvd.setLabel(
-            "left", f"DCVD {self._dcvd_lookback()}根", **{"color": _FG})
+            "left", f"DCVD({self._dcvd_lookback()})", **{"color": _FG})
 
     def _on_dcvd_lookback_changed(self, *_) -> None:
         self._apply_dcvd_scale()
