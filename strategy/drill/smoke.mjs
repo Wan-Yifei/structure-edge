@@ -166,7 +166,8 @@ for (let k = 0; k < 4; k++) {
 }
 api.report();
 const sc = els.score.innerHTML;
-for (const tok of ["你的总 R", "入场后胜率", "盈亏平衡胜率", "我的交易"]) {
+for (const tok of ["你的总 R", "入场后胜率", "按实际盈亏算的盈亏平衡胜率",
+                   "实际 平均盈利", "我的交易"]) {
   if (!sc.includes(tok)) throw new Error(`scorecard missing row: ${tok}`);
 }
 if (!/入场后胜率[\s\S]{0,80}\d+ \/ \d+/.test(sc))

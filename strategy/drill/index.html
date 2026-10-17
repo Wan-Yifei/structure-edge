@@ -857,9 +857,19 @@ function report(){
      names (real/decoy/mine) and so matched nothing -- the per-class rows
      silently never rendered. */
   const KINDS = ["深回落", "浅回调", "我的交易"];
-  /* A win rate only means something against the rate this R:R needs to break
-     even: 60% is strong at a 1.5R target and losing at 0.6R. */
-  const needW = isNaN(avgTgt) ? NaN : 1 / (1 + avgTgt);
+  /* A win rate only means something against the rate the trades need to
+     break even -- but that has to be computed on what the wins REALLY paid.
+     Using the planned target assumes every win collects it, and most do
+     not: a trade reaching neither barrier inside the horizon settles at the
+     close for a fraction. That is how this row once read "42% vs 39% needed
+     ✓ 够了" directly above a total of −3.74 R. */
+  const wonR = ent.filter(a => a.r > 0);
+  const lostR = ent.filter(a => a.r <= 0);
+  const avgWin = wonR.length ? wonR.reduce((s,a)=>s+a.r,0)/wonR.length : NaN;
+  const avgLoss = lostR.length
+    ? Math.abs(lostR.reduce((s,a)=>s+a.r,0)/lostR.length) : NaN;
+  const needW = (isNaN(avgWin) || isNaN(avgLoss))
+    ? NaN : avgLoss / (avgWin + avgLoss);
   const passed = A.filter(a => a.choice === "pass");
   const missed = passed.filter(a => settle(a.q, 1.0, 2.0).r > 0).length;
 
@@ -887,7 +897,11 @@ function report(){
     ["入场 / 放过", `${ent.length} 进　${A.length - ent.length} 放过`],
     ["入场后胜率", ent.length
       ? `${wins} / ${ent.length} = ${Math.round(100*wins/ent.length)}%` : "—"],
-    ["这个盈亏比的盈亏平衡胜率", isNaN(needW) ? "—"
+    ["实际 平均盈利 / 平均亏损",
+     (isNaN(avgWin) || isNaN(avgLoss)) ? "—"
+       : `${sr(avgWin)} R　/　${sr(-avgLoss)} R　（计划目标 ` +
+         `${isNaN(avgTgt) ? "—" : avgTgt.toFixed(2)} R）`],
+    ["按实际盈亏算的盈亏平衡胜率", isNaN(needW) ? "—"
       : `${Math.round(100*needW)}%　${ent.length && wins/ent.length >= needW
           ? "✓ 够了" : "✗ 还不够"}`],
     ["放过的题里本可盈利的", passed.length
@@ -954,6 +968,15 @@ function report(){
     }).filter(Boolean);
     notes.push("<b>这批题里唯一分得开的是 delta_r。</b>" + rows.join("；") +
       "。窗口越长差距越小 —— 它在转折点上落后。");
+  }
+  if (!isNaN(avgWin) && !isNaN(avgTgt) && avgWin < avgTgt * 0.9){
+    notes.push(`<b>赢的那些没吃到目标。</b>计划 ${avgTgt.toFixed(2)} R，实际` +
+      `平均只拿到 ${avgWin.toFixed(2)} R —— 大量单子既没碰止盈也没碰止损，` +
+      `在第 ${FWD} 根按收盘结算拿了个零头。它们算进胜率，但几乎不贡献 R，` +
+      `所以胜率看着够、钱却不够。止损 ${avgStop.toFixed(2)} ATR 配 ` +
+      `${avgTgt.toFixed(2)} R，等于把止盈放到 ` +
+      `${(avgStop * avgTgt).toFixed(2)} ATR 之外；` +
+      `我们量过 ${FWD} 根内走到 +2 ATR 的概率约三成。`);
   }
   notes.push("<b>这里不判对错。</b>深回落和浅回调只是两类位置，量下来命中率几乎一样，" +
     "区间重叠。谁该进取决于盈亏,不取决于哪个更像\"信号\"。");
