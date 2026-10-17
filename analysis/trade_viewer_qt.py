@@ -587,7 +587,37 @@ RANGE_DAYS = {"1d": 1, "2d": 2, "3d": 3, "7d": 5}
 # single minute's classified flow is often entirely one-sided. By 10 bars that
 # is 0.4%, with the median at 0.19 and the 99th percentile at 0.77 -- the full
 # range gets used without the indicator living on its rails.
-DCVD_LOOKBACK = 10
+DCVD_LOOKBACK = 5
+
+# |DCVD| quantiles by window, measured over 38,049 RTH minutes / 104 sessions
+# of SOXL (2026-05-19..10-16): {bars: (p75, p90, p99)}. The panel is scaled
+# from these rather than auto-ranged, so a reading means the same thing on
+# any day -- the property that normalising exists for -- while still filling
+# the panel instead of sitting in its middle seventh.
+DCVD_SCALE = {
+    1:  (0.517, 0.700, 0.93),
+    3:  (0.371, 0.523, 0.76),
+    5:  (0.316, 0.448, 0.68),
+    10: (0.256, 0.365, 0.56),
+    15: (0.224, 0.327, 0.51),
+    30: (0.180, 0.270, 0.42),
+}
+
+
+def dcvd_scale(n: int) -> tuple[float, float, float]:
+    """(p75, p90, p99) for a window, interpolated between measured ones."""
+    keys = sorted(DCVD_SCALE)
+    if n <= keys[0]:
+        return DCVD_SCALE[keys[0]]
+    if n >= keys[-1]:
+        return DCVD_SCALE[keys[-1]]
+    lo = max(k for k in keys if k <= n)
+    hi = min(k for k in keys if k >= n)
+    if lo == hi:
+        return DCVD_SCALE[lo]
+    f = (n - lo) / (hi - lo)
+    return tuple(DCVD_SCALE[lo][i] + f * (DCVD_SCALE[hi][i] - DCVD_SCALE[lo][i])
+                 for i in range(3))
 
 # Resolve NEUTRAL prints to the side inferred from the prevailing midpoint,
 # where scripts/classify_ticks.py has computed one. NEUTRAL is 57.5% of SOXL's
@@ -1987,6 +2017,23 @@ class TradeViewerQt(QMainWindow):
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
             tb_ind.addWidget(cb)
+            if key == "dcvd":
+                # Measured: a 1-bar reading separates outcomes by 13.1
+                # points, 5 bars by 7.2, 15 by 1.5 -- long windows lag the
+                # turn. The panel rescales with the window, so a short one
+                # stays readable instead of clipping off the top.
+                self._dcvd_spin = QSpinBox()
+                self._dcvd_spin.setRange(1, 30)
+                self._dcvd_spin.setValue(DCVD_LOOKBACK)
+                self._dcvd_spin.setFixedWidth(48)
+                self._dcvd_spin.setToolTip(
+                    "DCVD 的回看根数。\n"
+                    "实测区分力：1 根 +13.1 点，5 根 +7.2 点，15 根 +1.5 点，\n"
+                    "窗口越长越钝，转折点上尤其落后。\n"
+                    "纵轴跟着窗口走（按实测 p99），换窗口不会把线压扁或削顶。")
+                self._dcvd_spin.valueChanged.connect(
+                    self._on_dcvd_lookback_changed)
+                tb_ind.addWidget(self._dcvd_spin)
             if key == "avwap":
                 self._avwap_anchor_edit = QLineEdit()
                 self._avwap_anchor_edit.setPlaceholderText("YYYY-MM-DD")
@@ -2440,18 +2487,14 @@ class TradeViewerQt(QMainWindow):
         self._plot_dcvd.getAxis("bottom").setTextPen(_qc(_FG))
         self._plot_dcvd.setMenuEnabled(False)
         self._plot_dcvd.setXLink(self._plot_c)
-        # Bounded by construction, so the scale is fixed rather than fitted --
-        # a DCVD of 0.4 means the same thing on any day, which is the point of
-        # normalising. Auto-ranging would throw that away.
-        self._plot_dcvd.setYRange(-1.05, 1.05, padding=0)
+        # Fixed, not auto-ranged: a DCVD of 0.4 has to mean the same thing on
+        # a quiet day as a busy one, and auto-ranging would throw that away.
+        # But fixed AT +/-1.05 wasted the panel -- at the old 10-bar window
+        # the median |DCVD| is 0.148 and 97.6% of bars never reach the 0.5
+        # guides. So it is fixed PER WINDOW, from measured quantiles.
         self._plot_dcvd.vb.setMouseEnabled(y=False)
-        for lvl, style in ((0.0, Qt.PenStyle.SolidLine),
-                           (0.5, Qt.PenStyle.DotLine),
-                           (-0.5, Qt.PenStyle.DotLine)):
-            self._plot_dcvd.addItem(pg.InfiniteLine(
-                pos=lvl, angle=0, movable=False,
-                pen=pg.mkPen(_GREY, width=1, style=style),
-            ))
+        self._dcvd_guides: list = []
+        self._apply_dcvd_scale()
 
         # Row stretch factors — main chart is fixed; subplot rows collapse to
         # zero height when their indicator is off instead of leaving a gap.
@@ -4455,6 +4498,34 @@ class TradeViewerQt(QMainWindow):
         for f in fills:
             f.setVisible(on)
 
+    def _dcvd_lookback(self) -> int:
+        spin = getattr(self, "_dcvd_spin", None)
+        return int(spin.value()) if spin is not None else DCVD_LOOKBACK
+
+    def _apply_dcvd_scale(self) -> None:
+        """Range and guide lines for the current window."""
+        p75, p90, p99 = dcvd_scale(self._dcvd_lookback())
+        self._plot_dcvd.setYRange(-p99 * 1.05, p99 * 1.05, padding=0)
+        for item in getattr(self, "_dcvd_guides", []):
+            self._plot_dcvd.removeItem(item)
+        self._dcvd_guides = []
+        for lvl, style in ((0.0, Qt.PenStyle.SolidLine),
+                           (p75, Qt.PenStyle.DotLine),
+                           (-p75, Qt.PenStyle.DotLine),
+                           (p90, Qt.PenStyle.DashLine),
+                           (-p90, Qt.PenStyle.DashLine)):
+            ln = pg.InfiniteLine(pos=lvl, angle=0, movable=False,
+                                 pen=pg.mkPen(_GREY, width=1, style=style))
+            self._plot_dcvd.addItem(ln)
+            self._dcvd_guides.append(ln)
+        self._plot_dcvd.setLabel(
+            "left", f"DCVD {self._dcvd_lookback()}根", **{"color": _FG})
+
+    def _on_dcvd_lookback_changed(self, *_) -> None:
+        self._apply_dcvd_scale()
+        if self._klines is not None:
+            self._render(self._klines, self._ticks)
+
     def _draw_dcvd(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
         """Draw DCVD: the CVD slope normalised to [-1, +1].
 
@@ -4495,7 +4566,7 @@ class TradeViewerQt(QMainWindow):
             buy[i] = sum(pd_[p]["buy"] for p in pd_)
             sell[i] = sum(pd_[p]["sell"] for p in pd_)
 
-        look = max(1, min(DCVD_LOOKBACK, n))
+        look = max(1, min(self._dcvd_lookback(), n))
         csum_d = np.concatenate([[0.0], np.cumsum(buy - sell)])
         csum_t = np.concatenate([[0.0], np.cumsum(buy + sell)])
         dcvd = np.zeros(n, dtype=float)

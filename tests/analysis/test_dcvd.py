@@ -172,7 +172,30 @@ class TestWiring:
         viewer._clear_dcvd_items()
         assert viewer._dcvd_arr is None and viewer._dcvd_items == []
 
-    def test_subplot_axis_is_pinned_to_the_bounds(self, viewer):
-        """A fitted y-range would undo the normalisation's whole purpose."""
+    def test_subplot_axis_does_not_follow_the_data(self, viewer):
+        """A fitted y-range would undo the normalisation's whole purpose: a
+        reading of 0.4 has to look the same on a quiet day as a busy one."""
+        _run(viewer, [(60, 40, 0)] * 20)
+        quiet = viewer._plot_dcvd.vb.viewRange()[1]
+        _run(viewer, [(10_000, 10, 0)] * 20)      # violently one-sided
+        loud = viewer._plot_dcvd.vb.viewRange()[1]
+        assert quiet == pytest.approx(loud, abs=1e-6), \
+            "the axis moved with the data -- it is being fitted"
+
+    def test_subplot_axis_matches_the_measured_table_for_its_window(self, viewer):
+        """Fixed, but fixed PER WINDOW. At +/-1.05 for every window the old
+        panel left a 10-bar series -- median |DCVD| 0.148 -- in its middle
+        seventh, never reaching the guides."""
+        from analysis.trade_viewer_qt import dcvd_scale
         lo, hi = viewer._plot_dcvd.vb.viewRange()[1]
-        assert lo <= -1.0 and hi >= 1.0 and hi - lo < 3.0
+        _, _, p99 = dcvd_scale(viewer._dcvd_lookback())
+        assert hi == pytest.approx(p99 * 1.05, rel=0.02)
+        assert lo == pytest.approx(-p99 * 1.05, rel=0.02)
+
+    def test_a_longer_window_narrows_the_axis(self, viewer):
+        viewer._dcvd_spin.setValue(1)
+        short = viewer._plot_dcvd.vb.viewRange()[1][1]
+        viewer._dcvd_spin.setValue(30)
+        long_ = viewer._plot_dcvd.vb.viewRange()[1][1]
+        assert long_ < short, \
+            "averaging more bars flattens DCVD, so the axis must tighten"
