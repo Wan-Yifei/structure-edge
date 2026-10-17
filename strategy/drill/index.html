@@ -8,6 +8,7 @@
   --accent:#0d6e78; --ok:#0d7490; --bad:#c2410c;
   --stop:#c2410c; --tgt:#0d7490; --prof:#8b96a0; --poc:#a16207; --hm:#2f6d7a;
   --up:#1a9e5c; --dn:#d1495b;
+  --dec:#b45309;
   --font:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
   color-scheme:light;
@@ -18,6 +19,7 @@
   --accent:#4cb6bf; --ok:#39a8bd; --bad:#e0743f;
   --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
   --up:#35b87a; --dn:#e0646f;
+  --dec:#ffd54f;
   color-scheme:dark;
 }}
 :root[data-theme="dark"]{
@@ -26,6 +28,7 @@
   --accent:#4cb6bf; --ok:#39a8bd; --bad:#e0743f;
   --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
   --up:#35b87a; --dn:#e0646f;
+  --dec:#ffd54f;
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -195,6 +198,11 @@ function hotCol(n){
    scaled from these, never from the question on screen -- +0.30 has to mean
    the same thing everywhere, which is the entire point of a ratio. */
 const DR_SCALE = {1: [0.517, 0.700, 0.93], 5: [0.316, 0.448, 0.68]};
+/* The level the backtest validated: over 60 walk-forward out-of-sample
+   sessions, |dr1| >= 0.4 risking 1 ATR for 1.5 returned +0.207 R a trade
+   long and +0.247 short, against -0.101 and -0.062 for entering on every
+   minute. Marked on both sides because the two came out symmetric. */
+const DR_DECISION = 0.4;
 const FWD = 30, CW = 1040,
       CH = 520 + DR_H + GAP_H + FLOW_H + GAP_H + CAP_H + AXIS_H;
 const PRICE_H = 360, RSI_H = 96;
@@ -305,6 +313,7 @@ function draw(q, reveal){
         profC = cs.getPropertyValue("--prof").trim(),
         pocC = cs.getPropertyValue("--poc").trim(),
         hmC = cs.getPropertyValue("--hm").trim(),
+        decC = cs.getPropertyValue("--dec").trim(),
         upC = cs.getPropertyValue("--up").trim(),
         dnC = cs.getPropertyValue("--dn").trim(),
         surf = cs.getPropertyValue("--surface").trim();
@@ -486,11 +495,23 @@ function draw(q, reveal){
     // was unreadable.
     const [p75, p90, p99] = DR_SCALE[1];
     const DY = v => dy0 + DR_H/2 - (v / (p99 * 1.05)) * (DR_H/2);
-    for (const [lv, st] of [[0, []], [p75, [2,3]], [-p75, [2,3]],
-                            [p90, [5,3]], [-p90, [5,3]]]){
+    /* p75 is dropped here for the same reason the viewer dropped it: at
+       0.52 it sits close enough to the 0.40 decision line that the two read
+       as one band. p90 stays as the "unusual" marker, well clear of it. */
+    for (const [lv, st] of [[0, []], [p90, [5,3]], [-p90, [5,3]]]){
       g.save(); g.setLineDash(st);
       g.strokeStyle = lv === 0 ? ink3 : soft;
       g.globalAlpha = lv === 0 ? .55 : .9; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(PAD_L, DY(lv)); g.lineTo(PAD_L+W, DY(lv));
+      g.stroke(); g.restore(); g.globalAlpha = 1;
+    }
+    /* The measured threshold, both ways: long and short came out symmetric,
+       so marking one side would be half the instruction. The drill trains
+       the decision the backtest validated, so the level it validated has to
+       be on the chart. */
+    for (const lv of [DR_DECISION, -DR_DECISION]){
+      g.save(); g.setLineDash([7, 4]);
+      g.strokeStyle = decC; g.lineWidth = 1.4; g.globalAlpha = .95;
       g.beginPath(); g.moveTo(PAD_L, DY(lv)); g.lineTo(PAD_L+W, DY(lv));
       g.stroke(); g.restore(); g.globalAlpha = 1;
     }
@@ -544,8 +565,8 @@ function draw(q, reveal){
     }
     g.fillStyle = ink3; g.font = "10px ui-monospace,monospace";
     g.textAlign = "left"; g.textBaseline = "top";
-    g.fillText(`Δr　粗线 1 根 / 细线 5 根　虚线是实测 p75 ${p75.toFixed(2)}、` +
-               `p90 ${p90.toFixed(2)}（固定刻度，题与题可比）` +
+    g.fillText(`Δr　粗线 1 根 / 细线 5 根　黄虚线 ±${DR_DECISION} 是实测决策阈值、` +
+               `灰虚线 p90 ${p90.toFixed(2)}（固定刻度，题与题可比）` +
                (dv == null ? "　决策点无逐笔数据" : ""),
                PAD_L + 3, dy0 + 3);
   }
