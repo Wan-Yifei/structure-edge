@@ -244,7 +244,15 @@ class TestHeatmap:
         hot = int((101.0 - lo) / (hi - lo) * hm["nb"])
         assert g[hot].max() == 255
         quiet = int((100.0 - lo) / (hi - lo) * hm["nb"])
-        assert g[quiet].max() < 20
+        # Quantisation is logarithmic, so the quiet level survives the byte.
+        # Linear against the maximum put 100 shares next to a 50,000 wall on
+        # a code of 1 and every ordinary level collapsed into the same two or
+        # three values -- gone before the page could draw it. It must still
+        # be clearly dimmer than the wall; the page separates them further
+        # with a gamma above 1.
+        assert 20 < g[quiet].max() < 200
+        assert g[quiet].max() < g[hot].max()
+        assert hm["log"] == 1
 
     def test_a_price_range_with_no_rows_returns_none(self):
         from strategy.drill_gen import heatmap

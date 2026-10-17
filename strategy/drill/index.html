@@ -166,7 +166,30 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
    that quote a rate stay hidden rather than showing a stale one. */
 let BUCKETS = {}, PA = {}, CROSS = {}, ALLIN = null, RMETA = null;
 
-const FLOW_H = 150, GAP_H = 14, CAP_H = 18, AXIS_H = 16, DR_H = 104;
+const FLOW_H = 272, GAP_H = 14, CAP_H = 18, AXIS_H = 16, DR_H = 104;
+
+/* Liquidity ramp lifted from the live heatmap window so the two read the
+   same way: black -> purple -> amber -> yellow, over a percentile-normalised
+   log scale. Returns a css colour for a normalised value in [0, 1]. */
+/* 3.0, matching the live tool's default, and it has to be above 1 here.
+   Taking the log already lifted the dim end -- measured on a real session
+   the bytes land between p10 142 and p90 203 of 255 -- so without a gamma
+   that pushes midtones back down, percentile-normalising on top of that
+   paints almost every cell amber and the walls stop standing out. */
+const HM_GAMMA = 3.0;
+/* Everything drawn INSIDE the strip sits on that black field, so it takes
+   fixed light colours rather than the page's. The light theme's ink and its
+   green/red are chosen against white and go muddy here. */
+const HM_UP = "#35b87a", HM_DN = "#e0646f",
+      HM_RULE = "rgba(255,255,255,.22)", HM_EDGE = "#4cb6bf";
+function hotCol(n){
+  let r, gg, b, t;
+  if (n < 0.25){        t = n / 0.25;          r = t*60;        gg = 0;        b = t*140; }
+  else if (n < 0.5){    t = (n - 0.25) / 0.25; r = 60 + t*100;  gg = 0;        b = 140 + t*60; }
+  else if (n < 0.75){   t = (n - 0.5) / 0.25;  r = 160 + t*95;  gg = t*80;     b = 200 - t*200; }
+  else {                t = (n - 0.75) / 0.25; r = 255;         gg = 80 + t*155; b = 0; }
+  return `rgb(${r|0},${gg|0},${b|0})`;
+}
 /* |delta_r| quantiles by window, measured over 38,049 RTH minutes / 104
    sessions of SOXL (2026-05-19..10-16): [p75, p90, p99]. The panel is
    scaled from these, never from the question on screen -- +0.30 has to mean
@@ -563,21 +586,51 @@ function draw(q, reveal){
         for (const [r, c, v] of BG.s) m.set(r * BG.nc + c, v);
         at = (r, c) => m.get(r * BG.nc + c) || 0;
       }
-      for (let r = 0; r < BG.nb; r++){
-        const p0 = flo + (r / BG.nb) * (fhi - flo);
-        const p1 = flo + ((r + 1) / BG.nb) * (fhi - flo);
-        const ya = FY(p1), yb = FY(p0);
+      /* The ramp below runs black -> purple -> amber -> yellow and is built
+         for a black field, so the panel lays its own down rather than
+         following the page theme. On the light theme the dim end would
+         otherwise sit on white and read as nothing at all. */
+      g.save();
+      g.fillStyle = "#06080b";
+      g.fillRect(PAD_L + 1, fy0 + 1, FW - 2, FLOW_H - 2);
+
+      /* Brightness is referenced to a high PERCENTILE of what is on screen,
+         not to the maximum. Against the maximum a single wall sets the
+         ceiling for the whole panel and ordinary size near the touch -- real,
+         present in the data -- renders too dim to see. This is the same
+         correction the live heatmap tool makes. */
+      const vals = [];
+      for (let r = 0; r < BG.nb; r++)
         for (let c = 0; c < NC; c++){
           const v = at(r, c);
-          if (v < 6) continue;
-          /* Gamma under 1 lifts the thin levels; a linear ramp renders
-             everything but the single largest wall as near-black. */
-          g.globalAlpha = 0.72 * Math.pow(v / 255, 0.45);
-          g.fillStyle = hmC;
-          g.fillRect(FX(c), ya, Math.max(1, FW / NC), Math.max(1, yb - ya));
+          if (v > 0) vals.push(BG.log ? v : Math.log1p(v));
+        }
+      let ref = 0;
+      if (vals.length){
+        vals.sort((a, b) => a - b);
+        ref = vals[Math.min(vals.length - 1,
+                            Math.floor(vals.length * 0.99))] || 0;
+      }
+      if (ref > 0){
+        for (let r = 0; r < BG.nb; r++){
+          const p0 = flo + (r / BG.nb) * (fhi - flo);
+          const p1 = flo + ((r + 1) / BG.nb) * (fhi - flo);
+          const ya = FY(p1), yb = FY(p0);
+          for (let c = 0; c < NC; c++){
+            const raw = at(r, c);
+            if (raw <= 0) continue;
+            let n = Math.min(1, (BG.log ? raw : Math.log1p(raw)) / ref);
+            n = Math.pow(n, HM_GAMMA);
+            if (n < 0.02) continue;
+            g.globalAlpha = Math.min(220, n * 200 + 20) / 255;
+            g.fillStyle = hotCol(n);
+            g.fillRect(FX(c), ya, Math.max(1, FW / NC),
+                       Math.max(1, yb - ya));
+          }
         }
       }
       g.globalAlpha = 1;
+      g.restore();
     }
     if (B30 && B30.length){
       const vmax = Math.max(...B30.map(b => b[2]));
@@ -587,10 +640,10 @@ function draw(q, reveal){
         const rr = 2 + 7 * Math.sqrt(vol / (vmax || 1));
         g.beginPath();
         g.arc(FX(c) + FW / NC / 2, FY(px), rr, 0, 7);
-        g.fillStyle = side > 0 ? upC : dnC;
-        g.globalAlpha = .55; g.fill();
-        g.globalAlpha = 1; g.lineWidth = 1;
-        g.strokeStyle = side > 0 ? upC : dnC; g.stroke();
+        g.fillStyle = side > 0 ? HM_UP : HM_DN;
+        g.globalAlpha = .62; g.fill();
+        g.globalAlpha = 1; g.lineWidth = 1.2;
+        g.strokeStyle = side > 0 ? HM_UP : HM_DN; g.stroke();
       }
     }
     /* This strip has its OWN time axis -- 30 minutes ending at the decision,
@@ -598,7 +651,7 @@ function draw(q, reveal){
        the right-hand side reads as the chart's hidden future. Hence the
        labelled ticks, the solid wall at the right, and the word 决策. */
     g.save();
-    g.strokeStyle = acc; g.lineWidth = 2; g.globalAlpha = .85;
+    g.strokeStyle = HM_EDGE; g.lineWidth = 2; g.globalAlpha = .9;
     g.beginPath(); g.moveTo(PAD_L + FW, fy0); g.lineTo(PAD_L + FW, fy0 + FLOW_H);
     g.stroke();
     g.restore(); g.globalAlpha = 1;
@@ -607,7 +660,8 @@ function draw(q, reveal){
     g.textBaseline = "top"; g.textAlign = "center";
     for (const m of [30, 20, 10]){
       const x = PAD_L + FW * (1 - m / 30);
-      g.save(); g.setLineDash([2, 4]); g.strokeStyle = soft; g.lineWidth = 1;
+      g.save(); g.setLineDash([2, 4]); g.strokeStyle = HM_RULE;
+      g.lineWidth = 1;
       g.beginPath(); g.moveTo(x, fy0); g.lineTo(x, fy0 + FLOW_H); g.stroke();
       g.restore();
       g.fillText(`−${m}分`, x + 14, fy0 + FLOW_H + 3);

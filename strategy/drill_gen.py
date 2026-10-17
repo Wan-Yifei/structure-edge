@@ -232,7 +232,28 @@ def load_range(code: str, start: str, end: str) -> pd.DataFrame:
     return full
 
 
-HM_MINS, HM_SECS, HM_BINS = 30, 10, 48
+HM_MINS, HM_SECS, HM_BINS = 30, 10, 96
+
+
+def _quantise(grid):
+    """Grid -> one byte a cell, in LOG space.
+
+    Quantising linearly against the maximum spends almost the whole byte on
+    the top of the range: against a 40,000-share wall, a 400-share level
+    lands on 2 of 255 and every ordinary level near the touch collapses into
+    the same two or three codes. The information is gone before the page
+    ever sees it, so no amount of gamma at draw time brings it back.
+
+    log1p first, then quantise, which is what the live heatmap does with its
+    full-precision grid. The page re-normalises against a high percentile of
+    what it decodes, so the reference is a genuinely large level rather than
+    the single largest one.
+    """
+    top = float(grid.max())
+    if top <= 0:
+        return None, 0.0
+    lg = np.log1p(grid)
+    return np.round(lg / np.log1p(top) * 255).astype(np.uint8), top
 # Net aggressor volume a 10s column needs to raise a bubble. The viewer
 # defaults to 500, which on SOXL marks most columns and so says little;
 # 5000 picks out the ones worth looking at.
@@ -271,13 +292,12 @@ def heatmap(lad, t_end, lo, hi):
     pairs = np.unique(np.stack([col, ts_i]), axis=1)
     secs = np.bincount(pairs[0], minlength=ncol).astype(float)
     grid = np.divide(grid, secs[None, :], out=grid, where=secs[None, :] > 0)
-    top = grid.max()
-    if top <= 0:
+    q, top = _quantise(grid)
+    if q is None:
         return None
-    q = np.round(grid / top * 255).astype(np.uint8)
     return {"lo": round(float(lo), 3), "hi": round(float(hi), 3),
             "nb": HM_BINS, "nc": ncol, "sec": HM_SECS,
-            "top": int(round(top)),
+            "top": int(round(top)), "log": 1,
             "d": base64.b64encode(q.tobytes()).decode("ascii")}
 
 
@@ -359,16 +379,24 @@ def traded_profile(tk, t_end, lo: float, hi: float):
     row = np.clip(row.astype(int), 0, HM_BINS - 1)
     grid = np.zeros((HM_BINS, ncol), float)
     np.add.at(grid, (row, col), w.volume.to_numpy(float))
-    top = grid.max()
-    if top <= 0:
+    q, top = _quantise(grid)
+    if q is None:
         return None
     # SPARSE, unlike the resting heatmap. Price visits a narrow band at any
     # instant, so ~95% of this grid is zero; dense base64 would spend 11.5 KB
     # a question storing nothing and add 4 MB to the set.
-    q = np.round(grid / top * 255).astype(int)
-    rr, cc = np.nonzero(q >= 6)
+    #
+    # The floor is on the RAW grid, not on the quantised byte: in log space a
+    # single share already codes above 6, so the old test would keep every
+    # cell price ever touched and the sparse form would stop being sparse.
+    #
+    # 0.2% of the window's own maximum. The old byte test cut at 2.4%, which
+    # is what hid ordinary size next to a wall; this reaches twelve times
+    # deeper while still bounding how many cells a question carries.
+    rr, cc = np.nonzero(grid >= max(1.0, top * 0.002))
     return {"lo": round(float(lo), 3), "hi": round(float(hi), 3),
-            "nb": HM_BINS, "nc": ncol, "sec": HM_SECS, "top": int(round(top)),
+            "nb": HM_BINS, "nc": ncol, "sec": HM_SECS,
+            "top": int(round(top)), "log": 1,
             "s": [[int(r), int(c), int(q[r, c])] for r, c in zip(rr, cc)]}
 
 
