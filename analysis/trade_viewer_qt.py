@@ -2402,6 +2402,14 @@ class TradeViewerQt(QMainWindow):
         self._plot_dcvd: pg.PlotItem = self._chart_widget.addPlot(row=5, col=0)
         self._plot_dcvd.showGrid(x=True, y=True, alpha=0.10)
         self._plot_dcvd.setLabel("left", "DCVD", **{"color": _FG})
+        # DCVD lives inside +/-1, and pyqtgraph reads a range below 1 as a
+        # reason to switch the axis into milli-units. With no unit string to
+        # attach a prefix to it degrades into a "(x0.001)" suffix on the
+        # label and ticks printed as 500 where the value is 0.5 -- while the
+        # crosshair, which is not scaled, says 0.45 on the same pixel. The
+        # 0.40 decision line then draws against ticks reading 400. The axis
+        # has to speak the same numbers as the threshold it is there to show.
+        self._plot_dcvd.getAxis("left").enableAutoSIPrefix(False)
         self._plot_dcvd.getAxis("left").setTextPen(_qc(_FG))
         self._plot_dcvd.getAxis("bottom").setTextPen(_qc(_FG))
         self._plot_dcvd.setMenuEnabled(False)

@@ -343,3 +343,33 @@ class TestWiring:
             assert DCVD_DECISION not in lv
         else:
             assert DCVD_DECISION in lv
+
+
+class TestAxisUnits:
+    """The axis has to print the same numbers as the threshold on it."""
+
+    def test_no_si_prefix_rescaling(self, viewer):
+        """pyqtgraph treats a range under 1 as a reason to switch to
+        milli-units. With no unit string it shows up as a '(x0.001)' suffix
+        and ticks reading 500 where the value is 0.5 -- against which the
+        0.40 decision line appears to sit at 400."""
+        ax = viewer._plot_dcvd.getAxis("left")
+        assert ax.autoSIPrefix is False
+        assert ax.autoSIPrefixScale == 1.0
+
+    def test_label_carries_no_scale_suffix(self, viewer):
+        _run(viewer, [(60, 40, 0)] * 20)
+        assert "x0.001" not in viewer._plot_dcvd.getAxis("left").labelString()
+
+    def test_tick_values_are_the_real_values(self, viewer):
+        """A tick near the decision line must read 0.4, not 400."""
+        from analysis.trade_viewer_qt import DCVD_DECISION
+
+        _run(viewer, [(60, 40, 0)] * 20)
+        ax = viewer._plot_dcvd.getAxis("left")
+        lo, hi = viewer._plot_dcvd.vb.viewRange()[1]
+        vals = [v for _, pairs in ax.tickValues(lo, hi, 400) for v in pairs]
+        assert vals, "axis produced no ticks"
+        assert max(abs(v) for v in vals) < 2.0, \
+            f"ticks are not in DCVD units: {sorted(vals)[:5]}"
+        assert min(abs(v - DCVD_DECISION) for v in vals) < 0.3
