@@ -8,6 +8,7 @@
   --accent:#0d6e78; --ok:#0d7490; --bad:#c2410c;
   --stop:#c2410c; --tgt:#0d7490; --prof:#8b96a0; --poc:#a16207; --hm:#2f6d7a;
   --up:#1a9e5c; --dn:#d1495b;
+  --dr5:#6b4fa8;
   --dec:#b45309;
   --font:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -19,6 +20,7 @@
   --accent:#4cb6bf; --ok:#39a8bd; --bad:#e0743f;
   --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
   --up:#35b87a; --dn:#e0646f;
+  --dr5:#b39ddb;
   --dec:#ffd54f;
   color-scheme:dark;
 }}
@@ -28,6 +30,7 @@
   --accent:#4cb6bf; --ok:#39a8bd; --bad:#e0743f;
   --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
   --up:#35b87a; --dn:#e0646f;
+  --dr5:#b39ddb;
   --dec:#ffd54f;
   color-scheme:dark;
 }
@@ -309,6 +312,7 @@ function draw(q, reveal){
         pocC = cs.getPropertyValue("--poc").trim(),
         hmC = cs.getPropertyValue("--hm").trim(),
         decC = cs.getPropertyValue("--dec").trim(),
+        dr5C = cs.getPropertyValue("--dr5").trim(),
         upC = cs.getPropertyValue("--up").trim(),
         dnC = cs.getPropertyValue("--dn").trim(),
         surf = cs.getPropertyValue("--surface").trim();
@@ -577,7 +581,7 @@ function draw(q, reveal){
     }
     const d5 = q.drs5;
     if (d5){
-      g.strokeStyle = ink3; g.lineWidth = 1.4; g.globalAlpha = .75;
+      g.strokeStyle = dr5C; g.lineWidth = 2.2; g.globalAlpha = 1;
       g.beginPath();
       let on = false;
       for (let i = 0; i < last; i++){
@@ -597,7 +601,7 @@ function draw(q, reveal){
     }
     g.fillStyle = ink3; g.font = "12px ui-monospace,monospace";
     g.textAlign = "left"; g.textBaseline = "top";
-    g.fillText(`Δr　柱 = 1 根（决策值）/ 线 = 5 根　黄虚线 ±${DR_DECISION} 是实测阈值、` +
+    g.fillText(`Δr　绿红柱 = 1 根（决策值）/ 紫线 = 5 根　黄虚线 ±${DR_DECISION} 是实测阈值、` +
                `灰虚线 p90 ${p90.toFixed(2)}（固定刻度，题与题可比）` +
                (dv == null ? "　决策点无逐笔数据" : ""),
                PAD_L + 3, dy0 + 3);
