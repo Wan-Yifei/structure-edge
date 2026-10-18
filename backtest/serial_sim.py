@@ -76,12 +76,25 @@ def build():
     return days
 
 
+def count_signals(d):
+    """Every bar that fires, whether or not it could have been taken.
+
+    Counting them inside the walk gives 100% acceptance by construction:
+    the walk jumps from an entry straight to its exit, so the bars it skips
+    are exactly the signals it could not take and they never reach the
+    counter. The denominator cannot be computed from the walk.
+    """
+    v, a = d["dr"], d["a"]
+    ok = np.isfinite(v) & np.isfinite(a) & (a > 0)
+    return int((ok & (np.abs(v) >= THRESH)).sum())
+
+
 def run_day(d, next_open: bool):
-    """One session, one position at a time. Returns (trades, signals)."""
+    """One session, one position at a time. Returns the trades taken."""
     o, h, l, c = d["o"], d["h"], d["l"], d["c"]
     dr, a = d["dr"], d["a"]
     n = len(c)
-    out, signals = [], 0
+    out = []
     i = 0
     while i < n - 1:
         v, av = dr[i], a[i]
@@ -92,7 +105,6 @@ def run_day(d, next_open: bool):
         if side == 0:
             i += 1
             continue
-        signals += 1
         # The signal is known only once bar i has closed, so the earliest
         # tradeable price is bar i+1's open. The close of bar i is the
         # assumption every earlier run made; both are run.
@@ -121,7 +133,7 @@ def run_day(d, next_open: bool):
         # Flat only once the trade is out; everything in between is a
         # signal the account could not have taken.
         i = exit_i + 1
-    return out, signals
+    return out
 
 
 def summarise(name, rows, signals, days_n):
@@ -169,9 +181,8 @@ def main():
                        ("在下一根开盘成交（可执行）", True)):
         rows_by_day, total_sig = [], 0
         for d in oos:
-            rr, sg = run_day(days[d], next_open=nxt)
-            total_sig += sg
-            rows_by_day.append(rr)
+            rows_by_day.append(run_day(days[d], next_open=nxt))
+            total_sig += count_signals(days[d])
         flat = [x for rr in rows_by_day for x in rr]
         r = summarise(label, flat, total_sig, len(oos))
         results[label] = ([np.array([x["r"] for x in rr]) for rr in rows_by_day],
@@ -207,6 +218,24 @@ def main():
         print("\n  对照：按机会计价（每分钟独立评估）"
               "多头 +0.207 / 空头 +0.247 R")
         print("  差额就是「同一时刻只能持一个仓位」的代价。")
+
+        # Costs beyond the spread. At forty-odd trades a day the fee
+        # schedule decides this more than the edge does, and guessing the
+        # user's schedule is worse than stating what it would take to erase
+        # the edge.
+        atrs = np.array([x["atr"] for x in flat])
+        per_r = float(np.mean(STOP * atrs))      # dollars in one R
+        edge = float(rr.mean())
+        print()
+        print("=== 成本敏感度 ===")
+        print(f"  1 R 均值 ${per_r:.3f}/股；每笔优势 {edge:+.3f} R "
+              f"= ${edge * per_r:.4f}/股")
+        print(f"  现在只扣了 ${SPREAD:.2f} 价差，佣金未建模。")
+        print(f"  每笔再多 ${edge * per_r:.4f}/股的滑点+佣金，优势归零。")
+        for extra in (0.005, 0.01, 0.02, 0.04):
+            left = edge - extra / per_r
+            print(f"    额外 ${extra:.3f}/股 → 每笔 {left:+.3f} R，"
+                  f"{len(flat)} 笔合计 {left * len(flat):+.0f} R")
 
 
 if __name__ == "__main__":
