@@ -430,6 +430,27 @@ function draw(q, reveal){
     else { g.fillStyle = col; g.fillRect(x-bw/2, y1, bw, bh); }
   }
 
+  /* The settlement horizon. The chart draws AFTER bars of future but the
+     rule only looks at the first FWD of them, and nothing used to say so:
+     a target reached on bar 49 sat in plain sight above a verdict reading
+     "never touched". Past the horizon the field is dimmed, so what counts
+     and what is merely visible are two different-looking regions. */
+  if (reveal && last > q.mark + 1 + FWD){
+    const hx = X(q.mark + FWD);
+    g.save();
+    g.fillStyle = surf; g.globalAlpha = .62;
+    g.fillRect(hx, PAD_T + 1, PAD_L + W - hx, PRICE_H - 2);
+    g.globalAlpha = 1;
+    g.setLineDash([4, 3]); g.strokeStyle = ink3; g.lineWidth = 1.2;
+    g.beginPath(); g.moveTo(hx, PAD_T); g.lineTo(hx, PAD_T + PRICE_H);
+    g.stroke();
+    g.setLineDash([]);
+    g.fillStyle = ink3; g.font = "12px ui-monospace,monospace";
+    g.textAlign = "left"; g.textBaseline = "top";
+    g.fillText(`第 ${FWD} 根 · 结算到此为止`, hx + 4, PAD_T + 4);
+    g.restore();
+  }
+
   // ---- RSI ---------------------------------------------------------------
   const ry0 = PAD_T + PRICE_H + GAP_H;
   g.strokeStyle = soft; g.lineWidth = 1;
@@ -821,8 +842,22 @@ function settle(q, stopAtr, tgtAtr){
   }
   const endI = Math.min(q.c.length-1, q.mark+FWD);
   const move = short ? (q.entry - q.c[endI]) : (q.c[endI] - q.entry);
+  /* The chart draws more future than the rule settles on, so a level
+     reached past the horizon is on screen while the verdict says it never
+     was. Saying which bar it happened on turns an apparent contradiction
+     into the lesson: the horizon is part of the trade. */
+  let late = "";
+  for (let j = q.mark+1+FWD; j < q.c.length; j++){
+    const tu = short ? q.l[j] <= target : q.h[j] >= target;
+    const td = short ? q.h[j] >= stop   : q.l[j] <= stop;
+    if (tu || td){
+      late = `（图上第 ${j-q.mark} 根才${tu ? "到目标" : "破止损"}，`
+           + `已出 ${FWD} 根结算窗，不计）`;
+      break;
+    }
+  }
   return {stop, target, rr, r: move/risk, bar: FWD,
-          how:`${FWD} 根内都没碰到,按收盘结算`};
+          how:`${FWD} 根内都没碰到,按收盘结算${late}`};
 }
 
 function render(){

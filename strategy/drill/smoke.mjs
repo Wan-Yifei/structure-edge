@@ -58,7 +58,7 @@ global.fetch = () => Promise.reject(new Error("fetch must not be used"));
 global.setInterval = () => 0;
 global.clearInterval = () => {};
 const api = new Function(
-  code + "\n;return {choose, submit, levels, stepTo, loadSet, report, next," +
+  code + "\n;return {choose, submit, levels, settle, stepTo, loadSet, report, next," +
          "         prev, goto1, isAnswered: (id) => !!ans[id], getIdx: () => idx," +
          "         getStep: () => step, getQS: () => QS};")();
 
@@ -366,3 +366,31 @@ console.log("\nPARTITION OK");
 }
 
 console.log("\nJUMP OK");
+
+/* The settlement horizon. The chart draws AFTER bars of future, the rule
+   settles on FWD of them, and a level reached between the two is visible
+   while the verdict says it never happened. That looked like a bug until
+   the horizon was drawn and the verdict named the late bar. */
+{
+  const q = global.window.DRILL_c1.find(
+    x => x.day === "2026-10-02" && x.tm === "14:03");
+  if (!q) throw new Error("the 2026-10-02 14:03 question is missing");
+  /* The levels from the report: stop 162.42, target 164.34, R 1.52.
+     Derived from the question so the test keeps meaning if the
+     question's ATR is ever recomputed. */
+  const stopAtr = (q.entry - 162.42) / q.atr;
+  const tgtAtr  = (164.34 - q.entry) / q.atr;
+  const s = api.settle(q, stopAtr, tgtAtr);
+  if (!/没碰到/.test(s.how))
+    throw new Error("expected a time-stop settlement, got: " + s.how);
+  if (!/已出 30 根结算窗/.test(s.how))
+    throw new Error("the late touch is not named: " + s.how);
+  const late = Number(s.how.match(/第 (\d+) 根才/)[1]);
+  if (!(late > 30))
+    throw new Error("a touch inside the window must not be called late");
+  // And the window itself must still be the thing that decided it.
+  const within = q.h.slice(q.mark + 1, q.mark + 1 + 30);
+  if (Math.max(...within) >= s.target)
+    throw new Error("target was reachable inside the window after all");
+  console.log("ok   结算视野：窗外才触及的目标会说明，而不是静默当作没发生");
+}
