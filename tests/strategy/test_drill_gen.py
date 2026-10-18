@@ -212,7 +212,8 @@ class TestHeatmap:
         future = lad.copy()
         future.loc[future.ts > t, "size"] = 9e6
         b = heatmap(future, t, 99.0, 102.0)
-        assert a["d"] == b["d"] and a["top"] == b["top"]
+        assert a["db"] == b["db"] and a["da"] == b["da"]
+        assert a["top"] == b["top"]
 
     def test_levels_in_one_bin_sum_while_seconds_average(self):
         """Three levels of 1000 in one bin, held every second, is a band of
@@ -229,7 +230,8 @@ class TestHeatmap:
         from strategy.drill_gen import heatmap
         lad = self._ladder()
         hm = heatmap(lad, pd.Timestamp("2026-10-14 10:10:00"), 99.0, 102.0)
-        assert len(base64.b64decode(hm["d"])) == hm["nb"] * hm["nc"]
+        for key in ("db", "da"):
+            assert len(base64.b64decode(hm[key])) == hm["nb"] * hm["nc"]
         assert hm["nc"] == 30 * 60 // hm["sec"]
 
     def test_a_wall_lands_in_its_own_price_row(self):
@@ -239,7 +241,7 @@ class TestHeatmap:
         lad.loc[lad.price == 101.0, "size"] = 50000.0
         lo, hi = 99.0, 102.0
         hm = heatmap(lad, pd.Timestamp("2026-10-14 10:10:00"), lo, hi)
-        g = np.frombuffer(base64.b64decode(hm["d"]), np.uint8) \
+        g = np.frombuffer(base64.b64decode(hm["db"]), np.uint8) \
               .reshape(hm["nb"], hm["nc"])
         hot = int((101.0 - lo) / (hi - lo) * hm["nb"])
         assert g[hot].max() == 255
@@ -400,3 +402,55 @@ class TestBreakoutIsNotAPullback:
         c[-5:] = c[-6] - np.arange(1, 6) * 1.2
         _, why, _ = structure(c, c + 0.3, c - 0.3, c, n - 1, a=0.4)
         assert not any("突破" in txt for _, txt in why),             f"a pullback was read as a breakout: {[x for _, x in why]}"
+
+
+class TestHeatmapSides:
+    """Bid and ask are separate layers. Summed into one, a bid wall and the
+    ask wall above it render identically and the panel stops answering the
+    only question it exists for -- which side is holding."""
+
+    @staticmethod
+    def _two_sided():
+        t0 = pd.Timestamp("2026-10-14 10:00:00")
+        rows = []
+        for s in range(600):
+            rows.append((t0 + pd.Timedelta(seconds=s), 100.0, 4000.0, "B"))
+            rows.append((t0 + pd.Timedelta(seconds=s), 101.0, 1000.0, "A"))
+        return pd.DataFrame(rows, columns=["ts", "price", "size", "side"])
+
+    @staticmethod
+    def _grid(hm, key):
+        import base64
+        raw = base64.b64decode(hm[key])
+        return np.frombuffer(raw, np.uint8).reshape(hm["nb"], hm["nc"])
+
+    def test_each_side_lands_only_in_its_own_layer(self):
+        from strategy.drill_gen import heatmap
+        lo, hi = 99.0, 102.0
+        hm = heatmap(self._two_sided(),
+                     pd.Timestamp("2026-10-14 10:10:00"), lo, hi)
+        gb, ga = self._grid(hm, "db"), self._grid(hm, "da")
+        rb = int((100.0 - lo) / (hi - lo) * hm["nb"])
+        ra = int((101.0 - lo) / (hi - lo) * hm["nb"])
+        assert gb[rb].max() > 0 and gb[ra].max() == 0
+        assert ga[ra].max() > 0 and ga[rb].max() == 0
+
+    def test_both_layers_share_one_reference(self):
+        """Scaled apart, a thin ask would render as solid as a heavy bid.
+        The bid here is four times the ask and has to look it."""
+        from strategy.drill_gen import heatmap
+        hm = heatmap(self._two_sided(),
+                     pd.Timestamp("2026-10-14 10:10:00"), 99.0, 102.0)
+        gb, ga = self._grid(hm, "db"), self._grid(hm, "da")
+        assert gb.max() == 255, "the larger side sets the shared reference"
+        assert ga.max() < gb.max()
+        assert hm["top"] == pytest.approx(4000, rel=0.02)
+
+    def test_a_one_sided_book_still_emits_both_layers(self):
+        """The page indexes both keys; a missing one would be a crash on the
+        quiet days rather than an empty layer."""
+        from strategy.drill_gen import heatmap
+        lad = TestHeatmap._ladder()          # bids only
+        hm = heatmap(lad, pd.Timestamp("2026-10-14 10:10:00"), 99.0, 102.0)
+        assert "db" in hm and "da" in hm
+        assert self._grid(hm, "da").max() == 0

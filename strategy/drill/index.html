@@ -171,28 +171,23 @@ let BUCKETS = {}, PA = {}, CROSS = {}, ALLIN = null, RMETA = null;
 
 const FLOW_H = 272, GAP_H = 14, CAP_H = 18, AXIS_H = 16, DR_H = 104;
 
-/* Liquidity ramp lifted from the live heatmap window so the two read the
-   same way: black -> purple -> amber -> yellow, over a percentile-normalised
-   log scale. Returns a css colour for a normalised value in [0, 1]. */
+/* The live heatmap's own bid/ask pair, so the two panels read the same
+   way: teal is the bid side / buying, red is the ask side / selling.
+   Single-hue layers with an alpha ramp, which is what that tool draws when
+   its bid/ask toggle is on -- the combined black->purple->amber ramp is its
+   OTHER mode, and it cannot show which side is holding. */
+const HM_BID = "#26a69a", HM_ASK = "#ef5350";
+/* Older question files carry one combined grid with no side. Neutral, so
+   it cannot be mistaken for a side that was never recorded. */
+const HM_FLAT = "#9fb4c7";
 /* 3.0, matching the live tool's default, and it has to be above 1 here.
    Taking the log already lifted the dim end -- measured on a real session
    the bytes land between p10 142 and p90 203 of 255 -- so without a gamma
    that pushes midtones back down, percentile-normalising on top of that
-   paints almost every cell amber and the walls stop standing out. */
+   paints almost every cell bright and the walls stop standing out. */
 const HM_GAMMA = 3.0;
-/* Everything drawn INSIDE the strip sits on that black field, so it takes
-   fixed light colours rather than the page's. The light theme's ink and its
-   green/red are chosen against white and go muddy here. */
 const HM_UP = "#35b87a", HM_DN = "#e0646f",
       HM_RULE = "rgba(255,255,255,.22)", HM_EDGE = "#4cb6bf";
-function hotCol(n){
-  let r, gg, b, t;
-  if (n < 0.25){        t = n / 0.25;          r = t*60;        gg = 0;        b = t*140; }
-  else if (n < 0.5){    t = (n - 0.25) / 0.25; r = 60 + t*100;  gg = 0;        b = 140 + t*60; }
-  else if (n < 0.75){   t = (n - 0.5) / 0.25;  r = 160 + t*95;  gg = t*80;     b = 200 - t*200; }
-  else {                t = (n - 0.75) / 0.25; r = 255;         gg = 80 + t*155; b = 0; }
-  return `rgb(${r|0},${gg|0},${b|0})`;
-}
 /* |delta_r| quantiles by window, measured over 38,049 RTH minutes / 104
    sessions of SOXL (2026-05-19..10-16): [p75, p90, p99]. The panel is
    scaled from these, never from the question on screen -- +0.30 has to mean
@@ -291,7 +286,7 @@ const sr = (v, d = 2) => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(d);
    the plot and the number in a bordered chip at the right edge, so a price
    line always carries its value instead of needing the axis read off. */
 function tag(g, x, y, text, col, ink){
-  g.font = "11px ui-monospace,monospace";
+  g.font = "13px ui-monospace,monospace";
   const w = g.measureText(text).width + 10, h = 15;
   const bx = x - w, by = y - h/2;
   g.fillStyle = ink; g.globalAlpha = .82;
@@ -352,7 +347,7 @@ function draw(q, reveal){
     g.save(); g.setLineDash([3,3]); g.strokeStyle = col; g.lineWidth = 1;
     g.beginPath(); g.moveTo(PAD_L, y); g.lineTo(profX0 + PROF_W, y); g.stroke();
     g.restore();
-    g.fillStyle = col; g.font = "10px ui-monospace,monospace";
+    g.fillStyle = col; g.font = "12px ui-monospace,monospace";
     g.textAlign = "left"; g.textBaseline = "bottom";
     g.fillText(`${nm} ${fmt(p)}`, PAD_L + 3, y - 2);
   }
@@ -402,7 +397,7 @@ function draw(q, reveal){
     g.globalAlpha = .6; g.beginPath();
     g.moveTo(PAD_L, y); g.lineTo(profX0 + PROF_W, y); g.stroke(); g.restore();
     g.globalAlpha = 1; g.fillStyle = ink3;
-    g.font = "10px ui-monospace,monospace";
+    g.font = "12px ui-monospace,monospace";
     g.textAlign = "left"; g.textBaseline = "top";
     g.fillText(`低点 ${fmt(q.low0)}`, PAD_L + 3, y + 2);
   }
@@ -441,7 +436,7 @@ function draw(q, reveal){
     g.save(); g.setLineDash([2,4]); g.strokeStyle = lv===20?stopC:ink3;
     g.globalAlpha = lv===20?.6:.35; g.lineWidth = 1;
     g.beginPath(); g.moveTo(PAD_L, y); g.lineTo(PAD_L+W, y); g.stroke(); g.restore();
-    g.globalAlpha = 1; g.fillStyle = ink3; g.font = "10px ui-monospace,monospace";
+    g.globalAlpha = 1; g.fillStyle = ink3; g.font = "12px ui-monospace,monospace";
     g.textAlign = "left"; g.textBaseline = "middle";
     g.fillText(String(lv), PAD_L+W+4, y);
   }
@@ -462,23 +457,29 @@ function draw(q, reveal){
   }
   g.textAlign = "left";
 
-  // ---- crosshair ---------------------------------------------------------
-  if (_hover && _hover.x >= PAD_L && _hover.x <= PAD_L + W
-             && _hover.y >= PAD_T && _hover.y <= PAD_T + PRICE_H){
+  // ---- crosshair, price panel part ---------------------------------------
+  /* The bar under the cursor is wanted by the RSI and delta_r panels too,
+     so it is resolved once here and the vertical rule is drawn at the very
+     end -- those panels are painted after this point and would cover it. */
+  const chBi = (_hover && _hover.x >= PAD_L && _hover.x <= PAD_L + W)
+    ? Math.max(0, Math.min(last - 1,
+        Math.round((_hover.x - PAD_L) / (W/n) - .5)))
+    : null;
+  if (chBi != null && _hover.y >= PAD_T && _hover.y <= PAD_T + PRICE_H){
     const px = lo + (PAD_T + PRICE_H - _hover.y) / PRICE_H * (hi - lo);
-    const bi = Math.max(0, Math.min(last - 1,
-                                    Math.round((_hover.x - PAD_L) / (W/n) - .5)));
     g.save();
     g.setLineDash([3, 3]); g.strokeStyle = ink3; g.lineWidth = 1;
     g.globalAlpha = .7;
     g.beginPath();
     g.moveTo(PAD_L, _hover.y); g.lineTo(PAD_L + W, _hover.y);
-    g.moveTo(X(bi), PAD_T); g.lineTo(X(bi), PAD_T + PRICE_H);
     g.stroke();
     g.restore(); g.globalAlpha = 1;
     tag(g, rail, _hover.y, fmt(px), ink3,
         surf === "#fff" ? "#1b2626" : "#0a1110");
-    g.fillStyle = ink3; g.font = "11px ui-monospace,monospace";
+  }
+  if (chBi != null){
+    const bi = chBi;
+    g.fillStyle = ink3; g.font = "13px ui-monospace,monospace";
     g.textAlign = "left"; g.textBaseline = "top";
     g.fillText(`${q.t[bi]}　开 ${fmt(o[bi])}　高 ${fmt(h[bi])}　` +
                `低 ${fmt(l[bi])}　收 ${fmt(c[bi])}`, PAD_L + 3, PAD_T + 2);
@@ -495,25 +496,37 @@ function draw(q, reveal){
     // was unreadable.
     const [p75, p90, p99] = DR_SCALE[1];
     const DY = v => dy0 + DR_H/2 - (v / (p99 * 1.05)) * (DR_H/2);
-    /* p75 is dropped here for the same reason the viewer dropped it: at
-       0.52 it sits close enough to the 0.40 decision line that the two read
-       as one band. p90 stays as the "unusual" marker, well clear of it. */
-    for (const [lv, st] of [[0, []], [p90, [5,3]], [-p90, [5,3]]]){
-      g.save(); g.setLineDash(st);
-      g.strokeStyle = lv === 0 ? ink3 : soft;
-      g.globalAlpha = lv === 0 ? .55 : .9; g.lineWidth = 1;
-      g.beginPath(); g.moveTo(PAD_L, DY(lv)); g.lineTo(PAD_L+W, DY(lv));
+    /* These were drawn in --line-soft, which on the light theme is #eef1f2
+       -- a near-white rule on a white panel. A guide you cannot see is not
+       a guide, and three of them at different meanings need telling apart,
+       so each is drawn at a weight that matches how much it matters and
+       labelled at the right edge rather than left to be guessed.
+
+       p75 is dropped, as in the viewer: at 0.52 it sits close enough to the
+       0.40 decision line that the two read as one band. */
+    const guides = [
+      [0,           ink3, 1,   [],      .70, ""],
+      [p90,         ink3, 1,   [2, 4],  .45, `p90 ${p90.toFixed(2)}`],
+      [-p90,        ink3, 1,   [2, 4],  .45, ""],
+      /* The measured threshold, both ways: long and short came out
+         symmetric, so marking one side would be half the instruction. */
+      [DR_DECISION, decC, 1.6, [7, 4], 1,    `±${DR_DECISION}`],
+      [-DR_DECISION, decC, 1.6, [7, 4], 1,   ""],
+    ];
+    for (const [lv, col, wd, dash, alpha, label] of guides){
+      g.save();
+      g.setLineDash(dash); g.strokeStyle = col;
+      g.lineWidth = wd; g.globalAlpha = alpha;
+      g.beginPath(); g.moveTo(PAD_L, DY(lv)); g.lineTo(PAD_L + W, DY(lv));
       g.stroke(); g.restore(); g.globalAlpha = 1;
-    }
-    /* The measured threshold, both ways: long and short came out symmetric,
-       so marking one side would be half the instruction. The drill trains
-       the decision the backtest validated, so the level it validated has to
-       be on the chart. */
-    for (const lv of [DR_DECISION, -DR_DECISION]){
-      g.save(); g.setLineDash([7, 4]);
-      g.strokeStyle = decC; g.lineWidth = 1.4; g.globalAlpha = .95;
-      g.beginPath(); g.moveTo(PAD_L, DY(lv)); g.lineTo(PAD_L+W, DY(lv));
-      g.stroke(); g.restore(); g.globalAlpha = 1;
+      if (label){
+        g.save();
+        g.fillStyle = col; g.globalAlpha = alpha === .45 ? .8 : 1;
+        g.font = "11px ui-monospace,monospace";
+        g.textAlign = "right"; g.textBaseline = "bottom";
+        g.fillText(label, PAD_L + W - 3, DY(lv) - 1);
+        g.restore(); g.globalAlpha = 1;
+      }
     }
     // Minutes with no ticks are neither zero nor a flat line. An
     // unexplained break reads as a broken chart -- about 6% of RTH minutes
@@ -532,7 +545,7 @@ function draw(q, reveal){
           g.fillRect(x0, dy0 + 1, Math.max(2, x1 - x0), DR_H - 2);
           if (x1 - x0 > 54){
             g.fillStyle = ink3; g.globalAlpha = .8;
-            g.font = "9px ui-monospace,monospace";
+            g.font = "11px ui-monospace,monospace";
             g.textAlign = "center"; g.textBaseline = "middle";
             g.fillText("无逐笔数据", (x0 + x1) / 2, dy0 + DR_H / 2);
           }
@@ -541,15 +554,34 @@ function draw(q, reveal){
         }
       }
     }
-    for (const [key, col, wdt, alpha] of [["drs5", ink3, 1.0, .40],
-                                          ["drs1", acc, 1.6, 1]]){
-      const ser = q[key];
-      if (!ser) continue;
-      g.strokeStyle = col; g.lineWidth = wdt; g.globalAlpha = alpha;
+    /* The 1-bar reading is one number per minute, not a point on a path
+       between minutes. Drawing a line through them invents the segment in
+       between, and at a 1-bar window that invented part is most of what you
+       see -- which is why this panel read as noise. Bars, one per candle,
+       coloured by sign. The 5-bar reading stays a line: it IS a running
+       quantity, so a path is what it actually is. */
+    const BW = Math.max(1, (X(1) - X(0)) * 0.8);
+    const d1 = q.drs1;
+    if (d1){
+      for (let i = 0; i < last; i++){
+        const v = d1[i];
+        if (v == null) continue;
+        const cl = Math.max(-p99*1.05, Math.min(p99*1.05, v));
+        const y0 = DY(0), yy = DY(cl);
+        g.fillStyle = v >= 0 ? upC : dnC;
+        g.globalAlpha = .9;
+        g.fillRect(X(i) - BW/2, Math.min(y0, yy),
+                   BW, Math.max(1, Math.abs(yy - y0)));
+      }
+      g.globalAlpha = 1;
+    }
+    const d5 = q.drs5;
+    if (d5){
+      g.strokeStyle = ink3; g.lineWidth = 1.4; g.globalAlpha = .75;
       g.beginPath();
       let on = false;
       for (let i = 0; i < last; i++){
-        const v = ser[i];
+        const v = d5[i];
         if (v == null){ on = false; continue; }
         const yy = DY(Math.max(-p99*1.05, Math.min(p99*1.05, v)));
         if (!on){ g.moveTo(X(i), yy); on = true; } else g.lineTo(X(i), yy);
@@ -563,12 +595,33 @@ function draw(q, reveal){
       tag(g, rail, DY(dv), `Δr1 ${sr(dv)}`, acc,
           surf === "#fff" ? "#1b2626" : "#0a1110");
     }
-    g.fillStyle = ink3; g.font = "10px ui-monospace,monospace";
+    g.fillStyle = ink3; g.font = "12px ui-monospace,monospace";
     g.textAlign = "left"; g.textBaseline = "top";
-    g.fillText(`Δr　粗线 1 根 / 细线 5 根　黄虚线 ±${DR_DECISION} 是实测决策阈值、` +
+    g.fillText(`Δr　柱 = 1 根（决策值）/ 线 = 5 根　黄虚线 ±${DR_DECISION} 是实测阈值、` +
                `灰虚线 p90 ${p90.toFixed(2)}（固定刻度，题与题可比）` +
                (dv == null ? "　决策点无逐笔数据" : ""),
                PAD_L + 3, dy0 + 3);
+  }
+
+  // ---- crosshair, carried through the stacked panels ---------------------
+  if (chBi != null){
+    const bi = chBi, cx = X(bi);
+    g.save();
+    g.setLineDash([3, 3]); g.strokeStyle = ink3; g.lineWidth = 1;
+    g.globalAlpha = .7;
+    g.beginPath();
+    g.moveTo(cx, PAD_T); g.lineTo(cx, dy0 + DR_H);
+    g.stroke();
+    g.restore(); g.globalAlpha = 1;
+    const rv = q.rsi && q.rsi[bi];
+    if (rv != null)
+      tag(g, rail, ry0 + RSI_H - (rv / 100) * RSI_H, `RSI ${rv.toFixed(1)}`,
+          ink3, surf === "#fff" ? "#1b2626" : "#0a1110");
+    const d1v = q.drs1 && q.drs1[bi];
+    if (d1v != null)
+      tag(g, rail, dy0 + DR_H/2 - (d1v / (DR_SCALE[1][2] * 1.05)) * (DR_H/2),
+          `Δr1 ${sr(d1v)}`, acc,
+          surf === "#fff" ? "#1b2626" : "#0a1110");
   }
 
   // ---- order flow strip: 30 minutes before the decision ----------------
@@ -580,7 +633,7 @@ function draw(q, reveal){
   g.strokeRect(PAD_L + .5, fy0 + .5, FW - 1, FLOW_H - 1);
   const H30 = q.hm, B30 = q.bub;
   if (!H30 && !q.tvp && !(B30 && B30.length)){
-    g.fillStyle = ink3; g.font = "11px ui-monospace,monospace";
+    g.fillStyle = ink3; g.font = "13px ui-monospace,monospace";
     g.textBaseline = "middle"; g.textAlign = "center";
     g.fillText("这一天没有订单流归档", PAD_L + FW / 2, fy0 + FLOW_H / 2);
     g.textAlign = "left";
@@ -596,36 +649,63 @@ function draw(q, reveal){
     /* Traded volume arrives sparse ([row, col, value] triples) because its
        grid is ~95% empty; the resting book arrives dense. Normalise to one
        lookup so the drawing loop does not care which it got. */
+    g.save();
+    g.beginPath();
+    g.rect(PAD_L + 1, fy0 + 1, FW - 2, FLOW_H - 2);
+    g.clip();
+
     const BG = H30 || q.tvp;
     if (BG){
-      let at;
-      if (BG.d){
+      /* Two layers, one per side, in the live tool's own pair: teal for
+         bids / buying, red for asks / selling. Summed into one colour a bid
+         wall and the ask wall above it look identical, and the panel stops
+         answering the only question it is there for -- which side is
+         holding. Older question files carry a single combined grid; those
+         still render, in one neutral hue, because pretending to know the
+         side would be worse than admitting it is not there. */
+      const layers = [];
+      if (BG.db || BG.da){          // resting book, dense, split
+        for (const [k, col] of [["db", HM_BID], ["da", HM_ASK]])
+          if (BG[k]){
+            const bytes = atob(BG[k]);
+            layers.push([col, (r, c) => bytes.charCodeAt(r * BG.nc + c)]);
+          }
+      } else if (BG.sb || BG.sa){   // traded, sparse, split by aggressor
+        for (const [k, col] of [["sb", HM_BID], ["sa", HM_ASK]])
+          if (BG[k] && BG[k].length){
+            const m = new Map();
+            for (const [r, c, v] of BG[k]) m.set(r * BG.nc + c, v);
+            layers.push([col, (r, c) => m.get(r * BG.nc + c) || 0]);
+          }
+      } else if (BG.d){             // legacy combined, dense
         const bytes = atob(BG.d);
-        at = (r, c) => bytes.charCodeAt(r * BG.nc + c);
-      } else {
+        layers.push([HM_FLAT, (r, c) => bytes.charCodeAt(r * BG.nc + c)]);
+      } else if (BG.s){             // legacy combined, sparse
         const m = new Map();
         for (const [r, c, v] of BG.s) m.set(r * BG.nc + c, v);
-        at = (r, c) => m.get(r * BG.nc + c) || 0;
+        layers.push([HM_FLAT, (r, c) => m.get(r * BG.nc + c) || 0]);
       }
-      /* The ramp below runs black -> purple -> amber -> yellow and is built
-         for a black field, so the panel lays its own down rather than
-         following the page theme. On the light theme the dim end would
-         otherwise sit on white and read as nothing at all. */
+
+      /* The field is black because these hues are chosen against black --
+         on the light theme their dim end would sit on white and read as
+         nothing at all. */
       g.save();
       g.fillStyle = "#06080b";
       g.fillRect(PAD_L + 1, fy0 + 1, FW - 2, FLOW_H - 2);
 
-      /* Brightness is referenced to a high PERCENTILE of what is on screen,
-         not to the maximum. Against the maximum a single wall sets the
-         ceiling for the whole panel and ordinary size near the touch -- real,
-         present in the data -- renders too dim to see. This is the same
-         correction the live heatmap tool makes. */
+      /* Brightness is referenced to a high PERCENTILE, not the maximum:
+         against the maximum one wall sets the ceiling for the whole panel
+         and ordinary size near the touch -- real, present in the data --
+         renders too dim to see. The percentile is taken over BOTH layers
+         together so the sides stay comparable; per layer, a thin ask would
+         look as solid as a heavy bid. Same correction the live tool makes. */
       const vals = [];
-      for (let r = 0; r < BG.nb; r++)
-        for (let c = 0; c < NC; c++){
-          const v = at(r, c);
-          if (v > 0) vals.push(BG.log ? v : Math.log1p(v));
-        }
+      for (const [, at] of layers)
+        for (let r = 0; r < BG.nb; r++)
+          for (let c = 0; c < NC; c++){
+            const v = at(r, c);
+            if (v > 0) vals.push(BG.log ? v : Math.log1p(v));
+          }
       let ref = 0;
       if (vals.length){
         vals.sort((a, b) => a - b);
@@ -633,20 +713,22 @@ function draw(q, reveal){
                             Math.floor(vals.length * 0.99))] || 0;
       }
       if (ref > 0){
-        for (let r = 0; r < BG.nb; r++){
-          const p0 = flo + (r / BG.nb) * (fhi - flo);
-          const p1 = flo + ((r + 1) / BG.nb) * (fhi - flo);
-          const ya = FY(p1), yb = FY(p0);
-          for (let c = 0; c < NC; c++){
-            const raw = at(r, c);
-            if (raw <= 0) continue;
-            let n = Math.min(1, (BG.log ? raw : Math.log1p(raw)) / ref);
-            n = Math.pow(n, HM_GAMMA);
-            if (n < 0.02) continue;
-            g.globalAlpha = Math.min(220, n * 200 + 20) / 255;
-            g.fillStyle = hotCol(n);
-            g.fillRect(FX(c), ya, Math.max(1, FW / NC),
-                       Math.max(1, yb - ya));
+        const cw = Math.max(1, FW / NC);
+        for (const [col, at] of layers){
+          for (let r = 0; r < BG.nb; r++){
+            const p0 = flo + (r / BG.nb) * (fhi - flo);
+            const p1 = flo + ((r + 1) / BG.nb) * (fhi - flo);
+            const ya = FY(p1), yb = FY(p0);
+            for (let c = 0; c < NC; c++){
+              const raw = at(r, c);
+              if (raw <= 0) continue;
+              let n = Math.min(1, (BG.log ? raw : Math.log1p(raw)) / ref);
+              n = Math.pow(n, HM_GAMMA);
+              if (n < 0.02) continue;
+              g.globalAlpha = Math.min(200, n * 190 + 14) / 255;
+              g.fillStyle = col;
+              g.fillRect(FX(c), ya, cw, Math.max(1, yb - ya));
+            }
           }
         }
       }
@@ -667,6 +749,8 @@ function draw(q, reveal){
         g.strokeStyle = side > 0 ? HM_UP : HM_DN; g.stroke();
       }
     }
+    g.restore();            // end of the clipped field
+
     /* This strip has its OWN time axis -- 30 minutes ending at the decision,
        where the chart above spans three hours. Stacked without saying so,
        the right-hand side reads as the chart's hidden future. Hence the
@@ -677,7 +761,7 @@ function draw(q, reveal){
     g.stroke();
     g.restore(); g.globalAlpha = 1;
 
-    g.fillStyle = ink3; g.font = "10px ui-monospace,monospace";
+    g.fillStyle = ink3; g.font = "12px ui-monospace,monospace";
     g.textBaseline = "top"; g.textAlign = "center";
     for (const m of [30, 20, 10]){
       const x = PAD_L + FW * (1 - m / 30);

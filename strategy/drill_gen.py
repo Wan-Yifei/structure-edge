@@ -233,27 +233,6 @@ def load_range(code: str, start: str, end: str) -> pd.DataFrame:
 
 
 HM_MINS, HM_SECS, HM_BINS = 30, 10, 96
-
-
-def _quantise(grid):
-    """Grid -> one byte a cell, in LOG space.
-
-    Quantising linearly against the maximum spends almost the whole byte on
-    the top of the range: against a 40,000-share wall, a 400-share level
-    lands on 2 of 255 and every ordinary level near the touch collapses into
-    the same two or three codes. The information is gone before the page
-    ever sees it, so no amount of gamma at draw time brings it back.
-
-    log1p first, then quantise, which is what the live heatmap does with its
-    full-precision grid. The page re-normalises against a high percentile of
-    what it decodes, so the reference is a genuinely large level rather than
-    the single largest one.
-    """
-    top = float(grid.max())
-    if top <= 0:
-        return None, 0.0
-    lg = np.log1p(grid)
-    return np.round(lg / np.log1p(top) * 255).astype(np.uint8), top
 # Net aggressor volume a 10s column needs to raise a bubble. The viewer
 # defaults to 500, which on SOXL marks most columns and so says little;
 # 5000 picks out the ones worth looking at.
@@ -281,24 +260,49 @@ def heatmap(lad, t_end, lo, hi):
     row = (w.price.to_numpy() - lo) / (hi - lo) * HM_BINS
     col = np.clip(col.astype(int), 0, ncol - 1)
     row = np.clip(row.astype(int), 0, HM_BINS - 1)
-    grid = np.zeros((HM_BINS, ncol), float)
-    np.add.at(grid, (row, col), w["size"].to_numpy(float))
+    # Bid and ask go out as SEPARATE grids. Summed into one, a bid wall and
+    # the ask wall above it render as the same colour and the panel can no
+    # longer answer the question it exists for -- which side is holding. The
+    # live tool has exactly this split behind its bid/ask toggle.
+    sz = w["size"].to_numpy(float)
+    sd = w["side"].to_numpy()
+    gb = np.zeros((HM_BINS, ncol), float)
+    ga = np.zeros((HM_BINS, ncol), float)
+    for tgt, mark in ((gb, "B"), (ga, "A")):
+        m = sd == mark
+        if m.any():
+            np.add.at(tgt, (row[m], col[m]), sz[m])
+
     # Sizes SUM across the price levels inside a bin -- that is the band's
     # resting liquidity -- but AVERAGE across the seconds inside a column, so
     # a column is the typical book rather than a total that grows with how
     # many snapshots happened to land in it. Hence the divisor is the number
     # of distinct seconds per column, not the number of rows per cell.
+    #
+    # Both sides divide by the SAME second count -- every snapshot carries
+    # both books, so a column has one population of seconds, not one per
+    # side. Counting them per side would divide each by about the same
+    # number anyway, but only by accident.
     ts_i = w.ts.to_numpy().astype("datetime64[s]").astype(np.int64)
     pairs = np.unique(np.stack([col, ts_i]), axis=1)
     secs = np.bincount(pairs[0], minlength=ncol).astype(float)
-    grid = np.divide(grid, secs[None, :], out=grid, where=secs[None, :] > 0)
-    q, top = _quantise(grid)
-    if q is None:
+    for gr in (gb, ga):
+        np.divide(gr, secs[None, :], out=gr, where=secs[None, :] > 0)
+
+    # One shared reference, taken AFTER the per-second average, so the two
+    # layers stay comparable: scaled apart, a thin ask would look as solid
+    # as a heavy bid.
+    top = float(max(gb.max(), ga.max()))
+    if top <= 0:
         return None
-    return {"lo": round(float(lo), 3), "hi": round(float(hi), 3),
-            "nb": HM_BINS, "nc": ncol, "sec": HM_SECS,
-            "top": int(round(top)), "log": 1,
-            "d": base64.b64encode(q.tobytes()).decode("ascii")}
+    ref = np.log1p(top)
+    out = {"lo": round(float(lo), 3), "hi": round(float(hi), 3),
+           "nb": HM_BINS, "nc": ncol, "sec": HM_SECS, "log": 1,
+           "top": int(round(top))}
+    for key, gr in (("db", gb), ("da", ga)):
+        qq = np.round(np.log1p(gr) / ref * 255).astype(np.uint8)
+        out[key] = base64.b64encode(qq.tobytes()).decode("ascii")
+    return out
 
 
 def day_ticks(code: str, day) -> pd.DataFrame:
@@ -377,27 +381,42 @@ def traded_profile(tk, t_end, lo: float, hi: float):
     row = (w.price.to_numpy(float) - lo) / (hi - lo) * HM_BINS
     col = np.clip(col.astype(int), 0, ncol - 1)
     row = np.clip(row.astype(int), 0, HM_BINS - 1)
-    grid = np.zeros((HM_BINS, ncol), float)
-    np.add.at(grid, (row, col), w.volume.to_numpy(float))
-    q, top = _quantise(grid)
-    if q is None:
+    # Split by aggressor, the traded analogue of the book's bid/ask: these
+    # are prints, so the sides are who crossed the spread rather than who was
+    # resting. Drawn in the same two colours, because the question a reader
+    # asks of either panel is the same one -- which side is doing the work.
+    vol = w.volume.to_numpy(float)
+    dirn = w.direction.to_numpy() if "direction" in w else np.array([""] * len(w))
+    gb = np.zeros((HM_BINS, ncol), float)
+    ga = np.zeros((HM_BINS, ncol), float)
+    for tgt, mark in ((gb, "BUY"), (ga, "SELL")):
+        m = dirn == mark
+        if m.any():
+            np.add.at(tgt, (row[m], col[m]), vol[m])
+    top = float(max(gb.max(), ga.max()))
+    if top <= 0:
         return None
+    ref = np.log1p(top)
     # SPARSE, unlike the resting heatmap. Price visits a narrow band at any
     # instant, so ~95% of this grid is zero; dense base64 would spend 11.5 KB
     # a question storing nothing and add 4 MB to the set.
     #
     # The floor is on the RAW grid, not on the quantised byte: in log space a
-    # single share already codes above 6, so the old test would keep every
+    # single share already codes above 6, so a byte test would keep every
     # cell price ever touched and the sparse form would stop being sparse.
-    #
-    # 0.2% of the window's own maximum. The old byte test cut at 2.4%, which
-    # is what hid ordinary size next to a wall; this reaches twelve times
-    # deeper while still bounding how many cells a question carries.
-    rr, cc = np.nonzero(grid >= max(1.0, top * 0.002))
-    return {"lo": round(float(lo), 3), "hi": round(float(hi), 3),
-            "nb": HM_BINS, "nc": ncol, "sec": HM_SECS,
-            "top": int(round(top)), "log": 1,
-            "s": [[int(r), int(c), int(q[r, c])] for r, c in zip(rr, cc)]}
+    # 0.2% of the window's own maximum -- the old byte test cut at 2.4%,
+    # which is what hid ordinary size next to a wall.
+    floor = max(1.0, top * 0.002)
+    out = {"lo": round(float(lo), 3), "hi": round(float(hi), 3),
+           "nb": HM_BINS, "nc": ncol, "sec": HM_SECS,
+           "top": int(round(top)), "log": 1}
+    for key, gr in (("sb", gb), ("sa", ga)):
+        qq = np.round(np.log1p(gr) / ref * 255).astype(int)
+        rr, cc = np.nonzero(gr >= floor)
+        out[key] = [[int(r), int(c), int(qq[r, c])] for r, c in zip(rr, cc)]
+    if not out["sb"] and not out["sa"]:
+        return None
+    return out
 
 
 def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
