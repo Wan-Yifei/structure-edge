@@ -4556,12 +4556,14 @@ class TradeViewerQt(QMainWindow):
         if last_v is not None:
             col = next(c for lo, c in DCVD_LIGHT if last_v >= lo)
             _, _, p99 = dcvd_scale(self._dcvd_minutes())
+            # Small, and no border: it sits over the newest bars, which
+            # are the ones being read. A badge that has to be looked
+            # past to see the data it describes is worse than no badge.
             lbl = pg.TextItem(
-                text=f"\u25cf {last_v:+.2f}", color=col,
+                text=f"\u25cf{last_v:+.2f}", color=col,
                 anchor=(1.0, 0.0),
-                fill=pg.mkBrush(_qc(_BG_TIP, 210)),
-                border=pg.mkPen(col, width=1))
-            lbl.setFont(QFont("Monospace", 9))
+                fill=pg.mkBrush(_qc(_BG_TIP, 150)))
+            lbl.setFont(QFont("Monospace", 7))
             lbl.setZValue(20)
             self._plot_dcvd.addItem(lbl, ignoreBounds=True)
             self._dcvd_items.append(lbl)
