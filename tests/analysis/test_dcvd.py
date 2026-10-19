@@ -436,3 +436,34 @@ class TestDefaults:
         asked for is not."""
         assert viewer._ind_checks["option_walls"].isChecked()
         assert not viewer._ind_checks["option_alerts"].isChecked()
+
+
+class TestCheckedAtStartupActuallyActs:
+    """A box that starts checked never emits stateChanged.
+
+    Everything that reveals a subplot or starts a poll lived in those
+    handlers, so adding an indicator to _default_checked ticked its box and
+    did nothing else: DCVD appeared checked with its row still collapsed,
+    Option Walls appeared checked with the chain never polled. The row
+    visibilities were literals hand-synced to the set -- the comment
+    "# CVD on by default" was that sync, done once and never repeated.
+    """
+
+    ROWS = {1: "vol", 2: "kd", 3: "cvd", 4: "adi", 5: "dcvd"}
+
+    def test_every_checked_subplot_is_visible(self, viewer):
+        for row, key in self.ROWS.items():
+            on = viewer._ind_checks[key].isChecked()
+            stretch = viewer._chart_widget.ci.layout.rowStretchFactor(row)
+            assert (stretch > 0) == on, (
+                f"{key}: checked={on} but row stretch={stretch}")
+
+    def test_dcvd_in_particular(self, viewer):
+        """The one that was reported."""
+        assert viewer._ind_checks["dcvd"].isChecked()
+        assert viewer._chart_widget.ci.layout.rowStretchFactor(5) > 0
+
+    def test_the_option_poll_is_running(self, viewer):
+        """Walls default on, so the chain has to be being fetched."""
+        assert viewer._ind_checks["option_walls"].isChecked()
+        assert viewer._option_timer.isActive()

@@ -1744,6 +1744,12 @@ class TradeViewerQt(QMainWindow):
             QRadioButton {{ color: {_FG}; spacing: 4px; }}
         """)
 
+        # An indicator that starts checked never emits stateChanged, so the
+        # handler that acts on it never runs: the Options boxes were ticked
+        # while the chain was never polled and no wall was ever drawn. Run
+        # it once here, with the toolbar built and the plots in place.
+        self._on_option_indicator_toggle()
+
         # Auto-connect if args provided
         if args:
             self._connect_opend(host, port)
@@ -2430,11 +2436,18 @@ class TradeViewerQt(QMainWindow):
         # Row stretch factors — main chart is fixed; subplot rows collapse to
         # zero height when their indicator is off instead of leaving a gap.
         self._chart_widget.ci.layout.setRowStretchFactor(0, 5)
-        self._set_subplot_row_visible(self._plot_v,   1, False)
-        self._set_subplot_row_visible(self._plot_kd,  2, False)
-        self._set_subplot_row_visible(self._plot_cvd, 3, True)   # CVD on by default
-        self._set_subplot_row_visible(self._plot_adi, 4, False)
-        self._set_subplot_row_visible(self._plot_dcvd, 5, False)
+        # Read from the checkboxes, not from literals. These were hardcoded
+        # and hand-synced to _default_checked -- the "CVD on by default"
+        # comment was that sync, performed once and never repeated. Adding
+        # DCVD to the set then checked its box while leaving its row
+        # collapsed, because a box that starts checked never emits
+        # stateChanged and the handler that reveals the row never ran.
+        for plot, row, key in ((self._plot_v,    1, "vol"),
+                               (self._plot_kd,   2, "kd"),
+                               (self._plot_cvd,  3, "cvd"),
+                               (self._plot_adi,  4, "adi"),
+                               (self._plot_dcvd, 5, "dcvd")):
+            self._set_subplot_row_visible(plot, row, self._ind(key))
 
         # ── Graphics items ────────────────────────────────────────────────────
         self._candle_item = CandlestickItem()
