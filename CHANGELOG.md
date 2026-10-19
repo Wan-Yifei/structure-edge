@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.45.1 — 主图渲染快 2.5 倍：同一份桶键算了五遍 (2026-10-19)
+
+### Fixed: 主图刷新延迟
+
+实测 4,081 根 1 分钟 bar，`_render` 从 **1.6–1.9 秒降到 0.63–0.81 秒**，
+其中 Python 侧只剩 169 ms，剩下的是 Qt 真正画图的时间。
+
+起因是用户反馈「主图设成 1s 更新，延迟比 moomoo 还是明显大，远超 10s」。
+分步计时抓到三个怪事：`_draw_cvd` 520 ms、`_draw_dcvd` 274 ms、
+`_draw_delta` 259 ms —— 而 `_draw_delta` 这一轮**一个图元都没生成**。
+不画东西还要花四分之一秒，说明时间不在画上。
+
+四个绘制函数加区间 profile，各自用 `iterrows()` + `strptime` + `candle_start`
+逐根重建**同一份** bar→tick 桶键列表。单次实测 240 ms（其中 `iterrows`
+134 ms、`strptime` 约 106 ms），一次渲染重复五遍，约一秒。
+
+改成算一次：新增模块级 `bar_start_keys()` 做向量化，`_bucket_keys()` 按
+`(行数, 首尾 time_key, cm)` 记忆化。五处循环改为按下标取。
+
+`bar_start_keys()` 是逐分支抄 `candle_start()` 的，**没有**用 pandas 的
+`floor()`——`floor()` 按 epoch 对齐，`candle_start()` 在小时内对齐，两者
+只在「60 能被周期整除」时一致。`TIMEFRAME_MAP` 里八个周期碰巧都满足，
+所以抄近路今天能过，等哪天加了 45m 会静默错。`tests/analysis/
+test_bar_start_keys.py` 把等价性钉死：八个在用周期逐一对拍
+`candle_start()`，外加 45/90 这种不整除小时的；还有一条测试在新周期进了
+`TIMEFRAME_MAP` 却没进测试列表时直接报错。
+
+### 已知未修
+
+剩下的约 460 ms 在 Qt 画图本身（每根 bar 一个 `mkBrush`，12k 次/次渲染），
+以及逐价位 `sum()`。profile 已经很平，没有单个热点，要再快得减少
+QGraphicsItem 数量——是另一类改动。
+
 ## v0.45.0 — 规则定型为三变量；红绿灯；一批否定结论 (2026-10-19)
 
 ### 规则定型

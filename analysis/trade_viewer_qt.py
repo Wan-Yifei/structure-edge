@@ -1664,6 +1664,31 @@ def _close_with_hang_watchdog(window: QWidget, name: str, timeout: float = 1.0) 
 
 # ── Main window ───────────────────────────────────────────────────────────────
 
+def bar_start_keys(time_key, cm: int):
+    """Vectorised candle_start() over a time_key column, minus one candle.
+
+    Mirrors core.time_utils.candle_start branch for branch rather than
+    using pandas' floor(): floor() is epoch-aligned and candle_start()
+    aligns within the hour, which agree only while 60 is divisible by the
+    candle size. Every size in TIMEFRAME_MAP happens to satisfy that, so
+    the shortcut would work today and break silently the day a 45m is
+    added. tests/analysis/test_bar_start_keys.py pins the equivalence.
+
+    Returns an array of datetimes, NaT where the stamp did not parse --
+    the callers skip those exactly as the old try/except did.
+    """
+    ts = pd.to_datetime(time_key, errors="coerce") - pd.Timedelta(minutes=cm)
+    if cm >= 1440:
+        out = ts.dt.normalize()
+    elif cm > 60:
+        tot = ts.dt.hour * 60 + ts.dt.minute
+        out = ts.dt.normalize() + pd.to_timedelta((tot // cm) * cm, unit="m")
+    else:
+        out = (ts.dt.floor("h")
+               + pd.to_timedelta((ts.dt.minute // cm) * cm, unit="m"))
+    return out.dt.to_pydatetime()
+
+
 class TradeViewerQt(QMainWindow):
     """PyQtGraph-based trade viewer window."""
 
@@ -3733,18 +3758,27 @@ class TradeViewerQt(QMainWindow):
             self._plot_c.addItem(txt, ignoreBounds=True)
             self._bos_items.append(txt)
 
+    def _bucket_keys(self, klines: pd.DataFrame, cm: int):
+        """bar_start_keys for this frame, memoised for the render that
+        needs it five times over."""
+        tk = klines["time_key"]
+        sig = (len(tk), str(tk.iloc[0]) if len(tk) else "",
+               str(tk.iloc[-1]) if len(tk) else "", cm)
+        if getattr(self, "_bk_sig", None) == sig:
+            return self._bk_cache
+        self._bk_sig = sig
+        self._bk_cache = bar_start_keys(tk, cm)
+        return self._bk_cache
+
     def _clear_delta_items(self) -> None:
         for item in self._delta_items:
             self._plot_c.removeItem(item)
         self._delta_items.clear()
 
     def _draw_delta(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
-        for i, (_, row) in enumerate(klines.iterrows()):
-            try:
-                bar_end = datetime.strptime(
-                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
-            except ValueError:
+        lows = klines["low"].to_numpy(float)
+        for i, bk in enumerate(self._bucket_keys(klines, cm)):
+            if bk is pd.NaT:
                 continue
             pd_ = buckets.get(bk)
             if not pd_:
@@ -3771,7 +3805,7 @@ class TradeViewerQt(QMainWindow):
                 anchor=(0.5, 0.0),
             )
             txt.setFont(QFont("Monospace", 8))
-            txt.setPos(i, float(row["low"]) * 0.9997)
+            txt.setPos(i, lows[i] * 0.9997)
             self._plot_c.addItem(txt, ignoreBounds=True)
             self._delta_items.append(txt)
 
@@ -4247,12 +4281,8 @@ class TradeViewerQt(QMainWindow):
         n = len(klines)
         delta = np.zeros(n, dtype=float)
         day = [None] * n
-        for i, (_, row) in enumerate(klines.iterrows()):
-            try:
-                bar_end = datetime.strptime(
-                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
-            except ValueError:
+        for i, bk in enumerate(self._bucket_keys(klines, cm)):
+            if bk is pd.NaT:
                 continue
             day[i] = _trading_day_of_bucket(bk)
             pd_ = buckets.get(bk)
@@ -4303,12 +4333,8 @@ class TradeViewerQt(QMainWindow):
         # question and cannot stand in for this.
         off_seen = np.zeros(n, dtype=bool)
         have_off = False
-        for i, (_, row) in enumerate(klines.iterrows()):
-            try:
-                bar_end = datetime.strptime(
-                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
-            except ValueError:
+        for i, bk in enumerate(self._bucket_keys(klines, cm)):
+            if bk is pd.NaT:
                 continue
             pd_ = buckets.get(bk)
             if not pd_:
@@ -4486,12 +4512,8 @@ class TradeViewerQt(QMainWindow):
         n = len(klines)
         buy = np.zeros(n, dtype=float)
         sell = np.zeros(n, dtype=float)
-        for i, (_, row) in enumerate(klines.iterrows()):
-            try:
-                bar_end = datetime.strptime(
-                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
-            except ValueError:
+        for i, bk in enumerate(self._bucket_keys(klines, cm)):
+            if bk is pd.NaT:
                 continue
             pd_ = buckets.get(bk)
             if not pd_:
@@ -5599,12 +5621,10 @@ class TradeViewerQt(QMainWindow):
             return
         cm = self._candle_mins
         merged: dict = {}
-        for idx in range(i0, i1 + 1):
-            row = self._klines.iloc[idx]
-            try:
-                bar_end = datetime.strptime(str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-                bk = candle_start(bar_end - timedelta(minutes=cm), cm)
-            except ValueError:
+        keys = self._bucket_keys(self._klines, cm)
+        for idx in range(i0, min(i1 + 1, len(keys))):
+            bk = keys[idx]
+            if bk is pd.NaT:
                 continue
             pd_ = self._ticks.get(bk)
             if not pd_:
