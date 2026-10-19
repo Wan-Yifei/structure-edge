@@ -223,6 +223,104 @@ def paired(a, b, days_all, reps=4000):
     return d.mean(), np.percentile(d, 2.5), np.percentile(d, 97.5)
 
 
+# Every step from the tape to a number, in order. The glossary says what a
+# symbol means; this says how it is computed, which is the part someone
+# would need to reproduce or to find the mistake in.
+FORMULAS = [
+    ("输入", [
+        ("buy<sub>t</sub>, sell<sub>t</sub>",
+         "该分钟内 direction 为 BUY / SELL 的成交股数之和。"
+         "NEUTRAL（场外流，约占 57%）两边都不计入。"),
+        ("c<sub>t</sub>, h<sub>t</sub>, l<sub>t</sub>",
+         "该分钟的收 / 高 / 低。RTH 09:31–16:00，夜盘与盘前不参与。"),
+    ]),
+    ("1. 波动尺度（Wilder ATR，n=14）", [
+        ("TR<sub>t</sub> = max( h<sub>t</sub>−l<sub>t</sub>, "
+         "|h<sub>t</sub>−c<sub>t−1</sub>|, |l<sub>t</sub>−c<sub>t−1</sub>| )",
+         "真实波幅，含跳空。"),
+        ("ATR<sub>t</sub> = [ ATR<sub>t−1</sub>·(n−1) + TR<sub>t</sub> ] / n",
+         "Wilder 平滑；首值取前 n 根 TR 的算术平均。"),
+    ]),
+    ("2. 流量", [
+        ("OFI<sub>t</sub> = buy<sub>t</sub> − sell<sub>t</sub>",
+         "订单流失衡（股）。要求 buy+sell ≥ 300，否则该 bar 作废——"
+         "量太小时一笔小单就能把比值推到 ±1。"),
+        ("dr1<sub>t</sub> = OFI<sub>t</sub> / (buy<sub>t</sub>+sell<sub>t</sub>)",
+         "比值口径，恒在 −1..+1。这就是 viewer 的 DCVD。"),
+        ("S<sub>t</sub> = median( buy+sell )　over t−60 … t−1",
+         "近期常态成交量。<b>不含 t 自身</b>。"),
+        ("x<sub>t</sub> = OFI<sub>t</sub> / S<sub>t</sub>",
+         "量级口径。dr1 分不开「清淡的 0.5」和「巨量的 0.5」，x 分得开。"),
+    ]),
+    ("3. 价格", [
+        ("y<sub>t</sub> = ( c<sub>t</sub> − c<sub>t−1</sub> ) / "
+         "ATR14<sub>t</sub>",
+         "用 ATR 除掉波动状态，使不同时段可比。"
+         "与 OFI 同窗口：bar t 的流推动的就是 c<sub>t−1</sub>→c<sub>t</sub>。"),
+    ]),
+    ("4. 局部价格冲击（过原点的滚动 OLS）", [
+        ("λ<sub>t</sub> = Σ x<sub>i</sub>y<sub>i</sub> / Σ x<sub>i</sub>²"
+         "　i ∈ t−60 … t−1",
+         "「这段时间单位流量通常推动多少价格」。过原点是因为零流量应当"
+         "对应零冲击，留截距等于允许一个无来由的漂移。"
+         "<b>i 的上界是 t−1</b>：bar t 不参与拟合评判自己的那条线。"),
+    ]),
+    ("5. 残差与标准化", [
+        ("ε<sub>t</sub> = y<sub>t</sub> − λ<sub>t</sub>·x<sub>t</sub>",
+         "流量<b>没能兑现</b>的那部分价格。重卖而价格没跌 → ε>0。"
+         "方向由 ε 自带，代码里没有任何额外翻转。"),
+        ("σ<sub>t</sub> = sd( ε )　over t−60 … t−1",
+         "同样不含 t 自身。"),
+        ("A<sub>t</sub> = ε<sub>t</sub> / σ<sub>t</sub>",
+         "吸收分数。A=1.5 即「比近期常态罕见 1.5 个标准差」。"),
+    ]),
+    ("6. 流量门槛", [
+        ("G<sub>t</sub> = Q<sub>0.80</sub>( |x| )　over t−60 … t−1",
+         "自身近期 |x| 的 80 分位。"),
+        ("触发条件：|x<sub>t</sub>| ≥ G<sub>t</sub>",
+         "没有这一步，一根安静的 bar（流量小、价格也没动）残差同样可以很大，"
+         "会被算成吸收。这是把「推不动」和「没人推」分开的那一步。"),
+    ]),
+    ("7. 事件定义", [
+        ("看涨吸收：|x<sub>t</sub>| ≥ G<sub>t</sub>　且　x<sub>t</sub> &lt; 0"
+         "　且　A<sub>t</sub> ≥ 1.5",
+         "大量主动卖出，价格却没跌下去 → 做多。"),
+        ("看跌吸收：|x<sub>t</sub>| ≥ G<sub>t</sub>　且　x<sub>t</sub> &gt; 0"
+         "　且　A<sub>t</sub> ≤ −1.5",
+         "大量主动买入，价格却没涨上去 → 做空。"),
+        ("顺势对照：|x<sub>t</sub>| ≥ G<sub>t</sub>，方向 = sign(x<sub>t</sub>)",
+         "同一道门槛，方向相反。这一组是对照，结果却是全研究最强的。"),
+    ]),
+    ("8. 结算（三重障碍 + 时间止损）", [
+        ("entry = c<sub>t</sub>　　side = +1 做多 / −1 做空",
+         "在信号那根的收盘价入场。"
+         "<b>这是乐观假设</b>：dr 要整根走完才算得出来，实际最早只能在下一根"
+         "开盘成交，串行模拟测得该假设值 −0.010 R/笔。"),
+        ("stop = entry − side · 1.0 · ATR<sub>t</sub>",
+         ""),
+        ("target = entry + side · 1.5 · ATR<sub>t</sub>",
+         ""),
+        ("在 t+1 … t+30 内取<b>首次</b>触及：先碰 stop → R = −1；"
+         "先碰 target → R = +1.5",
+         "同一根里两边都碰到按 stop 算（取不利的一侧）。"),
+        ("都没碰到：R = side · ( c<sub>t+30</sub> − entry ) / ATR<sub>t</sub>",
+         "时间止损，按第 30 根收盘了结。"),
+        ("R<sub>净</sub> = R − spread / ( 1.0 · ATR<sub>t</sub> )",
+         "spread = 0.03 美元往返。约合 0.066 R。"),
+    ]),
+    ("9. 聚合与区间", [
+        ("每笔净 R = Σ<sub>各日</sub> ΣR<sub>净</sub> / "
+         "Σ<sub>各日</sub> n",
+         "按笔加权，不是各日均值的均值。"),
+        ("自助法：重采样<b>交易日</b>，4000 次，取 2.5 / 97.5 分位",
+         "不能重采样分钟：相邻分钟的 30 根前瞻窗口几乎完全重合，"
+         "有效样本接近交易日数而非分钟数。"),
+        ("配对差：同一次日重采样内同时算 A 与 B 再相减",
+         "两个各自的区间是否重叠，回答不了「B 比 A 好多少」。"),
+    ]),
+]
+
+
 GLOSSARY = [
     ("OFI<sub>t</sub>",
      "订单流失衡 = 主买量 − 主卖量（股）。方向已知的那部分成交，"
@@ -358,6 +456,17 @@ def _report(te, have, big, bull, bear, base_n, shown, deltas):
                   yaxis_title="事件数", height=340, barmode="group")
     ch_hr = _to_html(fig)
 
+    fm = ""
+    for head, items in FORMULAS:
+        fm += (f'<tr><td colspan="2" style="padding-top:14px;color:#5c9cf5;'
+               f'font-weight:600">{head}</td></tr>')
+        for expr, why in items:
+            fm += (f'<tr><td style="white-space:nowrap;font-family:'
+                   f'ui-monospace,monospace;color:#cdd6f4">{expr}</td>'
+                   f'<td style="color:#6e7a9b">{why}</td></tr>')
+    fm = ('<div class="table-wrap"><table class="result-table">'
+          + fm + "</table></div>")
+
     gl = "".join(
         f"<tr><td style='white-space:nowrap'><b>{a}</b></td>"
         f"<td>{b}</td><td style='color:#6e7a9b'>{c}</td></tr>"
@@ -389,6 +498,8 @@ def _report(te, have, big, bull, bear, base_n, shown, deltas):
         f'<div class="meta">样本外 {te.day.nunique()} 个交易日 / '
         f'{base_n:,} 分钟。{_SPEC}</div>'
         + _html_section("符号与定义", gl)
+        + _html_section("计算公式", fm
+            + '<p class="note">每一步都严格前视隔离：S、λ、σ、G 四个滚动量的窗口上界都是 t−1，bar t 绝不参与构造评判自己的那把尺子。</p>')
         + _html_section(
             "一、结论：吸收不只是无效，是反的",
             f'<div class="chart-full">{ch_main}</div>' + tbl
