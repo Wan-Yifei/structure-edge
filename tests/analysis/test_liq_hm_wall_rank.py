@@ -31,17 +31,21 @@ BIN = 0.01
 PMIN = 100.0
 
 
-def pick(levels, mid, top_n=3, prev=frozenset()):
+def pick(levels, mid, top_n=3, prev=frozenset(), bright=None):
     """The selection as the window runs it: (distance, bin, peak) -> labels.
 
     `levels` is {bin_index: peak_size}; everything given is assumed to have
-    passed Min.Vol and the brightness floor already.
+    passed Min.Vol and the brightness floor already. `bright` is
+    {bin_index: brightness}; when omitted every row is equally bright, so
+    the brightest-band exception lands on whichever row sorts first and the
+    older cases keep their original meaning.
     """
     cands = []
     for bi, v in levels.items():
         p = PMIN + (bi + 0.5) * BIN
         cands.append((abs(p - mid), bi, float(v)))
     cands.sort(key=lambda c: c[0])
+    br = dict(bright or {})
 
     def _eff(item):
         rank, c = item
@@ -55,10 +59,15 @@ def pick(levels, mid, top_n=3, prev=frozenset()):
             if by_size[0] in chosen:
                 chosen.remove(by_size[0])
             chosen.insert(0, by_size[0])
+    if cands and br:
+        by_bright = max(cands, key=lambda c: br.get(c[1], 0.0))
+        if by_bright in chosen:
+            chosen.remove(by_bright)
+        chosen.insert(0, by_bright)
 
     out, placed = [], []
     for _, bi, v in chosen:
-        if len(placed) >= top_n + 1:
+        if len(placed) >= top_n + 2:
             break
         if any(abs(bi - q) <= 1 for q in placed):
             continue
@@ -141,3 +150,51 @@ class TestIncumbency:
         prev = {round(PMIN + (i + 0.5) * BIN, 4) for i in (40, 44, 48, 52)}
         got = pick(levels, mid=100.50, top_n=3, prev=prev)
         assert len(got) == 3
+
+
+class TestBrightestAlwaysLabelled:
+    """The eye picks the brightest band; the labels have to name it.
+
+    Brightness is how much of the row stayed lit, so it disagrees with peak
+    size: a moderate wall standing for four minutes is the most visible
+    thing on the panel while a larger one that lived ten seconds is barely
+    there. The giant rule keys on peak and so misses exactly this case --
+    reported from a live panel where the brightest band, far below the
+    touch, carried no label at all.
+    """
+
+    def test_a_distant_bright_band_is_labelled(self):
+        # Four walls hug the touch; the fifth sits far below and is the one
+        # lit across the window. Its peak is well under 3x the runner-up, so
+        # the giant rule cannot rescue it.
+        levels = {100: 2_700, 102: 2_600, 104: 2_500, 106: 2_400, 20: 5_000}
+        bright = {100: .20, 102: .18, 104: .17, 106: .16, 20: .95}
+        got = prices(pick(levels, mid=PMIN + 1.01, top_n=3, bright=bright))
+        far = round(PMIN + 20.5 * BIN, 4)
+        assert far in got, f"the brightest band is missing: {got}"
+
+    def test_it_is_not_subject_to_the_count(self):
+        """top_n near walls must not crowd it out, which is what the extra
+        placement slot is for."""
+        levels = {100 + 2 * k: 2_000 + k for k in range(8)}
+        levels[20] = 4_000
+        bright = {bi: .2 for bi in levels}
+        bright[20] = .99
+        got = prices(pick(levels, mid=PMIN + 1.01, top_n=3, bright=bright))
+        assert round(PMIN + 20.5 * BIN, 4) in got
+        assert len(got) >= 4, "the near slate should still be labelled too"
+
+    def test_brightest_and_giant_can_be_one_row(self):
+        """Both exceptions pointing at the same row must not double-place
+        it or consume two slots."""
+        levels = {100: 2_000, 102: 1_900, 20: 50_000}
+        bright = {100: .2, 102: .2, 20: .99}
+        got = prices(pick(levels, mid=PMIN + 1.01, top_n=3, bright=bright))
+        far = round(PMIN + 20.5 * BIN, 4)
+        assert got.count(far) == 1
+
+    def test_without_brightness_the_old_behaviour_stands(self):
+        """The near walls still win when nothing is distinctly brighter."""
+        levels = {100: 2_700, 102: 2_600, 104: 2_500, 20: 3_000}
+        got = prices(pick(levels, mid=PMIN + 1.01, top_n=2))
+        assert round(PMIN + 20.5 * BIN, 4) not in got

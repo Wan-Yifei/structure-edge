@@ -2272,10 +2272,26 @@ class LiqHmWindow(QWidget):
                         chosen.remove(by_size[0])
                     chosen.insert(0, by_size[0])
 
+            # The second exception: the BRIGHTEST band always keeps a label,
+            # however far out it sits. Brightness and peak size disagree, and
+            # the giant rule above only catches the second -- brightness is
+            # how much of the row stayed lit, so a moderate wall standing for
+            # four minutes outranks a larger one that lived ten seconds.
+            # Labelling the short-lived one and not the band the eye actually
+            # picks out leaves the most visible thing on the panel unnamed,
+            # which is what the labels are for. Unconditional: no ratio to
+            # clear, because "the brightest" is already a single row.
+            if cands:
+                by_bright = max(cands, key=lambda c: bright[c[1]])
+                if by_bright in chosen:
+                    chosen.remove(by_bright)
+                chosen.insert(0, by_bright)
+
             placed: list[int] = []
             shown: set[float] = set()
             for _, bi, v in chosen:
-                if len(placed) >= top_n + 1:        # top_n near, plus the giant
+                # top_n near, plus the giant and the brightest.
+                if len(placed) >= top_n + 2:
                     break
                 # Skip a bin touching one already labelled: one wall, one label.
                 if any(abs(int(bi) - q) <= 1 for q in placed):
