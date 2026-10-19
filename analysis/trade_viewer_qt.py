@@ -1782,7 +1782,7 @@ class TradeViewerQt(QMainWindow):
         tb1.addWidget(_lbl("TF:"))
         self._tf_combo = QComboBox()
         self._tf_combo.addItems(list(TIMEFRAME_MAP.keys()))
-        self._tf_combo.setCurrentText(getattr(args, "tf", "5m") or "5m")
+        self._tf_combo.setCurrentText(getattr(args, "tf", "1m") or "1m")
         self._tf_combo.currentTextChanged.connect(self._on_tf_changed)
         tb1.addWidget(self._tf_combo)
 
@@ -1857,7 +1857,8 @@ class TradeViewerQt(QMainWindow):
         tb1.addWidget(self._conn_btn)
 
         self._ind_checks: dict[str, QCheckBox | QRadioButton] = {}
-        _default_checked = ("heatmap", "delta", "bos_choch", "cvd")
+        _default_checked = ("heatmap", "delta", "bos_choch", "cvd",
+                            "dcvd", "option_walls")
 
         # ── Row 2: SMC structural indicators ────────────────────────────────
         self.addToolBarBreak()
@@ -2215,7 +2216,10 @@ class TradeViewerQt(QMainWindow):
             ("option_alerts", "Option Alerts"),
         ]:
             cb = QCheckBox(label)
-            cb.setChecked(False)
+            # Walls draw on the chart; Alerts fire notifications. Turning the
+            # drawing on by default is harmless, starting a notification
+            # stream unasked is not, so only the first is in the set.
+            cb.setChecked(key in _default_checked)
             cb.stateChanged.connect(self._on_option_indicator_toggle)
             self._ind_checks[key] = cb
             tb_opt.addWidget(cb)
@@ -6365,7 +6369,7 @@ def _default_code() -> str:
 def _parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Trade Viewer Qt (PyQtGraph)")
     ap.add_argument("--code",    default=_default_code())
-    ap.add_argument("--tf",      default="5m",
+    ap.add_argument("--tf",      default="1m",
                     choices=list(TIMEFRAME_MAP.keys()))
     ap.add_argument("--mode",    default="Live",
                     choices=["Live", "Historical"])

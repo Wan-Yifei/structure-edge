@@ -405,3 +405,34 @@ class TestWindowIsMinutesNotBars:
 
         viewer._candle_mins = 1
         viewer._apply_dcvd_scale()
+
+
+class TestDefaults:
+    """The defaults have to agree with each other.
+
+    The 0.40 threshold exists only at a one-minute window, so DCVD being on
+    by default is only useful if the default timeframe is 1m -- on 5m the
+    panel appears with its decision line suppressed, which looks broken
+    rather than careful.
+    """
+
+    def test_default_timeframe_is_one_minute(self):
+        import argparse
+
+        from analysis import trade_viewer_qt as tv
+
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--tf", default="1m", choices=list(tv.TIMEFRAME_MAP))
+        assert ap.parse_args([]).tf == "1m"
+        assert tv.TIMEFRAME_MAP["1m"][1] == 1
+
+    def test_dcvd_is_on_and_at_one_minute(self, viewer):
+        assert viewer._ind_checks["dcvd"].isChecked()
+        assert viewer._tf_combo.currentText() == "1m"
+        assert viewer._dcvd_minutes() == 1
+
+    def test_option_walls_on_alerts_off(self, viewer):
+        """Drawing on the chart is harmless; a notification stream nobody
+        asked for is not."""
+        assert viewer._ind_checks["option_walls"].isChecked()
+        assert not viewer._ind_checks["option_alerts"].isChecked()
