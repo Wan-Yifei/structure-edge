@@ -2418,6 +2418,12 @@ class LiqHmWindow(QWidget):
         lost = peak - now
         if lost <= 0 or half > _WALL_FATE_MAX_HALF:
             return ""
+        # The size column shows the peak alone once a wall is this close to
+        # whole, i.e. it reports no loss. Explaining a loss the field beside
+        # it has just denied -- against a peak that is then not on the label
+        # at all -- is the two disagreeing in public.
+        if now >= peak * _WALL_INTACT_FRAC:
+            return ""
         if not self._absorb_cb.isChecked() or self._absorb_last_ts is None:
             return ""
         col = grid[lo:hi, bi]
@@ -2441,18 +2447,13 @@ class LiqHmWindow(QWidget):
         # 300 is still visibly resting. Naming the lost amount puts the
         # denominator on screen; at the extremes the share is dropped
         # altogether, because there is nothing to apportion.
-        gone = f"−{lost:,.0f}"
-        if frac >= 0.995:
-            return f"  {gone} pulled"
-        if frac <= 0.005:
-            return f"  {gone} eaten"
-        # Both shares, because two numbers summing to 100 are self-evidently
-        # a split and the reader never has to work out of what. One share
-        # alone had to be read against a denominator that was not on screen.
-        # Only when it is actually mixed: "100% pulled / 0% eaten" says
-        # nothing the word alone does not, and these labels reach leftward
-        # into the chart.
-        return f"  {gone}  {frac:.0%} pulled / {1.0 - frac:.0%} eaten"
+        # Both shares, always. Two numbers summing to 100 are self-evidently
+        # a split, and the lost amount beside them says of what -- neither
+        # fact has to be worked out. Dropping the pair at the extremes was
+        # shorter and read as a missing field: one column in two formats
+        # makes the reader ask why this row differs before reading it.
+        return (f"  −{lost:,.0f}  "
+                f"{frac:.0%} pulled / {1.0 - frac:.0%} eaten")
 
     def _wall_label_x(self) -> float:
         """X for the right-hand wall labels, just inside the view's right edge."""

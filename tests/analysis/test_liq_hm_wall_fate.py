@@ -77,11 +77,11 @@ def fate(win, peak, now, *, half=0.005, side="B", peak_col=10):
 class TestItSeparatesTheTwo:
     def test_pulled_when_nothing_printed(self, win):
         """The 116.00 case: 73,072 gone, nothing printed there."""
-        assert fate(win, 73_072, 0) == "  −73,072 pulled"
+        assert fate(win, 73_072, 0) == "  −73,072  100% pulled / 0% eaten"
 
     def test_eaten_when_the_loss_printed_at_that_price(self, win):
         win._absorb_ticks = ticks([(12, 40_000), (14, 33_072)])
-        assert fate(win, 73_072, 0) == "  −73,072 eaten"
+        assert fate(win, 73_072, 0) == "  −73,072  0% pulled / 100% eaten"
 
     def test_a_mix_reports_both_shares(self, win):
         win._absorb_ticks = ticks([(12, 20_000)])
@@ -93,35 +93,35 @@ class TestItSeparatesTheTwo:
     def test_more_printed_than_was_lost_is_fully_eaten(self, win):
         """Refills mean prints can exceed the net loss; never negative."""
         win._absorb_ticks = ticks([(12, 500_000)])
-        assert fate(win, 73_072, 0) == "  −73,072 eaten"
+        assert fate(win, 73_072, 0) == "  −73,072  0% pulled / 100% eaten"
 
 
 class TestWhatDoesNotCount:
     def test_neutral_prints_are_not_absorption(self, win):
         """Off-exchange consumes no displayed size."""
         win._absorb_ticks = ticks([(12, 73_072)], direction="NEUTRAL")
-        assert fate(win, 73_072, 0) == "  −73,072 pulled"
+        assert fate(win, 73_072, 0) == "  −73,072  100% pulled / 0% eaten"
 
     def test_buys_do_not_explain_a_bid_shrinking(self, win):
         win._absorb_ticks = ticks([(12, 73_072)], direction="BUY")
-        assert fate(win, 73_072, 0) == "  −73,072 pulled"
+        assert fate(win, 73_072, 0) == "  −73,072  100% pulled / 0% eaten"
 
     def test_sells_do_not_explain_an_ask_shrinking(self, win):
         win._absorb_ticks = ticks([(12, 5_000)], direction="SELL")
-        assert fate(win, 5_000, 0, side="A") == "  −5,000 pulled"
+        assert fate(win, 5_000, 0, side="A") == "  −5,000  100% pulled / 0% eaten"
 
     def test_buys_do_explain_an_ask_shrinking(self, win):
         win._absorb_ticks = ticks([(12, 5_000)], direction="BUY")
-        assert fate(win, 5_000, 0, side="A") == "  −5,000 eaten"
+        assert fate(win, 5_000, 0, side="A") == "  −5,000  0% pulled / 100% eaten"
 
     def test_prints_before_the_peak_are_not_counted(self, win):
         """The wall still held its peak then, so they hit something else."""
         win._absorb_ticks = ticks([(2, 73_072)])
-        assert fate(win, 73_072, 0, peak_col=10) == "  −73,072 pulled"
+        assert fate(win, 73_072, 0, peak_col=10) == "  −73,072  100% pulled / 0% eaten"
 
     def test_prints_at_another_price_are_not_counted(self, win):
         win._absorb_ticks = ticks([(12, 73_072)], price=116.40)
-        assert fate(win, 73_072, 0) == "  −73,072 pulled"
+        assert fate(win, 73_072, 0) == "  −73,072  100% pulled / 0% eaten"
 
 
 class TestItDeclinesToGuess:
@@ -208,10 +208,11 @@ class TestItNamesTheLoss:
             if "%" in got:
                 assert "\u2212" in got, got
 
-    def test_a_whole_loss_drops_the_percentage(self, win):
-        """100% of a loss apportions nothing; the word alone says it."""
+    def test_a_whole_loss_still_prints_the_pair(self, win):
+        """Dropping the share at the extremes was shorter and got asked
+        about: one column in two formats reads as a missing field."""
         got = fate(win, 1_020, 0)
-        assert got == "  \u22121,020 pulled", got
+        assert got == "  \u22121,020  100% pulled / 0% eaten", got
 
 
 class TestTheMixedFormIsASplit:
@@ -230,9 +231,37 @@ class TestTheMixedFormIsASplit:
         assert len(pcts) == 2, got
         assert sum(pcts) == 100, got
 
-    def test_both_words_appear_only_when_mixed(self, win):
+    def test_both_words_appear_whatever_the_split(self, win):
+        """Including at the extremes: one shape to learn, not two."""
         win._absorb_ticks = ticks([(12, 20_000)])
-        assert "eaten" in fate(win, 73_072, 0)
+        mixed = fate(win, 73_072, 0)
         win._absorb_ticks = ticks([])
         pure = fate(win, 73_072, 0)
-        assert "eaten" not in pure and "%" not in pure, pure
+        for got in (mixed, pure):
+            assert "pulled" in got and "eaten" in got, got
+
+
+class TestItAgreesWithTheSizeColumn:
+    """The two fields must not contradict each other about one wall.
+
+    The size column prints the peak alone once a wall is _WALL_INTACT_FRAC
+    whole -- i.e. it reports no loss. The suffix used to explain a loss
+    anyway, so a label read "925  −70 pulled": a loss, against a peak the
+    label never showed, beside a field saying nothing had gone.
+    """
+
+    def test_a_nearly_whole_wall_gets_no_suffix(self, win):
+        from analysis.liq_hm_window import _WALL_INTACT_FRAC
+
+        win._absorb_ticks = ticks([])
+        peak = 1_000
+        now = int(peak * _WALL_INTACT_FRAC) + 1      # inside "intact"
+        assert fate(win, peak, now) == ""
+
+    def test_just_past_intact_does_get_one(self, win):
+        from analysis.liq_hm_window import _WALL_INTACT_FRAC
+
+        win._absorb_ticks = ticks([])
+        peak = 1_000
+        now = int(peak * _WALL_INTACT_FRAC) - 1      # outside it
+        assert fate(win, peak, now) != ""
