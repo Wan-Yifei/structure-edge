@@ -2446,8 +2446,13 @@ class LiqHmWindow(QWidget):
             return f"  {gone} pulled"
         if frac <= 0.005:
             return f"  {gone} eaten"
-        return (f"  {gone} pulled {frac:.0%}" if frac >= 0.5
-                else f"  {gone} eaten {1.0 - frac:.0%}")
+        # Both shares, because two numbers summing to 100 are self-evidently
+        # a split and the reader never has to work out of what. One share
+        # alone had to be read against a denominator that was not on screen.
+        # Only when it is actually mixed: "100% pulled / 0% eaten" says
+        # nothing the word alone does not, and these labels reach leftward
+        # into the chart.
+        return f"  {gone}  {frac:.0%} pulled / {1.0 - frac:.0%} eaten"
 
     def _wall_label_x(self) -> float:
         """X for the right-hand wall labels, just inside the view's right edge."""

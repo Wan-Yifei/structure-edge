@@ -83,11 +83,12 @@ class TestItSeparatesTheTwo:
         win._absorb_ticks = ticks([(12, 40_000), (14, 33_072)])
         assert fate(win, 73_072, 0) == "  −73,072 eaten"
 
-    def test_a_mix_reports_the_larger_share(self, win):
+    def test_a_mix_reports_both_shares(self, win):
         win._absorb_ticks = ticks([(12, 20_000)])
         got = fate(win, 73_072, 0)
-        assert "pulled" in got
-        assert got == f"  −73,072 pulled {(73_072 - 20_000) / 73_072:.0%}"
+        assert "pulled" in got and "eaten" in got
+        f = (73_072 - 20_000) / 73_072
+        assert got == f"  −73,072  {f:.0%} pulled / {1 - f:.0%} eaten"
 
     def test_more_printed_than_was_lost_is_fully_eaten(self, win):
         """Refills mean prints can exceed the net loss; never negative."""
@@ -211,3 +212,27 @@ class TestItNamesTheLoss:
         """100% of a loss apportions nothing; the word alone says it."""
         got = fate(win, 1_020, 0)
         assert got == "  \u22121,020 pulled", got
+
+
+class TestTheMixedFormIsASplit:
+    """Two shares that sum to 100 declare themselves a partition.
+
+    One share alone had to be read against a denominator that was never on
+    screen, which is how "pulled 100%" came to sit beside a level still
+    holding 300.
+    """
+
+    def test_the_two_shares_sum_to_one_hundred(self, win):
+        win._absorb_ticks = ticks([(12, 20_000)])
+        got = fate(win, 73_072, 0)
+        import re
+        pcts = [int(x) for x in re.findall(r"(\d+)%", got)]
+        assert len(pcts) == 2, got
+        assert sum(pcts) == 100, got
+
+    def test_both_words_appear_only_when_mixed(self, win):
+        win._absorb_ticks = ticks([(12, 20_000)])
+        assert "eaten" in fate(win, 73_072, 0)
+        win._absorb_ticks = ticks([])
+        pure = fate(win, 73_072, 0)
+        assert "eaten" not in pure and "%" not in pure, pure
