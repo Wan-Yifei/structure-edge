@@ -189,3 +189,49 @@ class TestToolbarFold:
         viewer._toggle_toolbars()
         qapp.processEvents()
         assert viewer._fold_btn.text() == before
+
+
+class TestTheLight:
+    """Three bands on the newest bar, top-right of the DCVD panel.
+
+    Level only. The flip -- the rule's other half -- is already on screen:
+    a red bar followed by a green one IS the flip, so a light repeating it
+    would spend a colour on something the eye already has.
+
+    Amber is not "weak green": between 0 and 0.4 measured +0.074 R a trade
+    against +0.282 for the full rule, which is nearer nothing than signal.
+    """
+
+    @staticmethod
+    def _label(v):
+        return next((i for i in v._dcvd_items
+                     if type(i).__name__ == "TextItem"), None)
+
+    def test_each_band_gets_its_own_colour(self, viewer):
+        from analysis.trade_viewer_qt import DCVD_LIGHT
+
+        seen = []
+        for last in ((8000, 2000), (6000, 4000), (3500, 6500)):
+            draw(viewer, steady(40) + [last])
+            lbl = self._label(viewer)
+            assert lbl is not None
+            seen.append(lbl.textItem.defaultTextColor().name())
+        assert len(set(map(str, seen))) == 3, f"bands share a colour: {seen}"
+        # And the thresholds are the ones the rule was measured at.
+        assert [lo for lo, _ in DCVD_LIGHT][:2] == [0.4, 0.0]
+
+    def test_it_reads_the_newest_bar(self, viewer):
+        draw(viewer, steady(40) + [(9000, 1000)])
+        assert "+0.80" in self._label(viewer).toPlainText()
+        draw(viewer, steady(40) + [(1000, 9000)])
+        assert "-0.80" in self._label(viewer).toPlainText()
+
+    def test_a_thin_newest_bar_falls_back_to_the_last_reading(self, viewer):
+        """The floor voids a bar; the light then reports the newest bar that
+        has a reading rather than vanishing or inventing a zero."""
+        draw(viewer, steady(40) + [(9000, 1000)] + [(1, 1)])
+        assert "+0.80" in self._label(viewer).toPlainText()
+
+    def test_no_light_when_nothing_has_a_reading(self, viewer):
+        draw(viewer, [(0, 0)] * 40)
+        assert self._label(viewer) is None

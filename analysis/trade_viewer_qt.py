@@ -516,6 +516,18 @@ DCVD_CONTEXT = 5
 # +0.308 and +0.309 across reward ratios from 1:1 to 1:2.
 DCVD_DECISION = 0.4
 
+# The light's bands, read off the latest bar. Level only -- the flip (the
+# rule's other half) is already on screen: a red bar followed by a green
+# one IS the flip, so a light repeating it would spend a colour on
+# something the eye has. The light reports the level, the bars report the
+# turn, and together they are the rule.
+#
+# Amber is not "weak green". Between 0 and 0.4 measured +0.074 R a trade
+# against +0.282 for the full rule -- closer to nothing than to a signal.
+DCVD_LIGHT = [(DCVD_DECISION, "#26a69a"),   # >= 0.4
+              (0.0, "#ffa726"),             # 0 .. 0.4
+              (-1e9, "#ef5350")]            # < 0
+
 # Panel colours. The bars carry the sign, so they reuse the chart's own
 # buy/sell pair; the context line takes a hue used nowhere else so it cannot
 # be read as a third direction, and the decision line is warmer still,
@@ -4534,6 +4546,26 @@ class TradeViewerQt(QMainWindow):
                                        pen=None)
                 self._plot_dcvd.addItem(bars)
                 self._dcvd_items.append(bars)
+
+        # The light: the newest bar's band, pinned to the panel's top-right.
+        # The newest bar is still forming in Live mode, so this is the
+        # running reading for the minute in progress, not a settled one --
+        # it can change until the bar closes, and that is the honest thing
+        # for it to do rather than lag a minute behind the tape.
+        last_v = next((v for v in reversed(dcvd) if np.isfinite(v)), None)
+        if last_v is not None:
+            col = next(c for lo, c in DCVD_LIGHT if last_v >= lo)
+            _, _, p99 = dcvd_scale(self._dcvd_minutes())
+            lbl = pg.TextItem(
+                text=f"\u25cf {last_v:+.2f}", color=col,
+                anchor=(1.0, 0.0),
+                fill=pg.mkBrush(_qc(_BG_TIP, 210)),
+                border=pg.mkPen(col, width=1))
+            lbl.setFont(QFont("Monospace", 9))
+            lbl.setZValue(20)
+            self._plot_dcvd.addItem(lbl, ignoreBounds=True)
+            self._dcvd_items.append(lbl)
+            lbl.setPos(n - 0.5, p99 * 1.02)
 
         # The slower reading sits behind as context. 'finite' breaks the line
         # at bars the floor rejected rather than bridging them.
