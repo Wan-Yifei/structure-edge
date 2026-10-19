@@ -93,6 +93,15 @@ def build():
         d["atr"] = a
         d["dr1"] = dr
 
+        # Flow magnitude against the bar's own recent normal, the same
+        # recipe absorption.py uses. dr1 is a ratio and says nothing about
+        # size; x does, and the two are different enough that the 2x2
+        # between them was the strongest cell in that study.
+        tot_s = pd.Series(np.where(ok, tot, np.nan))
+        scale = tot_s.rolling(60, min_periods=20).median().shift(1)
+        d["x"] = (pd.Series(np.where(ok, buy - sell, np.nan)) / scale
+                  ).to_numpy()
+
         # Run of the OPPOSITE sign ending at t-1. Counted directly rather
         # than by the helper above, which the first version got wrong.
         n = len(dr)

@@ -58,7 +58,7 @@ global.fetch = () => Promise.reject(new Error("fetch must not be used"));
 global.setInterval = () => 0;
 global.clearInterval = () => {};
 const api = new Function(
-  code + "\n;return {choose, submit, levels, settle, stepTo, loadSet, report, next," +
+  code + "\n;return {choose, submit, levels, settle, ruleLight, stepTo, loadSet, report, next," +
          "         prev, goto1, isAnswered: (id) => !!ans[id], getIdx: () => idx," +
          "         getStep: () => step, getQS: () => QS};")();
 
@@ -393,4 +393,53 @@ console.log("\nJUMP OK");
   if (Math.max(...within) >= s.target)
     throw new Error("target was reachable inside the window after all");
   console.log("ok   结算视野：窗外才触及的目标会说明，而不是静默当作没发生");
+}
+
+/* The rule light. It is the measured rule rendered as three states, and
+   it must stay hidden until the answer is in -- a light visible while you
+   are still deciding turns the exercise into following a button. */
+{
+  const qs = global.window.DRILL_c1.filter(x => x.drs1 && x.dir === "long");
+  const pick = (f) => qs.find(q => {
+    const n = q.drs1[q.mark], p = q.mark >= 1 ? q.drs1[q.mark - 1] : null;
+    return n != null && f(n, p);
+  });
+
+  const red = pick((n) => n < 0);
+  const green = pick((n, p) => n >= 0.4 && p != null && p < 0);
+  if (!red || !green)
+    throw new Error("the question set has no red/green example to check");
+
+  const L = (q) => api.ruleLight(q);
+  if (L(red).k !== "red") throw new Error("dr1<0 must be red: " + L(red).k);
+  if (L(green).k !== "green")
+    throw new Error("threshold+flip must be green: " + L(green).k);
+
+  // Amber is the in-between, and must not be reachable from either extreme.
+  const amber = pick((n, p) => n >= 0 && !(n >= 0.4 && p != null && p < 0));
+  if (amber && L(amber).k !== "amber")
+    throw new Error("in-between must be amber: " + L(amber).k);
+
+  // A bar with no reading says so rather than guessing a side.
+  const na = qs.find(q => q.drs1[q.mark] == null);
+  if (na && L(na).k !== "na")
+    throw new Error("a bar with no delta_r must not get a colour");
+
+  // And it is absent before the answer, present after.
+  // The page hides the panel without clearing it, so the content of a
+  // previous reveal lingers -- `hidden` is what decides visibility.
+  // Answered questions are sorted to the front and re-show their verdict,
+  // which is correct -- so this has to land on one that is not answered.
+  const all = api.getQS();
+  const fresh = all.findIndex(x => !api.isAnswered(x.id));
+  if (fresh < 0) throw new Error("every question is already answered");
+  api.goto1(fresh + 1);
+  if (els.vd.hidden !== true)
+    throw new Error("the verdict panel is visible before answering");
+  api.choose("pass"); api.submit();
+  if (els.vd.hidden !== false)
+    throw new Error("the verdict panel stayed hidden after answering");
+  if (!/规则：/.test(els.vd.innerHTML))
+    throw new Error("the light is missing from the reveal");
+  console.log("ok   规则红绿灯：三态正确，且答题前不显示");
 }

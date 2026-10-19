@@ -1053,8 +1053,62 @@ function verdictFor(q, rec){
     vd.innerHTML = `<h3>入场：<span class="big">${sr(rec.r, 2)} R</span></h3>` +
       `<p>${rec.how}。止损 ${fmt(rec.stop)},目标 ${fmt(rec.target)}。这是${what}。</p>` + mine;
   }
-  vd.innerHTML += context(q);
+  vd.innerHTML += lightHtml(q) + context(q);
   $("b-go").hidden = true; $("b-next").hidden = false;
+}
+
+/* The measured rule, as a light. Shown only in the reveal: a light visible
+   while you are still deciding is not training, it is a button to follow,
+   and the one thing this exercise exists to measure is your own read.
+
+   Thresholds and colours are the walk-forward result, not taste:
+
+     green   dr1 >= +0.4 AND the previous bar was negative
+             +0.277 R a trade over 45 out-of-sample sessions; on this
+             question set 44 of 386, +0.250
+     red     dr1 < 0
+             186 of 386 here -- 48% -- averaging -0.234 R. The drill
+             over-samples this side by construction: it picks pullback
+             lows, and at a low the selling usually still has the upper
+             hand. Half of what you are practising is sitting on your
+             hands, which is exactly the half a question set cannot teach
+             by asking "what would you do here" over and over.
+     amber   dr1 >= 0 but not the full rule -- between the two. */
+function ruleLight(q){
+  const m = q.mark, s = q.drs1;
+  if (!s) return null;
+  const now = s[m], prev = m >= 1 ? s[m - 1] : null;
+  if (now == null) return {k: "na", t: "无逐笔数据", d: "这一根的主动成交量不足，规则不表态。"};
+  if (now < 0)
+    return {k: "red", t: "规则：别做",
+            d: `dr1 ${sr(now)}，主动卖占优。这一类在本题库 186 题里平均 ` +
+               `<b>−0.234 R</b>。`};
+  const flip = prev != null && prev < 0;
+  if (now >= DR_DECISION && flip)
+    return {k: "green", t: "规则：做多",
+            d: `dr1 ${sr(now)} ≥ ${DR_DECISION}，且前一根 ${sr(prev)} 为负` +
+               `——阈值与翻转都满足。本题库 44 题，平均 <b>+0.250 R</b>。`};
+  const why = now < DR_DECISION
+    ? `dr1 ${sr(now)} 没到 ${DR_DECISION}`
+    : `前一根 ${sr(prev)} 不是负的，不算翻转`;
+  return {k: "amber", t: "规则：不触发", d: `${why}。`};
+}
+
+const LIGHT_COL = {green: "var(--up)", red: "var(--dn)",
+                   amber: "var(--poc)", na: "var(--ink-3)"};
+
+function lightHtml(q){
+  const L = ruleLight(q);
+  if (!L) return "";
+  const c = LIGHT_COL[L.k];
+  return `<div style="margin-top:12px;padding:8px 10px;border-left:3px solid ${c};` +
+         `background:var(--line-soft)">` +
+         `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;` +
+         `background:${c};margin-right:7px;vertical-align:middle"></span>` +
+         `<b style="color:${c}">${L.t}</b>` +
+         `<div style="margin-top:3px;font-size:12.5px;color:var(--ink-2)">${L.d}</div>` +
+         `<div style="margin-top:4px;font-size:11.5px;color:var(--ink-3)">` +
+         `答题后才显示——答题前亮起来的灯就不是训练了。</div></div>`;
 }
 
 function context(q){
