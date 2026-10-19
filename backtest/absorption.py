@@ -295,8 +295,14 @@ FORMULAS = [
         ("看跌吸收：|x<sub>t</sub>| ≥ G<sub>t</sub>　且　x<sub>t</sub> &gt; 0"
          "　且　A<sub>t</sub> ≤ −1.5",
          "大量主动买入，价格却没涨上去 → 做空。"),
-        ("顺势对照：|x<sub>t</sub>| ≥ G<sub>t</sub>，方向 = sign(x<sub>t</sub>)",
-         "同一道门槛，方向相反。这一组是对照，结果却是全研究最强的。"),
+        ("大卖量顺势做空：|x<sub>t</sub>| ≥ G<sub>t</sub>　且　"
+         "x<sub>t</sub> &lt; 0",
+         "同一道门槛，方向相反——<b>不看 A</b>。这一组登记时是对照，"
+         "结果却是全研究最强的。"),
+        ("大买量顺势做多：|x<sub>t</sub>| ≥ G<sub>t</sub>　且　"
+         "x<sub>t</sub> &gt; 0",
+         "表与图里的「大卖量 / 大买量」就是指这两条，"
+         "门槛 G 的定义见上一段。"),
     ]),
     ("8. 结算（三重障碍 + 时间止损）", [
         ("entry = c<sub>t</sub>　　side = +1 做多 / −1 做空",
@@ -396,28 +402,41 @@ def _report(te, have, big, bull, bear, base_n, shown, deltas):
         return dict(n=len(s), hit=float((s[col] > 0).mean()),
                     r=net(n, sr), lo=lo, hi=hi)
 
+    # Every row carries the condition that produced it. "大卖量" appeared
+    # in the table and "|x| >= G" in the formulas, with nothing joining
+    # them -- the definition was present and still unreachable from the
+    # number it explained.
     rows = [
-        ("基准：每分钟做多", stat(have, "r_long"), "#6e7a9b"),
-        ("基准：每分钟做空", stat(have, "r_short"), "#6e7a9b"),
-        ("吸收做多 A≥1.5", stat(bull, "r_long"), "#ed8796"),
-        ("吸收做空 A≤−1.5", stat(bear, "r_short"), "#ed8796"),
-        ("大卖量顺势做空", stat(big & (te.x < 0), "r_short"), "#a6da95"),
-        ("大买量顺势做多", stat(big & (te.x > 0), "r_long"), "#a6da95"),
-        ("残差 A≥1.5（无门槛）",
+        ("基准：每分钟做多", "无条件，全部 bar 做多",
+         stat(have, "r_long"), "#6e7a9b"),
+        ("基准：每分钟做空", "无条件，全部 bar 做空",
+         stat(have, "r_short"), "#6e7a9b"),
+        ("吸收做多", "|x| ≥ G　且　x &lt; 0　且　A ≥ 1.5",
+         stat(bull, "r_long"), "#ed8796"),
+        ("吸收做空", "|x| ≥ G　且　x &gt; 0　且　A ≤ −1.5",
+         stat(bear, "r_short"), "#ed8796"),
+        ("大卖量顺势做空", "|x| ≥ G　且　x &lt; 0　（不看 A）",
+         stat(big & (te.x < 0), "r_short"), "#a6da95"),
+        ("大买量顺势做多", "|x| ≥ G　且　x &gt; 0　（不看 A）",
+         stat(big & (te.x > 0), "r_long"), "#a6da95"),
+        ("残差做多（无门槛）", "A ≥ 1.5　（不看流量）",
          stat(have & (te.A >= 1.5), "r_long"), "#f5a97f"),
-        ("残差 A≤−1.5（无门槛）",
+        ("残差做空（无门槛）", "A ≤ −1.5　（不看流量）",
          stat(have & (te.A <= -1.5), "r_short"), "#f5a97f"),
     ]
-    rows = [(n, s, c) for n, s, c in rows if s]
+    rows = [(n, q, s, c) for n, q, s, c in rows if s]
 
     fig = go.Figure(go.Bar(
-        x=[n for n, _, _ in rows], y=[s["r"] for _, s, _ in rows],
-        marker_color=[c for _, _, c in rows],
+        x=[n for n, _, _, _ in rows], y=[s["r"] for _, _, s, _ in rows],
+        marker_color=[c for _, _, _, c in rows],
+        customdata=[q for _, q, _, _ in rows],
+        hovertemplate="%{x}<br>%{customdata}<br>净 R %{y:+.3f}<extra></extra>",
         error_y=dict(type="data", symmetric=False,
-                     array=[s["hi"] - s["r"] for _, s, _ in rows],
-                     arrayminus=[s["r"] - s["lo"] for _, s, _ in rows],
+                     array=[s["hi"] - s["r"] for _, _, s, _ in rows],
+                     arrayminus=[s["r"] - s["lo"] for _, _, s, _ in rows],
                      color="#cdd6f4", thickness=1.2),
-        text=[f"{s['r']:+.3f}" for _, s, _ in rows], textposition="outside"))
+        text=[f"{s['r']:+.3f}" for _, _, s, _ in rows],
+        textposition="outside"))
     fig.add_hline(y=0, line=dict(color="#45506b", width=1))
     _apply_layout(fig, "每笔净 R（95% 区间按交易日重采样）",
                   yaxis_title="净 R", height=460, showlegend=False)
@@ -483,13 +502,17 @@ def _report(te, have, big, bull, bear, base_n, shown, deltas):
           + gl + "</table></div>")
 
     tbl = "".join(
-        f"<tr><td>{n}</td><td>{s['n']:,}</td><td>{s['hit']:.1%}</td>"
+        f"<tr><td>{n}</td>"
+        f"<td style='font-family:ui-monospace,monospace;color:#9fb4c7'>"
+        f"{q}</td>"
+        f"<td>{s['n']:,}</td><td>{s['hit']:.1%}</td>"
         f"<td style='color:{'#a6da95' if s['r'] > 0 else '#ed8796'}'>"
         f"{s['r']:+.3f}</td><td>[{s['lo']:+.3f}, {s['hi']:+.3f}]</td></tr>"
-        for n, s, _ in rows)
+        for n, q, s, _ in rows)
     tbl = ('<div class="table-wrap"><table class="result-table">'
-           "<tr><th>规则</th><th>笔数</th><th>胜率</th><th>每笔 R</th>"
-           "<th>95% 区间</th></tr>" + tbl + "</table></div>")
+           "<tr><th>规则</th><th>触发条件</th><th>笔数</th><th>胜率</th>"
+           "<th>每笔 R</th><th>95% 区间</th></tr>"
+           + tbl + "</table></div>")
 
     dl = "".join(
         f"<tr><td>{k}</td><td style='color:"
