@@ -6384,6 +6384,11 @@ class TradeViewerQt(QMainWindow):
 
         Only the main candle plot shows text labels; subplots suppress labels
         to prevent crowding — they are X-linked so positions already align.
+
+        Every subplot needs a line below. One that is missing does not fall
+        back to blank, it falls back to pyqtgraph's auto ticks, which label
+        the raw bar index -- "4320" where a time belongs. DCVD read that way
+        from v0.44.0 until v0.45.2.
         """
         n    = len(klines)
         step = max(1, n // 10)
@@ -6408,6 +6413,8 @@ class TradeViewerQt(QMainWindow):
             self._plot_cvd.getAxis("bottom").setTicks([pos_only])
         if self._ind("adi"):
             self._plot_adi.getAxis("bottom").setTicks([pos_only])
+        if self._ind("dcvd"):
+            self._plot_dcvd.getAxis("bottom").setTicks([pos_only])
 
     # ── Event filter (Enter key in toolbar QLineEdit) ─────────────────────────
 
