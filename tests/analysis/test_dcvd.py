@@ -70,8 +70,10 @@ def _reset_window(viewer):
     for as long as the order happened to work."""
     from analysis.trade_viewer_qt import DCVD_LOOKBACK
 
+    viewer._candle_mins = 1
     viewer._dcvd_spin.setValue(DCVD_LOOKBACK)
     yield
+    viewer._candle_mins = 1
     viewer._dcvd_spin.setValue(DCVD_LOOKBACK)
 
 
@@ -331,45 +333,75 @@ class TestWiring:
         assert long_ < short, \
             "averaging more bars flattens DCVD, so the axis must tighten"
 
-    def test_decision_line_hides_when_the_axis_drops_below_it(self, viewer):
-        """At long windows p99 falls under 0.40 and a guide pinned to the
-        frame edge would read as a reachable level."""
-        from analysis.trade_viewer_qt import DCVD_DECISION, dcvd_scale
+    def test_decision_line_needs_a_one_minute_window(self, viewer):
+        """A longer window drops the threshold whatever the axis does.
 
-        viewer._dcvd_spin.setValue(30)
-        _, _, p99 = dcvd_scale(30)
-        lv = sorted(round(float(g.value()), 4) for g in viewer._dcvd_guides)
-        if p99 <= DCVD_DECISION:
-            assert DCVD_DECISION not in lv
-        else:
-            assert DCVD_DECISION in lv
-
-
-class TestAxisUnits:
-    """The axis has to print the same numbers as the threshold on it."""
-
-    def test_no_si_prefix_rescaling(self, viewer):
-        """pyqtgraph treats a range under 1 as a reason to switch to
-        milli-units. With no unit string it shows up as a '(x0.001)' suffix
-        and ticks reading 500 where the value is 0.5 -- against which the
-        0.40 decision line appears to sit at 400."""
-        ax = viewer._plot_dcvd.getAxis("left")
-        assert ax.autoSIPrefix is False
-        assert ax.autoSIPrefixScale == 1.0
-
-    def test_label_carries_no_scale_suffix(self, viewer):
-        _run(viewer, [(60, 40, 0)] * 20)
-        assert "x0.001" not in viewer._plot_dcvd.getAxis("left").labelString()
-
-    def test_tick_values_are_the_real_values(self, viewer):
-        """A tick near the decision line must read 0.4, not 400."""
+        This used to turn only on p99 falling under 0.40 at long windows.
+        The minute rule now decides it first and subsumes that case: the
+        level was measured on one minute of flow, so a 30-bar window has no
+        business showing it even where the axis would fit.
+        """
         from analysis.trade_viewer_qt import DCVD_DECISION
 
-        _run(viewer, [(60, 40, 0)] * 20)
-        ax = viewer._plot_dcvd.getAxis("left")
-        lo, hi = viewer._plot_dcvd.vb.viewRange()[1]
-        vals = [v for _, pairs in ax.tickValues(lo, hi, 400) for v in pairs]
-        assert vals, "axis produced no ticks"
-        assert max(abs(v) for v in vals) < 2.0, \
-            f"ticks are not in DCVD units: {sorted(vals)[:5]}"
-        assert min(abs(v - DCVD_DECISION) for v in vals) < 0.3
+        viewer._dcvd_spin.setValue(30)
+        lv = sorted(round(float(g.value()), 4) for g in viewer._dcvd_guides)
+        assert DCVD_DECISION not in lv
+
+class TestWindowIsMinutesNotBars:
+    """The spinbox counts BARS; everything calibrated counts MINUTES.
+
+    DCVD_SCALE was measured on 1-minute bars over N-bar windows, and the
+    0.40 threshold was measured on one minute of flow. On a 5m chart a
+    lookback of 1 is a five-minute reading: scaling it against the 1-minute
+    distribution leaves it in the middle of the panel, and drawing the
+    threshold over it invites trading a level never validated for it -- the
+    5-bar version of the same rule was worth nothing out of sample.
+    """
+
+    def test_minutes_follow_the_timeframe(self, viewer):
+        viewer._candle_mins = 5
+        viewer._dcvd_spin.setValue(1)
+        assert viewer._dcvd_minutes() == 5
+        viewer._dcvd_spin.setValue(3)
+        assert viewer._dcvd_minutes() == 15
+        viewer._candle_mins = 1
+
+    def test_axis_uses_the_minute_scale(self, viewer):
+        from analysis.trade_viewer_qt import dcvd_scale
+
+        viewer._candle_mins = 5
+        viewer._dcvd_spin.setValue(1)
+        viewer._apply_dcvd_scale()
+        hi = viewer._plot_dcvd.vb.viewRange()[1][1]
+        assert hi == pytest.approx(dcvd_scale(5)[2] * 1.05, rel=0.02)
+        assert hi != pytest.approx(dcvd_scale(1)[2] * 1.05, rel=0.02)
+        viewer._candle_mins = 1
+        viewer._apply_dcvd_scale()
+
+    def test_label_states_minutes(self, viewer):
+        viewer._candle_mins = 5
+        viewer._dcvd_spin.setValue(1)
+        viewer._apply_dcvd_scale()
+        assert "5m" in viewer._plot_dcvd.getAxis("left").labelString()
+        viewer._candle_mins = 1
+        viewer._apply_dcvd_scale()
+
+    def test_threshold_only_at_one_minute(self, viewer):
+        from analysis.trade_viewer_qt import DCVD_DECISION
+
+        def levels():
+            return sorted(round(float(g.value()), 4)
+                          for g in viewer._dcvd_guides)
+
+        viewer._candle_mins = 1
+        viewer._dcvd_spin.setValue(1)
+        viewer._apply_dcvd_scale()
+        assert DCVD_DECISION in levels(), "1m must carry the measured level"
+
+        viewer._candle_mins = 5
+        viewer._apply_dcvd_scale()
+        assert DCVD_DECISION not in levels(), \
+            "a 5-minute window must not show a 1-minute threshold"
+
+        viewer._candle_mins = 1
+        viewer._apply_dcvd_scale()

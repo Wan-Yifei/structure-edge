@@ -2923,6 +2923,9 @@ class TradeViewerQt(QMainWindow):
 
     def _on_tf_changed(self, tf: str) -> None:
         _, self._candle_mins = TIMEFRAME_MAP[tf]
+        # The DCVD window is counted in bars but scaled in minutes, so the
+        # axis and its guides change meaning with the timeframe.
+        self._apply_dcvd_scale()
         self._last_chart_key = ("", "")  # force zoom reset on next render
         # Live tick buckets are keyed by bar-start time at the OLD candle_mins
         # alignment; switching timeframe changes the alignment, so stale
@@ -4321,9 +4324,21 @@ class TradeViewerQt(QMainWindow):
         spin = getattr(self, "_dcvd_spin", None)
         return int(spin.value()) if spin is not None else DCVD_LOOKBACK
 
+    def _dcvd_minutes(self) -> int:
+        """Minutes the window actually covers.
+
+        The spinbox counts BARS, and DCVD_SCALE is keyed by minutes -- it was
+        measured on 1-minute bars over N-bar windows. On a 5m chart a
+        lookback of 1 is a five-minute reading, so passing the bar count
+        would scale a 5-minute series against the 1-minute distribution and
+        leave it sitting in the middle of the panel.
+        """
+        return max(1, self._dcvd_lookback() * max(1, self._candle_mins))
+
     def _apply_dcvd_scale(self) -> None:
         """Range and guide lines for the current window."""
-        p75, p90, p99 = dcvd_scale(self._dcvd_lookback())
+        mins = self._dcvd_minutes()
+        p75, p90, p99 = dcvd_scale(mins)
         self._plot_dcvd.setYRange(-p99 * 1.05, p99 * 1.05, padding=0)
         for item in getattr(self, "_dcvd_guides", []):
             self._plot_dcvd.removeItem(item)
@@ -4335,7 +4350,12 @@ class TradeViewerQt(QMainWindow):
         guides = [(0.0, _GREY, 1, Qt.PenStyle.SolidLine),
                   (p90, _GREY, 1, Qt.PenStyle.DotLine),
                   (-p90, _GREY, 1, Qt.PenStyle.DotLine)]
-        if DCVD_DECISION < p99:
+        # The threshold was measured on ONE MINUTE of flow and does not
+        # carry to other windows: the same rule on five minutes was worth
+        # nothing out of sample. Drawing it over a 5-minute series would
+        # invite trading a level never validated for it, so it appears only
+        # when the window really is one minute.
+        if mins == 1 and DCVD_DECISION < p99:
             guides += [
                 (DCVD_DECISION, _DCVD_DECISION_COL, 1.4, Qt.PenStyle.DashLine),
                 (-DCVD_DECISION, _DCVD_DECISION_COL, 1.4,
@@ -4345,8 +4365,9 @@ class TradeViewerQt(QMainWindow):
                                  pen=pg.mkPen(col, width=wid, style=style))
             self._plot_dcvd.addItem(ln)
             self._dcvd_guides.append(ln)
+        # Minutes, not bars: "DCVD(1)" on a 5m chart read as one minute.
         self._plot_dcvd.setLabel(
-            "left", f"DCVD({self._dcvd_lookback()})", **{"color": _FG})
+            "left", f"DCVD({mins}m)", **{"color": _FG})
 
     def _on_dcvd_lookback_changed(self, *_) -> None:
         self._apply_dcvd_scale()
