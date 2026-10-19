@@ -56,6 +56,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPicture, QPen, QBrush, QFont, QIcon, QPixmap,
+    QShortcut, QKeySequence,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -482,6 +483,28 @@ DCVD_LOOKBACK = 1
 # panel showing the same quantity the backtest traded, which applies the same
 # floor and never trades a bar below it.
 DCVD_MIN_SIGNED = 300.0
+
+# The flow gate, from the absorption study. A bar clears it when its signed
+# volume, measured against its OWN recent normal, lands in the top fifth:
+#
+#     x = (buy - sell) / median(buy + sell over the prior 60 bars)
+#     G = the 80th percentile of |x| over those same prior bars
+#
+# DCVD is a RATIO and says nothing about size: a 500-share bar and a
+# 50,000-share bar both read 0.5 when two thirds of them is buying. The
+# gate is the missing dimension, and over 60 walk-forward sessions the two
+# together scored +0.351 a trade against +0.112 for DCVD alone. Encoded as
+# opacity rather than a second panel: colour already carries the sign and
+# height the ratio, so opacity is the free channel, and the pair reads as
+# "the solid ones are the bars with real size behind them".
+#
+# POST-HOC. That 2x2 was found by looking, not registered in advance, so
+# this is drawn to watch and to gather forward evidence -- not yet to act
+# on. The pre-registered part is the +/-0.4 line.
+DCVD_FLOW_WIN = 60
+DCVD_FLOW_PCT = 0.80
+_DCVD_DIM_ALPHA = 70      # bars that did not clear the gate
+_DCVD_LIT_ALPHA = 215     # bars that did
 
 # A slower reading drawn behind the bars for context. The bars are each
 # minute's own imbalance; this is the direction of the stretch around them.
@@ -2327,6 +2350,11 @@ class TradeViewerQt(QMainWindow):
         # widest row's trailing controls off the edge instead of collapsing
         # them into a popup. Floor the window width at the widest row's
         # natural size so that state is never reachable.
+        # Kept so the whole stack can be folded away. Six rows is roughly a
+        # fifth of the window's height, and none of it changes between
+        # trades -- the chart is what is being read.
+        self._toolbar_rows = toolbar_rows
+
         widest = max((tb.sizeHint().width() for tb in toolbar_rows), default=0)
         if widest:
             self.setMinimumWidth(widest + 16)
@@ -2795,8 +2823,33 @@ class TradeViewerQt(QMainWindow):
         self._status = QStatusBar()
         self._status.setStyleSheet(
             f"QStatusBar {{ background: {_BG_BAR}; color: {_FG}; font-size: 11px; }}")
+        # The fold control lives here because the status bar is the one
+        # strip that never hides: put it on a toolbar and folding them
+        # would take the way back with it.
+        self._fold_btn = QPushButton("\u25b2 Toolbars")
+        self._fold_btn.setFlat(True)
+        self._fold_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fold_btn.setToolTip(
+            "Hide the toolbars and give the space to the chart  (Ctrl+M)")
+        self._fold_btn.setStyleSheet(
+            f"QPushButton {{ color: {_GREY}; border: none; padding: 0 8px; }}"
+            f"QPushButton:hover {{ color: {_FG}; }}")
+        self._fold_btn.clicked.connect(self._toggle_toolbars)
+        self._status.addPermanentWidget(self._fold_btn)
+        QShortcut(QKeySequence("Ctrl+M"), self, self._toggle_toolbars)
+
         self.setStatusBar(self._status)
         self._log("Ready.")
+
+    def _toggle_toolbars(self) -> None:
+        """Fold the six toolbar rows away, and back."""
+        rows = getattr(self, "_toolbar_rows", [])
+        if not rows:
+            return
+        hide = rows[0].isVisible()
+        for tb in rows:
+            tb.setVisible(not hide)
+        self._fold_btn.setText("\u25bc Toolbars" if hide else "\u25b2 Toolbars")
 
     def _log(self, msg: str) -> None:
         ts   = datetime.now().strftime("%H:%M:%S")
@@ -4447,6 +4500,17 @@ class TradeViewerQt(QMainWindow):
                     out[i] = (csum_d[i + 1] - csum_d[j]) / tot
             return out
 
+        # The flow gate: is this bar's signed volume large for this stock
+        # right now? Strictly trailing -- the rolling median and percentile
+        # both end at the previous bar, so a bar never raises the hurdle it
+        # is then asked to clear.
+        tot = pd.Series(buy + sell).replace(0.0, np.nan)
+        scale = tot.rolling(DCVD_FLOW_WIN, min_periods=20).median().shift(1)
+        xf = pd.Series(buy - sell) / scale
+        gate = (xf.abs().rolling(DCVD_FLOW_WIN, min_periods=20)
+                .quantile(DCVD_FLOW_PCT).shift(1))
+        self._dcvd_gate = (xf.abs() >= gate).fillna(False).to_numpy()
+
         look = max(1, min(self._dcvd_lookback(), n))
         dcvd = series(look)
         self._dcvd_arr = dcvd
@@ -4457,14 +4521,19 @@ class TradeViewerQt(QMainWindow):
         # and the shorter the window the more of the picture is invented --
         # which is what made this panel look like noise at a 1-bar window.
         drawn = np.isfinite(dcvd)
+        gated = self._dcvd_gate
         for sign, col in ((1, _GREEN), (-1, _RED)):
-            sel = drawn & ((dcvd >= 0) if sign > 0 else (dcvd < 0))
-            if not sel.any():
-                continue
-            bars = pg.BarGraphItem(x=x[sel], height=dcvd[sel], width=0.78,
-                                   brush=_qc(col, 210), pen=None)
-            self._plot_dcvd.addItem(bars)
-            self._dcvd_items.append(bars)
+            side = drawn & ((dcvd >= 0) if sign > 0 else (dcvd < 0))
+            for lit, alpha in ((True, _DCVD_LIT_ALPHA),
+                               (False, _DCVD_DIM_ALPHA)):
+                sel = side & (gated if lit else ~gated)
+                if not sel.any():
+                    continue
+                bars = pg.BarGraphItem(x=x[sel], height=dcvd[sel],
+                                       width=0.78, brush=_qc(col, alpha),
+                                       pen=None)
+                self._plot_dcvd.addItem(bars)
+                self._dcvd_items.append(bars)
 
         # The slower reading sits behind as context. 'finite' breaks the line
         # at bars the floor rejected rather than bridging them.
@@ -4483,6 +4552,7 @@ class TradeViewerQt(QMainWindow):
             self._plot_dcvd.removeItem(item)
         self._dcvd_items.clear()
         self._dcvd_arr = None
+        self._dcvd_gate = None
 
     def _clear_adi_items(self) -> None:
         for item in self._adi_items:
