@@ -133,8 +133,15 @@ def build():
             d["dr1"] = np.where(ok, (buy - sell) / tot, np.nan)
 
         dp = np.r_[np.nan, np.diff(c)]
+        # Shifted like the other three rolling quantities. It was not, and
+        # a 60-bar median that includes bar t lets that bar nudge the scale
+        # it is then divided by. One value moves a median by at most half a
+        # rank, so the effect is small and conservative -- a heavy bar
+        # raises the median and so shrinks its own x -- but three of four
+        # windows excluding t and the fourth including it is not a defence,
+        # it is an inconsistency nobody can keep in their head.
         scale = pd.Series(np.where(ok, tot, np.nan)).rolling(
-            WIN, min_periods=20).median()
+            WIN, min_periods=20).median().shift(1)
         y = pd.Series(dp / a)
         x = pd.Series(ofi) / scale
         d["x"] = x.to_numpy()
