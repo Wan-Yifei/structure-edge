@@ -430,6 +430,41 @@ function draw(q, reveal){
     else { g.fillStyle = col; g.fillRect(x-bw/2, y1, bw, bh); }
   }
 
+  /* The rule light, bottom-right of the price panel. Same three states and
+     the same colours as the panel below, and like it, only once the answer
+     is in -- a light burning while you are still deciding is a button to
+     follow, not a question to answer.
+
+     Bottom-right because that corner is the only one nothing else claims:
+     the heatmap legend sits top-left, the OHLC readout runs along the top,
+     and the entry/stop/target rails leave from the right edge at their own
+     prices, which are never this low in the panel. */
+  if (reveal){
+    const L = ruleLight(q);
+    if (L){
+      const col = {green: upC, red: dnC, amber: pocC, na: ink3}[L.k];
+      g.save();
+      g.font = "13px ui-monospace,monospace";
+      const txt = {green: "做多", red: "别做", amber: "不触发",
+                   na: "无数据"}[L.k];
+      const tw = g.measureText(txt).width;
+      const bw = tw + 30, bh = 24;
+      const bx = PAD_L + W - bw - 8, by = PAD_T + PRICE_H - bh - 8;
+      g.globalAlpha = .92; g.fillStyle = surf;
+      g.fillRect(bx, by, bw, bh);
+      g.globalAlpha = 1;
+      g.strokeStyle = col; g.lineWidth = 1.4;
+      g.strokeRect(bx + .5, by + .5, bw - 1, bh - 1);
+      g.fillStyle = col;
+      g.beginPath();
+      g.arc(bx + 13, by + bh / 2, 5.5, 0, 7);
+      g.fill();
+      g.textAlign = "left"; g.textBaseline = "middle";
+      g.fillText(txt, bx + 23, by + bh / 2 + .5);
+      g.restore();
+    }
+  }
+
   /* The settlement horizon. The chart draws AFTER bars of future but the
      rule only looks at the first FWD of them, and nothing used to say so:
      a target reached on bar 49 sat in plain sight above a verdict reading

@@ -10,10 +10,16 @@ const html = fs.readFileSync(path.join(dir, "index.html"), "utf8");
 const code = html.match(/<script>([\s\S]*)<\/script>/)[1];
 
 const els = {};
+/* Drawing calls are recorded so a test can ask what the chart painted.
+   Only fillText is kept: it is the only call whose arguments identify what
+   was drawn rather than merely where. */
+const ctxCalls = [];
 const ctx = new Proxy({}, {
   get: (t, k) => {
     if (k === "measureText") return () => ({ width: 20 });
     if (k === "canvas") return {};
+    if (k === "fillText")
+      return (txt) => { ctxCalls.push("fillText:" + txt); };
     return () => {};
   },
   set: () => true,
@@ -442,4 +448,28 @@ console.log("\nJUMP OK");
   if (!/规则：/.test(els.vd.innerHTML))
     throw new Error("the light is missing from the reveal");
   console.log("ok   规则红绿灯：三态正确，且答题前不显示");
+}
+
+/* The same light on the chart. It is drawn, not written into the DOM, so
+   the check is on the canvas calls the stub records -- and the point being
+   pinned is that it is absent until the answer is in, exactly as in the
+   panel. */
+{
+  const all = api.getQS();
+  const fresh = all.findIndex(x => !api.isAnswered(x.id));
+  if (fresh < 0) throw new Error("every question is already answered");
+
+  ctxCalls.length = 0;
+  api.goto1(fresh + 1);
+  const before = ctxCalls.filter(c => c.startsWith("fillText:"))
+                         .some(c => /做多|别做|不触发|无数据/.test(c));
+  if (before) throw new Error("the chart light is drawn before answering");
+
+  api.choose("pass"); api.submit();
+  ctxCalls.length = 0;
+  api.stepTo(0);                       // force a redraw of the revealed chart
+  const after = ctxCalls.filter(c => c.startsWith("fillText:"))
+                        .some(c => /做多|别做|不触发|无数据/.test(c));
+  if (!after) throw new Error("the chart light is missing after answering");
+  console.log("ok   主图红绿灯：答题后才画出");
 }
