@@ -2436,8 +2436,18 @@ class LiqHmWindow(QWidget):
                 traded += tk["volume"]
         pulled = max(lost - min(lost, traded), 0.0)
         frac = pulled / lost
-        return (f"  pulled {frac:.0%}" if frac >= 0.5
-                else f"  eaten {1.0 - frac:.0%}")
+        # The percentage is OF THE LOSS, not of the order, and written beside
+        # "300 / 1,020" a bare "pulled 100%" reads as "all of it went" while
+        # 300 is still visibly resting. Naming the lost amount puts the
+        # denominator on screen; at the extremes the share is dropped
+        # altogether, because there is nothing to apportion.
+        gone = f"−{lost:,.0f}"
+        if frac >= 0.995:
+            return f"  {gone} pulled"
+        if frac <= 0.005:
+            return f"  {gone} eaten"
+        return (f"  {gone} pulled {frac:.0%}" if frac >= 0.5
+                else f"  {gone} eaten {1.0 - frac:.0%}")
 
     def _wall_label_x(self) -> float:
         """X for the right-hand wall labels, just inside the view's right edge."""

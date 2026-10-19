@@ -7,7 +7,13 @@ hours earlier a level took 2,518 shares and held. Matching the loss against
 what printed AT that price separates them.
 
 The suffix is an estimate and the tests say where it declines to guess: wide
-bins, no tick feed, an intact wall. NEUTRAL volume is excluded throughout --
+bins, no tick feed, an intact wall.
+
+It names the LOST amount, because the share it reports is a share of that
+loss and not of the order: "300 / 1,020  pulled 100%" was read, reasonably,
+as "all of it went" while 300 sat there still resting. With the loss on
+screen the denominator is unambiguous, and at the extremes the percentage is
+dropped -- there is nothing left to apportion. NEUTRAL volume is excluded throughout --
 off-exchange prints consume no displayed size, and counting them would read a
 withdrawal as absorption, which is the one mistake that matters here.
 """
@@ -71,50 +77,50 @@ def fate(win, peak, now, *, half=0.005, side="B", peak_col=10):
 class TestItSeparatesTheTwo:
     def test_pulled_when_nothing_printed(self, win):
         """The 116.00 case: 73,072 gone, nothing printed there."""
-        assert fate(win, 73_072, 0) == "  pulled 100%"
+        assert fate(win, 73_072, 0) == "  −73,072 pulled"
 
     def test_eaten_when_the_loss_printed_at_that_price(self, win):
         win._absorb_ticks = ticks([(12, 40_000), (14, 33_072)])
-        assert fate(win, 73_072, 0) == "  eaten 100%"
+        assert fate(win, 73_072, 0) == "  −73,072 eaten"
 
     def test_a_mix_reports_the_larger_share(self, win):
         win._absorb_ticks = ticks([(12, 20_000)])
         got = fate(win, 73_072, 0)
-        assert got.startswith("  pulled")
-        assert got == f"  pulled {(73_072 - 20_000) / 73_072:.0%}"
+        assert "pulled" in got
+        assert got == f"  −73,072 pulled {(73_072 - 20_000) / 73_072:.0%}"
 
     def test_more_printed_than_was_lost_is_fully_eaten(self, win):
         """Refills mean prints can exceed the net loss; never negative."""
         win._absorb_ticks = ticks([(12, 500_000)])
-        assert fate(win, 73_072, 0) == "  eaten 100%"
+        assert fate(win, 73_072, 0) == "  −73,072 eaten"
 
 
 class TestWhatDoesNotCount:
     def test_neutral_prints_are_not_absorption(self, win):
         """Off-exchange consumes no displayed size."""
         win._absorb_ticks = ticks([(12, 73_072)], direction="NEUTRAL")
-        assert fate(win, 73_072, 0) == "  pulled 100%"
+        assert fate(win, 73_072, 0) == "  −73,072 pulled"
 
     def test_buys_do_not_explain_a_bid_shrinking(self, win):
         win._absorb_ticks = ticks([(12, 73_072)], direction="BUY")
-        assert fate(win, 73_072, 0) == "  pulled 100%"
+        assert fate(win, 73_072, 0) == "  −73,072 pulled"
 
     def test_sells_do_not_explain_an_ask_shrinking(self, win):
         win._absorb_ticks = ticks([(12, 5_000)], direction="SELL")
-        assert fate(win, 5_000, 0, side="A") == "  pulled 100%"
+        assert fate(win, 5_000, 0, side="A") == "  −5,000 pulled"
 
     def test_buys_do_explain_an_ask_shrinking(self, win):
         win._absorb_ticks = ticks([(12, 5_000)], direction="BUY")
-        assert fate(win, 5_000, 0, side="A") == "  eaten 100%"
+        assert fate(win, 5_000, 0, side="A") == "  −5,000 eaten"
 
     def test_prints_before_the_peak_are_not_counted(self, win):
         """The wall still held its peak then, so they hit something else."""
         win._absorb_ticks = ticks([(2, 73_072)])
-        assert fate(win, 73_072, 0, peak_col=10) == "  pulled 100%"
+        assert fate(win, 73_072, 0, peak_col=10) == "  −73,072 pulled"
 
     def test_prints_at_another_price_are_not_counted(self, win):
         win._absorb_ticks = ticks([(12, 73_072)], price=116.40)
-        assert fate(win, 73_072, 0) == "  pulled 100%"
+        assert fate(win, 73_072, 0) == "  −73,072 pulled"
 
 
 class TestItDeclinesToGuess:
@@ -177,3 +183,31 @@ class TestTheGateIsReachable:
         default heatmap resolution stops clearing it."""
         from analysis.liq_hm_window import _WALL_FATE_MAX_HALF
         assert _WALL_FATE_MAX_HALF >= 0.03
+
+
+class TestItNamesTheLoss:
+    """The share is OF THE LOSS, so the loss has to be on screen.
+
+    Reported from a live panel: "B 98.81±0.02  300 / 1,020  pulled 100%".
+    The arithmetic was right -- 720 shares left and every one of them was
+    withdrawn -- but a bare 100% beside a level still holding 300 reads as
+    "all of it went". The number the percentage applies to was the only
+    thing missing.
+    """
+
+    def test_a_partial_loss_names_what_left_not_what_remains(self, win):
+        got = fate(win, 1_020, 300)
+        assert "720" in got, got
+        assert "1,020" not in got and "300" not in got, got
+
+    def test_no_bare_percentage_without_its_denominator(self, win):
+        """Any percentage printed must have the lost amount beside it."""
+        for peak, now in ((1_020, 300), (73_072, 0), (5_000, 4_000)):
+            got = fate(win, peak, now)
+            if "%" in got:
+                assert "\u2212" in got, got
+
+    def test_a_whole_loss_drops_the_percentage(self, win):
+        """100% of a loss apportions nothing; the word alone says it."""
+        got = fate(win, 1_020, 0)
+        assert got == "  \u22121,020 pulled", got
