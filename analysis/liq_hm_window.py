@@ -1364,6 +1364,12 @@ class LiqHmWindow(QWidget):
         delta_str   = f"  Δ{tick_delta:+,.0f}" if tick_delta is not None else ""
         depth_str   = self._depth_to_cursor(y)
         lbl_text    = f"{y:.2f}{delta_str}  {depth_str}" if depth_str else f"{y:.2f}{delta_str}"
+        # The row under the cursor, in the pinned labels' own words. Only a
+        # few rows can carry a standing label -- the rest of the picture is
+        # bands with no name on them, and the question they raise ("how big
+        # is THAT one") had no way to be asked. Hovering asks it.
+        for line in self._hovered_rows(y):
+            lbl_text += chr(10) + line
         self._price_lbl.setText(lbl_text)
         xlo, xhi = self._plot_widget.getPlotItem().vb.viewRange()[0]
         ylo, yhi = self._plot_widget.getPlotItem().vb.viewRange()[1]
@@ -2299,22 +2305,8 @@ class LiqHmWindow(QWidget):
                 placed.append(int(bi))
                 price = self._price_min + (int(bi) + 0.5) * self._bin_size
                 shown.add(round(price, 4))
-                # The grid only knows the bin, so the price is its centre. That
-                # is sub-penny while the band is narrow, but a day-long replay
-                # spreads ~$25 over 100 bins and a bare "164.00" would then be
-                # anywhere in a quarter-dollar. Say so once it matters.
-                half = self._bin_size / 2
-                px = (f"{price:.2f}" if half <= 0.01
-                      else f"{price:.2f}±{half:.2f}")
-                # Peak alone would keep showing a wall that has since been
-                # eaten; "now / peak" makes the consumption visible, and a
-                # level trading far below its peak is itself worth seeing.
-                c = float(cur[bi])
-                size_txt = (f"{v:,.0f}" if c >= v * _WALL_INTACT_FRAC
-                            else f"{c:,.0f} / {v:,.0f}")
                 lbl = pg.TextItem(
-                    text=f"{side} {px}  {size_txt}"
-                         f"{self._wall_fate(grid, bi, lo, hi, v, c, half, side)}",
+                    text=self._row_label(grid, int(bi), lo, hi, side),
                     color=_WALL_TEXT_COL,
                     fill=pg.mkBrush(QColor(*_LABEL_FILL_RGBA)),
                     border=pg.mkPen(colour, width=1),
@@ -2330,6 +2322,63 @@ class LiqHmWindow(QWidget):
             # What the next redraw grants rank slack to. Keyed by price, not
             # bin: a rebuilt price axis renumbers the bins.
             self._wall_prev[side] = shown
+
+    def _row_label(self, grid, bi: int, lo: int, hi: int, side: str) -> str:
+        """One row's book line, in the same words the pinned labels use.
+
+        Shared rather than re-formatted at the hover site: two spellings of
+        the same fact is how a panel starts disagreeing with itself.
+        Returns '' for a row that held nothing in view.
+
+        The grid only knows the bin, so the price is its centre. That is
+        sub-penny while the band is narrow, but a day-long replay spreads
+        ~$25 over 100 bins and a bare "164.00" would then be anywhere in a
+        quarter-dollar, hence the +/- once it matters.
+
+        Size reads "now / peak" rather than peak alone: peak would keep
+        showing a wall that has since been eaten, and a level trading far
+        below its peak is itself the thing worth seeing.
+        """
+        if self._bin_size <= 0 or hi <= lo or not (0 <= bi < grid.shape[1]):
+            return ""
+        peak = float(grid[lo:hi, bi].max())
+        if peak <= 0:
+            return ""
+        cur = float(grid[hi - 1, bi])
+        half = self._bin_size / 2
+        price = self._price_min + (bi + 0.5) * self._bin_size
+        px = f"{price:.2f}" if half <= 0.01 else f"{price:.2f}±{half:.2f}"
+        size_txt = (f"{peak:,.0f}" if cur >= peak * _WALL_INTACT_FRAC
+                    else f"{cur:,.0f} / {peak:,.0f}")
+        fate = self._wall_fate(grid, bi, lo, hi, peak, cur, half, side)
+        return f"{side} {px}  {size_txt}{fate}"
+
+    def _hovered_rows(self, y: float) -> list[str]:
+        """Book lines for the price row under the cursor, bid then ask.
+
+        Both sides are reported when both held size there: a level that was
+        a bid and later an ask is the ordinary way a price gets traded
+        through, and showing only one of them would hide half of it.
+        """
+        if self._bin_size <= 0:
+            return []
+        n_cols = len(self._col_ts)
+        if n_cols == 0:
+            return []
+        bi = int((y - self._price_min) / self._bin_size)
+        xlo, xhi = self._plot_widget.getPlotItem().vb.viewRange()[0]
+        lo = max(0, int(np.floor(xlo)))
+        hi = min(n_cols, int(np.ceil(xhi)))
+        if hi <= lo:
+            lo, hi = 0, n_cols
+        out = []
+        for grid, side in ((self._bid_grid, "B"), (self._ask_grid, "A")):
+            if grid is None or bi >= grid.shape[1] or bi < 0:
+                continue
+            txt = self._row_label(grid, bi, lo, hi, side)
+            if txt:
+                out.append(txt)
+        return out
 
     def _wall_fate(self, grid, bi: int, lo: int, hi: int,
                    peak: float, now: float, half: float, side: str) -> str:
