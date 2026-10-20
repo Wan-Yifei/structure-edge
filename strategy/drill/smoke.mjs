@@ -214,7 +214,30 @@ console.log("ok   成绩页：总 R、胜率带分母、盈亏平衡线、分类
    failure possible, so check the catch did not fire and that something was
    actually painted. Enter enough trades to pass curveStats' n >= 5 floor,
    which is what gates the reshuffle paragraphs. */
-for (let k = 0; k < 14; k++) {
+/* Twelve entries: inside the band where the old n >= 10 gate drew the
+   line and the correct n > 20 gate does not, so this discriminates
+   between them instead of passing under either. */
+for (let k = 0; k < 10; k++) {
+  els["s-stop"].value = "1.0";
+  els["s-tgt"].value = "2.0";
+  api.choose("enter");
+  api.submit();
+  api.next();
+}
+/* With 20 entries or fewer, the last-20 window is every entry, so the
+   rolling rate equals the cumulative one exactly and the line is not
+   drawn -- it would hide the teal one under an identical orange one. */
+ctxText.length = 0;
+api.report();
+if (/近20笔/.test(els["cv-leg1"].innerHTML.replace(/最近 20 笔/g, "")))
+  throw new Error("the rolling line must not be drawn under 21 entries");
+if (!/与累计完全重合/.test(els["cv-leg1"].innerHTML))
+  throw new Error("the legend must say why the rolling line is absent");
+if (ctxText.some((t) => t.txt === "近20笔"))
+  throw new Error("a label was drawn for a line that is not there");
+
+/* Past the gate, so both lines -- and both end labels -- exist below. */
+for (let k = 0; k < 25; k++) {
   els["s-stop"].value = "1.0";
   els["s-tgt"].value = "2.0";
   api.choose("enter");
@@ -249,6 +272,12 @@ for (const tok of ["重排", "置换检验", "95% 区间"]) {
 if (!/形状是抽签/.test(cr))
   throw new Error("the notes must say the curve's shape is a draw");
 console.log("ok   曲线读法：重排百分位、趋势置换、总 R 区间都在");
+
+if (!ctxText.some((t) => t.txt === "近20笔"))
+  throw new Error("past 20 entries the rolling line must be labelled");
+if (!/最近 20 笔/.test(els["cv-leg1"].innerHTML))
+  throw new Error("the legend must carry the rolling swatch once drawn");
+console.log("ok   近20笔：满 21 笔才画，之前说明它与累计重合");
 
 /* Label geometry. These all shipped broken once: the two line-end labels
    printed on top of each other whenever the lines finished near the same

@@ -1540,9 +1540,14 @@ function drawCurves(A){
     const entered = a.choice === "enter";
     if (entered){ n++; if (a.r > 0) k++; cum += a.r; rs.push(a.r); }
     const ci = n ? wilson(k, n) : null;
+    /* Only once the window is actually a window. At 20 entries or fewer,
+       rs.slice(-20) is every entry, so this would equal the cumulative
+       rate exactly and draw on top of it -- and at the moment the 10th
+       arrives it is one point with nothing to join, which looks like a
+       line that failed. */
     let w20 = null;
-    if (n >= 10){ const t = rs.slice(-20);
-                  w20 = t.filter(x => x > 0).length / t.length; }
+    if (n > 20){ const t = rs.slice(-20);
+                 w20 = t.filter(x => x > 0).length / t.length; }
     pts.push({e: entered, r: entered ? a.r : 0, nEnt: n,
               wr: n ? k/n : null, lo: ci && ci[0], hi: ci && ci[1],
               w20, cum,
@@ -1733,9 +1738,14 @@ function drawCurves(A){
 
   const cs0 = getComputedStyle(document.documentElement);
   const t0 = nm => cs0.getPropertyValue(nm).trim();
+  /* No swatch for a line that is not on screen. */
+  const hasW20 = pts.some(p => p.w20 !== null && p.w20 !== undefined);
   $("cv-leg1").innerHTML =
     `<span style="color:${t0("--accent")}">━</span> 累计胜率　` +
-    `<span style="color:${t0("--poc")}">━</span> 最近 20 笔　` +
+    (hasW20
+      ? `<span style="color:${t0("--poc")}">━</span> 最近 20 笔　`
+      : `<span style="color:${t0("--ink-3")}">最近 20 笔：入场超过 20 笔才画` +
+        `，在那之前它与累计完全重合</span>　`) +
     `<span style="color:${t0("--accent")};opacity:.45">▇</span> 95% 区间　` +
     `<span style="color:${t0("--ink-3")}">┄</span> 盈亏平衡　` +
     `<span style="color:${t0("--ink-3")}">移动鼠标看每一题</span>`;
