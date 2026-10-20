@@ -270,6 +270,68 @@ def integrated(data: dict[str, pd.DataFrame], levels: int, horizon: int):
     return float(np.mean(oos)), float(np.std(oos))
 
 
+def _pc1(Xtr):
+    """First principal component of the training design, with its scaler."""
+    mu, sd = Xtr.mean(0), Xtr.std(0)
+    sd[sd == 0] = 1.0
+    _, _, vt = np.linalg.svd((Xtr - mu) / sd, full_matrices=False)
+    return mu, sd, vt[0]
+
+
+def _binned(xtr, ytr, xte, bins=10):
+    """Non-parametric fit: predict each test point the training mean of its
+    decile. Edges from the training half only."""
+    edges = np.quantile(xtr, np.linspace(0, 1, bins + 1)[1:-1])
+    itr = np.digitize(xtr, edges)
+    means = np.array([ytr[itr == b].mean() if (itr == b).any() else ytr.mean()
+                      for b in range(bins)])
+    return means[np.digitize(xte, edges)]
+
+
+def shape_test(data: dict[str, pd.DataFrame], levels: int, horizon: int):
+    """Leave-one-day-out R^2 for five functional forms at a fixed depth."""
+    try:
+        from sklearn.ensemble import HistGradientBoostingRegressor
+    except ImportError:
+        HistGradientBoostingRegressor = None
+
+    days = sorted(data)
+    names = ["线性", "signed sqrt", "signed log", "分箱（非参）", "GBM（多档）"]
+    acc = {n: [] for n in names}
+    for held in days:
+        tr = [d for d in days if d != held]
+        Xtr = np.vstack([design(data[d], levels) for d in tr])
+        ytr = np.concatenate([_target(data[d], horizon) for d in tr])
+        m = np.isfinite(Xtr).all(1) & np.isfinite(ytr)
+        Xtr, ytr = Xtr[m], ytr[m]
+        Xte = design(data[held], levels)
+        yte = _target(data[held], horizon)
+        mt = np.isfinite(Xte).all(1) & np.isfinite(yte)
+        Xte, yte = Xte[mt], yte[mt]
+        base = ytr.mean()
+
+        mu, sd, w = _pc1(Xtr)
+        ztr = ((Xtr - mu) / sd) @ w
+        zte = ((Xte - mu) / sd) @ w
+
+        for nm, f in (("线性", lambda v: v),
+                      ("signed sqrt", lambda v: np.sign(v) * np.sqrt(np.abs(v))),
+                      ("signed log", lambda v: np.sign(v) * np.log1p(np.abs(v)))):
+            b = ols(f(ztr).reshape(-1, 1), ytr)
+            acc[nm].append(r2(yte, b[0] + b[1] * f(zte), base))
+
+        acc["分箱（非参）"].append(r2(yte, _binned(ztr, ytr, zte), base))
+
+        if HistGradientBoostingRegressor is not None:
+            g = HistGradientBoostingRegressor(
+                max_depth=3, max_iter=200, learning_rate=0.05,
+                random_state=0).fit(Xtr, ytr)
+            acc["GBM（多档）"].append(r2(yte, g.predict(Xte), base))
+        else:
+            acc["GBM（多档）"].append(float("nan"))
+    return [(n, float(np.mean(acc[n])), float(np.std(acc[n]))) for n in names]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--code", default="US_SOXL")
@@ -277,6 +339,8 @@ def main() -> None:
     ap.add_argument("--bucket", type=int, default=10, help="seconds")
     ap.add_argument("--min-snapshots", type=int, default=15000,
                     help="skip partial days below this many RTH snapshots")
+    ap.add_argument("--shape", type=int, default=0, metavar="LEVELS",
+                    help="also test non-linear forms at this depth (0 = off)")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -321,6 +385,13 @@ def main() -> None:
         pc, pcsd = integrated(data, args.levels, horizon)
         print(f"{'整合':>5}{'':>12}{pc:>12.4f}{pcsd:>10.4f}"
               f"   （前 {args.levels} 档的第一主成分）", flush=True)
+
+        if args.shape:
+            print(f"\n  形状检验（整合变量，{args.shape} 档；GBM 用原始多档）",
+                  flush=True)
+            print(f"  {'形式':<16}{'留一 R²':>12}{'折间 sd':>10}", flush=True)
+            for nm, mu_, sd_ in shape_test(data, args.shape, horizon):
+                print(f"  {nm:<16}{mu_:>12.4f}{sd_:>10.4f}", flush=True)
 
 
 if __name__ == "__main__":
