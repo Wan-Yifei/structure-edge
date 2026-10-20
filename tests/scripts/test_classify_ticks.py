@@ -170,3 +170,94 @@ class TestTheKeyItWritesOn:
         _run(dbs)
         _run(dbs)
         assert mids.count(C) == 1
+
+
+class TestResume:
+    """Signing a day whole costs 17 minutes, almost all of it json.loads over
+    384,000 book snapshots. A catch-up that re-read the morning every 20
+    minutes would cost far more than it is worth, so a run starts from what
+    is already signed -- and the overnight session stops reading "off n/a"
+    in the viewer until the next night's cron.
+    """
+
+    def test_a_day_with_nothing_signed_is_done_whole(self, dbs):
+        """Otherwise a frequent cron would need a separate job to seed it."""
+        _, mids, _ = dbs
+        assert classify_ticks.resume_point(C, DAY, mids) is None
+
+    def test_it_restarts_an_overlap_before_the_last_signed_print(self, dbs):
+        ticks, mids, ob = dbs
+        _book(ob, [(s, 100.00, 100.50) for s in (0, 1800)])
+        _ticks(ticks, [(0, 100.30, 10, "NEUTRAL"),
+                       (1800, 100.30, 10, "NEUTRAL")])
+        assert _run(dbs)["signed"] == 2
+
+        want = (T0 + timedelta(seconds=1800)) - classify_ticks.RESUME_OVERLAP
+        assert classify_ticks.resume_point(C, DAY, mids) == want
+
+    def test_the_morning_is_not_read_again(self, dbs):
+        """The whole point: the second run must not touch the first's bars."""
+        ticks, mids, ob = dbs
+        _book(ob, [(s, 100.00, 100.50) for s in (0, 600, 1200, 1800, 7200)])
+        _ticks(ticks, [(s, 100.30, 10, "NEUTRAL")
+                       for s in (0, 600, 1200, 1800)])
+        assert _run(dbs)["ticks"] == 4
+
+        _ticks(ticks, [(7200, 100.30, 10, "NEUTRAL")])
+        since = classify_ticks.resume_point(C, DAY, mids)
+        r = classify_ticks.classify_day(C, DAY, ticks, mids, since=since)
+        # 10:30 (inside the overlap) and 12:00; not 10:00, 10:10, 10:20.
+        assert r["ticks"] == 2, r
+        assert r["signed"] == 2
+        assert r["note"].startswith("resumed"), r["note"]
+        assert mids.count(C) == 5
+
+    def test_a_tick_that_landed_late_is_still_caught(self, dbs):
+        """Why the window reaches back at all. The tape is not ordered on
+        arrival; a print written to ticks.db after a run passed its
+        timestamp would never be signed if the next run began after it."""
+        ticks, mids, ob = dbs
+        _book(ob, [(s, 100.00, 100.50) for s in (0, 1700, 1800)])
+        _ticks(ticks, [(0, 100.30, 10, "NEUTRAL"),
+                       (1800, 100.30, 10, "NEUTRAL")])
+        assert _run(dbs)["signed"] == 2
+
+        late = T0 + timedelta(seconds=1700)      # before the last signed one
+        _ticks(ticks, [(1700, 100.40, 10, "NEUTRAL")])
+        since = classify_ticks.resume_point(C, DAY, mids)
+        assert since < late, "the overlap has to cover it"
+        classify_ticks.classify_day(C, DAY, ticks, mids, since=since)
+
+        signed = mids.load(C, DAY, DAY + timedelta(days=1))
+        assert any(k[1] == 100.40 for k in signed), "the late print was dropped"
+
+    def test_a_day_already_signed_through_costs_nothing(self, dbs):
+        ticks, mids, _ = dbs
+        r = classify_ticks.classify_day(C, DAY, ticks, mids,
+                                        since=DAY + timedelta(days=1))
+        assert r["note"] == "up to date"
+        assert r["secs"] == 0.0, "it must not have opened the book at all"
+        assert r["ticks"] == 0
+
+    def test_full_still_means_the_whole_day(self, dbs):
+        """--full passes since=None, and has to behave as it always did."""
+        ticks, mids, ob = dbs
+        _book(ob, [(s, 100.00, 100.50) for s in (0, 1800)])
+        _ticks(ticks, [(0, 100.30, 10, "NEUTRAL"),
+                       (1800, 100.30, 10, "NEUTRAL")])
+        _run(dbs)
+
+        r = classify_ticks.classify_day(C, DAY, ticks, mids, since=None)
+        assert r["ticks"] == 2 and r["note"] == ""
+
+
+class TestLastTsBounds:
+    def test_it_does_not_reach_into_the_next_day(self, dbs):
+        """resume_point asks per calendar day; a print from the following
+        session must not make today look finished."""
+        _, mids, _ = dbs
+        nxt = DAY + timedelta(days=1, hours=10)
+        mids.put([(C, nxt, 100.0, 10, "BUY")])
+        assert classify_ticks.resume_point(C, DAY, mids) is None
+        assert classify_ticks.resume_point(C, DAY + timedelta(days=1),
+                                           mids) is not None

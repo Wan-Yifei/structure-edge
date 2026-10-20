@@ -82,6 +82,20 @@ class TickMidStore:
             [code, _ts_str(start), _ts_str(end)])
         return {(r[0], r[1], r[2]): r[3] for r in cur.fetchall()}
 
+    def last_ts(self, code: str, start: datetime,
+                end: datetime) -> datetime | None:
+        """Timestamp of the newest signed print in [start, end), or None.
+
+        ORDER BY ... LIMIT 1 rather than MAX(ts): the primary key leads with
+        (code, ts) so this touches one index entry, and an empty range comes
+        back as no row rather than a row holding NULL.
+        """
+        row = self._con.execute(
+            "SELECT ts FROM tick_mid WHERE code = ? AND ts >= ? AND ts < ? "
+            "ORDER BY ts DESC LIMIT 1",
+            [code, _ts_str(start), _ts_str(end)]).fetchone()
+        return datetime.fromisoformat(row[0]) if row else None
+
     def count(self, code: str | None = None) -> int:
         if code:
             return self._con.execute(
