@@ -47,6 +47,9 @@ global.localStorage = {
   getItem(k) { return this._d[k] ?? null; },
   setItem(k, v) { this._d[k] = v; },
   removeItem(k) { delete this._d[k]; },
+  /* badge() walks the keys to count each set's answers. */
+  get length() { return Object.keys(this._d).length; },
+  key(i) { return Object.keys(this._d)[i] ?? null; },
 };
 global.document = {
   getElementById: (id) => (els[id] ||= mkEl(id)),
@@ -639,4 +642,38 @@ console.log("\nJUMP OK");
   if (!els.qcard.hidden)
     throw new Error("only Enter should jump");
   console.log("ok   做完之后：回到题目可用，跳到当前序号回车也有效");
+}
+
+
+/* Switching decision position. The sets keep separate progress on purpose
+   -- the ids carry _c0 / _c1 / mine_, and the low bar and the bar after it
+   are different questions -- so the counter dropping to 0 is correct. It
+   read as a wipe, with 清空重做 next to it and both buttons disappearing at
+   the same moment.
+
+   Runs after the block above, which answered the whole c1 set. */
+{
+  const beforeN = api.getQS().length;
+  els.conf.value = "0";
+  await api.loadSet("0");
+
+  if (api.getQS().length === 0) throw new Error("c0 set failed to load");
+  if (api.getQS().some((q) => api.isAnswered(q.id)))
+    throw new Error("c1 answers must not count as c0 answers");
+
+  const saved = els.saved.textContent;
+  if (!/已保存 0 \//.test(saved))
+    throw new Error("a fresh set should read zero: " + saved);
+  if (!/仍在/.test(saved))
+    throw new Error("it must say the other set's answers are still there: " +
+                    saved);
+  if (!new RegExp(`${beforeN} 题`).test(saved))
+    throw new Error(`it should name the other set's count (${beforeN}): ` +
+                    saved);
+
+  if (els["b-jump"].hidden)
+    throw new Error("the jump control must survive a set switch");
+  if (els.qcard.hidden)
+    throw new Error("switching sets must leave a question on screen");
+  console.log("ok   切换决策位置：计数归零但说明另一套仍在，题目和跳转都在");
 }
