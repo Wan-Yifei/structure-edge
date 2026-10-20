@@ -233,6 +233,20 @@ if (/近20笔/.test(els["cv-leg1"].innerHTML.replace(/最近 20 笔/g, "")))
   throw new Error("the rolling line must not be drawn under 21 entries");
 if (!/与累计完全重合/.test(els["cv-leg1"].innerHTML))
   throw new Error("the legend must say why the rolling line is absent");
+/* Where you stand against the gate, not just the rule: 12 entries in, it
+   must name the count and the gap, or a pending line reads as a broken
+   one. */
+{
+  const m = els["cv-leg1"].innerHTML.match(/现在 (\d+) 笔入场，还差 (\d+) 笔/);
+  if (!m)
+    throw new Error("the legend must report the count and the gap: " +
+                    els["cv-leg1"].innerHTML);
+  /* Checked as arithmetic rather than against a literal, so the numbers
+     stay consistent with the gate when the blocks above change. */
+  if (Number(m[1]) + Number(m[2]) !== 21)
+    throw new Error(
+      `${m[1]} entries plus ${m[2]} to go does not reach the gate of 21`);
+}
 if (ctxText.some((t) => t.txt === "近20笔"))
   throw new Error("a label was drawn for a line that is not there");
 

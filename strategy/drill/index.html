@@ -1744,8 +1744,8 @@ function drawCurves(A){
     `<span style="color:${t0("--accent")}">━</span> 累计胜率　` +
     (hasW20
       ? `<span style="color:${t0("--poc")}">━</span> 最近 20 笔　`
-      : `<span style="color:${t0("--ink-3")}">最近 20 笔：入场超过 20 笔才画` +
-        `，在那之前它与累计完全重合</span>　`) +
+      : `<span style="color:${t0("--ink-3")}">最近 20 笔：现在 ${n} 笔入场，` +
+        `还差 ${21 - n} 笔开始画 —— 在那之前它与累计完全重合</span>　`) +
     `<span style="color:${t0("--accent")};opacity:.45">▇</span> 95% 区间　` +
     `<span style="color:${t0("--ink-3")}">┄</span> 盈亏平衡　` +
     `<span style="color:${t0("--ink-3")}">移动鼠标看每一题</span>`;
