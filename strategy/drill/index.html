@@ -159,11 +159,25 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
   <div id="report" hidden>
     <h2>成绩</h2>
     <table class="score"><tbody id="score"></tbody></table>
+
+    <h2>曲线</h2>
+    <p class="hint" id="cv-note"></p>
+    <div class="card" style="margin-bottom:10px">
+      <div class="meta" id="cv-leg1"></div>
+      <canvas id="cv-wr"></canvas>
+    </div>
+    <div class="card">
+      <div class="meta" id="cv-leg2"></div>
+      <canvas id="cv-eq"></canvas>
+    </div>
+    <ul class="note" id="cv-read"></ul>
+
     <h2>读法</h2>
     <ul class="note" id="read"></ul>
   </div>
 </div>
 
+<script src="answer_order.js"></script>
 <script>
 /* Base rates come from rates_c{0,1}.json beside the questions, not from a
    constant baked in here: they are measured separately for each decision
@@ -1011,6 +1025,11 @@ function submit(){
            target:s.target, r:s.r, how:s.how, bar:s.bar};
   }
   rec.kind = q.kind; rec.id = q.id;
+  /* When, not just what. Without this the order answers were given is not
+     recoverable from the page -- the record held no time, and `ans` is
+     keyed by id. The sequence curves below need it; answers from before
+     this existed are ordered by answer_order.js instead. */
+  rec.at = Date.now();
   ans[q.id] = rec; save(q.id, rec);
   /* The future stays hidden and is stepped in one bar at a time -- watching
      it arrive is the part that trains anything; a chart that jumps straight
@@ -1415,7 +1434,260 @@ function report(){
   notes.push(`<b>这不是收益评估。</b>${A.length} 题,样本量只够看倾向,` +
     "同一套题做第二遍也不算数。");
   $("read").innerHTML = notes.map(t => `<li>${t}</li>`).join("");
+  try{ drawCurves(A); }catch(e){
+    /* A broken chart must not take the scorecard down with it. */
+    $("cv-note").textContent = "曲线画不出来：" + e.message;
+  }
 }
+
+/* ── Sequence curves ───────────────────────────────────────────────────
+   Everything above this point is order-free: a win rate and a total R are
+   sums over the set of questions answered, and shuffling the set cannot
+   move them. These two charts are the opposite -- they exist only because
+   of order, which makes them the part of the score page that is easiest to
+   over-read. Hence the reshuffle figures underneath them. */
+
+const CVW = 860, CVH1 = 230, CVH2 = 196;
+
+/* Score interval, not the normal approximation: at ten trades the normal
+   one runs past 0 and 1, which is exactly where this chart is trying to be
+   honest about how little it knows. */
+function wilson(k, n, z = 1.96){
+  if (!n) return [0, 1];
+  const p = k/n, d = 1 + z*z/n;
+  const c = (p + z*z/(2*n))/d;
+  const h = z*Math.sqrt(p*(1-p)/n + z*z/(4*n*n))/d;
+  return [Math.max(0, c-h), Math.min(1, c+h)];
+}
+function maxDD(seq){
+  let cum = 0, peak = 0, dd = 0;
+  for (const x of seq){ cum += x; peak = Math.max(peak, cum);
+                        dd = Math.min(dd, cum - peak); }
+  return dd;
+}
+function corrIdx(seq){
+  const n = seq.length; if (n < 3) return 0;
+  const my = seq.reduce((s,x)=>s+x,0)/n, mx = (n-1)/2;
+  let num = 0, dx = 0, dy = 0;
+  for (let i=0;i<n;i++){ const a=i-mx, b=seq[i]-my;
+                         num += a*b; dx += a*a; dy += b*b; }
+  return (dx && dy) ? num/Math.sqrt(dx*dy) : 0;
+}
+function shuffled2(a, rnd){
+  const s = a.slice();
+  for (let i=s.length-1;i>0;i--){ const j = Math.floor(rnd()*(i+1));
+                                  [s[i],s[j]] = [s[j],s[i]]; }
+  return s;
+}
+
+/* Answers in the order they were given. `at` is a real timestamp; answers
+   from before that field existed fall back to answer_order.js, which holds
+   the order recovered from this browser's localStorage write sequence. */
+function inAnswerOrder(A){
+  const ORD = {};
+  (window.DRILL_ORDER || []).forEach((id,i) => { ORD[id] = i; });
+  const key = a => a.at ? [1, a.at]
+                        : [0, ORD[a.id] === undefined ? 1e9 : ORD[a.id]];
+  return A.slice().sort((x,y) => {
+    const kx = key(x), ky = key(y);
+    return kx[0]-ky[0] || kx[1]-ky[1];
+  });
+}
+
+function curveStats(rs){
+  /* One PRNG, seeded, so the page does not report a different p-value on
+     every reload of the same answers. */
+  let s = 0x2f6e2b1 >>> 0;
+  const rnd = () => (s = (s*1664525 + 1013904223) >>> 0) / 4294967296;
+  const N = 2000, n = rs.length;
+  if (n < 5) return null;
+  const dd = maxDD(rs), tr = corrIdx(rs), tot = rs.reduce((a,b)=>a+b,0);
+  let deeper = 0, bigTrend = 0;
+  const boots = [];
+  for (let i=0;i<N;i++){
+    const sh = shuffled2(rs, rnd);
+    if (maxDD(sh) <= dd) deeper++;
+    if (Math.abs(corrIdx(sh)) >= Math.abs(tr)) bigTrend++;
+    let b = 0;
+    for (let j=0;j<n;j++) b += rs[Math.floor(rnd()*n)];
+    boots.push(b);
+  }
+  boots.sort((a,b)=>a-b);
+  return {dd, ddPct: deeper/N, trend: tr, trendP: bigTrend/N, tot,
+          rLo: boots[Math.floor(.025*N)], rHi: boots[Math.floor(.975*N)]};
+}
+
+function drawCurves(A){
+  const SEQ = inAnswerOrder(A);
+  const noAt = SEQ.filter(a => !a.at).length;
+  const cs = getComputedStyle(document.documentElement);
+  const tok = n => cs.getPropertyValue(n).trim();
+  const ink = tok("--ink"), ink2 = tok("--ink-2"), ink3 = tok("--ink-3"),
+        soft = tok("--line-soft"), line = tok("--line"),
+        acc = tok("--accent"), poc = tok("--poc"),
+        up = tok("--up"), dn = tok("--dn"), surf = tok("--surface");
+
+  /* Walk the sequence once, carrying both curves. */
+  const pts = []; let k = 0, n = 0, cum = 0; const rs = [];
+  for (const a of SEQ){
+    const entered = a.choice === "enter";
+    if (entered){ n++; if (a.r > 0) k++; cum += a.r; rs.push(a.r); }
+    const ci = n ? wilson(k, n) : null;
+    let w20 = null;
+    if (n >= 10){ const t = rs.slice(-20);
+                  w20 = t.filter(x => x > 0).length / t.length; }
+    pts.push({e:entered, wr: n ? k/n : null, lo: ci && ci[0], hi: ci && ci[1],
+              w20, cum});
+  }
+  const won = rs.filter(x => x > 0), lost = rs.filter(x => x <= 0);
+  const aw = won.length ? won.reduce((s,x)=>s+x,0)/won.length : NaN;
+  const al = lost.length ? Math.abs(lost.reduce((s,x)=>s+x,0)/lost.length)
+                         : NaN;
+  const need = (isNaN(aw) || isNaN(al)) ? null : al/(aw+al);
+  const st = curveStats(rs);
+
+  function frame(cv, H, lo, hi, ticks, fmt){
+    const g = cv.getContext("2d");
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width = CVW*dpr; cv.height = H*dpr;
+    cv.style.aspectRatio = CVW + "/" + H;
+    g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,CVW,H);
+    const L = 46, R = 70, T = 12, B = 24;
+    const X = i => L + (pts.length < 2 ? 0 : i/(pts.length-1)*(CVW-L-R));
+    const Y = v => T + (hi-v)/(hi-lo)*(H-T-B);
+    g.font = '11px ' + tok("--mono");
+    g.textBaseline = "middle";
+    for (const t of ticks){
+      const y = Y(t);
+      g.strokeStyle = soft; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(L, y+.5); g.lineTo(CVW-R, y+.5); g.stroke();
+      g.fillStyle = ink3; g.textAlign = "right";
+      g.fillText(fmt(t), L-6, y);
+    }
+    g.strokeStyle = line;
+    g.beginPath(); g.moveTo(L, Y(lo)+.5); g.lineTo(CVW-R, Y(lo)+.5); g.stroke();
+    g.textAlign = "center"; g.fillStyle = ink3;
+    const step = Math.max(1, Math.round(pts.length/8/10)*10);
+    for (let i=step; i<pts.length; i+=step)
+      g.fillText(String(i), X(i), H-10);
+    g.textAlign = "right";
+    g.fillText("答题序号", CVW-R, H-10);
+    return {g, X, Y, L, R, T, B};
+  }
+  function stroke(f, get, col, w){
+    const {g, X, Y} = f;
+    g.strokeStyle = col; g.lineWidth = w || 2;
+    g.lineJoin = "round"; g.lineCap = "round";
+    g.beginPath(); let on = false;
+    for (let i=0;i<pts.length;i++){
+      const v = get(pts[i]);
+      if (v === null || v === undefined || isNaN(v)){ on = false; continue; }
+      if (on) g.lineTo(X(i), Y(v)); else { g.moveTo(X(i), Y(v)); on = true; }
+    }
+    g.stroke();
+  }
+  function endLabel(f, get, col, txt, dy){
+    const {g, X, Y} = f;
+    for (let i=pts.length-1;i>=0;i--){
+      const v = get(pts[i]);
+      if (v === null || v === undefined || isNaN(v)) continue;
+      g.fillStyle = col;
+      g.beginPath(); g.arc(X(i), Y(v), 3.2, 0, 7); g.fill();
+      g.strokeStyle = surf; g.lineWidth = 2; g.stroke();
+      g.textAlign = "left"; g.textBaseline = "middle";
+      g.font = '500 11.5px ' + tok("--mono");
+      g.fillStyle = col;
+      g.fillText(txt, X(i)+8, Y(v) + (dy || 0));
+      return;
+    }
+  }
+
+  /* --- win rate, with the interval drawn as the band it is ------------ */
+  const f1 = frame($("cv-wr"), CVH1, 0, 1, [0,.25,.5,.75,1],
+                   v => Math.round(v*100) + "%");
+  const g1 = f1.g;
+  g1.fillStyle = acc; g1.globalAlpha = .16;
+  g1.beginPath(); let started = false;
+  for (let i=0;i<pts.length;i++){
+    if (pts[i].hi === null || pts[i].hi === undefined) continue;
+    if (started) g1.lineTo(f1.X(i), f1.Y(pts[i].hi));
+    else { g1.moveTo(f1.X(i), f1.Y(pts[i].hi)); started = true; }
+  }
+  for (let i=pts.length-1;i>=0;i--){
+    if (pts[i].lo === null || pts[i].lo === undefined) continue;
+    g1.lineTo(f1.X(i), f1.Y(pts[i].lo));
+  }
+  g1.closePath(); g1.fill(); g1.globalAlpha = 1;
+
+  if (need !== null){
+    g1.strokeStyle = ink3; g1.lineWidth = 1.5; g1.setLineDash([5,4]);
+    g1.beginPath(); g1.moveTo(f1.L, f1.Y(need));
+    g1.lineTo(CVW-f1.R, f1.Y(need)); g1.stroke(); g1.setLineDash([]);
+    g1.fillStyle = ink3; g1.textAlign = "left";
+    g1.font = '11px ' + tok("--mono");
+    g1.fillText("平衡 " + Math.round(need*100) + "%",
+                CVW-f1.R+6, f1.Y(need));
+  }
+  stroke(f1, p => p.w20, poc, 1.6);
+  stroke(f1, p => p.wr, acc, 2);
+  endLabel(f1, p => p.wr, acc,
+           n ? Math.round(100*k/n) + "%" : "—", -10);
+  endLabel(f1, p => p.w20, poc, "近20", 10);
+
+  /* --- cumulative R --------------------------------------------------- */
+  let lo2 = 0, hi2 = 0;
+  for (const p of pts){ lo2 = Math.min(lo2, p.cum); hi2 = Math.max(hi2, p.cum); }
+  lo2 = Math.floor(lo2) - 1; hi2 = Math.ceil(hi2) + 1;
+  const tk = []; const stp = Math.max(1, Math.round((hi2-lo2)/6));
+  for (let v = Math.ceil(lo2/stp)*stp; v <= hi2; v += stp) tk.push(v);
+  const f2 = frame($("cv-eq"), CVH2, lo2, hi2, tk, v => sr(v, 0));
+  const g2 = f2.g;
+  g2.strokeStyle = ink3; g2.lineWidth = 1.5; g2.setLineDash([5,4]);
+  g2.beginPath(); g2.moveTo(f2.L, f2.Y(0)); g2.lineTo(CVW-f2.R, f2.Y(0));
+  g2.stroke(); g2.setLineDash([]);
+  stroke(f2, p => p.cum, acc, 2);
+  endLabel(f2, p => p.cum, cum >= 0 ? up : dn, sr(cum, 2) + " R", 0);
+
+  $("cv-leg1").innerHTML =
+    `<span style="color:${acc}">━</span> 累计胜率　` +
+    `<span style="color:${poc}">━</span> 最近 20 笔　` +
+    `<span style="color:${acc};opacity:.45">▇</span> 95% 区间　` +
+    `<span style="color:${ink3}">┄</span> 盈亏平衡`;
+  $("cv-leg2").innerHTML = `<span style="color:${acc}">━</span> 累计 R` +
+    `　<b>${n}</b> 笔入场 / ${A.length} 题`;
+
+  $("cv-note").textContent = noAt
+    ? `横轴是答题顺序。其中 ${noAt} 题答于记录时间戳之前，`
+      + `顺序由本机 localStorage 的写入次序还原；之后的题带真实时间。`
+    : "横轴是答题顺序，由每题作答时记下的时间戳排出。";
+
+  /* --- what the shape is and is not evidence of ----------------------- */
+  const out = [];
+  if (st){
+    out.push(`<b>曲线的形状是抽签抽出来的。</b>上面的胜率和总 R 是对一` +
+      `堆题求和，换个顺序不会变；而回撤、曲线什么时候翻正、近 20 笔那条` +
+      `线，全部只是顺序。把同样这 ${rs.length} 笔重排 2000 次：` +
+      `你实际的最大回撤 ${st.dd.toFixed(2)} R 落在第 ` +
+      `${Math.round(st.ddPct*100)} 百分位 —— ` +
+      (st.ddPct > .5 ? "比典型的重排还浅。" : "并不比典型的重排更深。"));
+    out.push(`<b>看不出你在变好或变坏。</b>答题序号与每笔 R 的相关是 ` +
+      `${st.trend >= 0 ? "+" : "−"}${Math.abs(st.trend).toFixed(3)}，` +
+      `置换检验 p = ${st.trendP.toFixed(2)}。` +
+      (st.trendP > .05
+        ? "这个大小的相关，纯随机排列里也常见。"
+        : "这个相关在随机排列里不常见，值得再看。"));
+    out.push(`<b>总 R 的区间跨零。</b>${rs.length} 笔重采样 2000 次，` +
+      `合计 ${sr(st.tot, 2)} R 的 95% 区间是 ` +
+      `[${sr(st.rLo, 1)}, ${sr(st.rHi, 1)}] R。` +
+      (st.rLo > 0 ? "下界在零以上。"
+                  : "区间同时容得下赚和赔，所以这个总数还不能当结论。"));
+  }
+  out.push(`<b>习题是随机排的，这对统计是好事。</b>随机打散让题目难度和` +
+    `答题位置脱钩 —— 真出现趋势时，那是你的变化，不是题目先易后难。` +
+    `代价是这条线读不出"按日历的进步"，横轴是顺序，不是时间。`);
+  $("cv-read").innerHTML = out.map(t => `<li>${t}</li>`).join("");
+}
+
 
 function save(id, rec){
   try{ localStorage.setItem("drill:"+id, JSON.stringify(rec)); }catch(e){}

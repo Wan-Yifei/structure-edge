@@ -180,6 +180,53 @@ if (!/入场后胜率[\s\S]{0,80}\d+ \/ \d+/.test(sc))
   throw new Error("win rate must show the count, not just a percentage");
 console.log("ok   成绩页：总 R、胜率带分母、盈亏平衡线、分类统计都在");
 
+/* The curves. drawCurves() runs inside a try/catch on the page so a chart
+   that throws cannot take the scorecard with it; that makes a silent
+   failure possible, so check the catch did not fire and that something was
+   actually painted. Enter enough trades to pass curveStats' n >= 5 floor,
+   which is what gates the reshuffle paragraphs. */
+for (let k = 0; k < 14; k++) {
+  els["s-stop"].value = "1.0";
+  els["s-tgt"].value = "2.0";
+  api.choose("enter");
+  api.submit();
+  api.next();
+}
+ctxCalls.length = 0;
+api.report();
+
+if (/画不出来/.test(els["cv-note"].textContent))
+  throw new Error("drawCurves threw: " + els["cv-note"].textContent);
+if (!/答题顺序/.test(els["cv-note"].textContent))
+  throw new Error("the curve caption must say what the x axis is");
+if (!/累计胜率/.test(els["cv-leg1"].innerHTML))
+  throw new Error("win-rate legend missing");
+if (!/累计 R/.test(els["cv-leg2"].innerHTML))
+  throw new Error("equity legend missing");
+if (!ctxCalls.some((c) => /^fillText:平衡 \d+%$/.test(c)))
+  throw new Error("the break-even line was never labelled");
+if (!ctxCalls.some((c) => /^fillText:答题序号$/.test(c)))
+  throw new Error("the x axis was never labelled");
+console.log("ok   曲线：两张图都画了，横轴和平衡线都标了");
+
+const cr = els["cv-read"].innerHTML;
+for (const tok of ["重排", "置换检验", "95% 区间"]) {
+  if (!cr.includes(tok))
+    throw new Error(`curve notes missing: ${tok}`);
+}
+/* The whole point of the section: the shape is one draw, and the page has
+   to say so rather than let a rising line read as progress. */
+if (!/形状是抽签/.test(cr))
+  throw new Error("the notes must say the curve's shape is a draw");
+console.log("ok   曲线读法：重排百分位、趋势置换、总 R 区间都在");
+
+/* Order comes from `at` now. Without it the sequence is unrecoverable from
+   the page, since `ans` is keyed by id. */
+const saved = JSON.parse(localStorage.getItem("drill:" + api.getQS()[0].id));
+if (!saved || !saved.at)
+  throw new Error("answers must record when they were given");
+console.log("ok   答题记录带时间戳");
+
 /* Signs. "入场 — +0.50 R" read as negative: the em dash sat exactly where a
    minus would, and the ASCII hyphen used for negatives is visually lighter
    than the plus beside it. Every signed R now goes through one formatter. */
