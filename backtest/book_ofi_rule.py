@@ -44,7 +44,10 @@ from backtest.delta_atr_matrix import (CODE, MIN_SIGNED,       # noqa: E402
 
 LEVELS = 7            # phase 1's answer
 DR_GATE = 0.40        # the pre-registered threshold
-MIN_RTH = 15000       # snapshots a day needs to count as complete
+# Low enough to admit a short session. A day that starts at 13:00 is not a
+# damaged day, it is a short one, and its bars carry the same information.
+# 4,000 snapshots is a bit over an hour of regular trading.
+MIN_RTH = 4000
 
 
 def book_minutes(day: str):
@@ -173,8 +176,8 @@ def main() -> None:
         neg = sig[sig.ofi <= 0].r.to_numpy()
         gap = float(np.nanmean(pos) - np.nanmean(neg))
 
-        print("\n控制一：按天拆开（77 笔分到 5 天，看是不是某一天的事）",
-              flush=True)
+        print(f"\n控制一：按天拆开（{len(sig)} 笔分到 "
+              f"{sig.day.nunique()} 天，看是不是某一天的事）", flush=True)
         for day, g in sig.groupby("day"):
             p = g[g.ofi > 0].r.to_numpy()
             q = g[g.ofi <= 0].r.to_numpy()
@@ -207,6 +210,25 @@ def main() -> None:
         print(f"  实际差 {gap:+.3f} R，置换 {N:,} 次中 "
               f"{cnt/N:.1%} 达到或超过这个幅度  → p = {cnt/N:.3f}",
               flush=True)
+
+        print("\n控制四：这个差值要多少笔才测得动", flush=True)
+        sd = float(np.sqrt((np.nanvar(pos, ddof=1) * (len(pos) - 1) +
+                            np.nanvar(neg, ddof=1) * (len(neg) - 1)) /
+                           (len(pos) + len(neg) - 2)))
+        per_day = len(sig) / sig.day.nunique()
+        print(f"  合并标准差 {sd:.2f} R，每个交易日约 {per_day:.0f} 笔信号",
+              flush=True)
+        print(f"  {'真实效应':>10}{'每组所需':>10}{'合计':>8}{'约需交易日':>12}",
+              flush=True)
+        for frac in (1.0, 0.75, 0.5, 0.33, 0.25):
+            delta = abs(gap) * frac
+            # Two-sample, alpha .05 two-sided, 80% power: n = 16 (sd/delta)^2
+            n = 16 * (sd / delta) ** 2
+            print(f"  {delta:>9.2f} R{n:>10.0f}{2*n:>8.0f}"
+                  f"{2*n/per_day:>12.0f}", flush=True)
+        print("  观测到的 0.70 R 是在「看到之后才去测」的同一批数据上量的，"
+              "作为真值估计偏高；", flush=True)
+        print("  所以规划应当按它的一半或三分之一来排。", flush=True)
 
     print("\n相关", flush=True)
     sub = ok[np.isfinite(ok.dr1)]
