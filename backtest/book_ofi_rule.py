@@ -38,7 +38,7 @@ sys.path.insert(0, str(ROOT))
 
 from backtest.absorption import TGT, outcomes                  # noqa: E402
 from backtest.book_ofi import (LADDER, bucket, design,         # noqa: E402
-                               load_day, ofi_per_snapshot)
+                               load_day, ofi_per_snapshot, ols, r2)
 from backtest.delta_atr_matrix import (CODE, MIN_SIGNED,       # noqa: E402
                                        STOP, atr)
 
@@ -94,9 +94,16 @@ def trade_minutes(days: list[str]) -> pd.DataFrame:
         ok = tot >= MIN_SIGNED
         with np.errstate(invalid="ignore", divide="ignore"):
             dr = np.where(ok, (buy - sell) / tot, np.nan)
+        tot_s = pd.Series(np.where(ok, tot, np.nan))
+        scale = tot_s.rolling(60, min_periods=20).median().shift(1)
+        tflow = (pd.Series(np.where(ok, buy - sell, np.nan))
+                 / scale).to_numpy()
+        o = r.open.to_numpy(float)
         out = pd.DataFrame({
             "dr1": dr,
             "dr_prev": np.concatenate([[np.nan], dr[:-1]]),
+            "tflow": tflow,                      # signed volume, not the ratio
+            "ret": (c - o) / o * 1e4,            # this minute's own move, bp
             "atr": a,
             "r": outcomes(h, l, c, a, +1),
         }, index=r.index)
@@ -229,6 +236,27 @@ def main() -> None:
         print("  观测到的 0.70 R 是在「看到之后才去测」的同一批数据上量的，"
               "作为真值估计偏高；", flush=True)
         print("  所以规划应当按它的一半或三分之一来排。", flush=True)
+
+    print("\n盘口流 vs 成交流：哪一个在推价格", flush=True)
+    ok2 = f[np.isfinite(f.ofi) & np.isfinite(f.tflow) & np.isfinite(f.ret)]
+    y = ok2.ret.to_numpy()
+    pairs = (("只用盘口 OFI", ok2[["ofi"]].to_numpy()),
+             ("只用成交失衡", ok2[["tflow"]].to_numpy()),
+             ("两个一起", ok2[["ofi", "tflow"]].to_numpy()))
+    for nm, X in pairs:
+        b = ols(X, y)
+        pred = b[0] + X @ b[1:]
+        print(f"  {nm:<14}  同期 R² {r2(y, pred, y.mean()):.4f}"
+              f"   系数 {'  '.join(f'{v:+.3f}' for v in b[1:])}", flush=True)
+    print(f"  样本 {len(y):,} 个盘中分钟", flush=True)
+
+    # lambda in its own units: bp of move per one standard deviation of flow,
+    # which is readable without knowing the normalisation.
+    for nm, col in (("盘口 OFI", "ofi"), ("成交失衡", "tflow")):
+        v = ok2[col].to_numpy()
+        b = ols(v.reshape(-1, 1), y)
+        print(f"  λ（{nm}）: 每 1 个标准差的流量 → "
+              f"{b[1] * v.std():+.2f} bp", flush=True)
 
     print("\n相关", flush=True)
     sub = ok[np.isfinite(ok.dr1)]
