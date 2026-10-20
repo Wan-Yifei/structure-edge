@@ -590,3 +590,53 @@ console.log("\nJUMP OK");
   if (!after) throw new Error("the chart light is missing after answering");
   console.log("ok   主图红绿灯：答题后才画出");
 }
+
+
+/* Answering the last question used to be a dead end: 跳到未答的 hid itself
+   with nothing left unanswered, and that was the only control that puts a
+   question back -- prev and next are inside the card the score page hides.
+   The jump box could not rescue it either, because `change` does not fire
+   when the typed value matches what the field already shows, and the field
+   shows the current position.
+
+   This runs last on purpose: it answers everything, which would wreck the
+   partition and jump tests above. */
+{
+  const all = api.getQS();
+  for (let i = 0; i < all.length; i++) {
+    if (api.isAnswered(all[i].id)) continue;
+    api.goto1(i + 1);
+    api.choose("pass");
+    api.submit();
+  }
+  const left = all.filter((q) => !api.isAnswered(q.id)).length;
+  if (left) throw new Error(`${left} questions left unanswered`);
+
+  if (els["b-jump"].hidden)
+    throw new Error("with everything answered there must still be a way " +
+                    "back to the questions");
+  if (els["b-jump"].textContent !== "回到题目")
+    throw new Error("the button must say what it now does, got: " +
+                    els["b-jump"].textContent);
+
+  api.report();
+  if (!els.qcard.hidden) throw new Error("report() should hide the card");
+  els["b-jump"].onclick();
+  if (els.qcard.hidden)
+    throw new Error("回到题目 must bring the question card back");
+
+  /* The jump box, on the position it is already showing. */
+  api.report();
+  els["b-goto"].value = String(api.getIdx() + 1);
+  els["b-goto"].onkeydown({ key: "Enter", preventDefault() {} });
+  if (els.qcard.hidden)
+    throw new Error("Enter on the current position must bring the " +
+                    "question back");
+
+  /* A key that is not Enter must not jump. */
+  api.report();
+  els["b-goto"].onkeydown({ key: "7", preventDefault() {} });
+  if (!els.qcard.hidden)
+    throw new Error("only Enter should jump");
+  console.log("ok   做完之后：回到题目可用，跳到当前序号回车也有效");
+}

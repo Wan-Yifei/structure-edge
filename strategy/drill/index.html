@@ -1779,7 +1779,14 @@ function save(id, rec){
 function badge(){
   const n = QS.filter(q => ans[q.id]).length;
   $("saved").textContent = `已保存 ${n} / ${QS.length}` + (db ? "（已同步）" : "（本机）");
-  $("b-jump").hidden = n === 0 || n >= QS.length;
+  /* Once everything is answered there is nothing unanswered to jump to,
+     but this is also the only control that puts a question back on screen
+     -- prev and next live inside the card the score page hides. So it
+     stays, under a name that says what it now does; jump() already falls
+     back to the last question. */
+  const done = n >= QS.length;
+  $("b-jump").hidden = n === 0;
+  $("b-jump").textContent = done ? "回到题目" : "跳到未答的";
   $("b-report").hidden = n === 0;
 }
 function restore(){
@@ -1915,6 +1922,16 @@ $("b-go").onclick = submit;
 $("b-next").onclick = next;
 $("b-prev").onclick = prev;
 $("b-goto").onchange = () => goto1($("b-goto").value);
+/* `change` fires only when the value differs from what the field held, and
+   render() keeps the field showing the current position -- so typing the
+   number you are already on and pressing Enter did nothing. That is exactly
+   what gets typed when the score page is up and the question is wanted
+   back. */
+$("b-goto").onkeydown = (e) => {
+  if (e.key !== "Enter") return;
+  if (e.preventDefault) e.preventDefault();
+  goto1($("b-goto").value);
+};
 $("b-reset").onclick = reset;
 $("b-shuffle").onclick = reshuffle;
 $("b-jump").onclick = () => { jump(); $("report").hidden = true;
