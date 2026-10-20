@@ -15,20 +15,38 @@ const els = {};
    was drawn rather than merely where. */
 const ctxCalls = [];
 const ctxText = [];
+/* Fills in the order they were issued, each with the alpha in force.
+   Draw order is the only way to catch one thing painted over another. */
+const ctxOps = [];
+let curAlpha = 1;
+const alphaStack = [];
 const ctx = new Proxy({}, {
   get: (t, k) => {
     if (k === "measureText") return () => ({ width: 20 });
     if (k === "canvas") return {};
+    if (k === "globalAlpha") return curAlpha;
+    /* save/restore are modelled for alpha only, which is all the overpaint
+       check needs; a real context restores much more. */
+    if (k === "save") return () => { alphaStack.push(curAlpha); };
+    if (k === "restore")
+      return () => { if (alphaStack.length) curAlpha = alphaStack.pop(); };
     if (k === "fillText")
       return (txt, x, y) => {
         ctxCalls.push("fillText:" + txt);
         /* Where, not just what: label collisions are a geometry bug and
            the string alone cannot show one. */
         ctxText.push({ txt: String(txt), x, y });
+        ctxOps.push({ i: ctxOps.length, op: "fillText", alpha: curAlpha,
+                      txt: String(txt), x, y });
+      };
+    if (k === "fillRect")
+      return (x, y, w, h) => {
+        ctxOps.push({ i: ctxOps.length, op: "fillRect", alpha: curAlpha,
+                      x, y, w, h });
       };
     return () => {};
   },
-  set: () => true,
+  set: (t, k, v) => { if (k === "globalAlpha") curAlpha = v; return true; },
 });
 const mkEl = (id) => ({
   id, textContent: "", innerHTML: "", hidden: false, value: "",
@@ -592,6 +610,31 @@ console.log("\nJUMP OK");
                         .some(c => /做多|别做|不触发|无数据/.test(c));
   if (!after) throw new Error("the chart light is missing after answering");
   console.log("ok   主图红绿灯：答题后才画出");
+
+/* ...and that nothing paints over it afterwards. The settlement-horizon
+   veil covers the price panel from the horizon to its right edge at 0.62
+   alpha; the light sits in that corner, and was drawn first, so it shipped
+   dimmed along with the bars behind it. Draw order is the bug, so draw
+   order is what this checks. */
+{
+  ctxOps.length = 0;
+  api.stepTo(60);                      // all the way out, so the veil is up
+  const light = ctxOps.find(
+    (o) => o.op === "fillText" && /^(做多|别做|不触发|无数据)$/.test(o.txt));
+  if (!light) throw new Error("the rule light was not drawn");
+  if (light.alpha < 1)
+    throw new Error(`the light is drawn at alpha ${light.alpha}`);
+
+  const over = ctxOps.filter(
+    (o) => o.op === "fillRect" && o.alpha < 1 && o.i > light.i &&
+           o.x <= light.x && light.x <= o.x + o.w &&
+           o.y <= light.y && light.y <= o.y + o.h);
+  if (over.length)
+    throw new Error(
+      `${over.length} translucent fill(s) painted over the rule light ` +
+      `(alpha ${over[0].alpha})`);
+  console.log("ok   主图红绿灯：结算灰罩不会盖在它上面");
+}
 }
 
 

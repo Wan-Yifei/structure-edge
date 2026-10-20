@@ -444,7 +444,33 @@ function draw(q, reveal){
     else { g.fillStyle = col; g.fillRect(x-bw/2, y1, bw, bh); }
   }
 
-  /* The rule light, bottom-right of the price panel. Same three states and
+  /* The settlement horizon. The chart draws AFTER bars of future but the
+     rule only looks at the first FWD of them, and nothing used to say so:
+     a target reached on bar 49 sat in plain sight above a verdict reading
+     "never touched". Past the horizon the field is dimmed, so what counts
+     and what is merely visible are two different-looking regions. */
+  if (reveal && last > q.mark + 1 + FWD){
+    const hx = X(q.mark + FWD);
+    g.save();
+    g.fillStyle = surf; g.globalAlpha = .62;
+    g.fillRect(hx, PAD_T + 1, PAD_L + W - hx, PRICE_H - 2);
+    g.globalAlpha = 1;
+    g.setLineDash([4, 3]); g.strokeStyle = ink3; g.lineWidth = 1.2;
+    g.beginPath(); g.moveTo(hx, PAD_T); g.lineTo(hx, PAD_T + PRICE_H);
+    g.stroke();
+    g.setLineDash([]);
+    g.fillStyle = ink3; g.font = "12px ui-monospace,monospace";
+    g.textAlign = "left"; g.textBaseline = "top";
+    g.fillText(`第 ${FWD} 根 · 结算到此为止`, hx + 4, PAD_T + 4);
+    g.restore();
+  }
+
+  /* The rule light, bottom-right of the price panel. Drawn AFTER
+     the settlement-horizon veil above: that veil covers the panel
+     from the horizon to the right edge, which is exactly where this
+     corner is, and painting the light first left it dimmed to 38%
+     along with the bars it sits over. The light is a verdict on the
+     whole question, not part of the future being set aside. Same three states and
      the same colours as the panel below, and like it, only once the answer
      is in -- a light burning while you are still deciding is a button to
      follow, not a question to answer.
@@ -479,26 +505,6 @@ function draw(q, reveal){
     }
   }
 
-  /* The settlement horizon. The chart draws AFTER bars of future but the
-     rule only looks at the first FWD of them, and nothing used to say so:
-     a target reached on bar 49 sat in plain sight above a verdict reading
-     "never touched". Past the horizon the field is dimmed, so what counts
-     and what is merely visible are two different-looking regions. */
-  if (reveal && last > q.mark + 1 + FWD){
-    const hx = X(q.mark + FWD);
-    g.save();
-    g.fillStyle = surf; g.globalAlpha = .62;
-    g.fillRect(hx, PAD_T + 1, PAD_L + W - hx, PRICE_H - 2);
-    g.globalAlpha = 1;
-    g.setLineDash([4, 3]); g.strokeStyle = ink3; g.lineWidth = 1.2;
-    g.beginPath(); g.moveTo(hx, PAD_T); g.lineTo(hx, PAD_T + PRICE_H);
-    g.stroke();
-    g.setLineDash([]);
-    g.fillStyle = ink3; g.font = "12px ui-monospace,monospace";
-    g.textAlign = "left"; g.textBaseline = "top";
-    g.fillText(`第 ${FWD} 根 · 结算到此为止`, hx + 4, PAD_T + 4);
-    g.restore();
-  }
 
   // ---- RSI ---------------------------------------------------------------
   const ry0 = PAD_T + PRICE_H + GAP_H;
