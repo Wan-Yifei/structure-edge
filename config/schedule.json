@@ -107,5 +107,10 @@
     "enabled": true,
     "cron": "45 20 * * 1-5",
     "days": 3
+  },
+  "drill": {
+    "enabled": true,
+    "cron": "0 21 * * 1-5",
+    "keep": 1200
   }
 }
