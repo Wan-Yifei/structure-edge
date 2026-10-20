@@ -568,6 +568,10 @@ def main() -> None:
                          "than the newest one already in the file")
     ap.add_argument("--keep", type=int, default=600,
                     help="cap on total questions; oldest sessions drop first")
+    ap.add_argument("--no-rates", dest="rates", action="store_false",
+                    help="do not regenerate rates_c{confirm}.js beside the "
+                         "set. Only for writing a set somewhere scratch, "
+                         "where a rates file would be noise.")
     ap.add_argument("--replace", action="store_true",
                     help="regenerate the sessions in --start..--end, dropping "
                          "what is already on file for those days. Use after a "
@@ -654,6 +658,33 @@ def main() -> None:
     from collections import Counter
     print(f"+{fresh} new, {len(rows)} total -> {args.out}  "
           f"{dict(Counter(r['kind'] for r in rows))}")
+
+    if args.rates:
+        _write_rates(rows, args.confirm, args.code, out.parent)
+
+
+def _write_rates(rows, confirm, code, where: pathlib.Path) -> None:
+    """Regenerate the base rates beside the set they describe.
+
+    Computed from `rows` in memory, not by re-reading the file, so the two
+    cannot disagree even if something goes wrong with the write above.
+    """
+    from strategy.drill_rates import build
+    import json as _json
+    try:
+        data = build(rows, confirm, code)
+    except Exception as exc:                      # a bad rates file is worse
+        print(f"rates: 没有生成（{type(exc).__name__}: {exc}）")
+        return
+    p = where / f"rates_c{confirm}.js"
+    p.write_text(f"window.RATES_c{confirm}=" +
+                 _json.dumps(data, ensure_ascii=False,
+                             separators=(",", ":")) + ";\n",
+                 encoding="utf-8")
+    b = data["buckets"]["_all"]
+    print(f"rates: n={data['n']}，{data['sessions']} 个交易日 "
+          f"{data['period'][0]}..{data['period'][1]}，"
+          f"到 +2ATR {b[1]:.1%} [{b[2]:.1%}, {b[3]:.1%}] -> {p.name}")
 
 
 if __name__ == "__main__":
