@@ -1448,6 +1448,13 @@ function report(){
    over-read. Hence the reshuffle figures underneath them. */
 
 const CVW = 860, CVH1 = 230, CVH2 = 196;
+const CVL = 46, CVR = 96, CVT = 12, CVB = 26;
+
+/* The cursor over the curve charts, shared by both so one crosshair runs
+   through them, the same way _hover works for the question chart above.
+   _cvPaint is the repaint the handlers call; it is set when the charts are
+   built and stays valid until the next report(). */
+let _cvHover = null, _cvPaint = null;
 
 /* Score interval, not the normal approximation: at ten trades the normal
    one runs past 0 and 1, which is exactly where this chart is trying to be
@@ -1520,12 +1527,6 @@ function curveStats(rs){
 function drawCurves(A){
   const SEQ = inAnswerOrder(A);
   const noAt = SEQ.filter(a => !a.at).length;
-  const cs = getComputedStyle(document.documentElement);
-  const tok = n => cs.getPropertyValue(n).trim();
-  const ink = tok("--ink"), ink2 = tok("--ink-2"), ink3 = tok("--ink-3"),
-        soft = tok("--line-soft"), line = tok("--line"),
-        acc = tok("--accent"), poc = tok("--poc"),
-        up = tok("--up"), dn = tok("--dn"), surf = tok("--surface");
 
   /* Walk the sequence once, carrying both curves. */
   const pts = []; let k = 0, n = 0, cum = 0; const rs = [];
@@ -1536,8 +1537,10 @@ function drawCurves(A){
     let w20 = null;
     if (n >= 10){ const t = rs.slice(-20);
                   w20 = t.filter(x => x > 0).length / t.length; }
-    pts.push({e:entered, wr: n ? k/n : null, lo: ci && ci[0], hi: ci && ci[1],
-              w20, cum});
+    pts.push({e: entered, r: entered ? a.r : 0, nEnt: n,
+              wr: n ? k/n : null, lo: ci && ci[0], hi: ci && ci[1],
+              w20, cum,
+              tm: a.q ? `${a.q.day} ${a.q.tm}` : ""});
   }
   const won = rs.filter(x => x > 0), lost = rs.filter(x => x <= 0);
   const aw = won.length ? won.reduce((s,x)=>s+x,0)/won.length : NaN;
@@ -1545,34 +1548,41 @@ function drawCurves(A){
                          : NaN;
   const need = (isNaN(aw) || isNaN(al)) ? null : al/(aw+al);
   const st = curveStats(rs);
+  const P1 = $("cv-wr"), P2 = $("cv-eq");
 
-  function frame(cv, H, lo, hi, ticks, fmt){
+  function frame(cv, H, lo, hi, ticks, fmt, tok){
     const g = cv.getContext("2d");
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     cv.width = CVW*dpr; cv.height = H*dpr;
     cv.style.aspectRatio = CVW + "/" + H;
     g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,CVW,H);
-    const L = 46, R = 70, T = 12, B = 24;
-    const X = i => L + (pts.length < 2 ? 0 : i/(pts.length-1)*(CVW-L-R));
-    const Y = v => T + (hi-v)/(hi-lo)*(H-T-B);
+    const X = i => CVL + (pts.length < 2 ? 0
+                          : i/(pts.length-1)*(CVW-CVL-CVR));
+    const Y = v => CVT + (hi-v)/(hi-lo)*(H-CVT-CVB);
     g.font = '11px ' + tok("--mono");
     g.textBaseline = "middle";
     for (const t of ticks){
       const y = Y(t);
-      g.strokeStyle = soft; g.lineWidth = 1;
-      g.beginPath(); g.moveTo(L, y+.5); g.lineTo(CVW-R, y+.5); g.stroke();
-      g.fillStyle = ink3; g.textAlign = "right";
-      g.fillText(fmt(t), L-6, y);
+      g.strokeStyle = tok("--line-soft"); g.lineWidth = 1;
+      g.beginPath(); g.moveTo(CVL, y+.5); g.lineTo(CVW-CVR, y+.5); g.stroke();
+      g.fillStyle = tok("--ink-3"); g.textAlign = "right";
+      g.fillText(fmt(t), CVL-6, y);
     }
-    g.strokeStyle = line;
-    g.beginPath(); g.moveTo(L, Y(lo)+.5); g.lineTo(CVW-R, Y(lo)+.5); g.stroke();
-    g.textAlign = "center"; g.fillStyle = ink3;
+    g.strokeStyle = tok("--line");
+    g.beginPath(); g.moveTo(CVL, Y(lo)+.5); g.lineTo(CVW-CVR, Y(lo)+.5);
+    g.stroke();
+    /* The caption owns the right end of the axis; a tick that would run
+       into it is dropped rather than drawn on top of it. */
+    g.textAlign = "right"; g.fillStyle = tok("--ink-3");
+    g.fillText("答题序号", CVW-CVR, H-11);
+    const capLeft = CVW - CVR - 58;
+    g.textAlign = "center";
     const step = Math.max(1, Math.round(pts.length/8/10)*10);
-    for (let i=step; i<pts.length; i+=step)
-      g.fillText(String(i), X(i), H-10);
-    g.textAlign = "right";
-    g.fillText("答题序号", CVW-R, H-10);
-    return {g, X, Y, L, R, T, B};
+    for (let i=step; i<pts.length; i+=step){
+      if (X(i) > capLeft) continue;
+      g.fillText(String(i), X(i), H-11);
+    }
+    return {g, X, Y, H};
   }
   function stroke(f, get, col, w){
     const {g, X, Y} = f;
@@ -1586,74 +1596,145 @@ function drawCurves(A){
     }
     g.stroke();
   }
-  function endLabel(f, get, col, txt, dy){
-    const {g, X, Y} = f;
-    for (let i=pts.length-1;i>=0;i--){
-      const v = get(pts[i]);
-      if (v === null || v === undefined || isNaN(v)) continue;
-      g.fillStyle = col;
-      g.beginPath(); g.arc(X(i), Y(v), 3.2, 0, 7); g.fill();
-      g.strokeStyle = surf; g.lineWidth = 2; g.stroke();
+  /* Both end labels land in the same gutter and, when the two lines finish
+     near each other, on top of one another. Place them together: dots stay
+     on the data, text is pushed apart and kept inside the plot. */
+  function endLabels(f, items, tok){
+    const {g, X, Y, H} = f;
+    const put = [];
+    for (const it of items){
+      for (let i=pts.length-1;i>=0;i--){
+        const v = it.get(pts[i]);
+        if (v === null || v === undefined || isNaN(v)) continue;
+        put.push({x: X(i), dotY: Y(v), y: Y(v), col: it.col, txt: it.txt});
+        break;
+      }
+    }
+    put.sort((a,b) => a.y - b.y);
+    const MIN = 15;
+    for (let i=1;i<put.length;i++)
+      if (put[i].y - put[i-1].y < MIN) put[i].y = put[i-1].y + MIN;
+    const top = CVT + 7, bot = H - CVB - 7;
+    if (put.length && put[put.length-1].y > bot){
+      const shift = put[put.length-1].y - bot;
+      for (const p of put) p.y = Math.max(top, p.y - shift);
+    }
+    for (const p of put){
+      g.fillStyle = p.col;
+      g.beginPath(); g.arc(p.x, p.dotY, 3.2, 0, 7); g.fill();
+      g.strokeStyle = tok("--surface"); g.lineWidth = 2; g.stroke();
       g.textAlign = "left"; g.textBaseline = "middle";
       g.font = '500 11.5px ' + tok("--mono");
-      g.fillStyle = col;
-      g.fillText(txt, X(i)+8, Y(v) + (dy || 0));
-      return;
+      g.fillStyle = p.col;
+      g.fillText(p.txt, p.x + 8, p.y);
     }
   }
-
-  /* --- win rate, with the interval drawn as the band it is ------------ */
-  const f1 = frame($("cv-wr"), CVH1, 0, 1, [0,.25,.5,.75,1],
-                   v => Math.round(v*100) + "%");
-  const g1 = f1.g;
-  g1.fillStyle = acc; g1.globalAlpha = .16;
-  g1.beginPath(); let started = false;
-  for (let i=0;i<pts.length;i++){
-    if (pts[i].hi === null || pts[i].hi === undefined) continue;
-    if (started) g1.lineTo(f1.X(i), f1.Y(pts[i].hi));
-    else { g1.moveTo(f1.X(i), f1.Y(pts[i].hi)); started = true; }
+  function crosshair(f, text, tok){
+    if (_cvHover === null) return;
+    const {g, X, H} = f;
+    const x = X(_cvHover);
+    g.save();
+    g.setLineDash([3,3]); g.strokeStyle = tok("--ink-3");
+    g.lineWidth = 1; g.globalAlpha = .75;
+    g.beginPath(); g.moveTo(x, CVT); g.lineTo(x, H-CVB); g.stroke();
+    g.restore();
+    g.fillStyle = tok("--ink-2"); g.textAlign = "left";
+    g.textBaseline = "top";
+    g.font = '12px ' + tok("--mono");
+    g.fillText(text, CVL + 3, CVT + 1);
   }
-  for (let i=pts.length-1;i>=0;i--){
-    if (pts[i].lo === null || pts[i].lo === undefined) continue;
-    g1.lineTo(f1.X(i), f1.Y(pts[i].lo));
+
+  function paint(){
+    const cs = getComputedStyle(document.documentElement);
+    const tok = nm => cs.getPropertyValue(nm).trim();
+    const acc = tok("--accent"), poc = tok("--poc"),
+          ink3 = tok("--ink-3"), up = tok("--up"), dn = tok("--dn");
+    const h = _cvHover === null ? null : pts[_cvHover];
+
+    /* --- win rate, with the interval drawn as the band it is ---------- */
+    const f1 = frame(P1, CVH1, 0, 1, [0,.25,.5,.75,1],
+                     v => Math.round(v*100) + "%", tok);
+    const g1 = f1.g;
+    g1.fillStyle = acc; g1.globalAlpha = .16;
+    g1.beginPath(); let started = false;
+    for (let i=0;i<pts.length;i++){
+      if (pts[i].hi === null || pts[i].hi === undefined) continue;
+      if (started) g1.lineTo(f1.X(i), f1.Y(pts[i].hi));
+      else { g1.moveTo(f1.X(i), f1.Y(pts[i].hi)); started = true; }
+    }
+    for (let i=pts.length-1;i>=0;i--){
+      if (pts[i].lo === null || pts[i].lo === undefined) continue;
+      g1.lineTo(f1.X(i), f1.Y(pts[i].lo));
+    }
+    g1.closePath(); g1.fill(); g1.globalAlpha = 1;
+
+    if (need !== null){
+      g1.strokeStyle = ink3; g1.lineWidth = 1.5; g1.setLineDash([5,4]);
+      g1.beginPath(); g1.moveTo(CVL, f1.Y(need));
+      g1.lineTo(CVW-CVR, f1.Y(need)); g1.stroke(); g1.setLineDash([]);
+      /* Left end, not the right gutter: the gutter belongs to the two line
+         labels, and this rule spans the whole width anyway. */
+      g1.fillStyle = ink3; g1.textAlign = "left"; g1.textBaseline = "bottom";
+      g1.font = '11px ' + tok("--mono");
+      g1.fillText("平衡 " + Math.round(need*100) + "%", CVL + 5,
+                  f1.Y(need) - 4);
+    }
+    stroke(f1, p => p.w20, poc, 1.6);
+    stroke(f1, p => p.wr, acc, 2);
+    endLabels(f1, [
+      {get: p => p.wr, col: acc, txt: n ? Math.round(100*k/n) + "%" : "—"},
+      {get: p => p.w20, col: poc, txt: "近20笔"},
+    ], tok);
+    crosshair(f1, h ? `第 ${_cvHover+1} 题　${h.tm}　已入场 ${h.nEnt} 笔` +
+      (h.wr === null ? "" :
+        `　胜率 ${Math.round(h.wr*100)}%　` +
+        `区间 ${Math.round(h.lo*100)}–${Math.round(h.hi*100)}%`) +
+      (h.w20 === null ? "" : `　近20 ${Math.round(h.w20*100)}%`) : "", tok);
+
+    /* --- cumulative R ------------------------------------------------- */
+    let lo2 = 0, hi2 = 0;
+    for (const p of pts){ lo2 = Math.min(lo2, p.cum);
+                          hi2 = Math.max(hi2, p.cum); }
+    lo2 = Math.floor(lo2) - 1; hi2 = Math.ceil(hi2) + 1;
+    const tk = []; const stp = Math.max(1, Math.round((hi2-lo2)/6));
+    for (let v = Math.ceil(lo2/stp)*stp; v <= hi2; v += stp) tk.push(v);
+    const f2 = frame(P2, CVH2, lo2, hi2, tk, v => sr(v, 0), tok);
+    const g2 = f2.g;
+    g2.strokeStyle = ink3; g2.lineWidth = 1.5; g2.setLineDash([5,4]);
+    g2.beginPath(); g2.moveTo(CVL, f2.Y(0)); g2.lineTo(CVW-CVR, f2.Y(0));
+    g2.stroke(); g2.setLineDash([]);
+    stroke(f2, p => p.cum, acc, 2);
+    endLabels(f2, [{get: p => p.cum, col: cum >= 0 ? up : dn,
+                    txt: sr(cum, 2) + " R"}], tok);
+    crosshair(f2, h ? `第 ${_cvHover+1} 题　` +
+      (h.e ? `该题 ${sr(h.r, 2)} R` : "放过") +
+      `　累计 ${sr(h.cum, 2)} R` : "", tok);
   }
-  g1.closePath(); g1.fill(); g1.globalAlpha = 1;
 
-  if (need !== null){
-    g1.strokeStyle = ink3; g1.lineWidth = 1.5; g1.setLineDash([5,4]);
-    g1.beginPath(); g1.moveTo(f1.L, f1.Y(need));
-    g1.lineTo(CVW-f1.R, f1.Y(need)); g1.stroke(); g1.setLineDash([]);
-    g1.fillStyle = ink3; g1.textAlign = "left";
-    g1.font = '11px ' + tok("--mono");
-    g1.fillText("平衡 " + Math.round(need*100) + "%",
-                CVW-f1.R+6, f1.Y(need));
+  _cvPaint = paint;
+  paint();
+
+  for (const cv of [P1, P2]){
+    cv.onmousemove = (e) => {
+      const rc = cv.getBoundingClientRect();
+      const x = (e.clientX - rc.left) * (CVW / rc.width);
+      const i = Math.round((x - CVL) / (CVW-CVL-CVR) * (pts.length - 1));
+      const j = Math.max(0, Math.min(pts.length - 1, i));
+      if (j !== _cvHover){ _cvHover = j; _cvPaint(); }
+    };
+    cv.onmouseleave = () => { _cvHover = null; _cvPaint(); };
   }
-  stroke(f1, p => p.w20, poc, 1.6);
-  stroke(f1, p => p.wr, acc, 2);
-  endLabel(f1, p => p.wr, acc,
-           n ? Math.round(100*k/n) + "%" : "—", -10);
-  endLabel(f1, p => p.w20, poc, "近20", 10);
 
-  /* --- cumulative R --------------------------------------------------- */
-  let lo2 = 0, hi2 = 0;
-  for (const p of pts){ lo2 = Math.min(lo2, p.cum); hi2 = Math.max(hi2, p.cum); }
-  lo2 = Math.floor(lo2) - 1; hi2 = Math.ceil(hi2) + 1;
-  const tk = []; const stp = Math.max(1, Math.round((hi2-lo2)/6));
-  for (let v = Math.ceil(lo2/stp)*stp; v <= hi2; v += stp) tk.push(v);
-  const f2 = frame($("cv-eq"), CVH2, lo2, hi2, tk, v => sr(v, 0));
-  const g2 = f2.g;
-  g2.strokeStyle = ink3; g2.lineWidth = 1.5; g2.setLineDash([5,4]);
-  g2.beginPath(); g2.moveTo(f2.L, f2.Y(0)); g2.lineTo(CVW-f2.R, f2.Y(0));
-  g2.stroke(); g2.setLineDash([]);
-  stroke(f2, p => p.cum, acc, 2);
-  endLabel(f2, p => p.cum, cum >= 0 ? up : dn, sr(cum, 2) + " R", 0);
-
+  const cs0 = getComputedStyle(document.documentElement);
+  const t0 = nm => cs0.getPropertyValue(nm).trim();
   $("cv-leg1").innerHTML =
-    `<span style="color:${acc}">━</span> 累计胜率　` +
-    `<span style="color:${poc}">━</span> 最近 20 笔　` +
-    `<span style="color:${acc};opacity:.45">▇</span> 95% 区间　` +
-    `<span style="color:${ink3}">┄</span> 盈亏平衡`;
-  $("cv-leg2").innerHTML = `<span style="color:${acc}">━</span> 累计 R` +
+    `<span style="color:${t0("--accent")}">━</span> 累计胜率　` +
+    `<span style="color:${t0("--poc")}">━</span> 最近 20 笔　` +
+    `<span style="color:${t0("--accent")};opacity:.45">▇</span> 95% 区间　` +
+    `<span style="color:${t0("--ink-3")}">┄</span> 盈亏平衡　` +
+    `<span style="color:${t0("--ink-3")}">移动鼠标看每一题</span>`;
+  $("cv-leg2").innerHTML =
+    `<span style="color:${t0("--accent")}">━</span> 累计 R` +
     `　<b>${n}</b> 笔入场 / ${A.length} 题`;
 
   $("cv-note").textContent = noAt

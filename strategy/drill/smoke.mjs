@@ -14,12 +14,18 @@ const els = {};
    Only fillText is kept: it is the only call whose arguments identify what
    was drawn rather than merely where. */
 const ctxCalls = [];
+const ctxText = [];
 const ctx = new Proxy({}, {
   get: (t, k) => {
     if (k === "measureText") return () => ({ width: 20 });
     if (k === "canvas") return {};
     if (k === "fillText")
-      return (txt) => { ctxCalls.push("fillText:" + txt); };
+      return (txt, x, y) => {
+        ctxCalls.push("fillText:" + txt);
+        /* Where, not just what: label collisions are a geometry bug and
+           the string alone cannot show one. */
+        ctxText.push({ txt: String(txt), x, y });
+      };
     return () => {};
   },
   set: () => true,
@@ -30,6 +36,8 @@ const mkEl = (id) => ({
   onclick: null, oninput: null, onchange: null,
   focus() {}, setAttribute() {}, appendChild() {},
   getContext: () => ctx, width: 0, height: 0,
+  /* The curve charts map clientX back through this to a question index. */
+  getBoundingClientRect: () => ({ left: 0, top: 0, width: 860, height: 230 }),
 });
 
 const loaded = [];
@@ -193,6 +201,7 @@ for (let k = 0; k < 14; k++) {
   api.next();
 }
 ctxCalls.length = 0;
+ctxText.length = 0;
 api.report();
 
 if (/画不出来/.test(els["cv-note"].textContent))
@@ -219,6 +228,67 @@ for (const tok of ["重排", "置换检验", "95% 区间"]) {
 if (!/形状是抽签/.test(cr))
   throw new Error("the notes must say the curve's shape is a draw");
 console.log("ok   曲线读法：重排百分位、趋势置换、总 R 区间都在");
+
+/* Label geometry. These all shipped broken once: the two line-end labels
+   printed on top of each other whenever the lines finished near the same
+   value, the break-even caption competed for the same gutter, and the axis
+   caption sat under the last tick. */
+{
+  const at = (re) => ctxText.filter((t) => re.test(t.txt));
+  /* Both charts paint into the one stub context, and frame() writes the
+     axis caption first on each, so the captions mark the boundary. Without
+     splitting here the test would compare a y on one canvas against a y on
+     the other. */
+  const caps = ctxText
+    .map((t, i) => (t.txt === "答题序号" ? i : -1))
+    .filter((i) => i >= 0);
+  if (caps.length !== 2)
+    throw new Error(`expected 2 charts, saw ${caps.length} axis captions`);
+  const chart1 = ctxText.slice(caps[0], caps[1]);
+  /* x > 700 is the right gutter: the y-axis ticks read "100%" too, and
+     those sit at x = CVL - 6. */
+  const ends = chart1.filter((t) => t.x > 700 && /%|近20笔/.test(t.txt));
+  if (ends.length < 2)
+    throw new Error("both line ends must be labelled, got " + ends.length);
+  const ys = ends.map((e) => e.y).sort((a, b) => a - b);
+  for (let i = 1; i < ys.length; i++)
+    if (ys[i] - ys[i - 1] < 14)
+      throw new Error(`end labels overlap: y ${ys[i - 1]} and ${ys[i]}`);
+
+  const be = at(/^平衡 \d+%$/)[0];
+  if (!be) throw new Error("break-even label missing");
+  if (be.x > 200)
+    throw new Error(`break-even label is in the right gutter (x=${be.x})`);
+
+  /* CVW 860 minus CVR 96 is where the caption starts; a tick drawn inside
+     58px of it would print under the caption. */
+  const cap = at(/^答题序号$/)[0];
+  if (!cap) throw new Error("axis caption missing");
+  for (const t of ctxText)
+    if (/^\d+$/.test(t.txt) && t.y === cap.y && t.x > cap.x - 58)
+      throw new Error(`tick ${t.txt} collides with the axis caption`);
+  console.log("ok   曲线标注：两端不重叠、平衡线靠左、刻度避开轴名");
+}
+
+/* The crosshair. The question chart above has had one all along; these two
+   shipped inert. */
+{
+  ctxText.length = 0;
+  els["cv-wr"].onmousemove({ clientX: 400 });
+  const read = ctxText.filter((t) => /^第 \d+ 题/.test(t.txt));
+  if (read.length < 2)
+    throw new Error("hover must put a readout on BOTH charts, got " +
+                    read.length);
+  if (!/已入场 \d+ 笔/.test(read.map((r) => r.txt).join(" ")))
+    throw new Error("the win-rate readout must say how many trades so far");
+  if (!/累计 [+−]\d/.test(read.map((r) => r.txt).join(" ")))
+    throw new Error("the equity readout must show the running total");
+  ctxText.length = 0;
+  els["cv-wr"].onmouseleave();
+  if (ctxText.some((t) => /^第 \d+ 题/.test(t.txt)))
+    throw new Error("the readout must clear when the cursor leaves");
+  console.log("ok   曲线十字线：悬停两张图都出读数，移开就清掉");
+}
 
 /* Order comes from `at` now. Without it the sequence is unrecoverable from
    the page, since `ans` is keyed by id. */
