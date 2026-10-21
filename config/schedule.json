@@ -95,7 +95,7 @@
   },
   "tick_classify": {
     "enabled": true,
-    "cron": "*/20 * * * *",
+    "cron": "*/2 * * * *",
     "days": 2
   },
   "book_ladder": {
