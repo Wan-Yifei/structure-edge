@@ -1426,10 +1426,10 @@ class DataFetcher(QThread):
                 # nothing even when a dozen blocks were sitting there.
                 # Overlapping same-direction blocks collapse to the one
                 # with the most volume behind it, and blocks already
-                # closed through are capped at two PER SIDE -- still
-                # visible as retest levels, no longer the majority of the
-                # drawing. The detector's default is untouched because
-                # backtest/engine.py calls it too.
+                # closed through are capped at one PER SIDE -- the
+                # nearest level price could come back to from either
+                # direction, and nothing behind it. The detector's default
+                # is untouched because backtest/engine.py calls it too.
                 raw_obs = detect_order_blocks(warmup, [
                     dict(s, idx=s["idx"] - disp_off,
                          from_idx=s.get("from_idx", s["idx"]) - disp_off)
@@ -1437,7 +1437,7 @@ class DataFetcher(QThread):
                 ] if disp_off > 0 else smc_signals,
                     max_count=p.get("ob_max_count", 4),
                     select="strength",
-                    max_breakers=2,
+                    max_breakers=1,
                 )
                 for b in raw_obs:
                     r = dict(b)
@@ -2048,7 +2048,7 @@ class TradeViewerQt(QMainWindow):
                 self._ob_max_count.setEnabled(False)
                 self._ob_max_count.setToolTip(
                     "OB quota per side of price (strongest by volume). "
-                    "Blocks already broken are capped at 2 per side on "
+                    "Blocks already broken are capped at 1 per side on "
                     "top of this, as retest levels.")
                 self._ob_max_count.valueChanged.connect(self._trigger_fetch)
                 tb_smc.addWidget(self._ob_max_count)
