@@ -20,17 +20,25 @@ def _overlaps(a: dict, b: dict) -> bool:
 
 
 def _merge_overlapping(blocks: list[dict]) -> list[dict]:
-    """Collapse overlapping same-direction blocks down to the strongest.
+    """Collapse overlapping blocks down to one, in priority order.
 
-    Greedy from the strongest: a block is kept unless it overlaps one
-    already kept in its own direction. Bull and bear blocks are never
-    merged into each other -- a demand zone and a supply zone at the same
-    price are two readings of that price, not one.
+    Priority is untested before broken, then volume among the untested
+    and recency among the broken. Untested wins regardless of volume:
+    "not yet tested" against "already closed through" is a difference in
+    kind, and a large broken block should not hide a small live one.
+
+    Direction is deliberately NOT part of the test. A demand zone and a
+    supply zone at the same price really are two readings of that price,
+    but on a chart they are two translucent rectangles on top of each
+    other, which is the clutter this exists to remove.
     """
+    live = [b for b in blocks if b["subtype"] != "breaker"]
+    broken = [b for b in blocks if b["subtype"] == "breaker"]
+    ordered = (sorted(live, key=lambda b: -b.get("vol_ratio", 1.0))
+               + sorted(broken, key=lambda b: -b["idx"]))
     out: list[dict] = []
-    for b in sorted(blocks, key=lambda x: -x.get("vol_ratio", 1.0)):
-        if any(k["direction"] == b["direction"] and _overlaps(k, b)
-               for k in out):
+    for b in ordered:
+        if any(_overlaps(k, b) for k in out):
             continue
         out.append(b)
     return out
@@ -58,9 +66,11 @@ def _by_strength(blocks: list[dict], max_count: int, max_breakers: int | None,
     Blocks price is currently inside are always kept: those are the ones
     being tested right now, and there are never many.
     """
-    live = _merge_overlapping(
-        [b for b in blocks if b["subtype"] != "breaker"])
-    broken = [b for b in blocks if b["subtype"] == "breaker"]
+    # Deduped first, so a quota slot is never spent on a block that is
+    # then dropped for overlapping something already kept.
+    kept = _merge_overlapping(blocks)
+    live = [b for b in kept if b["subtype"] != "breaker"]
+    broken = [b for b in kept if b["subtype"] == "breaker"]
 
     half = max(1, max_count // 2)
     by_strength = lambda b: -b.get("vol_ratio", 1.0)       # noqa: E731

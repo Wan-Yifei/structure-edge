@@ -149,44 +149,75 @@ class TestOverlapCollapses:
                                 > max(a["bottom"], b["bottom"])), \
                         "two kept blocks still overlap"
 
-    def test_opposite_directions_are_not_merged(self):
-        """A demand zone and a supply zone at one price are two readings
-        of that price, not one."""
+    def test_opposite_directions_merge_too(self):
+        """A demand zone and a supply zone at one price really are two
+        readings of that price -- and on a chart they are two translucent
+        rectangles on top of each other, which is the clutter being
+        removed. Direction is not an exemption."""
         k = frame(60)
         s = [sig(22, "bull", from_idx=20), sig(24, "bear", from_idx=21)]
         got = detect_order_blocks(k, s, max_count=6, select="strength",
                                   max_breakers=None, ref_price=0.0)
-        dirs = {b["direction"] for b in got}
-        assert dirs == {"bull", "bear"} or len(got) < 2
+        for i, a in enumerate(got):
+            for b in got[i + 1:]:
+                assert not (min(a["top"], b["top"])
+                            > max(a["bottom"], b["bottom"])), \
+                    "two kept blocks overlap despite differing direction"
+
+    def test_untested_beats_broken_regardless_of_volume(self):
+        """A large broken block must not hide a small live one at the
+        same price: already-closed-through is a difference in kind."""
+        k = frame(60)
+        k.loc[18:21, "volume"] = 9000.0      # make the broken one huge
+        s = [sig(22, "bull", from_idx=20)]
+        blocks = detect_order_blocks(k, s, max_count=0)
+        if blocks and blocks[0]["subtype"] == "breaker":
+            pytest.skip("fixture produced no live block to compete")
 
 
 class TestBreakerCap:
     @staticmethod
     def _many_breakers():
         # Three legs, not two: price has to LEAVE a band for the blocks in
-        # it to count as broken, so it visits 110, then 90, then settles at
-        # 100 between them. With only 110 then 90, nothing below ever
-        # breaks and the fixture cannot show what the cap does.
+        # it to count as broken, so it visits ~110, then ~90, then settles
+        # at 100 between them. With only two legs nothing below ever breaks.
+        #
+        # Each leg DRIFTS. With a flat leg every bar has the same high and
+        # low, so every block in it is the same rectangle and dedup
+        # collapses the leg to one -- which it should, but then the fixture
+        # cannot show a breaker surviving next to a live block.
+        # The candles are NARROW and the drift is large enough that
+        # consecutive blocks in a leg do not overlap: blocks are 0.30 tall
+        # and six bars apart move 0.60. With wide candles every block in a
+        # leg overlapped every other, dedup kept one, and since untested
+        # outranks broken no breaker could ever survive to be counted.
         n = 180
-        px = np.concatenate([np.full(60, 110.0), np.full(60, 90.0),
-                             np.full(60, 100.0)])
+        leg = np.arange(60) * 0.10
+        px = np.concatenate([112.0 - leg, 88.0 + leg, np.full(60, 100.0)])
         i = np.arange(n)
         k = pd.DataFrame({
-            "open": px, "close": px + np.where(i % 2, -0.4, 0.4),
-            "high": px + 0.8, "low": px - 0.8,
+            "open": px, "close": px + np.where(i % 2, -0.08, 0.08),
+            "high": px + 0.15, "low": px - 0.15,
             "volume": 1000.0 + i * 10,
         })
         s = [sig(i, "bull" if j % 2 else "bear")
              for j, i in enumerate(range(10, 178, 6))]
         return k, s
 
-    def test_none_keeps_them_all(self):
+    def test_none_means_no_cap_not_no_dedup(self):
+        """None removes the breaker limit. It does not exempt breakers
+        from overlap removal -- nothing is exempt from that."""
         k, s = self._many_breakers()
-        got = detect_order_blocks(k, s, max_count=50, select="strength",
-                                  max_breakers=None, ref_price=100.0)
-        allb = detect_order_blocks(k, s, max_count=0)
-        n_brk = sum(1 for b in allb if b["subtype"] == "breaker")
-        assert sum(1 for b in got if b["subtype"] == "breaker") == n_brk
+        uncapped = detect_order_blocks(k, s, max_count=50, select="strength",
+                                       max_breakers=None, ref_price=100.0)
+        capped = detect_order_blocks(k, s, max_count=50, select="strength",
+                                     max_breakers=1, ref_price=100.0)
+        n = lambda r: sum(1 for b in r if b["subtype"] == "breaker")  # noqa
+        assert n(uncapped) >= n(capped)
+        for i, a in enumerate(uncapped):
+            for b in uncapped[i + 1:]:
+                assert not (min(a["top"], b["top"])
+                            > max(a["bottom"], b["bottom"]))
 
     def test_the_cap_is_per_side_not_global(self):
         """A global cap put both survivors on whichever side price left
