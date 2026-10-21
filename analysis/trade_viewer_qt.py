@@ -2006,8 +2006,11 @@ class TradeViewerQt(QMainWindow):
         tb1.addWidget(self._conn_btn)
 
         self._ind_checks: dict[str, QCheckBox | QRadioButton] = {}
+        # offex rides on the CVD panel, which is already on, and the
+        # classifier is kept current every two minutes specifically so that
+        # line is worth looking at -- leaving it off by default wasted that.
         _default_checked = ("heatmap", "delta", "bos_choch", "cvd",
-                            "dcvd", "option_walls")
+                            "dcvd", "offex", "option_walls")
 
         # ── Row 2: SMC structural indicators ────────────────────────────────
         self.addToolBarBreak()
