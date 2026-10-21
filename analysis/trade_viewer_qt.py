@@ -1615,6 +1615,69 @@ class ChandelierParamsDialog(QDialog):
         return self._period_spin.value(), self._mult_spin.value(), direction
 
 
+class AtrStopParamsDialog(QDialog):
+    """ATR period, the multiples to draw, direction, and the anchor price.
+
+    The anchor is blank by default, meaning the latest close -- "if I
+    entered now". Typing a fill price switches it to a position already
+    open, where the stop belongs relative to what was paid rather than to
+    where the price has since gone.
+    """
+
+    def __init__(self, period: int, mults: str, direction: str,
+                 anchor: float | None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ATR Stop Parameters")
+
+        self._period_spin = QSpinBox()
+        self._period_spin.setRange(2, 200)
+        self._period_spin.setValue(period)
+
+        self._mult_edit = QLineEdit(mults)
+        self._mult_edit.setPlaceholderText("1, 1.5, 2")
+        self._mult_edit.setToolTip(
+            "Comma-separated ATR multiples; one line is drawn per value")
+
+        self._dir_combo = QComboBox()
+        self._dir_combo.addItems(["Long", "Short"])
+        self._dir_combo.setCurrentIndex(0 if direction == "bull" else 1)
+
+        self._anchor_edit = QLineEdit("" if anchor is None else f"{anchor:g}")
+        self._anchor_edit.setPlaceholderText("latest close")
+        self._anchor_edit.setToolTip(
+            "Entry price to measure from. Leave blank to use the latest "
+            "close.")
+
+        form = QFormLayout()
+        form.addRow("ATR period:", self._period_spin)
+        form.addRow("Multiples:", self._mult_edit)
+        form.addRow("Direction:", self._dir_combo)
+        form.addRow("Anchor price:", self._anchor_edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[int, str, str, float | None]:
+        """(period, multiples text, "bull"/"bear", anchor or None)."""
+        direction = "bull" if self._dir_combo.currentIndex() == 0 else "bear"
+        raw = self._anchor_edit.text().strip()
+        anchor = None
+        if raw:
+            try:
+                anchor = float(raw)
+            except ValueError:          # a typo should not wipe the setting
+                anchor = None
+        return (self._period_spin.value(), self._mult_edit.text(),
+                direction, anchor)
+
+
 _HANG_LOG_PATH = pathlib.Path(__file__).parent.parent / "hang_watchdog.log"
 
 
@@ -1751,6 +1814,14 @@ class TradeViewerQt(QMainWindow):
         self._chandelier_period:     int   = 20
         self._chandelier_multiplier: float = 2.0
         self._chandelier_direction:  str   = "bull"   # "bull" | "bear"
+        # Fixed ATR stop: period 14 to match the risk unit every backtest in
+        # this project measures R against, so a level drawn here is the same
+        # 1R those results are quoted in.
+        self._atrstop_period:    int = 14
+        self._atrstop_mults:     str = "1, 1.5, 2"
+        self._atrstop_direction: str = "bull"
+        self._atrstop_anchor:    float | None = None   # None = latest close
+        self._atrstop_items:     list = []
         self._live_kl_sub: object = None  # kline SubType subscribed alongside TICKER/QUOTE
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
         # from resetting the user's manual pan/zoom on every tick.
@@ -1989,6 +2060,7 @@ class TradeViewerQt(QMainWindow):
             ("avwap",     "AVWAP"), # Anchored VWAP -- cumulative from a user-picked date
             ("vol",       "MAVOL"), # Volume subplot toggle
             ("chandelier", "Chandelier"), # ATR trailing-stop suggestion, bottom-right corner label
+            ("atr_stop",  "ATR Stop"),  # fixed k x ATR stop lines from an anchor
         ]:
             cb = QCheckBox(label)
             cb.setChecked(key in _default_checked)
@@ -2051,6 +2123,14 @@ class TradeViewerQt(QMainWindow):
                     lambda: self._render(self._klines, self._ticks) if self._klines is not None else None)
                 tb_ind.addWidget(_lbl("sigma:"))
                 tb_ind.addWidget(self._avwap_sigma_spin)
+            if key == "atr_stop":
+                atrstop_settings_btn = QPushButton("\u2699")
+                atrstop_settings_btn.setFixedWidth(28)
+                atrstop_settings_btn.setToolTip(
+                    "ATR stop parameters (period, multiples, direction, "
+                    "anchor price)")
+                atrstop_settings_btn.clicked.connect(self._on_atrstop_settings)
+                tb_ind.addWidget(atrstop_settings_btn)
             if key == "chandelier":
                 chandelier_settings_btn = QPushButton("⚙")
                 chandelier_settings_btn.setFixedWidth(28)
@@ -3604,6 +3684,11 @@ class TradeViewerQt(QMainWindow):
             self._update_chandelier_label()
         else:
             self._chandelier_label.setVisible(False)
+
+        # Fixed ATR stop levels (lines on the price panel)
+        self._clear_atrstop_items()
+        if self._ind("atr_stop"):
+            self._draw_atr_stops(klines)
 
         # Trade Review overlay
         self._clear_trade_items()
@@ -5922,6 +6007,77 @@ class TradeViewerQt(QMainWindow):
         y_top    = yhi - (yhi - ylo) * 0.015
         y_row    = (yhi - ylo) * 0.035
         self._ob_legend.setPos(xlo + x_pad, y_top - y_row)
+
+    def _clear_atrstop_items(self) -> None:
+        for item in self._atrstop_items:
+            self._plot_c.removeItem(item)
+        self._atrstop_items.clear()
+
+    def _on_atrstop_settings(self) -> None:
+        dlg = AtrStopParamsDialog(
+            self._atrstop_period, self._atrstop_mults,
+            self._atrstop_direction, self._atrstop_anchor, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            (self._atrstop_period, self._atrstop_mults,
+             self._atrstop_direction, self._atrstop_anchor) = dlg.values()
+            if self._ind("atr_stop") and self._klines is not None:
+                self._clear_atrstop_items()
+                self._draw_atr_stops(self._klines)
+
+    def _draw_atr_stops(self, klines: pd.DataFrame) -> None:
+        """One dashed line per ATR multiple, labelled with price and distance.
+
+        Nothing is drawn when the calculation declines -- too few bars for
+        the warmup, or a flat series with no range. A stop line at an
+        invented price is worse than no line, because it looks exactly like
+        a real one.
+        """
+        from strategy.atr_stop import fixed_stops, parse_multipliers
+
+        mults = parse_multipliers(self._atrstop_mults)
+        if klines is None or klines.empty or not mults:
+            return
+        r = fixed_stops(
+            klines["high"].to_numpy(float), klines["low"].to_numpy(float),
+            klines["close"].to_numpy(float), self._atrstop_period, mults,
+            self._atrstop_direction, self._atrstop_anchor)
+        if r is None:
+            return
+
+        bull = r["direction"] == "bull"
+        red_up = self._ind("red_up")
+        # Same convention as the chandelier label: the stop is the losing
+        # side, so it takes the colour that side has in the current scheme.
+        col = (_RED if red_up else _GREEN) if bull else (_GREEN if red_up else _RED)
+        # The widest multiple is the real stop if several are on screen;
+        # drawing them all at one weight makes the chart say nothing about
+        # which is which, so opacity carries the ordering.
+        widest = max(lv["mult"] for lv in r["levels"])
+        for lv in r["levels"]:
+            alpha = 110 + int(105 * (lv["mult"] / widest))
+            line = pg.InfiniteLine(
+                pos=lv["stop"], angle=0, movable=False,
+                pen=pg.mkPen(_qc(col, alpha), width=1,
+                             style=Qt.PenStyle.DashLine),
+                label=(f"SL {lv['mult']:g}x {lv['stop']:.2f}  "
+                       f"(-{lv['dist_pct']:.2f}%)" if bull else
+                       f"SL {lv['mult']:g}x {lv['stop']:.2f}  "
+                       f"(+{lv['dist_pct']:.2f}%)"),
+                labelOpts={"color": col, "position": 0.12})
+            self._plot_c.addItem(line)
+            self._atrstop_items.append(line)
+
+        # The anchor, when it is not simply the last close -- otherwise the
+        # distances are measured from somewhere the chart does not show.
+        if self._atrstop_anchor is not None:
+            a = pg.InfiniteLine(
+                pos=r["anchor"], angle=0, movable=False,
+                pen=pg.mkPen(_qc(_FG, 120), width=1,
+                             style=Qt.PenStyle.DotLine),
+                label=f"Entry {r['anchor']:.2f}",
+                labelOpts={"color": _FG, "position": 0.12})
+            self._plot_c.addItem(a)
+            self._atrstop_items.append(a)
 
     def _pin_chandelier_label(self, *_) -> None:
         """Re-anchor the chandelier suggestion label to the bottom-right of the candle view."""
