@@ -454,3 +454,61 @@ class TestHeatmapSides:
         hm = heatmap(lad, pd.Timestamp("2026-10-14 10:10:00"), 99.0, 102.0)
         assert "db" in hm and "da" in hm
         assert self._grid(hm, "da").max() == 0
+
+
+class TestPinchKind:
+    """The fast midline rolling into the slow one is a third shape. Both
+    existing kinds trigger on a new low, so nothing in the set covered it."""
+
+    @staticmethod
+    def _session(n=390):
+        """Up for 150 bars, then down for the rest -- long enough for the
+        span-25 midline to run well clear of the span-90 one and then come
+        back and cross it inside the scan window."""
+        import numpy as np
+        import pandas as pd
+
+        i = np.arange(n, dtype=float)
+        up = np.minimum(i, 150.0) * 0.08
+        dn = np.maximum(i - 150.0, 0.0) * 0.06
+        c = 100.0 + up - dn + 0.35 * np.sin(i / 3.1)
+        t = pd.date_range("2026-10-14 09:31", periods=n, freq="1min")
+        return pd.DataFrame(
+            {"open": c, "high": c + 0.3, "low": c - 0.3, "close": c,
+             "volume": np.full(n, 1000.0),
+             "buy": np.full(n, 600.0), "sell": np.full(n, 400.0)},
+            index=pd.DatetimeIndex(t, name="t"),
+        )
+
+    def _rows(self, kinds):
+        from strategy.drill_gen import build_day
+        return build_day("US.SOXL", "2026-10-14", self._session(),
+                         confirm=1, kinds=kinds, light=True)
+
+    def test_a_pinch_is_found(self):
+        got = self._rows(("deep", "shallow", "pinch"))
+        assert any(r["kind"] == "夹角" for r in got), \
+            f"no pinch in {sorted({r['kind'] for r in got})}"
+
+    def test_adding_it_does_not_displace_a_single_dip(self):
+        """The property worth a test: dips keep their own spacing cursor, so
+        the questions already on file -- and the answers keyed to their ids
+        -- survive a regeneration that introduces the new kind."""
+        before = [r["id"] for r in self._rows(("deep", "shallow"))]
+        after = [r["id"] for r in self._rows(("deep", "shallow", "pinch"))
+                 if r["kind"] != "夹角"]
+        assert after == before, (
+            f"{len(before) - len(after)} dip question(s) changed or vanished")
+
+    def test_only_the_leading_edge_is_marked(self):
+        """The condition holds for a run of bars; each run is one question."""
+        from strategy.drill_gen import GAP
+        got = [r for r in self._rows(("pinch",)) if r["kind"] == "夹角"]
+        mins = sorted(int(r["tm"][:2]) * 60 + int(r["tm"][3:]) for r in got)
+        assert mins, "fixture produced no pinch to space-check"
+        for a, b in zip(mins, mins[1:]):
+            assert b - a >= GAP, f"two pinches {b - a} bars apart"
+
+    def test_the_kind_is_off_when_not_asked_for(self):
+        got = self._rows(("deep", "shallow"))
+        assert not any(r["kind"] == "夹角" for r in got)

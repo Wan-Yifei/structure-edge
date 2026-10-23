@@ -122,8 +122,9 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
   <p class="hint">SOXL 1 分钟,决策前 120 根、后 60 根。右侧是当时能画出来的筹码分布(只用到决策那根为止),下方是 RSI(6)。
   上方 <b>Δr</b> 是主动成交失衡的 1 / 5 / 15 分钟回看窗口 —— 都只含已收盘的 K,没有前视。
   决策前 30 分钟如果有逐秒挂单档位的归档,会以背景热力图画出来(只有开始归档之后的交易日才有)。
-  题目混了两类位置:<b>深回落</b>(从 30 根高点跌掉 1 个 ATR 以上)和<b>浅回调</b>(只是前 10 根最低)。
-  <b>这两类的命中率量下来几乎一样</b>(33% 对 33%,区间重叠),所以标签本身不带信息,
+  题目混了三类位置:<b>深回落</b>(从 30 根高点跌掉 1 个 ATR 以上)、<b>浅回调</b>(只是前 10 根最低),
+  以及<b>夹角</b>(DK 快线转头向下、与慢线收拢到 0.25 ATR 以内,或刚刚交叉 —— 这一类多半还没破低)。
+  <b>这三类的命中率量下来几乎一样</b>(都在 33% 上下,区间重叠),所以标签本身不带信息,
   这里也不判对错,只算你最后的盈亏。真正分得开的是 <b>delta_r</b>:1 分钟窗口 ≥0 的
   命中 45%、&lt;0 的只有 25%。
   默认在<b>最低点之后一根</b>做决定 —— 低点要等它收了才知道是低点,右上角可以切回当根对比。
@@ -1356,7 +1357,7 @@ function report(){
   /* Keyed by q.kind as the generator writes it. These were the old schema's
      names (real/decoy/mine) and so matched nothing -- the per-class rows
      silently never rendered. */
-  const KINDS = ["深回落", "浅回调", "我的交易"];
+  const KINDS = ["深回落", "浅回调", "夹角", "我的交易"];
   /* A win rate only means something against the rate the trades need to
      break even -- but that has to be computed on what the wins REALLY paid.
      Using the planned target assumes every win collects it, and most do
@@ -1497,7 +1498,7 @@ function report(){
       `${(avgStop * avgTgt).toFixed(2)} ATR 之外；` +
       `我们量过 ${FWD} 根内走到 +2 ATR 的概率约三成。`);
   }
-  notes.push("<b>这里不判对错。</b>深回落和浅回调只是两类位置，量下来命中率几乎一样，" +
+  notes.push("<b>这里不判对错。</b>深回落、浅回调和夹角只是三类位置，量下来命中率几乎一样，" +
     "区间重叠。谁该进取决于盈亏,不取决于哪个更像\"信号\"。");
   notes.push(`<b>这不是收益评估。</b>${A.length} 题,样本量只够看倾向,` +
     "同一套题做第二遍也不算数。");

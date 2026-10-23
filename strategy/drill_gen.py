@@ -48,6 +48,19 @@ LOOK, MIN_DROP_ATR, GAP = 30, 1.0, 15
 # Same pair the viewer uses, so a reading learned here means the same thing
 # on the live chart. See analysis/trade_viewer_qt.py's _KD_FAST/_KD_SLOW.
 DK_FAST, DK_SLOW = 25, 90
+# A pinch: the fast midline falling over PINCH_SLOPE bars while the gap to
+# the slow one is shrinking over PINCH_NARROW and has closed to within
+# PINCH_ATR of an ATR -- or has crossed. 0.25 was chosen over 0.5 and 1.0
+# because it is the tight pinch the request described; the wider settings
+# differ in base rate only by an amount their extra samples cannot support.
+PINCH_ATR, PINCH_SLOPE, PINCH_NARROW = 0.25, 3, 5
+# How far a pinch must keep from the last dip mark. Pinches cluster
+# right after dips -- the median gap is 6 bars -- so requiring the full
+# GAP left only 26 of 136 over 110 sessions. 5 keeps 104 of them while
+# still dropping the ones that would render as the same chart a bar or
+# two along. Chosen for that, not for a base rate: picking it by win
+# rate would be fitting the same data the questions come from.
+PINCH_DIP_GAP = 5
 FWD = 30
 BEFORE, AFTER = 120, 60          # wider than the first set's 60/40
 MIN_SIGNED = 300.0
@@ -423,7 +436,7 @@ def traded_profile(tk, t_end, lo: float, hi: float):
 
 
 def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
-              kinds=("deep", "shallow"), lad=None, tk=None,
+              kinds=("deep", "shallow", "pinch"), lad=None, tk=None,
               light=False) -> list[dict]:
     """Questions for one session. `confirm` bars past the marked low.
 
@@ -463,20 +476,46 @@ def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
     dk1 = _dk["mid1"].to_numpy(float)
     dk2 = _dk["mid2"].to_numpy(float)
 
-    marks, last = [], -99
+    spread = dk1 - dk2
+    marks, last, last_p, armed = [], -99, -99, True
     for i in range(BEFORE, len(reg) - FWD - AFTER - confirm):
         a = A[i]
-        if np.isnan(a) or a <= 0 or i - last < GAP:
+        if np.isnan(a) or a <= 0:
             continue
-        is_deep = (L[i] == L[i - LOOK:i + 1].min()
-                   and (H[i - LOOK:i + 1].max() - L[i]) >= MIN_DROP_ATR * a)
-        is_shal = (not is_deep) and L[i] == L[i - 10:i + 1].min()
-        if is_deep and "deep" in kinds:
-            last = i
-            marks.append(("深回落", i))
-        elif is_shal and "shallow" in kinds:
-            last = i
-            marks.append(("浅回调", i))
+
+        # A pinch holds for many bars, so only its leading edge is an event.
+        # Arming is evaluated on EVERY bar, including ones the spacing rules
+        # below reject -- otherwise an episode that lapses during a cooldown
+        # would never re-arm and the next one would be missed.
+        pinch = bool(
+            np.isfinite(spread[i]) and np.isfinite(spread[i - PINCH_NARROW])
+            and dk1[i] < dk1[i - PINCH_SLOPE]
+            and abs(spread[i]) < abs(spread[i - PINCH_NARROW])
+            and (0 < spread[i] <= PINCH_ATR * a
+                 or spread[i - 1] > 0 >= spread[i]))
+        if not pinch:
+            armed = True
+
+        if i - last >= GAP:
+            is_deep = (L[i] == L[i - LOOK:i + 1].min()
+                       and (H[i - LOOK:i + 1].max() - L[i])
+                       >= MIN_DROP_ATR * a)
+            is_shal = (not is_deep) and L[i] == L[i - 10:i + 1].min()
+            if is_deep and "deep" in kinds:
+                last = i
+                marks.append(("深回落", i))
+                continue
+            if is_shal and "shallow" in kinds:
+                last = i
+                marks.append(("浅回调", i))
+                continue
+
+        # Last, and on its own cursor: a pinch must never displace a dip,
+        # whose id already carries saved answers.
+        if (pinch and armed and "pinch" in kinds
+                and i - last_p >= GAP and i - last >= PINCH_DIP_GAP):
+            armed, last_p = False, i
+            marks.append(("夹角", i))
 
     out = []
     for kind, i0 in marks:
