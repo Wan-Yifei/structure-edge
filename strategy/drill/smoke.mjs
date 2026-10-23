@@ -793,6 +793,49 @@ console.log("\nJUMP OK");
   if (saved1 && saved2 && count().fills <= before.fills)
     throw new Error("the channel stored on the question drew nothing");
   console.log("ok   DK 多空通道：有数据才画，填充半透明，快线蓝、慢线金不互换");
+
+/* The arrow marking the bar the trade actually ended on. */
+{
+  const qs = api.getQS();
+  /* A question whose stop or target is actually reached inside the window;
+     one that times out has no bar to point at and would pass vacuously. */
+  let found = null;
+  for (let k = 0; k < qs.length && !found; k++){
+    const st = api.settle(qs[k], 1.0, 2.0);
+    if (st.hit === "tp" || st.hit === "sl" || st.hit === "both")
+      found = {k, st};
+  }
+  if (!found) throw new Error("no settling question in the set");
+
+  api.goto1(found.k + 1);
+  els["s-stop"].value = "1.0";
+  els["s-tgt"].value = "2.0";
+  api.choose("enter");
+  api.submit();
+
+  const tok = found.st.hit === "tp" ? "--tgt" : "--stop";
+  const count = (step) => {
+    ctxOps.length = 0;
+    api.stepTo(step);
+    return ctxOps.filter((o) => o.op === "fill" && o.color === tok).length;
+  };
+
+  /* One bar short of the hit: the level's own label is already drawn, so
+     this is the baseline the arrow has to rise above. */
+  const before = count(found.st.bar - 1);
+  const after = count(found.st.bar);
+  if (after <= before)
+    throw new Error(`the ${found.st.hit} arrow did not appear ON the ` +
+                    `settling bar (${before} -> ${after}) -- either it is ` +
+                    `not drawn at all, or it is drawn on every bar and was ` +
+                    `already in the baseline`);
+
+  /* And nothing of the sort while the bar is still hidden. */
+  if (count(0) !== before)
+    throw new Error("the arrow is drawn before its bar is revealed -- " +
+                    "that answers the question early");
+  console.log("ok   成交箭头：结算那根才画，之前不画");
+}
 }
 }
 }

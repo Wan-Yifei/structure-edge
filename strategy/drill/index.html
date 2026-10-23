@@ -492,6 +492,19 @@ function draw(q, reveal){
     tag(g, rail, y, txt, col, surf === "#fff" ? "#1b2626" : "#0a1110");
   }
 
+  /* Which bar ended it. See hitArrow above for why this is recomputed
+     rather than read off the stored answer. */
+  if (a && a.choice === "enter" && a.stopAtr != null){
+    const st = settle(q, a.stopAtr, a.tgtAtr);
+    const j = q.mark + st.bar;
+    if (st.hit && st.hit !== "none" && j < last){
+      const tp = st.hit === "tp";
+      const y = Y(tp ? st.target : st.stop);
+      if (y > PAD_T - 2 && y < PAD_T + PRICE_H + 2)
+        hitArrow(g, X(j), y, tp ? 1 : -1, tp ? tgtC : stopC);
+    }
+  }
+
   /* The decision candle again, over the entry/stop/target rules, so the
      bar being judged is the clearest thing on the chart. */
   {
@@ -945,17 +958,35 @@ function levels(q, stopAtr, tgtAtr){
   const risk = Math.abs(q.entry - stop);
   return {stop, target, risk, rr: tgtAtr / stopAtr};
 }
+/* A stubby arrow whose TIP sits exactly on (x, y). `dir` is +1 for one
+   arriving from above (the target, reached from below) and -1 for one from
+   below (the stop). Sized in px, not in bars, so it stays legible when the
+   chart is narrow. */
+function hitArrow(g, x, y, dir, col){
+  const H = 15, W = 5, tip = y - dir * 2;       // 2px clear of the level
+  g.save();
+  g.fillStyle = col; g.strokeStyle = col; g.lineWidth = 2;
+  g.beginPath();
+  g.moveTo(x, tip);
+  g.lineTo(x - W, tip - dir * 7);
+  g.lineTo(x + W, tip - dir * 7);
+  g.closePath(); g.fill();
+  g.beginPath();
+  g.moveTo(x, tip - dir * 6); g.lineTo(x, tip - dir * H);
+  g.stroke();
+  g.restore();
+}
 function settle(q, stopAtr, tgtAtr){
   const {stop, target, risk, rr} = levels(q, stopAtr, tgtAtr);
   const short = q.dir === "short";
   for (let j = q.mark+1; j < Math.min(q.c.length, q.mark+1+FWD); j++){
     const tu = short ? q.l[j] <= target : q.h[j] >= target;
     const td = short ? q.h[j] >= stop   : q.l[j] <= stop;
-    if (tu && td) return {stop, target, rr, r:-1, bar:j-q.mark,
+    if (tu && td) return {stop, target, rr, r:-1, bar:j-q.mark, hit:"both",
                           how:"同一根里两边都碰到,按最坏算"};
-    if (tu) return {stop, target, rr, r:rr, bar:j-q.mark,
+    if (tu) return {stop, target, rr, r:rr, bar:j-q.mark, hit:"tp",
                     how:`第 ${j-q.mark} 根触及目标`};
-    if (td) return {stop, target, rr, r:-1, bar:j-q.mark,
+    if (td) return {stop, target, rr, r:-1, bar:j-q.mark, hit:"sl",
                     how:`第 ${j-q.mark} 根触及止损`};
   }
   const endI = Math.min(q.c.length-1, q.mark+FWD);
@@ -974,7 +1005,7 @@ function settle(q, stopAtr, tgtAtr){
       break;
     }
   }
-  return {stop, target, rr, r: move/risk, bar: FWD,
+  return {stop, target, rr, r: move/risk, bar: FWD, hit:"none",
           how:`${FWD} 根内都没碰到,按收盘结算${late}`};
 }
 
