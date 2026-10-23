@@ -963,7 +963,10 @@ function levels(q, stopAtr, tgtAtr){
    below (the stop). Sized in px, not in bars, so it stays legible when the
    chart is narrow. */
 function hitArrow(g, x, y, dir, col){
-  const H = 15, W = 5, tip = y - dir * 2;       // 2px clear of the level
+  /* The tip stands off the level rather than touching it: butted up
+     against the dashed line the two read as one mark and the arrow
+     stops looking like it points AT something. */
+  const H = 15, W = 5, tip = y - dir * 8;
   g.save();
   g.fillStyle = col; g.strokeStyle = col; g.lineWidth = 2;
   g.beginPath();
