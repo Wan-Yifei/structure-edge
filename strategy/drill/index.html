@@ -9,6 +9,7 @@
   --stop:#c2410c; --tgt:#0d7490; --prof:#8b96a0; --poc:#a16207; --hm:#2f6d7a;
   --up:#1a9e5c; --dn:#d1495b;
   --dr5:#6b4fa8;
+  --dk-up:#a16207; --dk-dn:#3b6ea5;
   --dec:#b45309;
   --font:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -21,6 +22,7 @@
   --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
   --up:#35b87a; --dn:#e0646f;
   --dr5:#b39ddb;
+  --dk-up:#d6a456; --dk-dn:#6fa8dc;
   --dec:#ffd54f;
   color-scheme:dark;
 }}
@@ -31,6 +33,7 @@
   --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
   --up:#35b87a; --dn:#e0646f;
   --dr5:#b39ddb;
+  --dk-up:#d6a456; --dk-dn:#6fa8dc;
   --dec:#ffd54f;
   color-scheme:dark;
 }
@@ -327,6 +330,8 @@ function draw(q, reveal){
         hmC = cs.getPropertyValue("--hm").trim(),
         decC = cs.getPropertyValue("--dec").trim(),
         dr5C = cs.getPropertyValue("--dr5").trim(),
+        dkUp = cs.getPropertyValue("--dk-up").trim(),
+        dkDn = cs.getPropertyValue("--dk-dn").trim(),
         upC = cs.getPropertyValue("--up").trim(),
         dnC = cs.getPropertyValue("--dn").trim(),
         surf = cs.getPropertyValue("--surface").trim();
@@ -368,6 +373,55 @@ function draw(q, reveal){
     g.fillStyle = col; g.font = "12px ui-monospace,monospace";
     g.textAlign = "left"; g.textBaseline = "bottom";
     g.fillText(`${nm} ${fmt(p)}`, PAD_L + 3, y - 2);
+  }
+
+  /* ---- DK channel (多空通道) --------------------------------------------
+     Fast and slow EMA channel midlines with the gap between them filled,
+     gold where fast leads and blue where it trails. Behind the candles on
+     purpose: it is context for the bars, and a band over a wick hides the
+     thing being read.
+
+     Only to `last` -- the band past the decision bar is the future this
+     question is asking about. */
+  if (q.dk1 && q.dk2){
+    const d1 = q.dk1, d2 = q.dk2;
+    const okAt = i => d1[i] != null && d2[i] != null;
+    /* Split at crossings so a segment never carries the colour of the side
+       it has just left. */
+    let seg = [];
+    const flush = () => {
+      if (seg.length < 2){ seg = []; return; }
+      const mid = seg[Math.floor(seg.length/2)];
+      g.fillStyle = (d1[mid] >= d2[mid]) ? dkUp : dkDn;
+      g.globalAlpha = .16;
+      g.beginPath();
+      g.moveTo(X(seg[0]), Y(d1[seg[0]]));
+      for (const i of seg) g.lineTo(X(i), Y(d1[i]));
+      for (let k = seg.length-1; k >= 0; k--) g.lineTo(X(seg[k]), Y(d2[seg[k]]));
+      g.closePath(); g.fill();
+      g.globalAlpha = 1;
+      seg = [];
+    };
+    for (let i = 0; i < last; i++){
+      if (!okAt(i)){ flush(); continue; }
+      if (seg.length){
+        const p = seg[seg.length-1];
+        const crossed = ((d1[p]-d2[p]) < 0) !== ((d1[i]-d2[i]) < 0);
+        if (crossed){ seg.push(i); flush(); }
+      }
+      seg.push(i);
+    }
+    flush();
+
+    for (const [arr, col, wd] of [[d1, dkUp, 1.4], [d2, dkDn, 1.4]]){
+      g.strokeStyle = col; g.lineWidth = wd;
+      g.beginPath(); let on = false;
+      for (let i = 0; i < last; i++){
+        if (arr[i] == null){ on = false; continue; }
+        if (on) g.lineTo(X(i), Y(arr[i])); else { g.moveTo(X(i), Y(arr[i])); on = true; }
+      }
+      g.stroke();
+    }
   }
 
   // ---- candles ----------------------------------------------------------

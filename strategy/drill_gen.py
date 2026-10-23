@@ -45,6 +45,9 @@ _ROOT = pathlib.Path(__file__).parent.parent
 
 RTH = (9.5, 16.0)
 LOOK, MIN_DROP_ATR, GAP = 30, 1.0, 15
+# Same pair the viewer uses, so a reading learned here means the same thing
+# on the live chart. See analysis/trade_viewer_qt.py's _KD_FAST/_KD_SLOW.
+DK_FAST, DK_SLOW = 25, 90
 FWD = 30
 BEFORE, AFTER = 120, 60          # wider than the first set's 60/40
 MIN_SIGNED = 300.0
@@ -452,6 +455,14 @@ def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
     rsi5s = pd.Series(compute_rsi(five, 6), index=five.index)
     rsi5 = rsi5s.reindex(reg["t"], method="ffill").to_numpy()
 
+    # DK (多空通道): the fast/slow EMA channel midlines the viewer draws as
+    # a ribbon. Computed over the whole session so each question's window
+    # inherits the same warmup the chart has, then sliced per question.
+    from strategy.smc.kd_trend import compute_kd
+    _dk = compute_kd(reg, fast=DK_FAST, slow=DK_SLOW)
+    dk1 = _dk["mid1"].to_numpy(float)
+    dk2 = _dk["mid2"].to_numpy(float)
+
     marks, last = [], -99
     for i in range(BEFORE, len(reg) - FWD - AFTER - confirm):
         a = A[i]
@@ -501,6 +512,12 @@ def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
             "dr15": flow(buy, sell, i, 15),
             "rsi1": None if not np.isfinite(rsi1[i]) else round(float(rsi1[i]), 1),
             "rsi5": None if not np.isfinite(rsi5[i]) else round(float(rsi5[i]), 1),
+            # Two decimals: these are prices on a chart, not a statistic,
+            # and the extra digits would cost ~0.5 MB a set for nothing.
+            "dk1": [None if not np.isfinite(v) else round(float(v), 2)
+                    for v in dk1[s:e]],
+            "dk2": [None if not np.isfinite(v) else round(float(v), 2)
+                    for v in dk2[s:e]],
             "sc": int(sc), "call": call(sc), "trend": info["trend"],
             "why": [[int(v), txt] for v, txt in why],
             "prof": prof,

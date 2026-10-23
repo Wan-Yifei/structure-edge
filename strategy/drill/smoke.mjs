@@ -44,6 +44,15 @@ const ctx = new Proxy({}, {
         ctxOps.push({ i: ctxOps.length, op: "fillRect", alpha: curAlpha,
                       x, y, w, h });
       };
+    /* Path fills and strokes carry no arguments, so only their count and
+       the alpha in force say anything -- which is enough to tell whether a
+       band was painted. */
+    if (k === "fill")
+      return () => { ctxOps.push({ i: ctxOps.length, op: "fill",
+                                   alpha: curAlpha }); };
+    if (k === "stroke")
+      return () => { ctxOps.push({ i: ctxOps.length, op: "stroke",
+                                   alpha: curAlpha }); };
     return () => {};
   },
   set: (t, k, v) => { if (k === "globalAlpha") curAlpha = v; return true; },
@@ -677,6 +686,60 @@ console.log("\nJUMP OK");
       `${over.length} translucent fill(s) painted over the rule light ` +
       `(alpha ${over[0].alpha})`);
   console.log("ok   主图红绿灯：结算灰罩不会盖在它上面");
+
+/* The DK channel ribbon. It is a path fill plus two strokes, so it leaves
+   no text and no fillRect -- the suite passed it for a week by never
+   running it, because the question files on disk had no dk1/dk2 and the
+   guard skipped the block entirely. */
+{
+  const q = api.getQS()[api.getIdx()];
+  const n = q.c.length;
+
+  const count = () => {
+    ctxOps.length = 0;
+    api.stepTo(0);
+    return {
+      fills: ctxOps.filter((o) => o.op === "fill").length,
+      strokes: ctxOps.filter((o) => o.op === "stroke").length,
+      faint: ctxOps.filter((o) => o.op === "fill" && o.alpha < 0.5).length,
+    };
+  };
+
+  /* Baseline FIRST, with the channel removed. Taking the file's current
+     state as the baseline only worked while the question sets had no
+     dk1/dk2; once they did, the baseline already contained a ribbon and
+     the comparison measured which synthetic channel had more crossings. */
+  const saved1 = q.dk1, saved2 = q.dk2;
+  q.dk1 = null; q.dk2 = null;
+  const before = count();
+
+  /* A channel that crosses once, so the fill has to be split and both
+     colours used -- a single segment would pass even if the crossing
+     logic were dropped. */
+  q.dk1 = []; q.dk2 = [];
+  for (let i = 0; i < n; i++) {
+    q.dk1.push(q.c[i] + (i < n / 2 ? 0.5 : -0.5));
+    q.dk2.push(q.c[i]);
+  }
+  const after = count();
+
+  if (after.fills <= before.fills)
+    throw new Error(`the ribbon drew no fill (${before.fills} -> ` +
+                    `${after.fills})`);
+  if (after.strokes < before.strokes + 2)
+    throw new Error("both midlines should be stroked, got " +
+                    (after.strokes - before.strokes));
+  if (after.faint <= before.faint)
+    throw new Error("the ribbon fill should be translucent, so it sits " +
+                    "behind the candles rather than over them");
+
+  /* And the real data on file draws one too -- the point of regenerating
+     the sets. Checked against the same cleared baseline. */
+  q.dk1 = saved1; q.dk2 = saved2;
+  if (saved1 && saved2 && count().fills <= before.fills)
+    throw new Error("the channel stored on the question drew nothing");
+  console.log("ok   DK 多空通道：有数据才画，填充半透明，两条中线都描边");
+}
 }
 }
 
