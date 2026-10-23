@@ -4751,10 +4751,10 @@ class TradeViewerQt(QMainWindow):
         """Draw KD fast/slow midline ribbon on the main candlestick chart.
 
         Visual layers (bottom-to-top):
-          1. Filled ribbon between mid1 and mid2 — gold alpha-30 when fast is
-             above slow (bullish spread), blue alpha-30 when fast is below.
-          2. mid1 line (gold, fast channel midpoint).
-          3. mid2 line (blue, slow channel midpoint).
+          1. Filled ribbon between mid1 and mid2 — gold alpha-35 when fast is
+             above slow (bullish spread), purple alpha-35 when fast is below.
+          2. mid1 line (blue, fast channel midpoint).
+          3. mid2 line (gold, slow channel midpoint).
 
         The fill is split at crossover points so each segment gets the correct
         directional color without bleed from the opposite side.

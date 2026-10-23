@@ -18,7 +18,10 @@ const ctxText = [];
 /* Fills in the order they were issued, each with the alpha in force.
    Draw order is the only way to catch one thing painted over another. */
 const ctxOps = [];
-let curAlpha = 1;
+let curAlpha = 1, curStroke = "", curFill = "";
+/* y values of the path under construction: a stroke takes no
+   arguments, so without them a stroke op cannot say WHAT it drew. */
+let curYs = [];
 const alphaStack = [];
 const ctx = new Proxy({}, {
   get: (t, k) => {
@@ -47,15 +50,28 @@ const ctx = new Proxy({}, {
     /* Path fills and strokes carry no arguments, so only their count and
        the alpha in force say anything -- which is enough to tell whether a
        band was painted. */
+    if (k === "beginPath") return () => { curYs = []; };
+    if (k === "moveTo" || k === "lineTo")
+      return (x, y) => { curYs.push(y); };
     if (k === "fill")
       return () => { ctxOps.push({ i: ctxOps.length, op: "fill",
-                                   alpha: curAlpha }); };
+                                   alpha: curAlpha, color: curFill }); };
     if (k === "stroke")
-      return () => { ctxOps.push({ i: ctxOps.length, op: "stroke",
-                                   alpha: curAlpha }); };
+      return () => {
+        const ys = curYs.filter((v) => typeof v === "number" && isFinite(v));
+        ctxOps.push({ i: ctxOps.length, op: "stroke", alpha: curAlpha,
+                      color: curStroke, n: ys.length,
+                      meanY: ys.length
+                        ? ys.reduce((a, b) => a + b, 0) / ys.length : null });
+      };
     return () => {};
   },
-  set: (t, k, v) => { if (k === "globalAlpha") curAlpha = v; return true; },
+  set: (t, k, v) => {
+    if (k === "globalAlpha") curAlpha = v;
+    if (k === "strokeStyle") curStroke = v;
+    if (k === "fillStyle") curFill = v;
+    return true;
+  },
 });
 const mkEl = (id) => ({
   id, textContent: "", innerHTML: "", hidden: false, value: "",
@@ -94,7 +110,11 @@ global.document = {
     },
   },
 };
-global.getComputedStyle = () => ({ getPropertyValue: () => "#ffffff" });
+/* Echo custom properties back as their own name so a test can assert
+   WHICH token a mark was drawn in; anything else keeps a real colour. */
+global.getComputedStyle = () => ({
+  getPropertyValue: (k) => (String(k).startsWith("--") ? String(k) : "#ffffff"),
+});
 global.matchMedia = () => ({ addEventListener() {} });
 global.atob = (s) => Buffer.from(s, "base64").toString("binary");
 global.fetch = () => Promise.reject(new Error("fetch must not be used"));
@@ -733,12 +753,46 @@ console.log("\nJUMP OK");
     throw new Error("the ribbon fill should be translucent, so it sits " +
                     "behind the candles rather than over them");
 
+  /* The lines wear their OWN tokens, not the fill's. The viewer pens the
+     fast midline blue and the slow one gold, while the fill is gold/purple
+     by which side leads -- four roles, and the first version of this had
+     the pair swapped AND borrowed the fill's two colours for the lines. */
+  const strokedIn = (tok) =>
+    ctxOps.some((o) => o.op === "stroke" && o.color === tok);
+  const filledIn = (tok) =>
+    ctxOps.some((o) => o.op === "fill" && o.color === tok);
+  if (!strokedIn("--dk-fast"))
+    throw new Error("the fast midline should be stroked in --dk-fast");
+  if (!strokedIn("--dk-slow"))
+    throw new Error("the slow midline should be stroked in --dk-slow");
+  if (!filledIn("--dk-up") && !filledIn("--dk-dn"))
+    throw new Error("the ribbon fill should wear --dk-up / --dk-dn");
+  if (strokedIn("--dk-up") || strokedIn("--dk-dn"))
+    throw new Error("a midline is wearing a fill colour");
+
+  /* Which line wears which. Both tokens being present somewhere passes
+     when the two lines simply trade colours, which is the bug that got
+     shipped -- so feed a channel whose fast line is above the slow one
+     everywhere and check the blue one really is the upper line. */
+  for (let i = 0; i < n; i++){ q.dk1[i] = q.c[i] + 0.5; q.dk2[i] = q.c[i]; }
+  count();
+  const meanOf = (tok) => {
+    const s = ctxOps.filter((o) => o.op === "stroke" && o.color === tok &&
+                                   o.n > 1);
+    if (!s.length) throw new Error(`no midline stroked in ${tok}`);
+    return s.reduce((a, o) => a + o.meanY, 0) / s.length;
+  };
+  /* Smaller y is higher on the canvas. */
+  if (!(meanOf("--dk-fast") < meanOf("--dk-slow")))
+    throw new Error("fast and slow midlines are wearing each other's " +
+                    "colour -- fast is blue, slow is gold");
+
   /* And the real data on file draws one too -- the point of regenerating
      the sets. Checked against the same cleared baseline. */
   q.dk1 = saved1; q.dk2 = saved2;
   if (saved1 && saved2 && count().fills <= before.fills)
     throw new Error("the channel stored on the question drew nothing");
-  console.log("ok   DK 多空通道：有数据才画，填充半透明，两条中线都描边");
+  console.log("ok   DK 多空通道：有数据才画，填充半透明，快线蓝、慢线金不互换");
 }
 }
 }

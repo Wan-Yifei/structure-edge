@@ -9,7 +9,8 @@
   --stop:#c2410c; --tgt:#0d7490; --prof:#8b96a0; --poc:#a16207; --hm:#2f6d7a;
   --up:#1a9e5c; --dn:#d1495b;
   --dr5:#6b4fa8;
-  --dk-up:#a16207; --dk-dn:#3b6ea5;
+  --dk-up:#a16207; --dk-dn:#7e3f96;
+  --dk-fast:#1f6feb; --dk-slow:#a16207;
   --dec:#b45309;
   --font:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -22,7 +23,8 @@
   --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
   --up:#35b87a; --dn:#e0646f;
   --dr5:#b39ddb;
-  --dk-up:#d6a456; --dk-dn:#6fa8dc;
+  --dk-up:#ffa005; --dk-dn:#ab47bc;
+  --dk-fast:#42a5f5; --dk-slow:#ffa005;
   --dec:#ffd54f;
   color-scheme:dark;
 }}
@@ -33,7 +35,8 @@
   --stop:#e0743f; --tgt:#39a8bd; --prof:#6b767f; --poc:#d6a456; --hm:#7fd4e0;
   --up:#35b87a; --dn:#e0646f;
   --dr5:#b39ddb;
-  --dk-up:#d6a456; --dk-dn:#6fa8dc;
+  --dk-up:#ffa005; --dk-dn:#ab47bc;
+  --dk-fast:#42a5f5; --dk-slow:#ffa005;
   --dec:#ffd54f;
   color-scheme:dark;
 }
@@ -332,6 +335,8 @@ function draw(q, reveal){
         dr5C = cs.getPropertyValue("--dr5").trim(),
         dkUp = cs.getPropertyValue("--dk-up").trim(),
         dkDn = cs.getPropertyValue("--dk-dn").trim(),
+        dkFast = cs.getPropertyValue("--dk-fast").trim(),
+        dkSlow = cs.getPropertyValue("--dk-slow").trim(),
         upC = cs.getPropertyValue("--up").trim(),
         dnC = cs.getPropertyValue("--dn").trim(),
         surf = cs.getPropertyValue("--surface").trim();
@@ -413,7 +418,10 @@ function draw(q, reveal){
     }
     flush();
 
-    for (const [arr, col, wd] of [[d1, dkUp, 1.4], [d2, dkDn, 1.4]]){
+    /* Blue fast, gold slow -- the viewer's pens, not the fill's colours.
+       The fill says which side is leading; the lines say which line is
+       which, and the fast one carries its own hue. */
+    for (const [arr, col, wd] of [[d1, dkFast, 1.4], [d2, dkSlow, 1.4]]){
       g.strokeStyle = col; g.lineWidth = wd;
       g.beginPath(); let on = false;
       for (let i = 0; i < last; i++){
