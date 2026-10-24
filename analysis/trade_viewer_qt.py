@@ -322,6 +322,91 @@ _BOS_SESSION_GAP: dict[str, int | None] = (
 
 # ── Shared tick-loading helper ────────────────────────────────────────────────
 
+def _day_window(date_str: str) -> tuple[datetime, datetime]:
+    """The 28-hour span a "day" of ticks covers: prior 20:00 through 23:59."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    return (dt - timedelta(days=1) + timedelta(hours=20),
+            dt.replace(hour=23, minute=59, second=59))
+
+
+def _query_ticks(code: str, start: datetime, end: datetime,
+                 with_offex: bool) -> list | None:
+    """Rows from ticks.db, or None when there is no database.
+
+    Split out so both the full and the incremental read go through one
+    place, and so tests can stand in for the store without a file.
+    """
+    db_path = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
+    if not db_path.exists():
+        return None
+    from feeds.tick_store import TickStore
+    with TickStore(db_path, read_only=True) as store:
+        return store.query_ticks(code, start, end, with_mid=with_offex)
+
+
+def _size_thresholds(rows) -> tuple[float, float]:
+    """Adaptive S/M/L boundaries: the day's own p33 and p67 by volume.
+
+    Fewer than six ticks is not a distribution, and splitting one into
+    thirds would label two prints "large" on no evidence -- everything is
+    small until there is enough to say otherwise.
+    """
+    vols = np.array([r["volume"] for r in rows if r["volume"] > 0],
+                    dtype=float)
+    if len(vols) < 6:
+        return float("inf"), float("inf")
+    return float(np.percentile(vols, 33)), float(np.percentile(vols, 67))
+
+
+def _new_tick_bin() -> dict:
+    return {
+        "buy": 0, "sell": 0, "neutral": 0,
+        "buy_s": 0, "buy_m": 0, "buy_l": 0,
+        "sell_s": 0, "sell_m": 0, "sell_l": 0,
+        "neutral_s": 0, "neutral_m": 0, "neutral_l": 0,
+        # Off-exchange flow, carried beside the feed's own counts rather
+        # than folded into them: every indicator that reads buy/sell keeps
+        # the exact meaning it had, and the one line that wants this reads
+        # these two.
+        "off_buy": 0, "off_sell": 0,
+    }
+
+
+def _bucket_ticks(rows, candle_mins: int,
+                  thresh_m: float, thresh_l: float) -> dict:
+    """Aggregate rows into {bucket: {price: bin}} with GIVEN thresholds.
+
+    The thresholds are a parameter rather than derived here so an
+    incremental read can keep using the ones the day was loaded with --
+    re-deriving them would mean re-stratifying rows that are no longer in
+    memory.
+    """
+    def _size(v) -> str:
+        if v <= thresh_m:
+            return "s"
+        if v <= thresh_l:
+            return "m"
+        return "l"
+
+    buckets: dict = defaultdict(lambda: defaultdict(_new_tick_bin))
+    for r in rows:
+        ts = (r["ts"] if isinstance(r["ts"], datetime)
+              else datetime.fromisoformat(str(r["ts"])))
+        bucket = candle_start(ts, candle_mins)
+        key = {"BUY": "buy", "SELL": "sell"}.get(
+            r["direction"].upper(), "neutral")
+        vol = r["volume"]
+        buckets[bucket][r["price"]][key] += vol
+        buckets[bucket][r["price"]][f"{key}_{_size(vol)}"] += vol
+        if key == "neutral":
+            md = r.get("mid_dir")
+            if md == "BUY":
+                buckets[bucket][r["price"]]["off_buy"] += vol
+            elif md == "SELL":
+                buckets[bucket][r["price"]]["off_sell"] += vol
+    return dict(buckets)
+
+
 def load_local_ticks(code: str, date_str: str, tf: str,
                      with_offex: bool = False) -> dict | None:
     """Load tick buckets from ticks.db for a given code and date.
@@ -334,69 +419,85 @@ def load_local_ticks(code: str, date_str: str, tf: str,
     S/M/L thresholds are computed from the day's volume distribution
     (p33 = small/medium boundary, p67 = medium/large boundary).
     """
-    db_path = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
-    if not db_path.exists():
-        return None
-    from feeds.tick_store import TickStore
     try:
-        dt             = datetime.strptime(date_str, "%Y-%m-%d")
         _, candle_mins = TIMEFRAME_MAP[tf]
-        tick_start     = dt - timedelta(days=1) + timedelta(hours=20)
-        tick_end       = dt.replace(hour=23, minute=59, second=59)
-        with TickStore(db_path, read_only=True) as store:
-            rows = store.query_ticks(code, tick_start, tick_end,
-                                     with_mid=with_offex)
+        start, end = _day_window(date_str)
+        rows = _query_ticks(code, start, end, with_offex)
         if not rows:
             return None
-
-        # Compute per-day volume percentiles for adaptive S/M/L thresholds.
-        vols = np.array([r["volume"] for r in rows if r["volume"] > 0],
-                        dtype=float)
-        if len(vols) >= 6:
-            thresh_m = float(np.percentile(vols, 33))  # small  < p33
-            thresh_l = float(np.percentile(vols, 67))  # medium p33..p67, large > p67
-        else:
-            thresh_m = thresh_l = float("inf")          # too few ticks → all small
-
-        def _size(v: int) -> str:
-            if v <= thresh_m:
-                return "s"
-            if v <= thresh_l:
-                return "m"
-            return "l"
-
-        def _new_bin() -> dict:
-            return {
-                "buy": 0, "sell": 0, "neutral": 0,
-                "buy_s": 0, "buy_m": 0, "buy_l": 0,
-                "sell_s": 0, "sell_m": 0, "sell_l": 0,
-                "neutral_s": 0, "neutral_m": 0, "neutral_l": 0,
-                # Off-exchange flow, carried beside the feed's own counts
-                # rather than folded into them: every indicator that reads
-                # buy/sell keeps the exact meaning it had, and the one line
-                # that wants this reads these two.
-                "off_buy": 0, "off_sell": 0,
-            }
-
-        buckets: dict = defaultdict(lambda: defaultdict(_new_bin))
-        for r in rows:
-            ts = (r["ts"] if isinstance(r["ts"], datetime)
-                  else datetime.fromisoformat(str(r["ts"])))
-            bucket = candle_start(ts, candle_mins)
-            key = {"BUY": "buy", "SELL": "sell"}.get(
-                r["direction"].upper(), "neutral")
-            vol = r["volume"]
-            buckets[bucket][r["price"]][key] += vol
-            buckets[bucket][r["price"]][f"{key}_{_size(vol)}"] += vol
-            if key == "neutral":
-                md = r.get("mid_dir")
-                if md == "BUY":
-                    buckets[bucket][r["price"]]["off_buy"] += vol
-                elif md == "SELL":
-                    buckets[bucket][r["price"]]["off_sell"] += vol
-        return dict(buckets)
+        tm, tl = _size_thresholds(rows)
+        return _bucket_ticks(rows, candle_mins, tm, tl)
     except Exception:
         return None
+
+
+# How far the newest day may grow on frozen S/M/L thresholds before they
+# are recomputed from scratch. Bucket count is the clock: it rises with
+# elapsed session time, is exact, and costs nothing to read. Doubling
+# gives roughly ten full loads across a session rather than one per
+# refresh cycle, which at 15s is 240.
+_LIVE_RELOAD_GROWTH = 2.0
+
+
+def load_day_live(code: str, date_str: str, tf: str, with_offex: bool,
+                  state: dict) -> dict | None:
+    """Today's buckets, re-reading only the part of the tape that is new.
+
+    `state` is owned by the caller and updated in place; pass {} the first
+    time. A full read happens when the state is empty, when it describes a
+    different (code, tf, date, offex), or when the day has grown past
+    _LIVE_RELOAD_GROWTH since the thresholds were taken.
+
+    Incremental reads restart at the start of the bucket holding the last
+    tick seen and REPLACE those buckets. Ticks share timestamps, so a
+    `ts >` cursor would drop the rest of that second and `ts >=` would
+    double-count it; a whole-bucket replace has no boundary case at all.
+    """
+    try:
+        _, candle_mins = TIMEFRAME_MAP[tf]
+        start, end = _day_window(date_str)
+        key = (code, tf, date_str, with_offex, candle_mins)
+
+        grown = (state.get("buckets")
+                 and len(state["buckets"]) >= _LIVE_RELOAD_GROWTH
+                 * max(1, state.get("n_at_thresh", 1)))
+        if state.get("key") != key or not state.get("buckets") or grown:
+            rows = _query_ticks(code, start, end, with_offex)
+            if not rows:
+                state.clear()
+                return None
+            tm, tl = _size_thresholds(rows)
+            buckets = _bucket_ticks(rows, candle_mins, tm, tl)
+            state.clear()
+            state.update(key=key, buckets=buckets, thresh=(tm, tl),
+                         n_at_thresh=len(buckets),
+                         last_ts=_max_ts(rows), full_loads=1)
+            return buckets
+
+        last_ts = state["last_ts"]
+        re_from = candle_start(last_ts, candle_mins)
+        rows = _query_ticks(code, re_from, end, with_offex)
+        if rows:
+            tm, tl = state["thresh"]
+            fresh = _bucket_ticks(rows, candle_mins, tm, tl)
+            # A new top-level dict: the one handed out last cycle may still
+            # be referenced by whatever drew from it, and mutating that
+            # under a consumer is the kind of bug that shows up as a chart
+            # changing while nothing asked it to.
+            buckets = dict(state["buckets"])
+            buckets.update(fresh)          # whole-bucket replace, never add
+            state["buckets"] = buckets
+            state["last_ts"] = _max_ts(rows)
+        return state["buckets"]
+    except Exception:
+        state.clear()
+        return load_local_ticks(code, date_str, tf, with_offex=with_offex)
+
+
+def _max_ts(rows) -> datetime:
+    def _as_dt(v):
+        return v if isinstance(v, datetime) else datetime.fromisoformat(str(v))
+    return max(_as_dt(r["ts"]) for r in rows)
 
 
 def load_raw_ticks(code: str, date_str: str) -> list[dict]:
@@ -577,7 +678,8 @@ USE_MID_DIR = False
 
 def load_tick_days(code: str, end_date_str: str, tf: str, days: int,
                    cache: dict | None = None,
-                   with_offex: bool = False) -> tuple[dict, dict]:
+                   with_offex: bool = False,
+                   live_state: dict | None = None) -> tuple[dict, dict]:
     """Merged tick buckets for the `days` calendar days ending at end_date_str.
 
     Returns (merged_buckets, newly_loaded) where newly_loaded maps date_str ->
@@ -616,6 +718,11 @@ def load_tick_days(code: str, end_date_str: str, tf: str, days: int,
         if not is_newest and key in cache:
             day = cache[key]
             fresh = False
+        elif is_newest and live_state is not None:
+            # The one day that cannot be cached, because it is still being
+            # written. Read incrementally instead -- see load_day_live.
+            day = load_day_live(code, d, tf, with_offex, live_state) or {}
+            fresh = True
         else:
             day = load_local_ticks(code, d, tf, with_offex=with_offex) or {}
             fresh = True
@@ -1469,7 +1576,11 @@ class DataFetcher(QThread):
                 ticks, self._new_tick_days = load_tick_days(
                     code, today, tf, int(p.get("tick_days", 1) or 1),
                     p.get("tick_cache"),
-                    with_offex=bool(p.get("with_offex")))
+                    with_offex=bool(p.get("with_offex")),
+                    # Owned by the widget and updated in place. Only one
+                    # fetch runs at a time, and the GUI thread does not
+                    # touch it while one is in flight.
+                    live_state=p.get("live_state"))
                 live_snap: dict = p.get("live_ticks") or {}
                 for bk, pd_ in live_snap.items():
                     if bk not in ticks:
@@ -1787,6 +1898,9 @@ class TradeViewerQt(QMainWindow):
         self._live_kl_key:  tuple | None        = None
         self._warmup:       pd.DataFrame | None = None
         self._ticks:        dict | None         = None
+        # Incremental cursor for TODAY's ticks, the one day that cannot be
+        # cached because it is still being written. See load_day_live.
+        self._tick_live_state: dict                = {}
         # Session-profile POC state. POC is a from-scratch argmax on every
         # rebuild with no memory, so on a bimodal profile it teleports between
         # the two peaks as their totals cross (observed: four 5-dollar flips
@@ -3349,6 +3463,7 @@ class TradeViewerQt(QMainWindow):
             "live_ticks":      live_snap,
             "tick_days":       RANGE_DAYS.get(self._get_range_val(), 1),
             "tick_cache":      dict(self._tick_day_cache),
+            "live_state":      None if historical else self._tick_live_state,
             "with_offex":      self._ind("offex"),
             # Only when it is this exact (code, tf); the fetcher additionally
             # refuses to use it if a gap shows up. Historical mode never tops
