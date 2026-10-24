@@ -1220,34 +1220,59 @@ function verdictFor(q, rec){
 
    Thresholds and colours are the walk-forward result, not taste:
 
-     green   dr1 >= +0.4 AND the previous bar was negative
-             +0.277 R a trade over 45 out-of-sample sessions; on this
-             question set 44 of 386, +0.250
+     green   dr1 >= +0.4 AND a flip behind it -- the previous bar
+             negative, or the previous bar short of 0.4 with the one
+             before it negative. +0.277 R a trade over 45 out-of-sample
+             sessions for the narrow form. Reaching 0.4 one bar late
+             measured the same as reaching it on the flip bar (40.0% vs
+             40.0% on c1, 46.7% vs 46.2% on c0), while 0.4 with no flip
+             behind it measured the set's own base rate -- so the bar it
+             lands on is not the thing, and the narrow form was dropping
+             a quarter of the signals for nothing.
      red     dr1 < 0
-             186 of 386 here -- 48% -- averaging -0.234 R. The drill
+             averaging about -0.23 R. The drill
              over-samples this side by construction: it picks pullback
              lows, and at a low the selling usually still has the upper
              hand. Half of what you are practising is sitting on your
              hands, which is exactly the half a question set cannot teach
              by asking "what would you do here" over and over.
      amber   dr1 >= 0 but not the full rule -- between the two. */
+/* "n 题，平均 x R" for one light, from the rates file belonging to the set
+   in play. These three numbers used to be typed into the strings below and
+   had gone stale by a factor of two. Mean R is 3p-1 rather than a stored
+   figure: every question in the set reached one barrier or the other, so a
+   2:1 trade pays exactly +2 or -1. */
+function lightStat(name){
+  const s = RMETA && RMETA.light && RMETA.light[name];
+  if (!s) return "";
+  const r = 3 * s[1] - 1;
+  return `本题库 ${s[0]} 题，命中 ${(s[1]*100).toFixed(1)}%，` +
+         `平均 <b>${r >= 0 ? "+" : "−"}${Math.abs(r).toFixed(3)} R</b>。`;
+}
 function ruleLight(q){
   const m = q.mark, s = q.drs1;
   if (!s) return null;
-  const now = s[m], prev = m >= 1 ? s[m - 1] : null;
+  const now = s[m];
+  const p1 = m >= 1 ? s[m - 1] : null, p2 = m >= 2 ? s[m - 2] : null;
   if (now == null) return {k: "na", t: "无逐笔数据", d: "这一根的主动成交量不足，规则不表态。"};
   if (now < 0)
     return {k: "red", t: "规则：别做",
-            d: `dr1 ${sr(now)}，主动卖占优。这一类在本题库 186 题里平均 ` +
-               `<b>−0.234 R</b>。`};
-  const flip = prev != null && prev < 0;
-  if (now >= DR_DECISION && flip)
+            d: `dr1 ${sr(now)}，主动卖占优。${lightStat("red")}`};
+  /* The flip may be one bar back. Reaching 0.4 on the turn and reaching it
+     the bar after measured the same; having no turn behind it at all did
+     not. */
+  const onBar = p1 != null && p1 < 0;
+  const oneLate = p1 != null && p2 != null && p2 < 0
+                  && p1 >= 0 && p1 < DR_DECISION;
+  if (now >= DR_DECISION && (onBar || oneLate))
     return {k: "green", t: "规则：做多",
-            d: `dr1 ${sr(now)} ≥ ${DR_DECISION}，且前一根 ${sr(prev)} 为负` +
-               `——阈值与翻转都满足。本题库 44 题，平均 <b>+0.250 R</b>。`};
+            d: `dr1 ${sr(now)} ≥ ${DR_DECISION}，` +
+               (onBar ? `且前一根 ${sr(p1)} 为负`
+                      : `前一根 ${sr(p1)} 还没到阈值、再前一根 ${sr(p2)} 为负`) +
+               `——阈值与翻转都满足。${lightStat("green")}`};
   const why = now < DR_DECISION
     ? `dr1 ${sr(now)} 没到 ${DR_DECISION}`
-    : `前一根 ${sr(prev)} 不是负的，不算翻转`;
+    : `身后两根都不是负的，不算翻转`;
   return {k: "amber", t: "规则：不触发", d: `${why}。`};
 }
 

@@ -30,6 +30,36 @@ import sys
 _ROOT = pathlib.Path(__file__).parent.parent
 DRILL = _ROOT / "strategy" / "drill"
 
+# Mirrors DR_DECISION in strategy/drill/index.html. The two have to agree:
+# the page decides the colour, this file counts how that colour has done.
+DR_DECISION = 0.4
+
+
+def light_of(q: dict) -> str | None:
+    """Which rule light a question would show. None when the bar has too
+    little aggressor volume for delta_r to exist.
+
+    Green wants a flip behind the move, not a flip on the bar itself: 0.4
+    reached one bar after the turn measured the same as 0.4 on the turn
+    (40.0% vs 40.0% on c1), while 0.4 with no turn behind it measured the
+    set's own base rate.
+    """
+    s = q.get("drs1")
+    m = q.get("mark")
+    if not s or m is None:
+        return None
+    now = s[m]
+    if now is None:
+        return None
+    if now < 0:
+        return "red"
+    p1 = s[m - 1] if m >= 1 else None
+    p2 = s[m - 2] if m >= 2 else None
+    flip = (p1 is not None and p1 < 0) or (
+        p1 is not None and p2 is not None
+        and p2 < 0 and 0 <= p1 < DR_DECISION)
+    return "green" if (now >= DR_DECISION and flip) else "amber"
+
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     """Score interval. The page prints these next to small n, where the
@@ -114,10 +144,20 @@ def build(qs: list[dict], confirm: int, code: str) -> dict:
     if a:
         allin["2:1"] = round(3 * a[1] - 1, 4)
 
+    # What each rule light has actually paid on this set. Mean R is left
+    # to the page as 3p-1: every question that survived generation reached
+    # one barrier or the other, so a 2:1 trade pays exactly +2 or -1 and
+    # the mean is a function of the rate, not a second measurement.
+    light: dict[str, list] = {}
+    for name in ("green", "red", "amber"):
+        s = stat([q for q in labelled if light_of(q) == name])
+        if s:
+            light[name] = s
+
     return {"confirm": confirm, "n": len(labelled), "sessions": len(days),
             "period": [days[0], days[-1]], "code": code,
             "buckets": buckets, "pa": pa, "cross": cross, "dr": dr,
-            "allin": allin}
+            "allin": allin, "light": light}
 
 
 def main() -> None:

@@ -835,6 +835,44 @@ console.log("\nJUMP OK");
     throw new Error("the arrow is drawn before its bar is revealed -- " +
                     "that answers the question early");
   console.log("ok   成交箭头：结算那根才画，之前不画");
+
+/* The green light's flip may be one bar back. */
+{
+  const DR = 0.4;
+  const at = (q, k) => {
+    const s = q.drs1, m = q.mark;
+    return (s && m - k >= 0) ? s[m - k] : null;
+  };
+  const qs = api.getQS();
+  const pick = (f) => qs.find((q) => {
+    const n = at(q, 0), p1 = at(q, 1), p2 = at(q, 2);
+    return n != null && p1 != null && p2 != null && f(n, p1, p2);
+  });
+
+  /* One bar late: the flip is at m-2, m-1 is positive but short of the
+     threshold, m clears it. Amber under the old rule, green now. */
+  const late = pick((n, p1, p2) => n >= DR && p1 >= 0 && p1 < DR && p2 < 0);
+  if (!late) throw new Error("no one-bar-late flip in the set to test");
+  const L = api.ruleLight(late);
+  if (L.k !== "green")
+    throw new Error(`a flip one bar back should be green, got ${L.k}`);
+
+  /* No flip behind it at all stays amber -- the widening is about WHEN the
+     threshold is reached, not about dropping the flip requirement. */
+  const noFlip = pick((n, p1, p2) => n >= DR && p1 >= DR && p2 >= 0);
+  if (noFlip && api.ruleLight(noFlip).k !== "amber")
+    throw new Error("0.4 with no flip behind it must not be green");
+
+  /* And the plain cases are untouched. */
+  const onBar = pick((n, p1) => n >= DR && p1 < 0);
+  if (onBar && api.ruleLight(onBar).k !== "green")
+    throw new Error("a flip on the bar itself should still be green");
+  const neg = pick((n) => n < 0);
+  if (neg && api.ruleLight(neg).k !== "red")
+    throw new Error("dr1 < 0 should still be red");
+
+  console.log("ok   规则红绿灯：翻转晚一根也算，身后没有翻转仍不算");
+}
 }
 }
 }
