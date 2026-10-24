@@ -871,7 +871,23 @@ console.log("\nJUMP OK");
   if (neg && api.ruleLight(neg).k !== "red")
     throw new Error("dr1 < 0 should still be red");
 
-  console.log("ok   规则红绿灯：翻转晚一根也算，身后没有翻转仍不算");
+  /* The continuation case: there IS a flip two bars back, but the bar
+     right after it already cleared the threshold, so the green fired
+     there. Saying "身后两根都不是负的" here is simply false -- the
+     negative is on the chart, two bars back. */
+  const cont = pick((n, p1, p2) => n >= DR && p1 >= DR && p2 < 0);
+  if (cont){
+    const C = api.ruleLight(cont);
+    if (C.k !== "amber")
+      throw new Error(`a continuation bar should be amber, got ${C.k}`);
+    if (/都不是负的/.test(C.d))
+      throw new Error("the amber text claims there is no flip behind a " +
+                      "bar that has one two back: " + C.d);
+    if (!/延续/.test(C.d))
+      throw new Error("a continuation bar should say so: " + C.d);
+  }
+
+  console.log("ok   规则红绿灯：翻转晚一根也算，延续那根不谎称没有翻转");
 }
 }
 }

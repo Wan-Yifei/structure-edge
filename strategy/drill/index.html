@@ -126,7 +126,7 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
   以及<b>夹角</b>(DK 快线转头向下、与慢线收拢到 0.25 ATR 以内,或刚刚交叉 —— 这一类多半还没破低)。
   <b>这三类的命中率量下来几乎一样</b>(都在 33% 上下,区间重叠),所以标签本身不带信息,
   这里也不判对错,只算你最后的盈亏。真正分得开的是 <b>delta_r</b>:1 分钟窗口 ≥0 的
-  命中 45%、&lt;0 的只有 25%。
+  命中<span id="dr-hi"> 约四成</span>、&lt;0 的只有<span id="dr-lo"> 两成多</span>。
   默认在<b>最低点之后一根</b>做决定 —— 低点要等它收了才知道是低点,右上角可以切回当根对比。
   提交之后<b>后面的 K 线不会一次放出来</b>:按 <b>▶ 下一根</b>(或方向键 →)一根一根走,
   <b>⏩ 自动</b>(空格)会播到结算那一根为止。止损和目标<b>各自独立按 ATR 设</b>,
@@ -1270,9 +1270,20 @@ function ruleLight(q){
                (onBar ? `且前一根 ${sr(p1)} 为负`
                       : `前一根 ${sr(p1)} 还没到阈值、再前一根 ${sr(p2)} 为负`) +
                `——阈值与翻转都满足。${lightStat("green")}`};
-  const why = now < DR_DECISION
-    ? `dr1 ${sr(now)} 没到 ${DR_DECISION}`
-    : `身后两根都不是负的，不算翻转`;
+  /* Three different reasons, and they send you to different places on the
+     chart. The middle one only exists because the signal fires once: a
+     flip followed by two bars over the threshold is one green, on the
+     first of them. */
+  let why;
+  if (now < DR_DECISION)
+    why = `dr1 ${sr(now)} 没到 ${DR_DECISION}`;
+  else if (p1 == null || p2 == null)
+    why = `前面不够两根 dr1，判不了翻转`;
+  else if (p1 >= DR_DECISION && p2 < 0)
+    why = `翻转在再前一根 ${sr(p2)}，而紧接着的 ${sr(p1)} 就已经越过 ` +
+          `${DR_DECISION}——绿灯是那一根，这一根只是延续`;
+  else
+    why = `身后两根 ${sr(p1)}、${sr(p2)} 都不是负的，不算翻转`;
   return {k: "amber", t: "规则：不触发", d: `${why}。`};
 }
 
@@ -2143,6 +2154,15 @@ function loadSet(conf){
   .then(([R, d]) => {
     if (R){ BUCKETS = R.buckets||{}; PA = R.pa||{}; CROSS = R.cross||{};
             ALLIN = R.allin||null; RMETA = R; }
+    /* The intro's two headline rates, from the set actually loaded. Typed
+       in by hand they went stale the same way the light's counts did. */
+    const dr = R && R.dr;
+    if (dr && dr["dr1|≥0"] && dr["dr1|<0"]){
+      const pct = (s) => ` ${(s[1]*100).toFixed(0)}%（n=${s[0]}）`;
+      const hi = $("dr-hi"), lo = $("dr-lo");
+      if (hi) hi.textContent = pct(dr["dr1|≥0"]);
+      if (lo) lo.textContent = pct(dr["dr1|<0"]);
+    }
     QS = orderFor(conf, d || []); ans = {}; idx = 0;
     if (!QS.length){
       $("prog").textContent = "没有题目";
