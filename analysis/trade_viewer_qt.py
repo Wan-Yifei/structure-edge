@@ -5536,6 +5536,40 @@ class TradeViewerQt(QMainWindow):
 
     # ── Tick profile (single candle on hover) ─────────────────────────────────
 
+    def _fit_profile_y(self, pw, prices, bin_h: float = 0.0,
+                       y_lo: float | None = None,
+                       y_hi: float | None = None) -> None:
+        """Y range from the panel's OWN bars, not the price chart's viewport.
+
+        Copying the chart's Y made the two line up, which is worth having
+        only while the chart is zoomed near this candle. It is not, in the
+        home view or any time an option wall stretches the axis: a minute
+        of ticks spans cents against an axis spanning dollars, and every
+        bar collapses into one sliver.
+
+        The candle's own high/low are taken into the range when the caller
+        has them, so a wick that traded nothing still shows as empty space
+        rather than being cropped out of the picture.
+        """
+        if not prices:
+            return
+        lo, hi = min(prices), max(prices)
+        if bin_h:
+            hi += bin_h
+        if y_lo is not None:
+            lo = min(lo, y_lo)
+        if y_hi is not None:
+            hi = max(hi, y_hi)
+        span = hi - lo
+        if span <= 0:
+            # Every print at one price -- a doji with one price level. Give
+            # it a sliver of its own value to sit in; a zero-height view
+            # renders nothing at all.
+            span = max(abs(hi) * 0.001, 0.01)
+            lo, hi = lo - span / 2, hi + span / 2
+        pad = span * 0.10
+        pw.setYRange(lo - pad, hi + pad, padding=0)
+
     def _draw_tick_profile(self, pd_: dict, header: str,
                            y_lo: float | None = None,
                            y_hi: float | None = None) -> None:
@@ -5602,7 +5636,8 @@ class TradeViewerQt(QMainWindow):
         bin_h = max(bin_h, 0.001)
 
         if self._ind("tick_vp"):
-            self._draw_tick_vp(prices, buys, sells, neutrals, bin_h, header)
+            self._draw_tick_vp(prices, buys, sells, neutrals, bin_h, header,
+                               y_lo=y_lo, y_hi=y_hi)
             return
 
         buys_arr    = np.array(buys,     dtype=float)
@@ -5721,13 +5756,12 @@ class TradeViewerQt(QMainWindow):
         # here: it keeps the padding behaviour this view has always had.
         pw.getPlotItem().vb.updateAutoRange()
 
-        # Sync Y range to current main chart viewport so profile aligns spatially.
-        # sigRangeChanged doesn't fire on hover, so we apply it once after drawing.
-        _, (ylo, yhi) = self._plot_c.vb.viewRange()
-        pw.setYRange(ylo, yhi, padding=0)
+        self._fit_profile_y(pw, prices, bin_h, y_lo, y_hi)
 
     def _draw_tick_vp(self, prices: list, buys: list, sells: list,
-                      neutrals: list, bin_h: float, header: str) -> None:
+                      neutrals: list, bin_h: float, header: str,
+                      y_lo: float | None = None,
+                      y_hi: float | None = None) -> None:
         """Render the same tick data as a volume profile: one bar per price
         level for total traded volume, plus POC / VAH / VAL.
 
@@ -5804,11 +5838,7 @@ class TradeViewerQt(QMainWindow):
             f"&nbsp;<span style='color:{_RED}'>POC {poc:.2f}</span>"
         ), **{"size": "7pt"})
 
-        # Same one-shot Y sync the order-flow view does: hover redraws do not
-        # fire sigRangeChanged, so the alignment with the main chart has to be
-        # reapplied after each draw.
-        _, (ylo, yhi) = self._plot_c.vb.viewRange()
-        pw.setYRange(ylo, yhi, padding=0)
+        self._fit_profile_y(pw, prices, bin_h, y_lo, y_hi)
 
     def _show_tick_profile(self, candle_idx: int) -> None:
         if self._range_region is not None:
