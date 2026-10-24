@@ -41,6 +41,7 @@ import faulthandler
 import json
 import os
 import pathlib
+import socket
 import sqlite3
 import sys
 import threading
@@ -405,6 +406,36 @@ def _bucket_ticks(rows, candle_mins: int,
             elif md == "SELL":
                 buckets[bucket][r["price"]]["off_sell"] += vol
     return dict(buckets)
+
+
+# Where the option-chain context connects. Named so the probe below and
+# the constructor that follows it cannot drift apart.
+_OPEND_HOST, _OPEND_PORT = "127.0.0.1", 11111
+
+
+def _opend_listening(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Is anything accepting connections on the OpenD port?
+
+    Worth asking because OpenQuoteContext does not answer it: given a
+    refused port it retries forever on the calling thread instead of
+    raising. Constructed during the viewer's __init__, that means the
+    window never appears when OpenD is not running. Measured on this
+    machine: the TCP connect is refused in ~1ms while the constructor was
+    still spinning in network_manager.poll after twenty seconds.
+
+    A listening socket is not a working OpenD -- it may still be starting
+    up or wedged -- so this only rules out the case that is both common
+    and cheap to detect.
+    """
+    s = socket.socket()
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 def load_local_ticks(code: str, date_str: str, tf: str,
@@ -1898,6 +1929,9 @@ class TradeViewerQt(QMainWindow):
         self._live_kl_key:  tuple | None        = None
         self._warmup:       pd.DataFrame | None = None
         self._ticks:        dict | None         = None
+        # So the "OpenD not listening" line is logged on transitions
+        # rather than on every poll.
+        self._opend_warned: bool                = False
         # Incremental cursor for TODAY's ticks, the one day that cannot be
         # cached because it is still being written. See load_day_live.
         self._tick_live_state: dict                = {}
@@ -3588,8 +3622,22 @@ class TradeViewerQt(QMainWindow):
     def _ensure_option_ctx(self) -> None:
         if self._option_ctx is not None:
             return
+        # Probe first. OpenQuoteContext blocks indefinitely rather than
+        # raising when OpenD is not up, and this runs on the GUI thread
+        # from __init__ -- see _opend_listening.
+        if not _opend_listening(_OPEND_HOST, _OPEND_PORT):
+            if not self._opend_warned:
+                self._opend_warned = True
+                self._log(f"OpenD not listening on {_OPEND_HOST}:"
+                          f"{_OPEND_PORT} — option chain idle, will start "
+                          f"on its own once it is up")
+            return
         try:
-            self._option_ctx = OpenQuoteContext(host="127.0.0.1", port=11111)
+            self._option_ctx = OpenQuoteContext(host=_OPEND_HOST,
+                                                port=_OPEND_PORT)
+            if self._opend_warned:
+                self._opend_warned = False
+                self._log("OpenD is up — option chain starting")
         except Exception as exc:
             self._log(f"Option context connect failed: {exc}")
             self._option_ctx = None
