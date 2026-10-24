@@ -2902,6 +2902,20 @@ class TradeViewerQt(QMainWindow):
         self._plot_c.addItem(self._ob_legend, ignoreBounds=True)
         self._plot_c.vb.sigRangeChanged.connect(self._pin_ob_legend)
 
+        # ── DCVD light (bottom-right, above the chandelier label) ─────────────
+        # Lives on the price chart rather than in the DCVD panel: at 7pt in a
+        # strip a few dozen pixels tall it could not be read, and the reading
+        # it carries is about the price in front of you.
+        self._dcvd_light = pg.TextItem(
+            anchor=(1.0, 1.0),
+            fill=pg.mkBrush(_qc(_BG_TIP, 200)),
+        )
+        self._dcvd_light.setFont(QFont("Monospace", 13, QFont.Weight.Bold))
+        self._dcvd_light.setZValue(61)
+        self._dcvd_light.setVisible(False)
+        self._plot_c.addItem(self._dcvd_light, ignoreBounds=True)
+        self._plot_c.vb.sigRangeChanged.connect(self._pin_dcvd_light)
+
         # ── Chandelier exit suggestion label (bottom-right) ─────────────────────
         self._chandelier_label = pg.TextItem(
             anchor=(1.0, 1.0),
@@ -3216,6 +3230,11 @@ class TradeViewerQt(QMainWindow):
             self._plot_adi.setTitle(f"{code}  A/D", color=_FG, size="8pt")
         self._set_subplot_row_visible(self._plot_adi, 4, show_adi)
         show_dcvd = self._ind("dcvd")
+        # The light lives on the price chart now, so turning the panel off has
+        # to take it down too -- otherwise it hangs there showing whatever the
+        # last draw left in it.
+        if not show_dcvd:
+            self._dcvd_light.setVisible(False)
         if show_dcvd:
             self._plot_dcvd.setTitle(f"{code}  DCVD", color=_FG, size="8pt")
         self._set_subplot_row_visible(self._plot_dcvd, 5, show_dcvd)
@@ -4672,27 +4691,22 @@ class TradeViewerQt(QMainWindow):
                 self._plot_dcvd.addItem(bars)
                 self._dcvd_items.append(bars)
 
-        # The light: the newest bar's band, pinned to the panel's top-right.
-        # The newest bar is still forming in Live mode, so this is the
-        # running reading for the minute in progress, not a settled one --
-        # it can change until the bar closes, and that is the honest thing
-        # for it to do rather than lag a minute behind the tape.
+        # The light, on the PRICE chart. The newest bar is still forming in
+        # Live mode, so this is the running reading for the minute in
+        # progress, not a settled one -- it can change until the bar closes,
+        # and that is the honest thing for it to do rather than lag a minute
+        # behind the tape.
         last_v = next((v for v in reversed(dcvd) if np.isfinite(v)), None)
-        if last_v is not None:
+        if last_v is None:
+            self._dcvd_light.setVisible(False)
+        else:
             col = next(c for lo, c in DCVD_LIGHT if last_v >= lo)
-            _, _, p99 = dcvd_scale(self._dcvd_minutes())
-            # Small, and no border: it sits over the newest bars, which
-            # are the ones being read. A badge that has to be looked
-            # past to see the data it describes is worse than no badge.
-            lbl = pg.TextItem(
-                text=f"\u25cf{last_v:+.2f}", color=col,
-                anchor=(1.0, 0.0),
-                fill=pg.mkBrush(_qc(_BG_TIP, 150)))
-            lbl.setFont(QFont("Monospace", 7))
-            lbl.setZValue(20)
-            self._plot_dcvd.addItem(lbl, ignoreBounds=True)
-            self._dcvd_items.append(lbl)
-            lbl.setPos(n - 0.5, p99 * 1.02)
+            # Named, unlike the old badge: in the DCVD panel the context said
+            # what the number was, and on the price chart nothing does.
+            self._dcvd_light.setText(f"\u25cf DCVD {last_v:+.2f}",
+                                     color=col)
+            self._dcvd_light.setVisible(True)
+            self._pin_dcvd_light()
 
         # The slower reading sits behind as context. 'finite' breaks the line
         # at bars the floor rejected rather than bridging them.
@@ -6096,6 +6110,19 @@ class TradeViewerQt(QMainWindow):
                 labelOpts={"color": _FG, "position": 0.12})
             self._plot_c.addItem(a)
             self._atrstop_items.append(a)
+
+    def _pin_dcvd_light(self, *_) -> None:
+        """Bottom-right of the candle view, one row up when the chandelier
+        label is there -- they share the corner."""
+        if not self._dcvd_light.isVisible():
+            return
+        xlo, xhi = self._plot_c.vb.viewRange()[0]
+        ylo, yhi = self._plot_c.vb.viewRange()[1]
+        x_pad = (xhi - xlo) * 0.01
+        y_pad = (yhi - ylo) * 0.015
+        row = ((yhi - ylo) * 0.055
+               if self._chandelier_label.isVisible() else 0.0)
+        self._dcvd_light.setPos(xhi - x_pad, ylo + y_pad + row)
 
     def _pin_chandelier_label(self, *_) -> None:
         """Re-anchor the chandelier suggestion label to the bottom-right of the candle view."""

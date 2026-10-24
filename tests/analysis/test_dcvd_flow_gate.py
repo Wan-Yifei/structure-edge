@@ -192,7 +192,12 @@ class TestToolbarFold:
 
 
 class TestTheLight:
-    """Three bands on the newest bar, top-right of the DCVD panel.
+    """Three bands on the newest bar, bottom-right of the PRICE chart.
+
+    It was 7pt in the DCVD strip and could not be read; the panel is a few
+    dozen pixels tall. It is a persistent item now rather than one rebuilt
+    per draw, so these look it up by name instead of digging it out of the
+    per-draw item list.
 
     Level only. The flip -- the rule's other half -- is already on screen:
     a red bar followed by a green one IS the flip, so a light repeating it
@@ -204,8 +209,16 @@ class TestTheLight:
 
     @staticmethod
     def _label(v):
-        return next((i for i in v._dcvd_items
-                     if type(i).__name__ == "TextItem"), None)
+        return v._dcvd_light if v._dcvd_light.isVisible() else None
+
+    def test_it_sits_on_the_price_chart_not_in_the_panel(self, viewer):
+        """The whole point of the move. A light back in the DCVD strip is
+        the unreadable one, and nothing else in these tests would notice."""
+        draw(viewer, steady(40) + [(9000, 1000)])
+        assert viewer._dcvd_light in viewer._plot_c.items
+        assert viewer._dcvd_light not in viewer._plot_dcvd.items
+        assert not any(type(i).__name__ == "TextItem"
+                       for i in viewer._dcvd_items),             "a second light is still being drawn into the DCVD panel"
 
     def test_each_band_gets_its_own_colour(self, viewer):
         from analysis.trade_viewer_qt import DCVD_LIGHT
