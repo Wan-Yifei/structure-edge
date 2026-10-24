@@ -478,6 +478,38 @@ if (/FX = c => PAD_L \+ \(c \/ NC\) \* W;/.test(src))
   throw new Error("the flow strip is spanning the full plot width again");
 console.log("ok   订单流条带右边缘对齐决策线，未来区下方留空");
 
+/* The per-period panel: grouped by the question's month, calendar order,
+   with the excess over the mechanical entry stated per month. */
+{
+  /* Re-render: later blocks in this file answered more questions, and the
+     panel left over from the earlier report() call describes the set as
+     it stood then. Comparing that against the current answers compares
+     two different moments. */
+  api.report();
+  const rowsHtml = els["period"].innerHTML || "";
+  const months = [...rowsHtml.matchAll(/(\d{4}-\d{2})（/g)].map(m => m[1]);
+  if (months.length < 1)
+    throw new Error("the period table rendered no rows");
+  const sorted = months.slice().sort();
+  if (String(months) !== String(sorted))
+    throw new Error(`periods are not in calendar order: ${months}`);
+  if (new Set(months).size !== months.length)
+    throw new Error("a month appears twice -- grouping is not by month");
+
+  /* Every month present among the ANSWERED questions has to appear; a
+     panel that quietly dropped one would understate exactly the kind of
+     period skew it exists to expose. */
+  const answered = api.getQS().filter(q => api.isAnswered(q.id));
+  const want = [...new Set(answered.map(q => q.day.slice(0, 7)))].sort();
+  if (String(months) !== String(want))
+    throw new Error(`months shown ${months} but answered span ${want}`);
+
+  if (!/超额/.test(rowsHtml))
+    throw new Error("the period rows should state the excess over the " +
+                    "mechanical entry, not the raw R");
+  console.log("ok   分时期：按题目月份分组、日历序，并给出相对机械的超额");
+}
+
 console.log("\nREPORT OK");
 
 /* Layout. Two lines of caption used to be drawn INSIDE the strip's box, in

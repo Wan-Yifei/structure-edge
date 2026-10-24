@@ -179,6 +179,15 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
     </div>
     <ul class="note" id="cv-read"></ul>
 
+    <h2>分时期</h2>
+    <p class="hint" id="pd-note"></p>
+    <div class="card" style="margin-bottom:10px">
+      <div class="meta" id="pd-leg"></div>
+      <canvas id="cv-pd"></canvas>
+    </div>
+    <table class="score"><tbody id="period"></tbody></table>
+    <ul class="note" id="pd-read"></ul>
+
     <h2>读法</h2>
     <ul class="note" id="read"></ul>
   </div>
@@ -1573,6 +1582,9 @@ function report(){
   notes.push(`<b>这不是收益评估。</b>${A.length} 题,样本量只够看倾向,` +
     "同一套题做第二遍也不算数。");
   $("read").innerHTML = notes.map(t => `<li>${t}</li>`).join("");
+  try{ drawPeriods(A); }catch(e){
+    $("pd-note").textContent = "分时期图未能绘制：" + e.message;
+  }
   try{ drawCurves(A); }catch(e){
     /* A broken chart must not take the scorecard down with it. */
     $("cv-note").textContent = "曲线画不出来：" + e.message;
@@ -1661,6 +1673,139 @@ function curveStats(rs){
   boots.sort((a,b)=>a-b);
   return {dd, ddPct: deeper/N, trend: tr, trendP: bigTrend/N, tot,
           rLo: boots[Math.floor(.025*N)], rHi: boots[Math.floor(.975*N)]};
+}
+
+/* ── By period ─────────────────────────────────────────────────────────
+   Which stretch of tape a question came from, as opposed to when it was
+   answered. These are different axes and the difference is not academic:
+   answering in a shuffled order means a run of answers can sit almost
+   entirely inside one quarter, and a score that rises with the calendar
+   of the QUESTIONS is a statement about the market, not about you. */
+function monthsOf(A){
+  const by = {};
+  for (const a of A){
+    if (!a.q || !a.q.day) continue;
+    const m = a.q.day.slice(0, 7);
+    const b = (by[m] = by[m] || {n:0, ent:0, wins:0, r:0, base:0});
+    b.n++; b.r += a.r; b.base += settle(a.q, 1.0, 2.0).r;
+    if (a.choice === "enter"){ b.ent++; if (a.r > 0) b.wins++; }
+  }
+  return by;
+}
+
+/* One point per day: the median entry price of that day's questions.
+   Every question decides between 11:31 and 14:30, so this is a midday
+   mark and nothing more -- it is not the close and must not be read as
+   one. Built from the whole set so the line has no holes on days that
+   went unanswered. */
+function dailyMark(){
+  const by = {};
+  for (const q of QS){
+    if (!q.day || q.entry == null) continue;
+    (by[q.day] = by[q.day] || []).push(q.entry);
+  }
+  return Object.keys(by).sort().map(d => {
+    const v = by[d].sort((x,y) => x-y);
+    return {day: d, px: v[Math.floor(v.length/2)]};
+  });
+}
+
+function drawPeriods(A){
+  const by = monthsOf(A);
+  const months = Object.keys(by).sort();
+  const series = dailyMark().filter(p =>
+    months.includes(p.day.slice(0, 7)));
+  const tok = k => getComputedStyle(document.documentElement)
+                     .getPropertyValue(k).trim();
+  const H = 190, L = 46, R = 96, T = 28, B = 26;
+  const cv = $("cv-pd");
+  const g = cv.getContext("2d");
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = CVW*dpr; cv.height = H*dpr;
+  cv.style.aspectRatio = CVW + "/" + H;
+  g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,CVW,H);
+
+  if (series.length < 2){
+    $("pd-note").textContent = "题目跨度不足一天，画不出走势。";
+    $("period").innerHTML = ""; return;
+  }
+  const px = series.map(p => p.px);
+  const lo = Math.min(...px), hi = Math.max(...px);
+  const pad = (hi - lo) * 0.12 || 1;
+  const X = i => L + i/(series.length-1)*(CVW-L-R);
+  const Y = v => T + (hi+pad - v)/((hi+pad)-(lo-pad))*(H-T-B);
+
+  /* Month bands behind everything, tinted by whether the trader beat the
+     mechanical entry over that month's questions. */
+  let i0 = 0;
+  for (let i = 1; i <= series.length; i++){
+    const cur = series[Math.min(i, series.length-1)].day.slice(0,7);
+    const prev = series[i-1].day.slice(0,7);
+    if (i === series.length || cur !== prev){
+      const b = by[prev];
+      if (b){
+        const d = (b.r - b.base) / b.n;
+        g.fillStyle = d >= 0 ? tok("--ok") : tok("--bad");
+        g.globalAlpha = Math.min(0.16, 0.04 + Math.abs(d)*0.5);
+        g.fillRect(X(i0), T, Math.max(1, X(i-1)-X(i0)), H-T-B);
+        g.globalAlpha = 1;
+        g.fillStyle = tok("--ink-3");
+        g.font = '11px ' + tok("--mono");
+        g.textAlign = "center";
+        const mid = (X(i0)+X(i-1))/2;
+        g.fillText(prev.slice(5) + "月", mid, T-16);
+        g.fillStyle = d >= 0 ? tok("--ok") : tok("--bad");
+        g.fillText((d>=0?"+":"") + d.toFixed(3) + " R/题", mid, T-4);
+      }
+      i0 = i-1;
+    }
+  }
+  g.strokeStyle = tok("--line");
+  g.beginPath(); g.moveTo(L, H-B+.5); g.lineTo(CVW-R, H-B+.5); g.stroke();
+  g.fillStyle = tok("--ink-3"); g.font = '11px ' + tok("--mono");
+  g.textAlign = "right"; g.textBaseline = "middle";
+  for (const v of [lo, (lo+hi)/2, hi]) g.fillText(v.toFixed(0), L-6, Y(v));
+
+  g.strokeStyle = tok("--acc"); g.lineWidth = 1.6;
+  g.beginPath();
+  series.forEach((p, i) => i ? g.lineTo(X(i), Y(p.px))
+                             : g.moveTo(X(i), Y(p.px)));
+  g.stroke();
+
+  $("pd-leg").innerHTML =
+    '<span style="color:var(--acc)">—</span> SOXL 每日午盘价（题目入场价中位数）' +
+    '　<span style="color:var(--ok)">■</span> 你赢过机械全进' +
+    '　<span style="color:var(--bad)">■</span> 没赢过';
+  $("pd-note").textContent =
+    "横轴是题目所属日期，不是答题顺序。带色底纹是你在那个月相对「全部进场 " +
+    "1 ATR 止损 / 2R」的每题超额。";
+
+  const rows = [];
+  for (const m of months){
+    const b = by[m];
+    const wr = b.ent ? `${Math.round(100*b.wins/b.ent)}%` : "—";
+    const d = (b.r - b.base) / b.n;
+    rows.push([`${m}（${b.n} 题，进 ${b.ent}）`,
+      `你 ${sr(b.r/b.n, 3)} R/题　机械 ${sr(b.base/b.n, 3)} R/题　` +
+      `<b style="color:${d>=0?"var(--ok)":"var(--bad)"}">超额 ${sr(d, 3)}</b>` +
+      `　入场后胜率 ${wr}`]);
+  }
+  $("period").innerHTML = rows.map(([k,v]) =>
+    `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+
+  const best = months.slice().sort((a,b) =>
+    by[b].base/by[b].n - by[a].base/by[a].n);
+  const note = [];
+  if (months.length > 1){
+    const hiM = best[0], loM = best[best.length-1];
+    note.push(`<b>月份之间，题目本身的难易差得不小。</b>机械全进在 ` +
+      `${hiM} 是 ${sr(by[hiM].base/by[hiM].n, 3)} R/题，在 ${loM} 是 ` +
+      `${sr(by[loM].base/by[loM].n, 3)} R/题。曲线那张图按答题顺序走，` +
+      `而答题顺序和月份不是一回事 —— 一段上坡可能只是那阵子在答好做的月份。`);
+  }
+  note.push(`<b>看超额那一列，不要看总 R。</b>总 R 高的月份可能只是题好做；` +
+    `超额为正才说明你的挑选和参数在那个月加了分。`);
+  $("pd-read").innerHTML = note.map(t => `<li>${t}</li>`).join("");
 }
 
 function drawCurves(A){
