@@ -158,23 +158,41 @@ def is_displacement_candle(
 def compute_volume_profile(
     klines: pd.DataFrame,
     n_bins: int = 100,
+    edges: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
     """Build a volume-at-price profile over the given kline window.
 
     Each bar's volume is distributed uniformly across the price bins it spans.
     Returns (edges, bin_vols) where edges has n_bins+1 elements.
     Returns (None, None) when the price range is degenerate.
+
+    `edges` supplies the grid instead of deriving one from this window's
+    own high and low. Callers comparing several windows need it: with a
+    per-window grid, bin k is a different price in each one and a level
+    cannot be followed from one to the next. Bars outside the supplied
+    grid are clipped into the end bins rather than dropped, so the totals
+    still add up to the window's volume.
     """
     lows  = klines["low"].values.astype(float)
     highs = klines["high"].values.astype(float)
     vols  = klines["volume"].values.astype(float)
 
-    p_min, p_max = lows.min(), highs.max()
-    if p_min >= p_max:
-        return None, None
+    if edges is not None:
+        edges = np.asarray(edges, dtype=float)
+        if edges.size < 2:
+            return None, None
+        n_bins = edges.size - 1
+        p_min = float(edges[0])
+        bin_size = float(edges[1] - edges[0])
+        if bin_size <= 0:
+            return None, None
+    else:
+        p_min, p_max = lows.min(), highs.max()
+        if p_min >= p_max:
+            return None, None
+        edges    = np.linspace(p_min, p_max, n_bins + 1)
+        bin_size = edges[1] - edges[0]
 
-    edges    = np.linspace(p_min, p_max, n_bins + 1)
-    bin_size = edges[1] - edges[0]
     bin_vols = np.zeros(n_bins)
 
     lo_bins = np.clip(((lows  - p_min) / bin_size).astype(int), 0, n_bins - 1)

@@ -2476,12 +2476,13 @@ class TradeViewerQt(QMainWindow):
         self._liq_hm_btn.clicked.connect(self._on_liq_hm_toggle)
         tb3.addWidget(self._liq_hm_btn)
 
-        self._mvp_btn = QPushButton("多日 VP")
+        self._mvp_btn = QPushButton("Multi-Day VP")
         self._mvp_btn.setCheckable(True)
         self._mvp_btn.setChecked(False)
         self._mvp_btn.setToolTip(
-            "另开一个窗口，把最近几个交易日的成交分布并排画出来，\n"
-            "并把相邻日的价值区上下沿连起来——看的是价值区往哪边移。")
+            "Opens a window with the last few sessions' volume profiles\n"
+            "side by side, value-area edges joined between them -- for\n"
+            "watching which way value is migrating.")
         self._mvp_btn.clicked.connect(self._on_mvp_toggle)
         tb3.addWidget(self._mvp_btn)
 
