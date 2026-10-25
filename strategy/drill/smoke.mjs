@@ -1414,61 +1414,44 @@ console.log("\nKEYS OK");
 console.log("\nARROWS OK");
 
 
-/* ---- days with no tick archive --------------------------------------- *
- * 44 of 1789 questions have no delta_r anywhere in their window. Checked
+/* ---- days with no tick archive are left out ------------------------- *
+ * 44 of 1789 questions had no delta_r anywhere in their window. Checked
  * against db/ticks.db the data is not there to read -- on 2026-05-20,
- * 07-01 and 07-15 the archive has nothing across 11:00-14:00, which is
- * where every decision point sits. They keep training the structural
- * read, so they stay; they just stop going first and the panel stops
- * blaming thin flow for it.                                             */
+ * 07-01 and 07-15 the archive holds nothing across 11:00-14:00, which is
+ * where every decision point sits, and 06-05 only starts at 12:41.
+ *
+ * They were kept for a while on the theory that they still train the
+ * structural read. That is not how they get used -- they get passed on
+ * sight -- so they are filtered out at load, and the count is shown
+ * rather than the questions silently vanishing.                        */
 {
-  const QS = api.getQS();
-  const dead = QS.filter(q => api.noFlow(q));
-  if (!dead.length) throw new Error("expected some archive-less questions");
-  console.log(`ok   题库里 ${dead.length} / ${QS.length} 题整窗无 Δr`);
-
-  for (const k of Object.keys(localStorage._d))
-    if (/^drill:\d{4}-/.test(k) || /^drill:mine/.test(k))
-      delete localStorage._d[k];
   api.loadSet("1");
   await new Promise((r) => setTimeout(r, 300));
-  els["b-bal"].checked = true;
+  const raw = global.window.DRILL_c1;
+  const dead = raw.filter(q => api.noFlow(q));
+  if (!dead.length)
+    throw new Error("fixture: the bank has no archive-less questions left");
 
-  /* Within one bucket, a question that can show the signal goes first. */
-  const QS2 = api.getQS();
-  const target = QS2.find(q => api.noFlow(q));
-  const cell = api.cellOf(target);
-  const live = QS2.filter(q => api.cellOf(q) === cell && !api.noFlow(q));
-  if (!live.length)
-    throw new Error("fixture needs a bucket holding both kinds");
-  let seen = 0, guard = 0;
-  while (guard++ < 1200){
-    const i = api.nextByDeficit();
-    if (i < 0) break;
-    const q = QS2[i];
-    if (api.cellOf(q) === cell){
-      if (api.noFlow(q)){ seen = -1; break; }      // served too early
-      seen++;
-      if (seen >= live.length) break;              // all the live ones went
-    }
-    els["s-stop"].value = "1.0"; els["s-tgt"].value = "2.0";
-    api.goto1(String(i + 1)); api.choose("pass"); api.submit();
-  }
-  if (seen < 0)
-    throw new Error("an archive-less question was served while its " +
-                    "bucket still had usable ones");
-  console.log(`ok   缺口出题：同桶内 ${live.length} 道有 Δr 的全部先出`);
+  const QS = api.getQS();
+  if (QS.some(q => api.noFlow(q)))
+    throw new Error("an archive-less question made it into the set");
+  if (QS.length !== raw.length - dead.length)
+    throw new Error(`${raw.length} - ${dead.length} should be ${QS.length}`);
+  console.log(`ok   整窗无 Δr 的 ${dead.length} 题被排除（${raw.length} → ${QS.length}）`);
 
-  /* The panel names the right reason. */
-  ctxText.length = 0;          // it accumulates across every draw above
-  api.goto1(String(QS2.indexOf(target) + 1));
-  const said = ctxText.map(t => t.txt).join(" | ");
-  if (!/没有逐笔归档/.test(said))
-    throw new Error("the panel should say the archive is missing: " +
-                    said.slice(0, 300));
-  if (/可定向成交太少/.test(said))
-    throw new Error("it blamed thin flow for a missing archive");
-  console.log("ok   面板说的是「没有逐笔归档」，不是「可定向成交太少」");
+  if (!/没有逐笔归档/.test(els.prog.textContent))
+    throw new Error("the count should be stated, not silently dropped: " +
+                    els.prog.textContent);
+  console.log("ok   题号栏说明了排除了多少题");
+
+  /* The ledger set must survive: all 129 of those carry flow, and a
+     filter that ate them would empty the set. */
+  api.loadSet("mine");
+  await new Promise((r) => setTimeout(r, 300));
+  if (!api.getQS().length) throw new Error("the filter emptied 我的交易");
+  console.log(`ok   「我的交易」不受影响（${api.getQS().length} 题）`);
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
 }
 
 console.log("\nNOFLOW OK");

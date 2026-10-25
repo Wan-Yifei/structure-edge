@@ -249,6 +249,7 @@ let navBack = [];
    up here because render() clears it and render runs before the keyboard
    section near the bottom of this script. */
 let kbMode = null;
+let DROPPED = 0;   // archive-less questions left out of this set
 let step = 0, timer = null;   // bars of the future played so far
 let _geo = null, _hover = null;   // chart geometry + cursor, for the crosshair
 
@@ -715,20 +716,7 @@ function draw(q, reveal){
     // minute can carry plenty of prints and still be blanked for having
     // too little that was directional. The old label said 无逐笔数据,
     // which claimed more than the condition does.
-    if (noFlow(q)){
-      /* One band, not 180 tiled ones, and the honest reason: this day has
-         no tick archive, so there was never anything to be thin. */
-      g.save();
-      g.fillStyle = soft; g.globalAlpha = .55;
-      g.fillRect(PAD_L + 1, dy0 + 1, W - 2, DR_H - 2);
-      g.fillStyle = ink3; g.globalAlpha = .85;
-      g.font = "12px ui-monospace,monospace";
-      g.textAlign = "center"; g.textBaseline = "middle";
-      g.fillText("这一天没有逐笔归档，Δr 全程不可用",
-                 PAD_L + W / 2, dy0 + DR_H / 2);
-      g.textAlign = "left";
-      g.restore();
-    } else {
+    {
       const ser = q.drs1 || [];
       let st = -1;
       for (let i = 0; i <= last; i++){
@@ -1057,7 +1045,8 @@ function render(){
   const nDone = QS.filter(x => ans[x.id]).length;
   $("prog").textContent = `第 ${idx+1} / ${QS.length} 题` +
     (nDone && nDone < QS.length
-      ? `　（已答 ${nDone} 题排在前面，第 ${nDone+1} 题起是新的）` : "");
+      ? `　（已答 ${nDone} 题排在前面，第 ${nDone+1} 题起是新的）` : "") +
+    (DROPPED ? `　（另有 ${DROPPED} 题所在交易日没有逐笔归档，已排除）` : "");
   const rv = q.rsi[q.mark];
   const dcol = v => v == null ? "var(--ink-3)"
                   : (v >= 0 ? "var(--ok)" : "var(--bad)");
@@ -1475,20 +1464,14 @@ function nextByDeficit(){
   }
   if (bestCell === null) return -1;
   const today = QS[idx] ? QS[idx].day : null;
-  /* Four tiers, best first: has flow and a different session, has flow,
-     no flow but a different session, no flow. A question with no tick
-     archive cannot exercise the delta_r rule at all, so it goes last
-     within its bucket rather than being dropped. */
-  const tiers = [-1, -1, -1, -1];
+  let fallback = -1;
   for (let i = 0; i < QS.length; i++){
     const q = QS[i];
     if (ans[q.id] || cellOf(q) !== bestCell) continue;
-    const t = (noFlow(q) ? 2 : 0) + (q.day === today ? 1 : 0);
-    if (t === 0) return i;
-    if (tiers[t] < 0) tiers[t] = i;
+    if (q.day !== today) return i;
+    if (fallback < 0) fallback = i;
   }
-  for (const i of tiers) if (i >= 0) return i;
-  return -1;
+  return fallback;
 }
 
 function balanced(){
@@ -2586,7 +2569,15 @@ function loadSet(conf){
       if (hi) hi.textContent = pct(dr["dr1|≥0"]);
       if (lo) lo.textContent = pct(dr["dr1|<0"]);
     }
-    QS = orderFor(conf, d || []); ans = {}; idx = 0; navBack = [];
+    /* Questions whose day has no tick archive never make it into the
+       set. They were kept for a while on the theory that they still
+       train the structural read; in practice they get passed on sight,
+       so a skipped question is just a question in the way. The bank
+       files are untouched -- if the archive is ever backfilled they
+       come back by themselves. */
+    const all = d || [], usable = all.filter(q => !noFlow(q));
+    DROPPED = all.length - usable.length;
+    QS = orderFor(conf, usable); ans = {}; idx = 0; navBack = [];
     if (!QS.length){
       $("prog").textContent = "没有题目";
       $("qcard").hidden = true; $("report").hidden = true;
