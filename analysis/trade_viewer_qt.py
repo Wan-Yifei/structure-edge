@@ -1055,6 +1055,8 @@ class CandlestickItem(pg.GraphicsObject):
 
     HEATMAP_BINS = 20  # price bins per candle for heatmap
 
+    CHUNK = 128   # bars per frozen picture; see _ensure_pictures
+
     def __init__(self):
         super().__init__()
         self._klines:      pd.DataFrame | None = None
@@ -1062,18 +1064,76 @@ class CandlestickItem(pg.GraphicsObject):
         self._candle_mins: int                 = 1
         self._show_heatmap: bool               = True
         self._red_up:      bool                = False   # True = red up, green down
-        self._picture:     QPicture | None     = None
         self._rect:        QRectF              = QRectF()
+
+        # Baked pictures, replayed in order. See _ensure_pictures.
+        self._chunks:   list[QPicture]         = []
+        self._part:     QPicture | None        = None
+        self._part_rng: tuple[int, int]        = (0, 0)
+        self._last:     QPicture | None        = None
+
+        # What the baked pictures were drawn from; a change in any of it
+        # invalidates all of them.
+        self._cfg:    tuple | None             = None
+        self._anchor: str                      = ""
+
+        # Per-bar arrays, read out of the frame once in set_data.
+        self._o = self._h = self._l = self._c = None
+        self._bk: list | None                  = None
 
     def set_data(self, klines: pd.DataFrame, buckets: dict | None,
                  candle_mins: int, show_heatmap: bool = True,
-                 red_up: bool = False) -> None:
+                 red_up: bool = False,
+                 dirty_bars: set | None = None) -> None:
+        """Hand over the frame; `dirty_bars` says which bars moved.
+
+        dirty_bars is None by default and then nothing is reused -- the
+        same full rebuild this did before. A caller that knows what
+        changed (the live path) passes the bar indices, and only the
+        pictures covering those bars are dropped.
+        """
+        n = len(klines)
+        cfg = (candle_mins, show_heatmap, red_up)
+        anchor = str(klines["time_key"].iloc[0]) if n else ""
+
+        # A different series, a different setting, or a frame that
+        # shrank: nothing baked can be trusted.
+        reuse = (dirty_bars is not None and cfg == self._cfg
+                 and anchor == self._anchor and self._klines is not None
+                 and n >= len(self._klines) > 0)
+        if not reuse:
+            self._chunks.clear()
+            self._part = None
+            self._part_rng = (0, 0)
+        elif dirty_bars:
+            first = min(dirty_bars)
+            del self._chunks[first // self.CHUNK:]
+            ps, pe = self._part_rng
+            if any(ps <= b < pe for b in dirty_bars):
+                self._part = None
+        # The final bar is live by definition.
+        self._last = None
+
         self._klines       = klines
         self._buckets      = buckets
         self._candle_mins  = candle_mins
         self._show_heatmap = show_heatmap
         self._red_up       = red_up
-        self._picture      = None
+        self._cfg          = cfg
+        self._anchor       = anchor
+
+        # Read the frame out once. iterrows() over 2641 rows, with a
+        # strptime per row, was a large part of the cost of baking.
+        if n:
+            self._o = klines["open"].to_numpy(float)
+            self._h = klines["high"].to_numpy(float)
+            self._l = klines["low"].to_numpy(float)
+            self._c = klines["close"].to_numpy(float)
+            self._bk = list(bar_start_keys(klines["time_key"], candle_mins))
+        else:
+            self._o = self._h = self._l = self._c = None
+            self._bk = None
+
         if not klines.empty:
             self._rect = QRectF(
                 -0.5,
@@ -1084,16 +1144,44 @@ class CandlestickItem(pg.GraphicsObject):
         self.prepareGeometryChange()
         self.update()
 
-    # ── build QPicture once, replay on every paint ────────────────────────────
+    # ── bake pictures per chunk, replay them all on every paint ──────────────
 
-    def _build(self) -> None:
+    def _ensure_pictures(self) -> None:
+        """Bake whatever set_data dropped, and nothing else.
+
+        Bars [0, n-1) are history and the final bar is live, so the split
+        is: complete CHUNK-sized runs of history, then the remainder of
+        history, then the one live bar. A new bar moves the previous live
+        bar into `part`, which is why `part` is keyed on its range -- and
+        once `part` is CHUNK bars long it becomes a chunk and is never
+        rebaked.
+        """
+        n = len(self._klines)
+        full = (n - 1) // self.CHUNK            # complete chunks in [0, n-1)
+        del self._chunks[full:]
+        while len(self._chunks) < full:
+            i = len(self._chunks)
+            self._chunks.append(self._bake(i * self.CHUNK,
+                                           (i + 1) * self.CHUNK))
+
+        rng = (full * self.CHUNK, n - 1)
+        if self._part is None or self._part_rng != rng:
+            self._part = self._bake(*rng) if rng[1] > rng[0] else None
+            self._part_rng = rng
+
+        if self._last is None:
+            self._last = self._bake(n - 1, n)
+
+    def _bake(self, a: int, b: int) -> QPicture:
+        """One picture covering bars [a, b)."""
         pic = QPicture()
         p   = QPainter(pic)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
-        klines      = self._klines
         buckets     = self._buckets or {}
-        candle_mins = self._candle_mins
+        o_a, h_a    = self._o, self._h
+        l_a, c_a    = self._l, self._c
+        bk_a        = self._bk
 
         # Color scheme: green-up/red-down (Western) OR red-up/green-down (Chinese)
         _bull_col = _RED   if self._red_up else _GREEN
@@ -1102,23 +1190,17 @@ class CandlestickItem(pg.GraphicsObject):
         # Pre-compute per-candle data so we can do a two-pass draw
         # (bodies + heatmap first, wicks on top last).
         candle_data: list[tuple] = []
-        for i, (_, row) in enumerate(klines.iterrows()):
-            o = float(row["open"])
-            h = float(row["high"])
-            l = float(row["low"])
-            c = float(row["close"])
+        for i in range(a, b):
+            o = float(o_a[i])
+            h = float(h_a[i])
+            l = float(l_a[i])
+            c = float(c_a[i])
             body_lo = min(o, c)
             body_hi = max(o, c)
             if body_hi <= body_lo:
                 body_hi = body_lo + 0.0001
-            try:
-                bar_end = datetime.strptime(
-                    str(row["time_key"])[:16], "%Y-%m-%d %H:%M")
-                bk = candle_start(
-                    bar_end - timedelta(minutes=candle_mins), candle_mins)
-            except ValueError:
-                bk = None
-            pd_ = buckets.get(bk) if bk else None
+            bk = bk_a[i]
+            pd_ = buckets.get(bk) if bk is not pd.NaT else None
             candle_data.append((i, o, h, l, c, body_lo, body_hi, pd_))
 
         # Pass 1 — bodies + heatmap overlay
@@ -1152,7 +1234,7 @@ class CandlestickItem(pg.GraphicsObject):
                 p.drawLine(QPointF(i, l), QPointF(i, body_lo))
 
         p.end()
-        self._picture = pic
+        return pic
 
     def _draw_heatmap_overlay(self, p: QPainter, i: int,
                                low: float, high: float,
@@ -1226,9 +1308,13 @@ class CandlestickItem(pg.GraphicsObject):
     def paint(self, p: QPainter, *args) -> None:
         if self._klines is None or self._klines.empty:
             return
-        if self._picture is None:
-            self._build()
-        self._picture.play(p)
+        self._ensure_pictures()
+        for pic in self._chunks:
+            pic.play(p)
+        if self._part is not None:
+            self._part.play(p)
+        if self._last is not None:
+            self._last.play(p)
 
     def boundingRect(self) -> QRectF:
         return self._rect
@@ -2820,6 +2906,11 @@ class TradeViewerQt(QMainWindow):
         self._ob_item = ObItem()
         self._plot_c.addItem(self._ob_item)
 
+        # Last frame's drawing inputs, for _dirty_bars. Holding the
+        # buckets mapping is deliberate: the id() comparison is only
+        # valid while those dicts are alive.
+        self._prev_frame: dict | None = None
+
         self._bos_items:     list = []  # PlotCurveItem + TextItem per signal
         # Pool of delta labels, one per candle. Kept in the scene across
         # renders and reused -- see _draw_delta.
@@ -3846,9 +3937,13 @@ class TradeViewerQt(QMainWindow):
         if show_hm:
             self._pin_heatmap_legend()
 
-        # Candlesticks
-        self._candle_item.set_data(klines, buckets if show_hm else None,
-                                   cm, show_heatmap=show_hm, red_up=red_up)
+        # Candlesticks. The dirty set is what lets the item keep the
+        # chunks it already baked; see CandlestickItem._ensure_pictures.
+        hm_buckets = buckets if show_hm else None
+        self._candle_item.set_data(klines, hm_buckets, cm,
+                                   show_heatmap=show_hm, red_up=red_up,
+                                   dirty_bars=self._dirty_bars(
+                                       klines, hm_buckets, cm))
 
         # FVG zones
         self._fvg_item.set_data(
@@ -4107,6 +4202,65 @@ class TradeViewerQt(QMainWindow):
         self._bk_sig = sig
         self._bk_cache = bar_start_keys(tk, cm)
         return self._bk_cache
+
+    def _dirty_bars(self, klines: pd.DataFrame, buckets: dict | None,
+                    cm: int) -> set | None:
+        """Bar indices whose drawing inputs changed since the last render.
+
+        None means "everything", which is what the caller assumed before
+        there was a dirty set at all. Returned for the first render and
+        for any frame that is not simply the previous one grown at the
+        right-hand edge.
+        """
+        n = len(klines)
+        anchor = str(klines["time_key"].iloc[0]) if n else ""
+        prev = self._prev_frame
+        key = (cm, anchor, buckets is None)
+
+        if prev is None or prev["key"] != key or not n or n < prev["n"]:
+            self._remember_frame(klines, buckets, cm, key)
+            return None
+
+        m = prev["n"]                       # bars both frames have
+        # The bar that was last is no longer last, and anything appended
+        # is new, so both are redrawn regardless of their contents.
+        dirty = set(range(m - 1, n))
+
+        o = klines["open"].to_numpy(float)
+        h = klines["high"].to_numpy(float)
+        low = klines["low"].to_numpy(float)
+        c = klines["close"].to_numpy(float)
+        moved = (  (o[:m] != prev["o"]) | (h[:m] != prev["h"])
+                 | (low[:m] != prev["l"]) | (c[:m] != prev["c"]))
+        dirty.update(np.nonzero(moved)[0].tolist())
+
+        if buckets is not None:
+            keys = self._bucket_keys(klines, cm)
+            prev_ids = prev["bid"]
+            for i in range(m):
+                if id(buckets.get(keys[i])) != prev_ids[i]:
+                    dirty.add(i)
+
+        self._remember_frame(klines, buckets, cm, key)
+        return dirty
+
+    def _remember_frame(self, klines: pd.DataFrame, buckets: dict | None,
+                        cm: int, key: tuple) -> None:
+        n = len(klines)
+        bid = []
+        if buckets is not None and n:
+            keys = self._bucket_keys(klines, cm)
+            bid = [id(buckets.get(k)) for k in keys]
+        self._prev_frame = {
+            "key": key, "n": n,
+            "o": klines["open"].to_numpy(float).copy(),
+            "h": klines["high"].to_numpy(float).copy(),
+            "l": klines["low"].to_numpy(float).copy(),
+            "c": klines["close"].to_numpy(float).copy(),
+            "bid": bid,
+            # Keeps every bucket dict alive, so the ids above stay unique.
+            "buckets": buckets,
+        }
 
     def _clear_delta_items(self) -> None:
         # Hide, do not remove: the pool exists so that a redraw costs no
