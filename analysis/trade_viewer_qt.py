@@ -121,6 +121,23 @@ _OB_BREAK = "#9e9e9e"   # breaker OB grey
 _OB_MIT   = "#ffa726"   # mitigation OB amber
 _EMA_COLS = ["#42a5f5", "#ab47bc", "#ffa726"]  # EMA 20/50/200
 
+
+def _alpha_brush(hex_: str, alpha: int):
+    """A brush at a fixed alpha, built once at import.
+
+    The delta labels reassign their fill on up to 1440 items a render and
+    it only ever takes two values, so building the brushes here beats
+    mkBrush in the loop. Same colours and same alpha the per-label
+    mkBrush(_qc(color, 180)) produced.
+    """
+    c = pg.mkColor(hex_)
+    c.setAlpha(alpha)
+    return pg.mkBrush(c)
+
+
+_DELTA_UP_BRUSH = _alpha_brush(_UP, 180)
+_DELTA_DN_BRUSH = _alpha_brush(_DOWN, 180)
+
 # Inverse-leveraged pairs. Hovering a price level on the key symbol also shows
 # where its inverse would be trading at that level, so a level picked on one
 # can be read straight off as a level on the other.
@@ -2804,7 +2821,10 @@ class TradeViewerQt(QMainWindow):
         self._plot_c.addItem(self._ob_item)
 
         self._bos_items:     list = []  # PlotCurveItem + TextItem per signal
+        # Pool of delta labels, one per candle. Kept in the scene across
+        # renders and reused -- see _draw_delta.
         self._delta_items:   list = []  # TextItem per candle
+        self._delta_used:    int  = 0   # how many of the pool are showing
         self._ema_items:     list = []  # PlotCurveItem per EMA period
         self._avwap_items:   list = []  # anchored-VWAP curve + anchor line + label
         self._option_wall_items: list = []  # Call/Put Wall + Zero Gamma lines -- cleared+redrawn each update
@@ -4089,9 +4109,17 @@ class TradeViewerQt(QMainWindow):
         return self._bk_cache
 
     def _clear_delta_items(self) -> None:
-        for item in self._delta_items:
-            self._plot_c.removeItem(item)
-        self._delta_items.clear()
+        # Hide, do not remove: the pool exists so that a redraw costs no
+        # scene churn, and dropping it here would pay that cost on every
+        # indicator toggle.
+        #
+        # This is also what keeps a short frame from showing the tail of a
+        # long one. _draw_delta is only ever called right after this, so
+        # it starts from an all-hidden pool and shows exactly the labels
+        # it draws; it does not trim a tail of its own.
+        for item in self._delta_items[:self._delta_used]:
+            item.setVisible(False)
+        self._delta_used = 0
 
     def _draw_delta(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
         lows = klines["low"].to_numpy(float)
@@ -4114,18 +4142,25 @@ class TradeViewerQt(QMainWindow):
             else:
                 txt_str = f"{sign}{delta}"
 
-            # Use bright white with a coloured fill tag so text is always readable
-            # against the dark background, regardless of heatmap overlay colour.
-            color = _UP if delta >= 0 else _DOWN
-            txt = pg.TextItem(
-                text=txt_str, color="#ffffff",
-                fill=pg.mkBrush(_qc(color, 180)),
-                anchor=(0.5, 0.0),
-            )
-            txt.setFont(QFont("Monospace", 8))
+            # Bright white on a coloured fill tag so the text stays readable
+            # against the dark background whatever the heatmap is doing.
+            n = self._delta_used
+            if n < len(self._delta_items):
+                txt = self._delta_items[n]
+            else:
+                txt = pg.TextItem(text="", color="#ffffff", anchor=(0.5, 0.0))
+                txt.setFont(QFont("Monospace", 8))
+                self._plot_c.addItem(txt, ignoreBounds=True)
+                self._delta_items.append(txt)
+            txt.setText(txt_str)
+            # No setter for the fill brush, but paint() reads the attribute
+            # directly and the constructor does nothing more than this.
+            # Two prebuilt brushes: the colour only ever takes two values,
+            # and 1440 mkBrush calls a render is not free either.
+            txt.fill = _DELTA_UP_BRUSH if delta >= 0 else _DELTA_DN_BRUSH
             txt.setPos(i, lows[i] * 0.9997)
-            self._plot_c.addItem(txt, ignoreBounds=True)
-            self._delta_items.append(txt)
+            txt.setVisible(True)
+            self._delta_used = n + 1
 
     # ── DOM window ────────────────────────────────────────────────────────────
 
