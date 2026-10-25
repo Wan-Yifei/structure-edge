@@ -270,3 +270,63 @@ class TestChunkBookkeeping:
         blank.fill(0)
         assert shot(item, 40, 40) == bytes(
             blank.constBits().asarray(blank.sizeInBytes()))
+
+
+class TestOffScreenChunksAreSkipped:
+    """paint() replays only the chunks the view can see.
+
+    The pixel tests above paint through a bare QPainter, where
+    viewRect() is None and every chunk replays -- so none of them
+    exercises the culling at all. These do.
+    """
+
+    @pytest.mark.parametrize("a,b,x0,x1,want", [
+        (0, 128, 0.0, 10.0, True),       # view inside the range
+        (0, 128, 200.0, 300.0, False),   # view entirely to the right
+        (256, 384, 0.0, 10.0, False),    # view entirely to the left
+        (0, 128, 127.4, 300.0, True),    # view starts on the last bar
+        (0, 128, 127.6, 300.0, False),   # ...and just past it
+        (128, 256, -50.0, 127.5, True),  # view ends on the first bar
+        (128, 256, -50.0, 127.4, False),  # ...and just short of it
+    ])
+    def test_the_overlap_test(self, a, b, x0, x1, want):
+        assert tv.CandlestickItem._spans(a, b, x0, x1) is want
+
+    def test_culling_does_not_change_the_picture(self, qapp, monkeypatch):
+        """Under a real view, a narrow X range must paint exactly what
+        an unculled replay of the same range paints."""
+        import pyqtgraph as pg
+
+        n = CHUNK * 3 + 20
+        kl, buckets = make(n)
+
+        def grab(cull):
+            pw = pg.PlotWidget()
+            pw.resize(400, 300)
+            item = tv.CandlestickItem()
+            item.set_data(kl, buckets, 1)
+            pw.addItem(item)
+            pw.setXRange(CHUNK + 10, CHUNK + 60, padding=0)
+            pw.setYRange(float(kl["low"].min()), float(kl["high"].max()),
+                         padding=0)
+            if not cull:
+                monkeypatch.setattr(tv.CandlestickItem, "_spans",
+                                    staticmethod(lambda *a: True))
+            img = QImage(400, 300, QImage.Format.Format_ARGB32)
+            img.fill(0)
+            p = QPainter(img)
+            pw.render(p)
+            p.end()
+            monkeypatch.undo()
+            return bytes(img.constBits().asarray(img.sizeInBytes()))
+
+        assert grab(True) == grab(False), "剔除改变了画面"
+
+    def test_a_narrow_view_replays_few_chunks(self, qapp):
+        """Counting the overlap decisions, since the saving is the whole
+        point and the pixels are identical either way."""
+        n = CHUNK * 8
+        played = [i for i in range(n // CHUNK)
+                  if tv.CandlestickItem._spans(i * CHUNK, (i + 1) * CHUNK,
+                                               CHUNK * 3.0, CHUNK * 3.0 + 50)]
+        assert played == [3], f"窄视野下仍会重放 {played}"

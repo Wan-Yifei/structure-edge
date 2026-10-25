@@ -1215,6 +1215,15 @@ class CandlestickItem(pg.GraphicsObject):
         if self._last is None:
             self._last = self._bake(n - 1, n)
 
+    @staticmethod
+    def _spans(a: int, b: int, x0: float, x1: float) -> bool:
+        """Does the bar range [a, b) overlap the view span [x0, x1]?
+
+        A bar sits from i-0.35 to i+0.35, so the range occupies
+        [a-0.5, b-0.5) in x.
+        """
+        return a - 0.5 <= x1 and b - 0.5 >= x0
+
     def _bake(self, a: int, b: int) -> QPicture:
         """One picture covering bars [a, b)."""
         pic = QPicture()
@@ -1352,11 +1361,28 @@ class CandlestickItem(pg.GraphicsObject):
         if self._klines is None or self._klines.empty:
             return
         self._ensure_pictures()
-        for pic in self._chunks:
-            pic.play(p)
-        if self._part is not None:
+
+        # Replay only the chunks the view can see. Qt pays for a
+        # QPicture's commands whether or not they land on screen, and at
+        # a 200-bar zoom 19 of the 21 chunks are off it. Each chunk's bar
+        # range is known, which is what makes this a lookup rather than a
+        # clip test. A bar is drawn from i-0.35 to i+0.35, so chunk k
+        # occupies [k*CHUNK - 0.5, (k+1)*CHUNK - 0.5).
+        vr = self.viewRect()
+        if vr is None:
+            x0, x1 = float("-inf"), float("inf")
+        else:
+            x0, x1 = vr.left() - 1.0, vr.right() + 1.0
+
+        for idx, pic in enumerate(self._chunks):
+            if idx * self.CHUNK - 0.5 > x1:
+                break                       # chunks are in bar order
+            if self._spans(idx * self.CHUNK, (idx + 1) * self.CHUNK, x0, x1):
+                pic.play(p)
+        if self._part is not None and self._spans(*self._part_rng, x0, x1):
             self._part.play(p)
-        if self._last is not None:
+        n = len(self._klines)
+        if self._last is not None and self._spans(n - 1, n, x0, x1):
             self._last.play(p)
 
     def boundingRect(self) -> QRectF:
