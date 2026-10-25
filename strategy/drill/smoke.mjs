@@ -176,7 +176,7 @@ global.clearInterval = () => {};
 const api = new Function(
   code + "\n;return {choose, submit, levels, settle, ruleLight, stepTo, loadSet, report, next," +
          "         prev, goto1, isAnswered: (id) => !!ans[id], getIdx: () => idx," +
-         "         cellOf, nextByDeficit," +
+         "         cellOf, nextByDeficit, noFlow, stopAuto," +
          "         getStep: () => step, getQS: () => QS};")();
 
 await new Promise((r) => setTimeout(r, 400));
@@ -1412,3 +1412,89 @@ console.log("\nKEYS OK");
 }
 
 console.log("\nARROWS OK");
+
+
+/* ---- days with no tick archive --------------------------------------- *
+ * 44 of 1789 questions have no delta_r anywhere in their window. Checked
+ * against db/ticks.db the data is not there to read -- on 2026-05-20,
+ * 07-01 and 07-15 the archive has nothing across 11:00-14:00, which is
+ * where every decision point sits. They keep training the structural
+ * read, so they stay; they just stop going first and the panel stops
+ * blaming thin flow for it.                                             */
+{
+  const QS = api.getQS();
+  const dead = QS.filter(q => api.noFlow(q));
+  if (!dead.length) throw new Error("expected some archive-less questions");
+  console.log(`ok   题库里 ${dead.length} / ${QS.length} 题整窗无 Δr`);
+
+  for (const k of Object.keys(localStorage._d))
+    if (/^drill:\d{4}-/.test(k) || /^drill:mine/.test(k))
+      delete localStorage._d[k];
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  els["b-bal"].checked = true;
+
+  /* Within one bucket, a question that can show the signal goes first. */
+  const QS2 = api.getQS();
+  const target = QS2.find(q => api.noFlow(q));
+  const cell = api.cellOf(target);
+  const live = QS2.filter(q => api.cellOf(q) === cell && !api.noFlow(q));
+  if (!live.length)
+    throw new Error("fixture needs a bucket holding both kinds");
+  let seen = 0, guard = 0;
+  while (guard++ < 1200){
+    const i = api.nextByDeficit();
+    if (i < 0) break;
+    const q = QS2[i];
+    if (api.cellOf(q) === cell){
+      if (api.noFlow(q)){ seen = -1; break; }      // served too early
+      seen++;
+      if (seen >= live.length) break;              // all the live ones went
+    }
+    els["s-stop"].value = "1.0"; els["s-tgt"].value = "2.0";
+    api.goto1(String(i + 1)); api.choose("pass"); api.submit();
+  }
+  if (seen < 0)
+    throw new Error("an archive-less question was served while its " +
+                    "bucket still had usable ones");
+  console.log(`ok   缺口出题：同桶内 ${live.length} 道有 Δr 的全部先出`);
+
+  /* The panel names the right reason. */
+  ctxText.length = 0;          // it accumulates across every draw above
+  api.goto1(String(QS2.indexOf(target) + 1));
+  const said = ctxText.map(t => t.txt).join(" | ");
+  if (!/没有逐笔归档/.test(said))
+    throw new Error("the panel should say the archive is missing: " +
+                    said.slice(0, 300));
+  if (/可定向成交太少/.test(said))
+    throw new Error("it blamed thin flow for a missing archive");
+  console.log("ok   面板说的是「没有逐笔归档」，不是「可定向成交太少」");
+}
+
+console.log("\nNOFLOW OK");
+
+/* ---- 6 plays the reveal to the end ----------------------------------- */
+{
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  els["s-stop"].value = "1.0"; els["s-tgt"].value = "2.0";
+  api.choose("enter"); api.submit();
+  const q = api.getQS()[api.getIdx()];
+  if (api.getStep() >= q.c.length - q.mark - 1)
+    throw new Error("fixture: already at the end before pressing 6");
+  fireKey("6");
+  if (api.getStep() < q.c.length - q.mark - 1)
+    throw new Error(`6 should run to the last bar, stopped at ` +
+                    `${api.getStep()} of ${q.c.length - q.mark - 1}`);
+  console.log(`ok   键盘 6：直接放到结尾（${api.getStep()} 根）`);
+
+  /* Not before the question is answered -- there is nothing to play. */
+  api.next();
+  const before = api.getStep();
+  fireKey("6");
+  if (api.getStep() !== before)
+    throw new Error("6 should do nothing on an unanswered question");
+  console.log("ok   键盘 6：没答题时不动");
+}
+
+console.log("\nPLAYALL OK");

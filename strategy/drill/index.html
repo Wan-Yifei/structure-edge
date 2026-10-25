@@ -160,7 +160,7 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
         <span id="play" hidden>
           <button id="b-step" title="走一根 K（快捷键 . 或 Shift+→）">▶ 下一根</button>
           <button id="b-auto" title="自动逐根播放">⏩ 自动</button>
-          <button id="b-all">⏭ 全部</button>
+          <button id="b-all" title="直接放到结尾（快捷键 6）">⏭ 全部</button>
           <span id="stepn" class="prog" style="margin:0 0 0 6px"></span>
         </span>
         <button id="b-next" hidden title="下一题（快捷键 → 或回车）">下一题 →</button>
@@ -715,7 +715,20 @@ function draw(q, reveal){
     // minute can carry plenty of prints and still be blanked for having
     // too little that was directional. The old label said 无逐笔数据,
     // which claimed more than the condition does.
-    {
+    if (noFlow(q)){
+      /* One band, not 180 tiled ones, and the honest reason: this day has
+         no tick archive, so there was never anything to be thin. */
+      g.save();
+      g.fillStyle = soft; g.globalAlpha = .55;
+      g.fillRect(PAD_L + 1, dy0 + 1, W - 2, DR_H - 2);
+      g.fillStyle = ink3; g.globalAlpha = .85;
+      g.font = "12px ui-monospace,monospace";
+      g.textAlign = "center"; g.textBaseline = "middle";
+      g.fillText("这一天没有逐笔归档，Δr 全程不可用",
+                 PAD_L + W / 2, dy0 + DR_H / 2);
+      g.textAlign = "left";
+      g.restore();
+    } else {
       const ser = q.drs1 || [];
       let st = -1;
       for (let i = 0; i <= last; i++){
@@ -1428,6 +1441,14 @@ function context(q){
    pooled rate. */
 function cellOf(q){ return (q.kind || "?") + "|" + (q.trend || "?"); }
 
+/* No delta_r anywhere in the window -- the day has no tick archive, not a
+   quiet tape. 44 of 1789 questions, on five days where db/ticks.db simply
+   has nothing across 11:00-14:00. They still train the structural read, so
+   they stay in the bank; they just stop going first. */
+function noFlow(q){
+  return !q.drs1 || !q.drs1.some(v => v != null);
+}
+
 /* The unanswered question from the bucket furthest behind.
 
    coverage = answered / available, and taking the minimum every time is
@@ -1454,14 +1475,20 @@ function nextByDeficit(){
   }
   if (bestCell === null) return -1;
   const today = QS[idx] ? QS[idx].day : null;
-  let fallback = -1;
+  /* Four tiers, best first: has flow and a different session, has flow,
+     no flow but a different session, no flow. A question with no tick
+     archive cannot exercise the delta_r rule at all, so it goes last
+     within its bucket rather than being dropped. */
+  const tiers = [-1, -1, -1, -1];
   for (let i = 0; i < QS.length; i++){
     const q = QS[i];
     if (ans[q.id] || cellOf(q) !== bestCell) continue;
-    if (q.day !== today) return i;
-    if (fallback < 0) fallback = i;
+    const t = (noFlow(q) ? 2 : 0) + (q.day === today ? 1 : 0);
+    if (t === 0) return i;
+    if (tiers[t] < 0) tiers[t] = i;
   }
-  return fallback;
+  for (const i of tiers) if (i >= 0) return i;
+  return -1;
 }
 
 function balanced(){
@@ -2377,7 +2404,7 @@ function kbHint(){
   }
   h.className = "kbhint";
   h.textContent = $("b-go").hidden
-    ? "← → 翻题　回车 下一题　空格 播放　, . 走 K"
+    ? "← → 翻题　回车 下一题　空格 播放　6 放到底　, . 走 K"
     : "1 放过　2 入场　3 止损　4 目标　5 提交　← → 翻题　空格/回车 确认";
 }
 
@@ -2426,6 +2453,12 @@ document.addEventListener("keydown", e => {
     case "5":
       if (answering && !$("b-go").disabled){
         e.preventDefault(); kbSet(null); submit();
+      }
+      return;
+    case "6":
+      // Straight to the last bar, no animation; only once answered.
+      if (!$("play").hidden){
+        e.preventDefault(); stopAuto(); stepTo(QS[idx].c.length);
       }
       return;
     case "w": case "W": case "ArrowUp":
