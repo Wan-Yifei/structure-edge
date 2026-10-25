@@ -5559,9 +5559,10 @@ class TradeViewerQt(QMainWindow):
         self._profile_pin_conns.append(conn3)
         _pin_price_label()
 
-        # Previous session's open and close, when they fall inside what
-        # the panel is showing. See _prev_session_levels for why they come
-        # from the unfiltered frame.
+        # Previous session's open and close, each drawn only when it
+        # falls inside what the panel is showing. See _prev_session_levels
+        # for the day boundary and for why they come from the unfiltered
+        # frame.
         for price, tag in self._prev_session_levels():
             if not (lo <= price <= hi):
                 continue
@@ -5600,11 +5601,16 @@ class TradeViewerQt(QMainWindow):
     def _prev_session_levels(self) -> list[tuple[float, str]]:
         """[(price, tag)] for the previous trading day's open and close.
 
+        "Previous" is relative to the last bar loaded, NOT to the
+        profile's Range window: in 2D the levels then fall inside the
+        distribution being drawn, which is intended -- where yesterday
+        opened does not change with how many days the histogram is
+        accumulating over.
+
         From self._klines, the UNFILTERED frame. The session-filtered one
         is what the histogram is built from, and with "Night" unchecked it
-        holds no overnight bars -- the previous day's open would quietly
-        become its 09:30 open, which is a different price and a different
-        claim.
+        holds no overnight bars -- the open would quietly become the
+        09:30 one, which is a different price and a different claim.
 
         Trading day is _trading_day's 20:00 boundary, so the overnight
         session counts toward the day it leads into, the same as CVD's
@@ -5618,18 +5624,15 @@ class TradeViewerQt(QMainWindow):
         cur = days[-1]
         if cur is None:
             return []
-        prev = None
-        for d in reversed(days):
-            if d is not None and d != cur:
-                prev = d
-                break
+        prev = next((d for d in reversed(days) if d is not None and d != cur),
+                    None)
         if prev is None:
             return []
         rows = [i for i, d in enumerate(days) if d == prev]
         if not rows:
             return []
-        return [(float(k["open"].iloc[rows[0]]), "前开"),
-                (float(k["close"].iloc[rows[-1]]), "前收")]
+        return [(float(k["open"].iloc[rows[0]]), "PDO"),
+                (float(k["close"].iloc[rows[-1]]), "PDC")]
 
     def _filter_sessions(self, klines: pd.DataFrame) -> pd.DataFrame:
         """Keep only rows whose time falls in the active session windows."""

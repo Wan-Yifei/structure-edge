@@ -29,6 +29,10 @@ import analysis.trade_viewer_qt as tv  # noqa: E402
 _levels = tv.TradeViewerQt.__dict__["_prev_session_levels"]
 
 
+def got(stub):
+    return {tag: p for p, tag in _levels(stub)}
+
+
 class Stub:
     """Only what the method reads."""
 
@@ -60,9 +64,9 @@ class TestBoundary:
             ("2026-10-21 16:00:00", 112.5, 113.0),
             ("2026-10-22 09:31:00", 120.0, 120.5),   # today
         ])
-        got = dict((tag, p) for p, tag in _levels(Stub(df)))
-        assert got["前开"] == 111.0, "20:01 的开盘才是前一交易日的开盘"
-        assert got["前收"] == 113.0
+        g = got(Stub(df))
+        assert g["PDO"] == 111.0, "20:01 的开盘才是前一交易日的开盘"
+        assert g["PDC"] == 113.0
 
     def test_calendar_grouping_would_give_a_different_answer(self):
         """The control. If this ever starts matching the calendar-date
@@ -73,8 +77,8 @@ class TestBoundary:
             ("2026-10-21 16:00:00", 112.5, 113.0),
             ("2026-10-22 09:31:00", 120.0, 120.5),
         ])
-        got = dict((tag, p) for p, tag in _levels(Stub(df)))
-        assert got["前开"] != 112.0, "取成了 09:31 的开盘，边界没生效"
+        assert got(Stub(df))["PDO"] != 112.0, \
+            "取成了 09:31 的开盘，边界没生效"
 
 
 class TestEdges:
@@ -84,7 +88,8 @@ class TestEdges:
         assert _levels(Stub(df)) == []
 
     def test_too_few_rows_is_not_an_error(self):
-        assert _levels(Stub(frame([("2026-10-22 09:31:00", 1.0, 1.0)]))) == []
+        one = frame([("2026-10-22 09:31:00", 1.0, 1.0)])
+        assert _levels(Stub(one)) == []
         assert _levels(Stub(None)) == []
 
     def test_a_gap_over_a_weekend_still_finds_the_last_session(self):
@@ -95,15 +100,16 @@ class TestEdges:
             ("2026-10-16 16:00:00", 90.5, 91.0),
             ("2026-10-19 09:31:00", 95.0, 95.5),     # Monday
         ])
-        got = dict((tag, p) for p, tag in _levels(Stub(df)))
-        assert got["前开"] == 90.0 and got["前收"] == 91.0
+        g = got(Stub(df))
+        assert g["PDO"] == 90.0 and g["PDC"] == 91.0
 
-    def test_it_uses_the_last_bar_of_the_day_for_the_close(self):
+    def test_the_close_is_the_last_bar_of_that_day(self):
+        """Not the day's high or its 16:00 bar specifically -- the last
+        bar present for that trading day, whatever time it carries."""
         df = frame([
             ("2026-10-20 09:31:00", 100.0, 100.5),
             ("2026-10-20 12:00:00", 100.5, 104.0),
-            ("2026-10-20 15:59:00", 104.0, 99.0),    # the close
+            ("2026-10-20 15:59:00", 104.0, 99.0),
             ("2026-10-21 09:31:00", 99.0, 99.5),
         ])
-        got = dict((tag, p) for p, tag in _levels(Stub(df)))
-        assert got["前收"] == 99.0
+        assert got(Stub(df))["PDC"] == 99.0
