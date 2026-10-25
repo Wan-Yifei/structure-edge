@@ -876,6 +876,17 @@ def _compute_profile_bins(
     khi  = kl["high"].values.astype(float)
     kvol = kl["volume"].fillna(0).values.astype(float)
     kt   = kl["time_key"].values
+
+    # Collect first, bin once. This loop used to call np.digitize on every
+    # single price level -- 90,000 scalar calls per render, each paying
+    # numpy's dispatch cost to place one number. Everything numpy now
+    # happens below, on the whole array at once.
+    tp: list[float] = []
+    tt: list[float] = []
+    tb: list[float] = []
+    tsl: list[float] = []
+    tn: list[float] = []
+    tm: list[float] = []
     for j in range(len(kl)):
         bar_ticks_used = False
         if ticks:
@@ -896,16 +907,14 @@ def _compute_profile_bins(
                         if total > 0:
                             p = float(price)
                             if lo <= p <= hi:
-                                bi = int(np.clip(np.digitize(p, bins) - 1,
-                                                 0, n_bins - 1))
-                                volumes[bi] += total
+                                tp.append(p)
+                                tt.append(total)
+                                tb.append(buy)
+                                tsl.append(sell)
+                                tn.append(neutral)
+                                tm.append(counts.get("buy_m", 0)
+                                          + counts.get("sell_m", 0))
                                 bar_ticks_used = True
-                                stats["total"]   += total
-                                stats["buy"]     += buy
-                                stats["sell"]    += sell
-                                stats["neutral"] += neutral
-                                stats["medium"]  += (counts.get("buy_m", 0)
-                                                      + counts.get("sell_m", 0))
                     if bar_ticks_used:
                         used_ticks = True
 
@@ -914,6 +923,19 @@ def _compute_profile_bins(
             n_hit = int(mask.sum())
             if n_hit:
                 volumes[mask] += kvol[j] / n_hit
+
+    if tp:
+        # Same bins array and the same digitize as the per-price version,
+        # so a price exactly on a boundary lands in the bin it always did.
+        bi = np.clip(np.digitize(np.asarray(tp, dtype=float), bins) - 1,
+                     0, n_bins - 1)
+        volumes += np.bincount(bi, weights=np.asarray(tt, dtype=float),
+                               minlength=n_bins)
+        stats["total"]   = float(np.sum(tt))
+        stats["buy"]     = float(np.sum(tb))
+        stats["sell"]    = float(np.sum(tsl))
+        stats["neutral"] = float(np.sum(tn))
+        stats["medium"]  = float(np.sum(tm))
 
     return centers, volumes, used_ticks, stats
 
