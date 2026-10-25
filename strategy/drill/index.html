@@ -79,6 +79,10 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .verdict h3{margin:0 0 6px;font-size:14px;font-weight:600}
 .verdict p{margin:0;color:var(--ink-2);font-size:13px;max-width:74ch}
 .verdict .big{font-family:var(--mono);font-size:17px;color:var(--ink)}
+.kbhint{font-size:12px;color:var(--ink-3);margin-left:10px;
+  font-variant-numeric:tabular-nums}
+.kbhint.on{color:var(--accent)}
+input[type=range].kbfocus{outline:2px solid var(--accent);outline-offset:3px}
 table.score{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 table.score th{font-size:11px;font-weight:500;letter-spacing:.06em;
   text-transform:uppercase;color:var(--ink-3);text-align:right;padding:0 0 7px;
@@ -138,8 +142,9 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
     <canvas id="cv" width="1040" height="520" aria-label="价格、筹码分布与 RSI"></canvas>
     <div class="ctrl" id="ctrl">
       <div class="row">
-        <button id="b-pass">放过</button>
-        <button id="b-enter">入场</button>
+        <button id="b-pass" title="放过（快捷键 1）">放过</button>
+        <button id="b-enter" title="入场（快捷键 2）">入场</button>
+        <span id="kb-hint" class="kbhint"></span>
       </div>
       <div class="sliders" id="sl" hidden>
         <label for="s-stop">止损</label>
@@ -151,7 +156,7 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
       </div>
       <div class="row">
         <button id="b-prev" title="上一题（快捷键 P）">← 上一题</button>
-        <button class="pri" id="b-go" disabled>提交</button>
+        <button class="pri" id="b-go" disabled title="提交（快捷键 5）">提交</button>
         <span id="play" hidden>
           <button id="b-step" title="走一根 K（快捷键 →）">▶ 下一根</button>
           <button id="b-auto" title="自动逐根播放">⏩ 自动</button>
@@ -240,6 +245,10 @@ let QS = [], idx = 0, ans = {}, pick = null, db = null;
 /* Where 下一题 came from. With 按缺口出题 on, next() jumps rather than
    steps, so idx-- would land somewhere the reader was never at. */
 let navBack = [];
+/* Which slider the keyboard is driving: null | "stop" | "tgt". Declared
+   up here because render() clears it and render runs before the keyboard
+   section near the bottom of this script. */
+let kbMode = null;
 let step = 0, timer = null;   // bars of the future played so far
 let _geo = null, _hover = null;   // chart geometry + cursor, for the crosshair
 
@@ -1056,6 +1065,7 @@ function render(){
   $("b-pass").setAttribute("aria-pressed","false");
   $("b-enter").setAttribute("aria-pressed","false");
   $("sl").hidden = true; $("b-go").disabled = true;
+  kbSet(null);                    // a new card starts with no mode
   $("b-go").hidden = false; $("b-next").hidden = true; $("vd").hidden = true;
   syncOut();
   /* Coming back to one already answered: show it as it was left, settled and
@@ -1182,7 +1192,10 @@ function verdictFor(q, rec){
       `结果 <b>${q.myWL === "win" ? "盈利" : "亏损"}</b>` +
       (q.onSoxs ? `<br><span style="color:var(--ink-3)">这一笔你是买 SOXS 表达的；` +
                   `图和订单流都是 SOXL，止损止盈按实测 beta −1.008 折过来。</span>` : "") +
-      (q.myR == null ? "" : ` ${q.myR >= 0 ? "+" : ""}${q.myR} R`) + "。";
+      /* sr(), not a hand-rolled sign: this printed the raw number, so a
+         loss came out as "-0.5 R" with an ASCII hyphen among the proper
+         minus signs everywhere else. */
+      (q.myR == null ? "" : ` ${sr(+q.myR, 2)} R`) + "。";
     if (rec.choice === "enter"){
       const dd = rec.stopAtr - d, tt = rec.tgtAtr - td;
       mine += `<br>这次你止损 ${rec.stopAtr.toFixed(2)} ATR（` +
@@ -1228,6 +1241,7 @@ function verdictFor(q, rec){
   }
   vd.innerHTML += lightHtml(q) + context(q);
   $("b-go").hidden = true; $("b-next").hidden = false;
+  kbHint();
 }
 
 /* The measured rule, as a light. Shown only in the reveal: a light visible
@@ -2325,6 +2339,98 @@ document.addEventListener("keydown", e => {
   if (e.target && e.target.tagName === "INPUT") return;
   if (e.key === "p" || e.key === "P"){ e.preventDefault(); prev(); }
   if (e.key === "n" || e.key === "N"){ e.preventDefault(); next(); }
+});
+
+/* ---- answering without the mouse ------------------------------------
+   1 放过  2 入场  3 调止损  4 调目标  5 提交，W/S 加减，空格或回车确认。
+
+   3 and 4 put the keyboard into a slider and 空格/回车 steps back out.
+   The mode is shown in #kb-hint and as an outline on the live slider,
+   because a modal keyboard with no visible state is how you nudge the
+   stop when you meant the target. */
+function kbSet(mode){
+  kbMode = mode;
+  $("s-stop").classList.toggle("kbfocus", mode === "stop");
+  $("s-tgt").classList.toggle("kbfocus", mode === "tgt");
+  kbHint();
+}
+
+function kbHint(){
+  const h = $("kb-hint");
+  if (kbMode){
+    h.className = "kbhint on";
+    h.textContent = (kbMode === "stop" ? "调止损" : "调目标") +
+      "：W 加 / S 减（按住 Shift 五倍），空格或回车结束";
+    return;
+  }
+  h.className = "kbhint";
+  h.textContent = $("b-go").hidden
+    ? "回车 下一题　空格 播放　← → 走 K"
+    : "1 放过　2 入场　3 止损　4 目标　5 提交　空格/回车 确认";
+}
+
+function kbNudge(dir, big){
+  if (!kbMode) return;
+  const el = $(kbMode === "stop" ? "s-stop" : "s-tgt");
+  const unit = +el.step || 0.05;
+  const v = +el.value + dir * (big ? 5 : 1) * unit;
+  /* Snap back onto the slider's grid: 1.00 + 3*0.05 is
+     1.1500000000000001, and the ATR readout would print it. */
+  el.value = (Math.round(
+    Math.min(+el.max, Math.max(+el.min, v)) / unit) * unit).toFixed(2);
+  syncOut();
+}
+
+/* 空格/回车 confirms whatever step is in hand: leave the slider if in
+   one, else submit, else move on. */
+function kbConfirm(key){
+  if (kbMode){ kbSet(null); return true; }
+  if (!$("b-go").hidden && !$("b-go").disabled){ submit(); return true; }
+  if (!$("b-next").hidden && key === "Enter"){ next(); return true; }
+  return false;
+}
+
+document.addEventListener("keydown", e => {
+  // A text field keeps its digits; a slider keeps W/S.
+  if (e.target && e.target.tagName === "INPUT" && e.target.type !== "range")
+    return;
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  if ($("qcard").hidden) return;
+
+  const answering = !$("b-go").hidden;
+  switch (e.key){
+    case "1":
+      if (answering){ e.preventDefault(); kbSet(null); choose("pass"); }
+      return;
+    case "2":
+      if (answering){ e.preventDefault(); kbSet(null); choose("enter"); }
+      return;
+    case "3":
+      if (answering && !$("sl").hidden){ e.preventDefault(); kbSet("stop"); }
+      return;
+    case "4":
+      if (answering && !$("sl").hidden){ e.preventDefault(); kbSet("tgt"); }
+      return;
+    case "5":
+      if (answering && !$("b-go").disabled){
+        e.preventDefault(); kbSet(null); submit();
+      }
+      return;
+    case "w": case "W": case "ArrowUp":
+      if (kbMode){ e.preventDefault(); kbNudge(+1, e.shiftKey); }
+      return;
+    case "s": case "S": case "ArrowDown":
+      if (kbMode){ e.preventDefault(); kbNudge(-1, e.shiftKey); }
+      return;
+    case "Enter":
+      if (kbConfirm("Enter")) e.preventDefault();
+      return;
+    case " ":
+      // Once answered, space belongs to the playback; that came first.
+      if (!$("play").hidden && !kbMode) return;
+      if (kbConfirm(" ")) e.preventDefault();
+      return;
+  }
 });
 
 /* Redraws the whole canvas per move. At this size that is a fraction of a

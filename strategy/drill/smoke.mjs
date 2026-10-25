@@ -73,9 +73,41 @@ const ctx = new Proxy({}, {
     return true;
   },
 });
+/* A real little classList, not a no-op: the keyboard outline on the live
+   slider is state a test wants to read back. */
+const mkCls = () => {
+  const set = new Set();
+  return {
+    _set: set,
+    add: (c) => set.add(c),
+    remove: (c) => set.delete(c),
+    contains: (c) => set.has(c),
+    toggle: (c, on) => {
+      const want = on === undefined ? !set.has(c) : !!on;
+      if (want) set.add(c); else set.delete(c);
+      return want;
+    },
+  };
+};
+/* Attributes come from the page rather than from a copy kept here: the
+   sliders' min/max/step are what the keyboard nudge clamps and rounds
+   against, and a stub that guessed them would test arithmetic nobody
+   ships. */
+const attrsOf = (id) => {
+  const tag = html.match(
+    new RegExp('<[a-zA-Z]+[^>]*[ ]id="' + id + '"[^>]*>'));
+  const out = {};
+  if (tag)
+    for (const m of tag[0].matchAll(/([a-zA-Z-]+)="([^"]*)"/g))
+      out[m[1]] = m[2];
+  return out;
+};
 const mkEl = (id) => ({
-  id, textContent: "", innerHTML: "", hidden: false, value: "",
+  id, textContent: "", innerHTML: "", hidden: false,
   disabled: false, checked: true, style: {}, className: "",
+  classList: mkCls(),
+  type: "", step: "", min: "", max: "", value: "",
+  ...attrsOf(id),
   onclick: null, oninput: null, onchange: null,
   focus() {}, setAttribute() {}, appendChild() {},
   getContext: () => ctx, width: 0, height: 0,
@@ -100,10 +132,24 @@ global.localStorage = {
   get length() { return Object.keys(this._d).length; },
   key(i) { return Object.keys(this._d)[i] ?? null; },
 };
+/* Keydown handlers were dropped on the floor, so nothing bound to the
+   keyboard could be tested at all. They are collected instead, and
+   fireKey() replays one the way the browser would. */
+const keyHandlers = [];
+const fireKey = (key, opts = {}) => {
+  let prevented = false;
+  const ev = {
+    key, shiftKey: !!opts.shift, ctrlKey: false, altKey: false,
+    metaKey: false, target: opts.target || { tagName: "BODY" },
+    preventDefault(){ prevented = true; },
+  };
+  for (const h of keyHandlers) h(ev);
+  return prevented;
+};
 global.document = {
   getElementById: (id) => (els[id] ||= mkEl(id)),
   documentElement: {},
-  addEventListener() {},
+  addEventListener(type, fn) { if (type === "keydown") keyHandlers.push(fn); },
   createElement: () => ({ src: "", onload: null, onerror: null }),
   head: {
     appendChild(el) {
@@ -1184,3 +1230,107 @@ console.log("\nBALANCE OK");
 }
 
 console.log("\nINTERVAL OK");
+
+
+/* ---- answering from the keyboard ------------------------------------ *
+ * 1 放过  2 入场  3 调止损  4 调目标  5 提交，W/S 加减，空格或回车确认.
+ * The two bindings worth guarding are the collisions: digits typed into
+ * a text box must stay in the box, and space after the reveal must keep
+ * driving the playback rather than jumping to the next question.       */
+{
+  for (const k of Object.keys(localStorage._d))
+    if (/^drill:\d{4}-/.test(k) || /^drill:mine/.test(k))
+      delete localStorage._d[k];
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+
+  const stop = els["s-stop"], tgt = els["s-tgt"];
+  const inStop = () => stop.classList.contains("kbfocus");
+  const inTgt = () => tgt.classList.contains("kbfocus");
+
+  if (!fireKey("1")) throw new Error("1 should be handled");
+  if (!els.sl.hidden) throw new Error("1 放过 must not show the sliders");
+  if (els["b-go"].disabled) throw new Error("1 should arm 提交");
+  console.log("ok   键盘 1：放过");
+
+  fireKey("2");
+  if (els.sl.hidden) throw new Error("2 入场 must show the sliders");
+  if (inStop() || inTgt())
+    throw new Error("2 must not jump into a slider by itself");
+  console.log("ok   键盘 2：入场，且不自作主张进入调整");
+
+  fireKey("3");
+  if (!inStop()) throw new Error("3 should drive the stop slider");
+  if (!/调止损/.test(els["kb-hint"].textContent))
+    throw new Error("the hint must name the mode: " +
+                    els["kb-hint"].textContent);
+  const v0 = +stop.value;
+  fireKey("w");
+  if (Math.abs(+stop.value - (v0 + 0.05)) > 1e-9)
+    throw new Error(`W should add one step, ${v0} -> ${stop.value}`);
+  fireKey("s"); fireKey("s");
+  if (Math.abs(+stop.value - (v0 - 0.05)) > 1e-9)
+    throw new Error(`S should subtract, got ${stop.value}`);
+  fireKey("w", { shift: true });
+  if (Math.abs(+stop.value - (v0 + 0.20)) > 1e-9)
+    throw new Error(`Shift+W should be five steps, got ${stop.value}`);
+  console.log(`ok   键盘 W/S：一步 0.05，Shift 五步（${v0} → ${stop.value}）`);
+
+  /* Floating point: 1.00 + 3*0.05 is 1.1500000000000001 and the ATR
+     readout would print it. */
+  for (let i = 0; i < 7; i++) fireKey("w");
+  if (!/^\d+\.\d{2}$/.test(String(stop.value)))
+    throw new Error("the value drifted off the grid: " + stop.value);
+  console.log(`ok   不会漂出两位小数（${stop.value}）`);
+
+  for (let i = 0; i < 400; i++) fireKey("w");
+  if (+stop.value > +stop.max)
+    throw new Error(`ran past max: ${stop.value} > ${stop.max}`);
+  for (let i = 0; i < 400; i++) fireKey("s");
+  if (+stop.value < +stop.min)
+    throw new Error(`ran past min: ${stop.value} < ${stop.min}`);
+  console.log(`ok   夹在 [${stop.min}, ${stop.max}] 之内`);
+
+  fireKey(" ");
+  if (inStop()) throw new Error("space should leave the slider");
+  console.log("ok   空格：退出调整状态");
+
+  const held = +stop.value;
+  fireKey("4");
+  if (!inTgt() || inStop())
+    throw new Error("4 should move the outline to the target, alone");
+  const t0 = +tgt.value;
+  fireKey("w");
+  if (Math.abs(+tgt.value - (t0 + 0.05)) > 1e-9)
+    throw new Error("W should now drive the target");
+  if (+stop.value !== held)
+    throw new Error(`the stop moved while the target was selected: ` +
+                    `${held} -> ${stop.value}`);
+  fireKey("Enter");
+  if (inTgt()) throw new Error("enter should leave the slider too");
+  console.log("ok   键盘 4：只有一个滑块在被驱动，回车同样退出");
+
+  /* A text box keeps its digits, or the goto field stops working. */
+  const box = { tagName: "INPUT", type: "text" };
+  const before = els["b-go"].disabled;
+  fireKey("1", { target: box });
+  if (els["b-go"].disabled !== before)
+    throw new Error("a digit typed into a text field reached the drill");
+  console.log("ok   输入框里的数字不会被抢走");
+
+  fireKey("5");
+  if (els.vd.hidden) throw new Error("5 should submit and reveal");
+  console.log("ok   键盘 5：提交");
+
+  /* Space after the reveal belongs to the playback; that binding is older. */
+  const at = api.getIdx();
+  fireKey(" ");
+  if (api.getIdx() !== at)
+    throw new Error("space after the reveal must not change question");
+  fireKey("Enter");
+  if (api.getIdx() === at)
+    throw new Error("enter after the reveal should move on");
+  console.log("ok   揭晓后：空格留给播放，回车才翻题");
+}
+
+console.log("\nKEYS OK");
