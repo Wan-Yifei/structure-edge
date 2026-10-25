@@ -5559,6 +5559,33 @@ class TradeViewerQt(QMainWindow):
         self._profile_pin_conns.append(conn3)
         _pin_price_label()
 
+        # Previous session's open and close, when they fall inside what
+        # the panel is showing. See _prev_session_levels for why they come
+        # from the unfiltered frame.
+        for price, tag in self._prev_session_levels():
+            if not (lo <= price <= hi):
+                continue
+            ln = pg.InfiniteLine(
+                pos=price, angle=0, movable=False,
+                pen=pg.mkPen(_qc(_GREY), width=1,
+                             style=Qt.PenStyle.DashDotLine))
+            lb = pg.TextItem(
+                text=f"{tag} {price:.2f}", color=_GREY,
+                fill=pg.mkBrush(_qc(_BG_TIP, 180)), anchor=(0.0, 0.5))
+            lb.setFont(QFont("Monospace", 7))
+            pw.addItem(ln, ignoreBounds=True)
+            pw.addItem(lb, ignoreBounds=True)
+
+            # Pinned LEFT, unlike POC/VAH/VAL on the right: these are
+            # reference prices rather than readings off this profile, and
+            # stacking five labels in one corner makes all five unreadable.
+            def _pin_prev(item=lb, p=price) -> None:
+                item.setPos(vb.viewRange()[0][0], p)
+
+            self._profile_pin_conns.append(
+                vb.sigRangeChanged.connect(lambda *_, f=_pin_prev: f()))
+            _pin_prev()
+
         max_vol = float(volumes.max())
         vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         vb.setXRange(0, max_vol * 1.15, padding=0)
@@ -5569,6 +5596,40 @@ class TradeViewerQt(QMainWindow):
         y_hi = max(hi, last_price)
         y_pad = (y_hi - y_lo) * 0.10
         vb.setYRange(y_lo - y_pad, y_hi + y_pad, padding=0)
+
+    def _prev_session_levels(self) -> list[tuple[float, str]]:
+        """[(price, tag)] for the previous trading day's open and close.
+
+        From self._klines, the UNFILTERED frame. The session-filtered one
+        is what the histogram is built from, and with "Night" unchecked it
+        holds no overnight bars -- the previous day's open would quietly
+        become its 09:30 open, which is a different price and a different
+        claim.
+
+        Trading day is _trading_day's 20:00 boundary, so the overnight
+        session counts toward the day it leads into, the same as CVD's
+        reset and the profile range.
+        """
+        k = self._klines
+        if k is None or len(k) < 2:
+            return []
+        cm = max(1, int(self._candle_mins))
+        days = [_trading_day(tk, cm) for tk in k["time_key"]]
+        cur = days[-1]
+        if cur is None:
+            return []
+        prev = None
+        for d in reversed(days):
+            if d is not None and d != cur:
+                prev = d
+                break
+        if prev is None:
+            return []
+        rows = [i for i, d in enumerate(days) if d == prev]
+        if not rows:
+            return []
+        return [(float(k["open"].iloc[rows[0]]), "前开"),
+                (float(k["close"].iloc[rows[-1]]), "前收")]
 
     def _filter_sessions(self, klines: pd.DataFrame) -> pd.DataFrame:
         """Keep only rows whose time falls in the active session windows."""
