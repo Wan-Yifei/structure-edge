@@ -168,8 +168,41 @@ class MultiVPWindow(QMainWindow):
         self._plot.addItem(self._read, ignoreBounds=True)
         # Session levels, filled by reload() and read on hover.
         self._levels: dict[int, tuple] = {}
+        # (item, x, price, session) for the level labels, repositioned on
+        # every range change because "overlapping" is a pixel distance.
+        self._tags: list = []
         self._plot.scene().sigMouseMoved.connect(self._on_mouse)
+        self._plot.getPlotItem().vb.sigRangeChanged.connect(
+            lambda *_: self._place_labels())
         self._plot.getPlotItem().vb.setMouseEnabled(x=True, y=True)
+
+    # ── label placement ─────────────────────────────────────────────────
+    def _place_labels(self) -> None:
+        """Nudge labels apart where they would overlap, per session.
+
+        Each one starts on its own level. Within a session the three are
+        walked in price order and any that is nearer than one label
+        height to the one below is pushed up by the remainder, so only
+        the crowded ones move and the lowest stays put.
+        """
+        if not self._tags:
+            return
+        vb = self._plot.getPlotItem().vb
+        (_, _), (y0, y1) = vb.viewRange()
+        h_px = max(vb.height(), 1)
+        gap = (y1 - y0) * (11.0 / h_px)      # one label height, in price
+        if gap <= 0:
+            return
+        by_sess: dict[int, list] = {}
+        for t, x, p, i in self._tags:
+            by_sess.setdefault(i, []).append((p, t, x))
+        for group in by_sess.values():
+            group.sort(key=lambda r: r[0])
+            placed = None
+            for p, t, x in group:
+                y = p if placed is None else max(p, placed + gap)
+                t.setPos(x, y)
+                placed = y
 
     # ── crosshair ───────────────────────────────────────────────────────
     def _on_mouse(self, pos) -> None:
@@ -246,9 +279,13 @@ class MultiVPWindow(QMainWindow):
             self._plot.removeItem(it)
         self._items.clear()
         self._levels.clear()
+        self._tags.clear()
 
-    def _add(self, item) -> None:
-        self._plot.addItem(item)
+    def _add(self, item, ignore: bool = False) -> None:
+        # ignore=True keeps an item out of the auto-range calculation --
+        # for labels, which are positioned FROM the range and must not
+        # feed back into it.
+        self._plot.addItem(item, ignoreBounds=ignore)
         self._items.append(item)
 
     def reload(self) -> None:
@@ -303,25 +340,21 @@ class MultiVPWindow(QMainWindow):
                     x=[i, i + slab * BAR_SPAN], y=[p, p],
                     pen=pg.mkPen(_qc(col), width=wd)))
                 if self._labels.isChecked():
-                    # Anchored at the right end of its own segment, and
-                    # above the line, so three labels on one slab do not
-                    # sit on each other or on the next slab's bars.
+                    # Anchored at the right end of its own segment. The
+                    # vertical position is settled in _place_labels once
+                    # the range is known -- see there.
                     t = pg.TextItem(text=f"{nm} {p:.2f}", color=_qc(col),
-                                    anchor=(1.0, 1.0))
+                                    anchor=(1.0, 0.5))
                     t.setFont(QFont("Monospace", 7))
-                    self._add(t)
+                    self._add(t, ignore=True)
                     t.setPos(i + slab * BAR_SPAN, p)
+                    self._tags.append((t, i + slab * BAR_SPAN, p, i))
 
             # Price path across the slab, so the profile has its sequence.
             c = g["close"].to_numpy(float)
             xs = np.linspace(i, i + slab * BAR_SPAN, len(c))
             self._add(pg.PlotCurveItem(
                 x=xs, y=c, pen=pg.mkPen(_qc(_PATH, 150), width=1)))
-
-            lbl = pg.TextItem(text=day[5:], color=_qc(_GREY), anchor=(0, 1))
-            lbl.setFont(QFont("Monospace", 8))
-            self._add(lbl)
-            lbl.setPos(i, float(edges[0]))
 
             if prev is not None and self._join.isChecked():
                 pi, (pvah, pval) = prev
@@ -341,6 +374,7 @@ class MultiVPWindow(QMainWindow):
             self._plot.setYRange(min(lo_all) - pad, max(hi_all) + pad,
                                  padding=0)
             self._plot.setXRange(-0.1, len(sess) + 0.1, padding=0)
+        self._place_labels()
         ax = self._plot.getPlotItem().getAxis("bottom")
         ax.setTicks([[(i + BAR_SPAN / 2, d[5:]) for i, (d, _) in
                       enumerate(sess)]])

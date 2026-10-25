@@ -271,12 +271,51 @@ class TestSharedGrid:
 
 
 class TestLevelLabels:
-    def test_three_labels_a_session_plus_the_day_tag(self, win):
+    def test_three_labels_a_session(self, win):
+        """The in-plot day tag was removed -- the axis already carries the
+        date, and two rows of the same thing read as a bug."""
         w, days = win
-        assert kinds(w).get("TextItem", 0) == len(days) * 4
+        assert kinds(w).get("TextItem", 0) == len(days) * 3
 
     def test_they_can_be_turned_off(self, win):
-        w, days = win
+        w, _ = win
         w._labels.setChecked(False)
         w.reload()
-        assert kinds(w).get("TextItem", 0) == len(days)
+        assert kinds(w).get("TextItem", 0) == 0
+
+class TestLabelPlacement:
+    def test_crowded_labels_are_pushed_apart(self, qapp, monkeypatch):
+        """POC and VAL land within a few cents often enough that the two
+        labels overlapped and neither could be read."""
+        import feeds.fetcher as fetcher
+        # A session that spends nearly all its time in a narrow band, so
+        # POC and the value-area edges end up almost on top of each other.
+        t = pd.date_range("2026-10-20 09:31", periods=390, freq="1min")
+        c = 100 + np.where(np.arange(390) % 50 == 0, 0.6, 0.0)
+        frame = pd.DataFrame(
+            {"time_key": t.strftime("%Y-%m-%d %H:%M:%S"),
+             "open": c, "high": c + 0.02, "low": c - 0.02, "close": c,
+             "volume": np.full(390, 1000.0)})
+        monkeypatch.setattr(fetcher, "fetch_klines", lambda *a, **k: frame)
+        from analysis.multi_vp_window import MultiVPWindow
+        w = MultiVPWindow()
+        w.resize(900, 600)
+        w.show()
+        qapp.processEvents()
+        w.reload()
+        w._place_labels()
+        ys = sorted(t_.pos().y() for t_, *_ in w._tags)
+        vb = w._plot.getPlotItem().vb
+        (_, _), (y0, y1) = vb.viewRange()
+        gap = (y1 - y0) * (11.0 / max(vb.height(), 1))
+        for a, b in zip(ys, ys[1:]):
+            assert b - a >= gap * 0.99, f"标签仍然重叠：{a} 与 {b}"
+        w.close()
+
+    def test_a_clear_label_stays_on_its_level(self, win):
+        """Only the crowded ones move. Spacing all three evenly would put
+        every label slightly wrong to fix a problem two do not have."""
+        w, _ = win
+        w._place_labels()
+        lowest = min(w._tags, key=lambda r: r[2])
+        assert abs(lowest[0].pos().y() - lowest[2]) < 1e-9
