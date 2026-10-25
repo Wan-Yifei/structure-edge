@@ -1334,3 +1334,81 @@ console.log("\nINTERVAL OK");
 }
 
 console.log("\nKEYS OK");
+
+
+/* ---- the arrows ------------------------------------------------------ *
+ * ← → used to walk the playback one bar and the buttons said so. They
+ * now move between questions, which is what gets reached for; walking
+ * the reveal is , . with Shift+arrows as an alias. Three states, so the
+ * checks below are one per state.                                      */
+{
+  for (const k of Object.keys(localStorage._d))
+    if (/^drill:\d{4}-/.test(k) || /^drill:mine/.test(k))
+      delete localStorage._d[k];
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  /* Sequential mode first, where "next" has an arithmetic meaning. */
+  els["b-bal"].checked = false;
+  api.goto1("5");
+  const at = api.getIdx();
+  fireKey("ArrowRight");
+  if (api.getIdx() !== at + 1)
+    throw new Error(`→ should advance, ${at} -> ${api.getIdx()}`);
+  fireKey("ArrowLeft");
+  if (api.getIdx() !== at)
+    throw new Error(`← should go back, got ${api.getIdx()}`);
+  console.log("ok   箭头：← → 翻题（顺序模式）");
+
+  /* With 按缺口出题 on, → jumps -- and ← must still bring you back,
+     which is what the back stack is for. */
+  els["b-bal"].checked = true;
+  const from = api.getIdx();
+  fireKey("ArrowRight");
+  if (api.getIdx() === from)
+    throw new Error("→ did nothing with 按缺口出题 on");
+  fireKey("ArrowLeft");
+  if (api.getIdx() !== from)
+    throw new Error(`← should return to ${from}, got ${api.getIdx()}`);
+  console.log("ok   箭头：缺口模式下 → 跳转，← 仍回到来处");
+
+  /* In a slider they belong to the slider -- jumping question mid-adjust
+     would throw the value away. */
+  fireKey("2");
+  fireKey("3");
+  const held = api.getIdx(), v0 = +els["s-stop"].value;
+  fireKey("ArrowRight");
+  if (api.getIdx() !== held)
+    throw new Error("→ must not change question while a slider is live");
+  if (Math.abs(+els["s-stop"].value - (v0 + 0.05)) > 1e-9)
+    throw new Error(`→ should nudge the slider, got ${els["s-stop"].value}`);
+  fireKey("ArrowLeft");
+  if (Math.abs(+els["s-stop"].value - v0) > 1e-9)
+    throw new Error("← should nudge back");
+  fireKey(" ");
+  console.log("ok   箭头：调滑块时归滑块，不会翻题");
+
+  /* And during the reveal: bare arrows翻题, Shift and , . walk bars. */
+  fireKey("5");
+  if (els.play.hidden) throw new Error("the reveal should expose 播放");
+  const s0 = api.getStep(), q0 = api.getIdx();
+  fireKey("ArrowRight", { shift: true });
+  if (api.getStep() !== s0 + 1)
+    throw new Error(`Shift+→ should walk a bar, ${s0} -> ${api.getStep()}`);
+  if (api.getIdx() !== q0)
+    throw new Error("Shift+→ must not change question");
+  fireKey(".");
+  if (api.getStep() !== s0 + 2)
+    throw new Error("'.' should walk a bar too");
+  fireKey(",");
+  if (api.getStep() !== s0 + 1)
+    throw new Error("',' should walk back");
+  console.log("ok   揭晓中：Shift+箭头 和 , . 走 K，且不翻题");
+
+  fireKey("ArrowRight");
+  if (api.getIdx() === q0)
+    throw new Error("a bare → after the reveal should move to the next " +
+                    "question, not walk bars");
+  console.log("ok   揭晓后：裸箭头翻题");
+}
+
+console.log("\nARROWS OK");

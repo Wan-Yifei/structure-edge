@@ -155,15 +155,15 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
         <output id="o-tgt"></output>
       </div>
       <div class="row">
-        <button id="b-prev" title="上一题（快捷键 P）">← 上一题</button>
+        <button id="b-prev" title="上一题（快捷键 ← 或 P）">← 上一题</button>
         <button class="pri" id="b-go" disabled title="提交（快捷键 5）">提交</button>
         <span id="play" hidden>
-          <button id="b-step" title="走一根 K（快捷键 →）">▶ 下一根</button>
+          <button id="b-step" title="走一根 K（快捷键 . 或 Shift+→）">▶ 下一根</button>
           <button id="b-auto" title="自动逐根播放">⏩ 自动</button>
           <button id="b-all">⏭ 全部</button>
           <span id="stepn" class="prog" style="margin:0 0 0 6px"></span>
         </span>
-        <button id="b-next" hidden>下一题 →</button>
+        <button id="b-next" hidden title="下一题（快捷键 → 或回车）">下一题 →</button>
       </div>
     </div>
     <div class="verdict" id="vd" hidden></div>
@@ -2331,8 +2331,15 @@ $("b-auto").onclick = autoPlay;
 $("b-all").onclick = () => { stopAuto(); stepTo(QS[idx].c.length); };
 document.addEventListener("keydown", e => {
   if ($("play").hidden) return;
-  if (e.key === "ArrowRight"){ e.preventDefault(); stopAuto(); stepTo(step + 1); }
-  if (e.key === "ArrowLeft"){ e.preventDefault(); stopAuto(); stepTo(step - 1); }
+  if (e.target && e.target.tagName === "INPUT" && e.target.type !== "range")
+    return;
+  /* The bare arrows moved to question navigation, which is what they get
+     reached for. Walking the reveal is . and , with Shift+arrows for the
+     hand already on them. */
+  const fwd = e.key === "." || (e.shiftKey && e.key === "ArrowRight");
+  const back = e.key === "," || (e.shiftKey && e.key === "ArrowLeft");
+  if (fwd){ e.preventDefault(); stopAuto(); stepTo(step + 1); }
+  if (back){ e.preventDefault(); stopAuto(); stepTo(step - 1); }
   if (e.key === " "){ e.preventDefault(); autoPlay(); }
 });
 document.addEventListener("keydown", e => {
@@ -2360,13 +2367,13 @@ function kbHint(){
   if (kbMode){
     h.className = "kbhint on";
     h.textContent = (kbMode === "stop" ? "调止损" : "调目标") +
-      "：W 加 / S 减（按住 Shift 五倍），空格或回车结束";
+      "：W/→ 加　S/← 减（按住 Shift 五倍），空格或回车结束";
     return;
   }
   h.className = "kbhint";
   h.textContent = $("b-go").hidden
-    ? "回车 下一题　空格 播放　← → 走 K"
-    : "1 放过　2 入场　3 止损　4 目标　5 提交　空格/回车 确认";
+    ? "← → 翻题　回车 下一题　空格 播放　, . 走 K"
+    : "1 放过　2 入场　3 止损　4 目标　5 提交　← → 翻题　空格/回车 确认";
 }
 
 function kbNudge(dir, big){
@@ -2421,6 +2428,18 @@ document.addEventListener("keydown", e => {
       return;
     case "s": case "S": case "ArrowDown":
       if (kbMode){ e.preventDefault(); kbNudge(-1, e.shiftKey); }
+      return;
+    /* While a slider is being driven the arrows belong to it: jumping to
+       another question mid-adjust is a nasty way to lose the value. */
+    case "ArrowRight":
+      if (e.shiftKey) return;              // Shift+→ walks the bars
+      e.preventDefault();
+      if (kbMode) kbNudge(+1, false); else next();
+      return;
+    case "ArrowLeft":
+      if (e.shiftKey) return;
+      e.preventDefault();
+      if (kbMode) kbNudge(-1, false); else prev();
       return;
     case "Enter":
       if (kbConfirm("Enter")) e.preventDefault();
