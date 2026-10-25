@@ -138,6 +138,12 @@ def _alpha_brush(hex_: str, alpha: int):
 _DELTA_UP_BRUSH = _alpha_brush(_UP, 180)
 _DELTA_DN_BRUSH = _alpha_brush(_DOWN, 180)
 
+# Screen pixels per bar below which the delta labels are hidden. They are
+# Monospace 8pt and run to about five characters ("+1.2M"), so under this
+# they overlap into a smear. At a 1600px wide plot this shows them from
+# roughly 90 bars in.
+_DELTA_MIN_PX = 18.0
+
 # Inverse-leveraged pairs. Hovering a price level on the key symbol also shows
 # where its inverse would be trading at that level, so a level picked on one
 # can be read straight off as a level on the other.
@@ -1273,7 +1279,7 @@ class CandlestickItem(pg.GraphicsObject):
 
         # Pass 2 — wicks drawn on top of everything so they are never covered.
         # width=0 → cosmetic pen: always 1 screen pixel regardless of zoom level.
-        for i, o, h, l, c, body_lo, body_hi, _ in candle_data:
+        for i, o, h, l, c, body_lo, body_hi, pd_ in candle_data:
             is_bull    = c >= o
             wick_color = _qc(_bull_col if is_bull else _bear_col)
             p.setPen(QPen(wick_color, 0))
@@ -1284,6 +1290,14 @@ class CandlestickItem(pg.GraphicsObject):
             # Lower wick
             if l < body_lo:
                 p.drawLine(QPointF(i, l), QPointF(i, body_lo))
+            # Body outline, only where the heatmap took the body over.
+            # Those bins are buy/sell coloured, which leaves the bar's
+            # own direction shown nowhere; the outline is the only place
+            # it survives. Drawn here, in the wick pass, so the bins
+            # cannot cover it.
+            if self._show_heatmap and pd_:
+                p.drawRect(QRectF(i - 0.35, body_lo, 0.7,
+                                  body_hi - body_lo))
 
         p.end()
         return pic
@@ -2990,7 +3004,9 @@ class TradeViewerQt(QMainWindow):
         # Pool of delta labels, one per candle. Kept in the scene across
         # renders and reused -- see _draw_delta.
         self._delta_items:   list = []  # TextItem per candle
-        self._delta_used:    int  = 0   # how many of the pool are showing
+        self._delta_used:    int  = 0   # how many of the pool are in use
+        self._delta_x:  np.ndarray = np.empty(0)  # bar index per used label
+        self._delta_vis: tuple[int, int] = (0, 0)  # pool span now visible
         self._ema_items:     list = []  # PlotCurveItem per EMA period
         self._avwap_items:   list = []  # anchored-VWAP curve + anchor line + label
         self._option_wall_items: list = []  # Call/Put Wall + Zero Gamma lines -- cleared+redrawn each update
@@ -3282,6 +3298,7 @@ class TradeViewerQt(QMainWindow):
         self._dcvd_light.setVisible(False)
         self._plot_c.addItem(self._dcvd_light, ignoreBounds=True)
         self._plot_c.vb.sigRangeChanged.connect(self._pin_dcvd_light)
+        self._plot_c.vb.sigRangeChanged.connect(self._cull_delta_labels)
 
         # ── Chandelier exit suggestion label (bottom-right) ─────────────────────
         self._chandelier_label = pg.TextItem(
@@ -4402,13 +4419,26 @@ class TradeViewerQt(QMainWindow):
         # long one. _draw_delta is only ever called right after this, so
         # it starts from an all-hidden pool and shows exactly the labels
         # it draws; it does not trim a tail of its own.
-        for item in self._delta_items[:self._delta_used]:
+        # Only the visible span needs hiding; the rest already are, and
+        # walking all 1440 to hide them cost 13.5ms a render.
+        lo, hi = self._delta_vis
+        for item in self._delta_items[lo:hi]:
             item.setVisible(False)
         self._delta_used = 0
+        self._delta_vis = (0, 0)
 
     def _draw_delta(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
         lows = klines["low"].to_numpy(float)
         buy, sell, _ = self._bar_flow(klines, buckets, cm)
+        # Blank the cull's view of the pool before touching it. Adding
+        # and moving items can make the view auto-range, which fires
+        # sigRangeChanged mid-loop; a cull running then would read the
+        # PREVIOUS frame's _delta_x against this frame's _delta_used and
+        # light up labels this frame never drew -- which _delta_vis would
+        # then forget, leaving them on screen for good.
+        self._delta_x = np.empty(0)
+        self._delta_vis = (0, 0)
+        xs: list[float] = []
         for i in range(len(klines)):
             # int(): the counts are whole trades, and the under-1000
             # branch below prints the number raw.
@@ -4431,6 +4461,11 @@ class TradeViewerQt(QMainWindow):
             else:
                 txt = pg.TextItem(text="", color="#ffffff", anchor=(0.5, 0.0))
                 txt.setFont(QFont("Monospace", 8))
+                # Born hidden. A TextItem is visible by default, and
+                # visibility is _cull_delta_labels' job -- it only ever
+                # changes the span it tracks, so anything it did not put
+                # on screen must not already be there.
+                txt.setVisible(False)
                 self._plot_c.addItem(txt, ignoreBounds=True)
                 self._delta_items.append(txt)
             txt.setText(txt_str)
@@ -4440,8 +4475,52 @@ class TradeViewerQt(QMainWindow):
             # and 1440 mkBrush calls a render is not free either.
             txt.fill = _DELTA_UP_BRUSH if delta >= 0 else _DELTA_DN_BRUSH
             txt.setPos(i, lows[i] * 0.9997)
-            txt.setVisible(True)
+            xs.append(i)
             self._delta_used = n + 1
+
+        # Visibility is the cull's business, not the loop's: at most a
+        # screenful is shown, and only when they are far enough apart to
+        # read.
+        self._delta_x = np.asarray(xs, dtype=float)
+        self._cull_delta_labels()
+
+    def _cull_delta_labels(self, *_) -> None:
+        """Show delta labels only where they can be read.
+
+        Qt charges for every item in the scene, not for the ones on
+        screen, so 1440 labels cost the same at a 200-bar zoom as at a
+        full-day one -- and at the full-day one they are packed into a
+        few pixels where no number is legible. Both are fixed by showing
+        a screenful at most, and nothing at all below _DELTA_MIN_PX.
+
+        Runs on every range change, so it touches only the labels whose
+        visibility actually changes.
+        """
+        if not self._delta_used:
+            return
+        vb = self._plot_c.vb
+        x0, x1 = vb.viewRange()[0]
+        span = x1 - x0
+        width = vb.width()
+        if span <= 0 or width <= 0 or width / span < _DELTA_MIN_PX:
+            lo = hi = 0                     # too dense to read
+        else:
+            # Clamped to what is actually in use: a cull can land while
+            # _draw_delta is still filling the pool.
+            xs = self._delta_x[:self._delta_used]
+            lo = int(np.searchsorted(xs, x0, "left"))
+            hi = int(np.searchsorted(xs, x1, "right"))
+
+        plo, phi = self._delta_vis
+        if (lo, hi) == (plo, phi):
+            return
+        for i in range(plo, phi):
+            if not (lo <= i < hi):
+                self._delta_items[i].setVisible(False)
+        for i in range(lo, hi):
+            if not (plo <= i < phi):
+                self._delta_items[i].setVisible(True)
+        self._delta_vis = (lo, hi)
 
     # ── DOM window ────────────────────────────────────────────────────────────
 

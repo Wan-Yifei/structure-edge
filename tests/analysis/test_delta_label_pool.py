@@ -99,6 +99,11 @@ def draw(viewer, n, deltas=None):
     return kl
 
 
+def show(viewer, lo, hi):
+    """Set the visible X span; the range signal runs the cull."""
+    viewer._plot_c.vb.setXRange(lo, hi, padding=0)
+
+
 def count_new(monkeypatch):
     """Counts TextItem constructions until the returned list is read."""
     made = []
@@ -158,6 +163,7 @@ class TestStaleLabelsAreNotLeftShowing:
     def test_a_shorter_frame_hides_the_tail(self, viewer):
         draw(viewer, 12)
         draw(viewer, 4)
+        show(viewer, -1, 12)       # wide enough to want all four
         assert viewer._delta_used == 4
         assert all(it.isVisible() for it in viewer._delta_items[:4])
         assert not any(it.isVisible() for it in viewer._delta_items[4:]), \
@@ -204,3 +210,72 @@ class TestEveryMutableThingIsRefreshed:
         once at import, and green/red would be a plausible wrong guess."""
         assert tv._DELTA_UP_BRUSH.color() == tv._qc("#ffa005", 180)
         assert tv._DELTA_DN_BRUSH.color() == tv._qc("#ab47bc", 180)
+
+
+class TestOnlyLegibleLabelsAreShown:
+    """A label is on screen only where it can be read.
+
+    Qt charges for every item in the scene rather than for the ones on
+    screen, so 1440 labels cost the same at a 200-bar zoom as at a
+    full-day one -- a drag measured 117ms either way. At the full-day
+    zoom they are also packed into a few pixels where no number is
+    legible. One rule fixes both.
+
+    These drive the real view box: the rule is about pixels per bar, and
+    a stubbed width would pin arithmetic rather than behaviour.
+    """
+
+    def test_nothing_shows_when_the_bars_are_too_close(self, viewer):
+        draw(viewer, 12)
+        vb = viewer._plot_c.vb
+        show(viewer, 0, vb.width() / tv._DELTA_MIN_PX * 2)   # half the room
+        assert not any(it.isVisible() for it in viewer._delta_items)
+        assert viewer._delta_vis == (0, 0)
+
+    def test_they_come_back_when_zoomed_in(self, viewer):
+        draw(viewer, 12)
+        vb = viewer._plot_c.vb
+        show(viewer, 0, vb.width() / tv._DELTA_MIN_PX * 2)
+        assert not any(it.isVisible() for it in viewer._delta_items)
+        show(viewer, -1, 12)
+        assert all(it.isVisible() for it in viewer._delta_items[:12])
+
+    def test_only_the_bars_in_view(self, viewer):
+        draw(viewer, 12)
+        show(viewer, 3.5, 7.5)
+        vis = [i for i, it in enumerate(viewer._delta_items) if it.isVisible()]
+        assert vis == [4, 5, 6, 7], f"showing {vis}"
+
+    def test_panning_moves_the_window(self, viewer):
+        draw(viewer, 12)
+        show(viewer, 3.5, 7.5)
+        show(viewer, 7.5, 11.5)
+        vis = [i for i, it in enumerate(viewer._delta_items) if it.isVisible()]
+        assert vis == [8, 9, 10, 11], f"showing {vis}"
+
+    def test_a_pan_touches_only_what_changes(self, viewer, monkeypatch):
+        """The whole point is that a drag does not pay for 1440 items."""
+        draw(viewer, 12)
+        show(viewer, 3.5, 7.5)
+        touched = []
+        real = pg.TextItem.setVisible
+        monkeypatch.setattr(
+            pg.TextItem, "setVisible",
+            lambda self, v: (touched.append(v), real(self, v))[1])
+        show(viewer, 4.5, 8.5)              # one leaves, one enters
+        assert len(touched) == 2, f"touched {len(touched)}"
+
+    def test_a_frame_that_draws_nothing(self, viewer):
+        draw(viewer, 6, deltas=[0] * 6)     # every bar skipped
+        show(viewer, -1, 6)
+        assert viewer._delta_used == 0
+        assert not any(it.isVisible() for it in viewer._delta_items)
+
+    def test_a_new_label_is_not_born_visible(self, viewer):
+        """A TextItem is visible by default; the cull only changes the
+        span it tracks, so anything it did not show must not be there."""
+        draw(viewer, 12)
+        show(viewer, 3.5, 7.5)
+        draw(viewer, 12, deltas=[(i + 2) * 100 for i in range(12)])
+        vis = [i for i, it in enumerate(viewer._delta_items) if it.isVisible()]
+        assert vis == [4, 5, 6, 7], f"showing {vis}"

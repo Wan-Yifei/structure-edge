@@ -330,3 +330,74 @@ class TestOffScreenChunksAreSkipped:
                   if tv.CandlestickItem._spans(i * CHUNK, (i + 1) * CHUNK,
                                                CHUNK * 3.0, CHUNK * 3.0 + 50)]
         assert played == [3], f"窄视野下仍会重放 {played}"
+
+
+class TestDirectionOutline:
+    """With the heatmap on, the body is repainted in buy/sell colours
+    and the bar's own direction is shown nowhere. An outline in the
+    bull/bear colour puts it back.
+
+    The bars here are built with no wicks (high == body top, low ==
+    body bottom), because wicks are drawn in that same colour -- with
+    them the colour would be on screen whether or not the outline were
+    drawn, and the test would pass for free.
+    """
+
+    @staticmethod
+    def _flat(bull):
+        """One wickless bar, plus a tick bucket that covers its body."""
+        o, c = (100.0, 101.0) if bull else (101.0, 100.0)
+        t = pd.date_range("2026-10-23 09:31", periods=1, freq="1min")
+        kl = pd.DataFrame({
+            "time_key": t.strftime("%Y-%m-%d %H:%M:%S"),
+            "open": [o], "close": [c],
+            "high": [max(o, c)], "low": [min(o, c)],
+            "volume": [1000.0]})
+        bk = candle_start(t[0].to_pydatetime() - timedelta(minutes=1), 1)
+        buckets = {bk: {float(p): {"buy": 100, "sell": 40, "neutral": 10}
+                        for p in np.linspace(100.0, 101.0, 6)}}
+        return kl, buckets
+
+    @staticmethod
+    def _colours(item, w=120, h=120):
+        img = QImage(w, h, QImage.Format.Format_ARGB32)
+        img.fill(0)
+        p = QPainter(img)
+        r = item.boundingRect()
+        p.translate(0, h)
+        p.scale(w / r.width(), -h / r.height())
+        p.translate(-r.x(), -r.y())
+        item.paint(p)
+        p.end()
+        return {img.pixel(x, y) & 0xFFFFFF
+                for x in range(w) for y in range(h)}
+
+    def test_a_bull_body_keeps_its_colour_under_the_heatmap(self, qapp):
+        kl, buckets = self._flat(True)
+        item = tv.CandlestickItem()
+        item.set_data(kl, buckets, 1, show_heatmap=True)
+        assert 0x26A69A in self._colours(item), "涨的方向看不出来了"
+
+    def test_a_bear_body_keeps_its_colour_under_the_heatmap(self, qapp):
+        kl, buckets = self._flat(False)
+        item = tv.CandlestickItem()
+        item.set_data(kl, buckets, 1, show_heatmap=True)
+        assert 0xEF5350 in self._colours(item), "跌的方向看不出来了"
+
+    def test_the_colour_scheme_is_honoured(self, qapp):
+        """red_up swaps them, and the outline must swap with them."""
+        kl, buckets = self._flat(True)
+        item = tv.CandlestickItem()
+        item.set_data(kl, buckets, 1, show_heatmap=True, red_up=True)
+        cols = self._colours(item)
+        assert 0xEF5350 in cols and 0x26A69A not in cols
+
+    def test_a_bar_with_no_ticks_keeps_its_solid_body(self, qapp):
+        """Not an outline test -- it passes with or without one. The
+        outline is only drawn where the heatmap took the body over, and
+        a bar with no bucket never does, so this pins that such a bar
+        still gets a solid body in its own colour."""
+        kl, _ = self._flat(True)
+        bare = tv.CandlestickItem()
+        bare.set_data(kl, {}, 1, show_heatmap=True)
+        assert 0x26A69A in self._colours(bare)
