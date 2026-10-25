@@ -2910,6 +2910,10 @@ class TradeViewerQt(QMainWindow):
         # buckets mapping is deliberate: the id() comparison is only
         # valid while those dicts are alive.
         self._prev_frame: dict | None = None
+        # The dirty set for the render in progress, and the per-bar flow
+        # totals carried between renders. See _dirty_bars / _bar_flow.
+        self._frame_dirty: set | None = None
+        self._flow_cache: dict | None = None
 
         self._bos_items:     list = []  # PlotCurveItem + TextItem per signal
         # Pool of delta labels, one per candle. Kept in the scene across
@@ -3937,13 +3941,18 @@ class TradeViewerQt(QMainWindow):
         if show_hm:
             self._pin_heatmap_legend()
 
+        # Which bars moved since the last render. Computed once, against
+        # the real buckets rather than the heatmap's view of them, because
+        # _bar_flow needs it whether the heatmap is on or not; _dirty_bars
+        # records the frame it is given, so a second call would report
+        # nothing changed.
+        self._frame_dirty = self._dirty_bars(klines, buckets, cm)
+
         # Candlesticks. The dirty set is what lets the item keep the
         # chunks it already baked; see CandlestickItem._ensure_pictures.
-        hm_buckets = buckets if show_hm else None
-        self._candle_item.set_data(klines, hm_buckets, cm,
+        self._candle_item.set_data(klines, buckets if show_hm else None, cm,
                                    show_heatmap=show_hm, red_up=red_up,
-                                   dirty_bars=self._dirty_bars(
-                                       klines, hm_buckets, cm))
+                                   dirty_bars=self._frame_dirty)
 
         # FVG zones
         self._fvg_item.set_data(
@@ -4262,6 +4271,57 @@ class TradeViewerQt(QMainWindow):
             "buckets": buckets,
         }
 
+    def _bar_flow(self, klines: pd.DataFrame, buckets: dict, cm: int):
+        """Per-bar classified buy and sell volume, plus the trading day.
+
+        Three overlays want this and all three used to compute it from
+        scratch every frame: 1440 buckets, every price level in each,
+        three times over. Here it is computed once and kept, and only
+        the bars in self._frame_dirty are redone -- one bar, usually.
+
+        Returns (buy, sell, day) where day[i] is the trading day of bar
+        i's bucket, or None for a bar whose stamp did not parse.
+        """
+        n = len(klines)
+        anchor = str(klines["time_key"].iloc[0]) if n else ""
+        cache = self._flow_cache if self._frame_dirty is not None else None
+        if (cache and cache["cm"] == cm and cache["anchor"] == anchor
+                and n >= cache["n"]):
+            buy = np.zeros(n, dtype=float)
+            sell = np.zeros(n, dtype=float)
+            buy[:cache["n"]] = cache["buy"]
+            sell[:cache["n"]] = cache["sell"]
+            day = cache["day"] + [None] * (n - cache["n"])
+            todo = [i for i in self._frame_dirty if i < n]
+        else:
+            buy = np.zeros(n, dtype=float)
+            sell = np.zeros(n, dtype=float)
+            day = [None] * n
+            todo = range(n)
+
+        keys = self._bucket_keys(klines, cm)
+        for i in todo:
+            bk = keys[i]
+            if bk is pd.NaT:
+                buy[i] = sell[i] = 0.0
+                day[i] = None
+                continue
+            day[i] = _trading_day_of_bucket(bk)
+            pd_ = buckets.get(bk)
+            if not pd_:
+                buy[i] = sell[i] = 0.0
+                continue
+            b = s_ = 0.0
+            for counts in pd_.values():
+                b += counts["buy"]
+                s_ += counts["sell"]
+            buy[i] = b
+            sell[i] = s_
+
+        self._flow_cache = {"cm": cm, "anchor": anchor, "n": n,
+                            "buy": buy, "sell": sell, "day": day}
+        return buy, sell, day
+
     def _clear_delta_items(self) -> None:
         # Hide, do not remove: the pool exists so that a redraw costs no
         # scene churn, and dropping it here would pay that cost on every
@@ -4277,15 +4337,11 @@ class TradeViewerQt(QMainWindow):
 
     def _draw_delta(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
         lows = klines["low"].to_numpy(float)
-        for i, bk in enumerate(self._bucket_keys(klines, cm)):
-            if bk is pd.NaT:
-                continue
-            pd_ = buckets.get(bk)
-            if not pd_:
-                continue
-            total_buy  = sum(pd_[p]["buy"]  for p in pd_)
-            total_sell = sum(pd_[p]["sell"] for p in pd_)
-            delta = total_buy - total_sell
+        buy, sell, _ = self._bar_flow(klines, buckets, cm)
+        for i in range(len(klines)):
+            # int(): the counts are whole trades, and the under-1000
+            # branch below prints the number raw.
+            delta = int(buy[i] - sell[i])
             if delta == 0:
                 continue
             sign = "+" if delta >= 0 else ""
@@ -4805,18 +4861,8 @@ class TradeViewerQt(QMainWindow):
         session that never actually paused.
         """
         n = len(klines)
-        delta = np.zeros(n, dtype=float)
-        day = [None] * n
-        for i, bk in enumerate(self._bucket_keys(klines, cm)):
-            if bk is pd.NaT:
-                continue
-            day[i] = _trading_day_of_bucket(bk)
-            pd_ = buckets.get(bk)
-            if not pd_:
-                continue
-            total_buy  = sum(pd_[p]["buy"]  for p in pd_)
-            total_sell = sum(pd_[p]["sell"] for p in pd_)
-            delta[i] = total_buy - total_sell
+        buy, sell, day = self._bar_flow(klines, buckets, cm)
+        delta = buy - sell
 
         # Block index per trading day, counted BACK from the newest one so the
         # most recent block is always a full N days. Counting forward from the
@@ -5036,16 +5082,7 @@ class TradeViewerQt(QMainWindow):
         as a gap is the honest picture.
         """
         n = len(klines)
-        buy = np.zeros(n, dtype=float)
-        sell = np.zeros(n, dtype=float)
-        for i, bk in enumerate(self._bucket_keys(klines, cm)):
-            if bk is pd.NaT:
-                continue
-            pd_ = buckets.get(bk)
-            if not pd_:
-                continue
-            buy[i] = sum(pd_[p]["buy"] for p in pd_)
-            sell[i] = sum(pd_[p]["sell"] for p in pd_)
+        buy, sell, _ = self._bar_flow(klines, buckets, cm)
 
         csum_d = np.concatenate([[0.0], np.cumsum(buy - sell)])
         csum_t = np.concatenate([[0.0], np.cumsum(buy + sell)])
