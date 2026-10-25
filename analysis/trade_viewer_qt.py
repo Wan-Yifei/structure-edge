@@ -844,11 +844,55 @@ def apply_profile_range(klines: pd.DataFrame, range_val: str, cm: int) -> pd.Dat
     return klines[mask]
 
 
+def _bucket_arrays(pd_: dict, cache: dict | None = None, key=None):
+    """One bucket's price levels as arrays, built once.
+
+    Returns (price, total, buy, sell, neutral, medium), keeping only
+    levels whose three directions sum above zero -- a level that sums to
+    zero is not tick coverage and must not stop a bar falling back to
+    its OHLCV volume.
+
+    With a cache, the entry holds the bucket dict itself and is reused
+    while that is the very same object. The incremental tick loader
+    replaces whole buckets, so identity separates changed from unchanged;
+    holding the object is also what keeps the test honest, since an id()
+    kept for something that has been freed can match a new dict at the
+    same address.
+    """
+    if cache is not None:
+        hit = cache.get(key)
+        if hit is not None and hit[0] is pd_:
+            return hit[1]
+
+    prices, tot, buy, sell, neu, med = [], [], [], [], [], []
+    for price, counts in pd_.items():
+        b = counts.get("buy", 0)
+        s_ = counts.get("sell", 0)
+        nn = counts.get("neutral", 0)
+        t = b + s_ + nn
+        if t > 0:
+            prices.append(float(price))
+            tot.append(t)
+            buy.append(b)
+            sell.append(s_)
+            neu.append(nn)
+            med.append(counts.get("buy_m", 0) + counts.get("sell_m", 0))
+
+    out = tuple(np.asarray(x, dtype=float)
+                for x in (prices, tot, buy, sell, neu, med))
+    if cache is not None:
+        if len(cache) > 50_000:          # a long session, many symbols
+            cache.clear()
+        cache[key] = (pd_, out)
+    return out
+
+
 def _compute_profile_bins(
     kl: pd.DataFrame,
     ticks: dict | None,
     candle_mins: int,
     n_bins: int = 60,
+    cache: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, bool, dict]:
     """Volume profile bins for the given klines rows.
 
@@ -892,67 +936,66 @@ def _compute_profile_bins(
     klo  = kl["low"].values.astype(float)
     khi  = kl["high"].values.astype(float)
     kvol = kl["volume"].fillna(0).values.astype(float)
-    kt   = kl["time_key"].values
 
-    # Collect first, bin once. This loop used to call np.digitize on every
-    # single price level -- 90,000 scalar calls per render, each paying
-    # numpy's dispatch cost to place one number. Everything numpy now
-    # happens below, on the whole array at once.
-    tp: list[float] = []
-    tt: list[float] = []
-    tb: list[float] = []
-    tsl: list[float] = []
-    tn: list[float] = []
-    tm: list[float] = []
-    for j in range(len(kl)):
-        bar_ticks_used = False
-        if ticks:
-            try:
-                bar_end = datetime.strptime(str(kt[j])[:16], "%Y-%m-%d %H:%M")
-                bk = candle_start(
-                    bar_end - timedelta(minutes=candle_mins), candle_mins)
-            except ValueError:
-                bk = None
-            if bk is not None:
-                pd_ = ticks.get(bk)
-                if pd_:
-                    for price, counts in pd_.items():
-                        buy     = counts.get("buy", 0)
-                        sell    = counts.get("sell", 0)
-                        neutral = counts.get("neutral", 0)
-                        total   = buy + sell + neutral
-                        if total > 0:
-                            p = float(price)
-                            if lo <= p <= hi:
-                                tp.append(p)
-                                tt.append(total)
-                                tb.append(buy)
-                                tsl.append(sell)
-                                tn.append(neutral)
-                                tm.append(counts.get("buy_m", 0)
-                                          + counts.get("sell_m", 0))
-                                bar_ticks_used = True
-                    if bar_ticks_used:
-                        used_ticks = True
+    # Gather the buckets, then do everything numpy at once. This loop
+    # used to read every price level of every bucket into six python
+    # lists -- ~86k dict reads a render -- and before that it called
+    # np.digitize once per level. Now a bucket is split into arrays once
+    # and kept (see _bucket_arrays), and the per-bar work is a dict
+    # lookup and six appends.
+    parts: list[tuple] = []
+    lens:  list[int]   = []
+    rows:  list[int]   = []
+    n_bars = len(kl)
+    bks = bar_start_keys(kl["time_key"], candle_mins) if ticks else None
+    for j in range(n_bars):
+        if not ticks:
+            break
+        bk = bks[j]
+        if bk is pd.NaT:
+            continue
+        pd_ = ticks.get(bk)
+        if not pd_:
+            continue
+        arrs = _bucket_arrays(pd_, cache, bk)
+        if arrs[0].size:
+            parts.append(arrs)
+            lens.append(arrs[0].size)
+            rows.append(j)
 
-        if not bar_ticks_used:
-            mask  = (centers >= klo[j]) & (centers <= khi[j])
-            n_hit = int(mask.sum())
-            if n_hit:
-                volumes[mask] += kvol[j] / n_hit
+    # A bar whose levels all fall outside [lo, hi] is NOT tick-covered
+    # and keeps its OHLCV fallback, so which bars are covered can only be
+    # decided after the range mask -- done here for every bar at once.
+    covered = np.zeros(n_bars, dtype=bool)
+    if parts:
+        p  = np.concatenate([a[0] for a in parts])
+        t  = np.concatenate([a[1] for a in parts])
+        b  = np.concatenate([a[2] for a in parts])
+        sl = np.concatenate([a[3] for a in parts])
+        nu = np.concatenate([a[4] for a in parts])
+        md = np.concatenate([a[5] for a in parts])
+        owner = np.repeat(np.asarray(rows), np.asarray(lens))
 
-    if tp:
-        # Same bins array and the same digitize as the per-price version,
-        # so a price exactly on a boundary lands in the bin it always did.
-        bi = np.clip(np.digitize(np.asarray(tp, dtype=float), bins) - 1,
-                     0, n_bins - 1)
-        volumes += np.bincount(bi, weights=np.asarray(tt, dtype=float),
-                               minlength=n_bins)
-        stats["total"]   = float(np.sum(tt))
-        stats["buy"]     = float(np.sum(tb))
-        stats["sell"]    = float(np.sum(tsl))
-        stats["neutral"] = float(np.sum(tn))
-        stats["medium"]  = float(np.sum(tm))
+        m = (p >= lo) & (p <= hi)
+        if m.any():
+            covered[np.unique(owner[m])] = True
+            used_ticks = True
+            # Same bins array and the same digitize as the per-price
+            # version, so a price exactly on a boundary lands in the bin
+            # it always did.
+            bi = np.clip(np.digitize(p[m], bins) - 1, 0, n_bins - 1)
+            volumes += np.bincount(bi, weights=t[m], minlength=n_bins)
+            stats["total"]   = float(t[m].sum())
+            stats["buy"]     = float(b[m].sum())
+            stats["sell"]    = float(sl[m].sum())
+            stats["neutral"] = float(nu[m].sum())
+            stats["medium"]  = float(md[m].sum())
+
+    for j in np.nonzero(~covered)[0]:
+        mask  = (centers >= klo[j]) & (centers <= khi[j])
+        n_hit = int(mask.sum())
+        if n_hit:
+            volumes[mask] += kvol[j] / n_hit
 
     return centers, volumes, used_ticks, stats
 
@@ -2914,6 +2957,8 @@ class TradeViewerQt(QMainWindow):
         # totals carried between renders. See _dirty_bars / _bar_flow.
         self._frame_dirty: set | None = None
         self._flow_cache: dict | None = None
+        # bucket key -> (bucket dict, its arrays); see _bucket_arrays.
+        self._profile_cache: dict = {}
 
         self._bos_items:     list = []  # PlotCurveItem + TextItem per signal
         # Pool of delta labels, one per candle. Kept in the scene across
@@ -5683,7 +5728,8 @@ class TradeViewerQt(QMainWindow):
         # bucket fall back to spreading the bar's volume evenly across every
         # bin its high-low range touches.
         centers, volumes, _used_ticks, _stats = _compute_profile_bins(
-            klines, self._ticks, self._candle_mins, n_bins=n_bins)
+            klines, self._ticks, self._candle_mins, n_bins=n_bins,
+            cache=self._profile_cache)
         if centers.size == 0:
             return
 
