@@ -1968,6 +1968,7 @@ class TradeViewerQt(QMainWindow):
         self._fvg_gaps:     list[dict]          = []
         self._ob_blocks:    list[dict]          = []
         self._liq_hm_window: "LiqHmWindow | None" = None
+        self._mvp_window = None
         self._dom_window:  QWidget | None      = None  # DOM depth-of-market window
         self._trade_record: dict | None         = None  # active trade review
         self._live_code: str = ""        # code currently subscribed for tick push
@@ -2474,6 +2475,15 @@ class TradeViewerQt(QMainWindow):
             "Requires order_book_collector.py to be running.")
         self._liq_hm_btn.clicked.connect(self._on_liq_hm_toggle)
         tb3.addWidget(self._liq_hm_btn)
+
+        self._mvp_btn = QPushButton("多日 VP")
+        self._mvp_btn.setCheckable(True)
+        self._mvp_btn.setChecked(False)
+        self._mvp_btn.setToolTip(
+            "另开一个窗口，把最近几个交易日的成交分布并排画出来，\n"
+            "并把相邻日的价值区上下沿连起来——看的是价值区往哪边移。")
+        self._mvp_btn.clicked.connect(self._on_mvp_toggle)
+        tb3.addWidget(self._mvp_btn)
 
         tb3.addSeparator()
 
@@ -4141,6 +4151,25 @@ class TradeViewerQt(QMainWindow):
     def _on_liq_hm_closed(self) -> None:
         self._liq_hm_window = None
         self._liq_hm_btn.setChecked(False)
+
+    # ── Multi-session volume profile window ──────────────────────────────────
+
+    def _on_mvp_toggle(self, checked: bool) -> None:
+        if checked:
+            from analysis.multi_vp_window import MultiVPWindow
+            self._mvp_window = MultiVPWindow()
+            self._mvp_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            self._mvp_window.destroyed.connect(self._on_mvp_closed)
+            self._mvp_window.set_code(self._code_edit.text().strip())
+            self._mvp_window.reload()
+            self._mvp_window.show()
+        elif self._mvp_window is not None:
+            _close_with_hang_watchdog(self._mvp_window, "MultiVPWindow")
+            self._mvp_window = None
+
+    def _on_mvp_closed(self) -> None:
+        self._mvp_window = None
+        self._mvp_btn.setChecked(False)
 
     def _clear_ema_items(self) -> None:
         for item in self._ema_items:
