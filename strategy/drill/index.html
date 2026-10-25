@@ -706,10 +706,15 @@ function draw(q, reveal){
         g.restore(); g.globalAlpha = 1;
       }
     }
-    // Minutes with no ticks are neither zero nor a flat line. An
-    // unexplained break reads as a broken chart -- about 6% of RTH minutes
-    // are missing, in a few long outages rather than scattered, so say so
-    // where it happens instead of leaving a hole.
+    // A blank minute is neither zero nor a flat line, and an unexplained
+    // break reads as a broken chart, so the band says why it is there.
+    //
+    // It is NOT "no ticks": the generator blanks a bar whose BUY+SELL
+    // volume is under MIN_SIGNED (300 shares), and NEUTRAL volume counts
+    // towards neither. A large share of this tape is tagged NEUTRAL, so a
+    // minute can carry plenty of prints and still be blanked for having
+    // too little that was directional. The old label said 无逐笔数据,
+    // which claimed more than the condition does.
     {
       const ser = q.drs1 || [];
       let st = -1;
@@ -725,7 +730,7 @@ function draw(q, reveal){
             g.fillStyle = ink3; g.globalAlpha = .8;
             g.font = "11px ui-monospace,monospace";
             g.textAlign = "center"; g.textBaseline = "middle";
-            g.fillText("无逐笔数据", (x0 + x1) / 2, dy0 + DR_H / 2);
+            g.fillText("可定向成交太少", (x0 + x1) / 2, dy0 + DR_H / 2);
           }
           g.restore();
           st = -1;
