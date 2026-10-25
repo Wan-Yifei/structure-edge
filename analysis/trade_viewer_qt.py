@@ -2171,6 +2171,8 @@ class TradeViewerQt(QMainWindow):
         self._fetcher:      DataFetcher | None  = None
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._trigger_fetch)
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.timeout.connect(self._on_redraw_tick)
         self._candle_mins   = 1
         self._smc_signals:  list[dict]          = []
         self._fvg_gaps:     list[dict]          = []
@@ -2354,6 +2356,24 @@ class TradeViewerQt(QMainWindow):
         self._refresh_spin.valueChanged.connect(self._on_refresh_changed)
         tb1.addWidget(self._refresh_spin)
 
+        # Redraw (Live). Separate from Refresh because repainting needs no
+        # API call at all: ticks are pushed, so the tape-driven overlays
+        # can run far ahead of the K-line top-up without costing quota.
+        # The floor is 0.5s because a render is ~220ms and 0.3s would put
+        # the GUI thread at a 73% duty cycle.
+        tb1.addWidget(_lbl("Redraw (s):"))
+        self._redraw_spin = QDoubleSpinBox()
+        self._redraw_spin.setRange(0.5, 10.0)
+        self._redraw_spin.setSingleStep(0.5)
+        self._redraw_spin.setDecimals(1)
+        self._redraw_spin.setValue(0.5)
+        self._redraw_spin.setFixedWidth(60)
+        self._redraw_spin.setToolTip(
+            "How often the chart repaints from ticks already received. "
+            "Costs no API calls; skipped when no new prints arrived.")
+        self._redraw_spin.valueChanged.connect(self._on_redraw_changed)
+        tb1.addWidget(self._redraw_spin)
+
         tb1.addSeparator()
 
         # Connect / Stop
@@ -2479,7 +2499,7 @@ class TradeViewerQt(QMainWindow):
                     "an unrecognised date shows a red warning instead of silently "
                     "using the whole chart.")
                 self._avwap_anchor_edit.returnPressed.connect(
-                    lambda: self._render(self._klines, self._ticks) if self._klines is not None else None)
+                    lambda: self._redraw())
                 tb_ind.addWidget(self._avwap_anchor_edit)
                 self._avwap_sigma_spin = QSpinBox()
                 self._avwap_sigma_spin.setRange(0, 3)
@@ -2495,7 +2515,7 @@ class TradeViewerQt(QMainWindow):
                     "+-3sigma ~= 99.7% of observations fall inside that band --\n"
                     "approximate, since price returns aren't perfectly normal.")
                 self._avwap_sigma_spin.valueChanged.connect(
-                    lambda: self._render(self._klines, self._ticks) if self._klines is not None else None)
+                    lambda: self._redraw())
                 tb_ind.addWidget(_lbl("sigma:"))
                 tb_ind.addWidget(self._avwap_sigma_spin)
             if key == "atr_stop":
@@ -2992,6 +3012,16 @@ class TradeViewerQt(QMainWindow):
         # Last frame's drawing inputs, for _dirty_bars. Holding the
         # buckets mapping is deliberate: the id() comparison is only
         # valid while those dicts are alive.
+        # The buckets as they came from ticks.db / the fetch, before
+        # _render merges the pushed live ones in on top. _render
+        # overwrites self._ticks with the merged result, so this is the
+        # only mapping that can safely be handed back to it.
+        self._db_ticks: dict | None = None
+        # Bumped by the TICKER handler; _render records what it drew. A
+        # redraw with no new prints is 220ms for an identical picture.
+        self._tick_seq: int = 0
+        self._drawn_tick_seq: int = -1
+
         self._prev_frame: dict | None = None
         # The dirty set for the render in progress, and the per-bar flow
         # totals carried between renders. See _dirty_bars / _bar_flow.
@@ -3467,20 +3497,7 @@ class TradeViewerQt(QMainWindow):
                     ret, data = super().on_recv_rsp(rsp_str)
                     if ret != RET_OK or data is None or data.empty:
                         return
-                    with viewer._tick_lock:
-                        for _, row in data.iterrows():
-                            raw = str(row["time"])
-                            fmt = ("%Y-%m-%d %H:%M:%S.%f" if "." in raw
-                                   else "%Y-%m-%d %H:%M:%S")
-                            t      = datetime.strptime(raw, fmt)
-                            bucket = candle_start(t, candle_mins)
-                            price  = float(row["price"])
-                            vol    = int(row["volume"])
-                            d      = str(row["ticker_direction"]).upper()
-                            key    = ("buy" if d == "BUY"
-                                      else ("sell" if d == "SELL" else "neutral"))
-                            viewer._live_ticks[bucket][price][key] += vol
-                            viewer._last_tick_price = price
+                    viewer._ingest_ticks(data, candle_mins)
 
             class _QuoteHandler(StockQuoteHandlerBase):
                 def on_recv_rsp(self, rsp_str):
@@ -3504,13 +3521,16 @@ class TradeViewerQt(QMainWindow):
             self._live_code = code
             interval = self._refresh_spin.value() * 1000
             self._refresh_timer.start(interval)
-            self._log(f"Live: subscribed {code}, refreshing every "
-                      f"{self._refresh_spin.value()}s")
+            self._redraw_timer.start(int(self._redraw_spin.value() * 1000))
+            self._log(f"Live: subscribed {code}, fetching every "
+                      f"{self._refresh_spin.value()}s, "
+                      f"redrawing every {self._redraw_spin.value():g}s")
         except Exception as exc:
             self._log(f"Live start error: {exc}")
 
     def _stop_live(self) -> None:
         self._refresh_timer.stop()
+        self._redraw_timer.stop()
         try:
             if self._ctx and self._live_code:
                 unsub = [SubType.TICKER, SubType.QUOTE]
@@ -3569,6 +3589,59 @@ class TradeViewerQt(QMainWindow):
     def _on_refresh_changed(self, value: int) -> None:
         if self._refresh_timer.isActive():
             self._refresh_timer.start(value * 1000)
+
+    def _on_redraw_changed(self, value: float) -> None:
+        if self._redraw_timer.isActive():
+            self._redraw_timer.start(int(value * 1000))
+
+    def _ingest_ticks(self, data: pd.DataFrame, candle_mins: int) -> None:
+        """Fold a pushed TICKER frame into the live buckets.
+
+        Runs on the subscription's callback thread, so everything it
+        touches is under _tick_lock -- including _tick_seq, which is the
+        only thing telling the redraw timer there is anything new to
+        paint. Bumped once per frame rather than per row: the timer only
+        needs to know that something arrived.
+
+        Lives here rather than inside the handler class so it can be
+        tested without a subscription; the handler is three lines of
+        unpacking around this call.
+        """
+        with self._tick_lock:
+            for _, row in data.iterrows():
+                raw = str(row["time"])
+                fmt = ("%Y-%m-%d %H:%M:%S.%f" if "." in raw
+                       else "%Y-%m-%d %H:%M:%S")
+                t      = datetime.strptime(raw, fmt)
+                bucket = candle_start(t, candle_mins)
+                price  = float(row["price"])
+                vol    = int(row["volume"])
+                d      = str(row["ticker_direction"]).upper()
+                key    = ("buy" if d == "BUY"
+                          else ("sell" if d == "SELL" else "neutral"))
+                self._live_ticks[bucket][price][key] += vol
+                self._last_tick_price = price
+            self._tick_seq += 1
+
+    def _on_redraw_tick(self) -> None:
+        """Repaint from data already in hand, if any of it is new."""
+        if self._klines is None:
+            return
+        if self._tick_seq == self._drawn_tick_seq:
+            return            # no prints since the last paint
+        self._redraw()
+
+    def _redraw(self) -> None:
+        """Repaint without fetching anything.
+
+        The source must be self._db_ticks, not self._ticks: _render
+        overwrites self._ticks with the merged mapping, and its merge
+        skips a live bucket already present there, so handing it back
+        would freeze the newest bucket -- the only one still moving.
+        """
+        if self._klines is None:
+            return
+        self._render(self._klines, self._db_ticks)
 
     def _set_subplot_row_visible(self, plot_item: pg.PlotItem, row: int, visible: bool) -> None:
         """Show/hide a subplot row, collapsing its layout space to zero when hidden.
@@ -3635,7 +3708,7 @@ class TradeViewerQt(QMainWindow):
             self._pin_ob_legend()
         self._ob_max_count.setEnabled(self._ind("ob"))
         self._fvg_min_pct.setEnabled(self._ind("fvg"))
-        self._render(self._klines, self._ticks)
+        self._redraw()
         if self._liq_hm_window is not None:
             self._liq_hm_window.set_red_up(self._ind("red_up"))
 
@@ -3791,6 +3864,7 @@ class TradeViewerQt(QMainWindow):
             None if result.get("historical")
             else (result.get("code", ""), result.get("tf", "")))
         self._ticks       = result["ticks"]
+        self._db_ticks    = result["ticks"]
         for key, day in (result.get("new_tick_days") or {}).items():
             self._tick_day_cache[key] = day
         if len(self._tick_day_cache) > 12:
@@ -3802,7 +3876,7 @@ class TradeViewerQt(QMainWindow):
         self._smc_signals = result["smc_signals"]
         self._fvg_gaps    = result["fvg_gaps"]
         self._ob_blocks   = result["ob_blocks"]
-        self._render(self._klines, self._ticks)
+        self._render(self._klines, self._db_ticks)
 
         # In Live mode, auto-scroll right when new bars arrive and the view
         # was already at the right edge (user hasn't manually panned left).
@@ -3985,6 +4059,10 @@ class TradeViewerQt(QMainWindow):
     def _render(self, klines: pd.DataFrame | None, ticks: dict | None) -> None:
         if klines is None or klines.empty:
             return
+        # Whatever had arrived when this paint started is on screen after
+        # it; the redraw timer uses this to skip repainting an unchanged
+        # picture.
+        self._drawn_tick_seq = self._tick_seq
 
         tf          = self._tf_combo.currentText()
         _, cm       = TIMEFRAME_MAP[tf]
@@ -5202,7 +5280,7 @@ class TradeViewerQt(QMainWindow):
     def _on_dcvd_lookback_changed(self, *_) -> None:
         self._apply_dcvd_scale()
         if self._klines is not None:
-            self._render(self._klines, self._ticks)
+            self._redraw()
 
     def _draw_dcvd(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
         """Draw DCVD: the CVD slope normalised to [-1, +1].
