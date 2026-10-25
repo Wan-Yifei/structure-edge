@@ -103,6 +103,7 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
   <div class="row" style="margin:0 0 10px;gap:8px;align-items:baseline">
     <span id="saved" class="prog" style="margin:0;color:var(--ink-3)"></span>
     <button id="b-jump" style="padding:5px 10px;font-size:12px" hidden>跳到未答的</button>
+    <label id="l-bal" style="font-size:12px;margin-left:10px;color:var(--ink-3);cursor:pointer" hidden><input type="checkbox" id="b-bal" checked style="vertical-align:-1px"> 按缺口出题</label>
     <button id="b-report" style="padding:5px 10px;font-size:12px" hidden>看成绩</button>
     <label style="font-size:12px;color:var(--ink-3)">跳到
       <input id="b-goto" type="text" style="width:104px;font-size:12px;padding:3px 5px"
@@ -236,6 +237,9 @@ const FWD = 30, CW = 1040,
 const PRICE_H = 360, RSI_H = 96;
 const PROF_W = 110, LBL_W = 128, PAD_L = 8, PAD_T = 12;
 let QS = [], idx = 0, ans = {}, pick = null, db = null;
+/* Where 下一题 came from. With 按缺口出题 on, next() jumps rather than
+   steps, so idx-- would land somewhere the reader was never at. */
+let navBack = [];
 let step = 0, timer = null;   // bars of the future played so far
 let _geo = null, _hover = null;   // chart geometry + cursor, for the crosshair
 
@@ -1074,7 +1078,10 @@ function render(){
   $("b-goto").placeholder = `${idx + 1} / ${QS.length}`;
 }
 
-function prev(){ if (idx > 0){ idx--; render(); } }
+function prev(){
+  if (navBack.length){ idx = navBack.pop(); render(); return; }
+  if (idx > 0){ idx--; render(); }
+}
 /* Position OR identity. A bare number is a position in the current order,
    which is only stable within one load: answered questions move to the
    front on the next one, so "第 52 题" points somewhere else tomorrow. A
@@ -1393,7 +1400,64 @@ function context(q){
   return s;
 }
 
-function next(){ if (idx < QS.length-1){ idx++; render(); } else report(); }
+/* Which practice bucket a question belongs to: its kind crossed with the
+   structure the generator read off the chart. Those are the two splits the
+   answers actually separate on -- by kind, 深回落 came in at 41% and +0.07
+   R against 浅回调's 55% and +0.19; by structure, 区间 was +0.42 R a trade
+   and 下降 was -0.16. Calendar month, which is what the panel below used to
+   invite comparing, separates nothing: every month's interval covers the
+   pooled rate. */
+function cellOf(q){ return (q.kind || "?") + "|" + (q.trend || "?"); }
+
+/* The unanswered question from the bucket furthest behind.
+
+   coverage = answered / available, and taking the minimum every time is
+   water-filling: a bucket far behind gets served until it catches the rest,
+   then they alternate by themselves. 夹角 sat at 10% against 48% and 52%,
+   so it is the one that runs first.
+
+   Within the chosen bucket the base order decides, except that a question
+   from the session just seen is passed over if another is available --
+   adjacent minutes of one chart test recall rather than judgement, which is
+   what spreadByDay exists to avoid. */
+function nextByDeficit(){
+  const avail = new Map(), done = new Map();
+  for (const q of QS){
+    const c = cellOf(q);
+    avail.set(c, (avail.get(c) || 0) + 1);
+    if (ans[q.id]) done.set(c, (done.get(c) || 0) + 1);
+  }
+  let bestCell = null, bestCov = Infinity;
+  for (const [c, n] of avail){
+    if ((done.get(c) || 0) >= n) continue;          // nothing left here
+    const cov = (done.get(c) || 0) / n;
+    if (cov < bestCov){ bestCov = cov; bestCell = c; }
+  }
+  if (bestCell === null) return -1;
+  const today = QS[idx] ? QS[idx].day : null;
+  let fallback = -1;
+  for (let i = 0; i < QS.length; i++){
+    const q = QS[i];
+    if (ans[q.id] || cellOf(q) !== bestCell) continue;
+    if (q.day !== today) return i;
+    if (fallback < 0) fallback = i;
+  }
+  return fallback;
+}
+
+function balanced(){
+  const el = $("b-bal");
+  return !el || el.checked;
+}
+
+function next(){
+  if (balanced()){
+    const i = nextByDeficit();
+    if (i >= 0){ navBack.push(idx); idx = i; render(); return; }
+    report(); return;                                // everything answered
+  }
+  if (idx < QS.length-1){ navBack.push(idx); idx++; render(); } else report();
+}
 
 function report(){
   $("qcard").hidden = true; $("report").hidden = false; $("prog").textContent = "完成";
@@ -1681,6 +1745,19 @@ function curveStats(rs){
    answering in a shuffled order means a run of answers can sit almost
    entirely inside one quarter, and a score that rises with the calendar
    of the QUESTIONS is a statement about the market, not about you. */
+/* Wilson score interval. Normal-approximation error bars would run past
+   0 and 1 on the months with four entries, which is exactly where the
+   caution is needed most. */
+function wilson(k, n, z){
+  z = z || 1.96;
+  if (!n) return null;
+  const p = k/n, d = 1 + z*z/n;
+  const c = (p + z*z/(2*n))/d;
+  const h = z*Math.sqrt(p*(1-p)/n + z*z/(4*n*n))/d;
+  return [Math.max(0, c-h), Math.min(1, c+h)];
+}
+const pct = v => Math.round(100*v) + "%";
+
 function monthsOf(A){
   const by = {};
   for (const a of A){
@@ -1783,7 +1860,11 @@ function drawPeriods(A){
   const rows = [];
   for (const m of months){
     const b = by[m];
-    const wr = b.ent ? `${Math.round(100*b.wins/b.ent)}%` : "—";
+    const ci = wilson(b.wins, b.ent);
+    const wr = b.ent
+      ? `${pct(b.wins/b.ent)} <span style="color:var(--ink-3)">` +
+        `[${pct(ci[0])}, ${pct(ci[1])}]</span>`
+      : "—";
     const d = (b.r - b.base) / b.n;
     rows.push([`${m}（${b.n} 题，进 ${b.ent}）`,
       `你 ${sr(b.r/b.n, 3)} R/题　机械 ${sr(b.base/b.n, 3)} R/题　` +
@@ -1802,6 +1883,31 @@ function drawPeriods(A){
       `${hiM} 是 ${sr(by[hiM].base/by[hiM].n, 3)} R/题，在 ${loM} 是 ` +
       `${sr(by[loM].base/by[loM].n, 3)} R/题。曲线那张图按答题顺序走，` +
       `而答题顺序和月份不是一回事 —— 一段上坡可能只是那阵子在答好做的月份。`);
+  }
+  /* The win-rate column invites reading a best and a worst month off it.
+     Usually there is no such thing to read: with a few dozen entries a
+     month, every interval covers the pooled rate and the spread is
+     noise. Say so rather than leaving the numbers to speak. */
+  const entM = months.filter(m => by[m].ent > 0);
+  if (entM.length > 1){
+    const K = entM.reduce((s,m) => s + by[m].wins, 0);
+    const N = entM.reduce((s,m) => s + by[m].ent, 0);
+    const pooled = K/N;
+    const covers = entM.filter(m => {
+      const ci = wilson(by[m].wins, by[m].ent);
+      return ci[0] <= pooled && pooled <= ci[1];
+    });
+    const lo = entM.slice().sort((a,b) => by[a].ent - by[b].ent)[0];
+    if (covers.length === entM.length){
+      note.push(`<b>月度胜率之间没有可读的差别。</b>${entM.length} 个月的 ` +
+        `95% 区间全都盖住总体的 ${pct(pooled)}，所以看起来的高低和噪声分不` +
+        `开。最少的那个月（${lo}）只有 ${by[lo].ent} 笔入场 —— 胜率要做到 ` +
+        `±10 个点需要约 96 笔。`);
+    } else {
+      note.push(`<b>注意区间宽度。</b>${entM.length} 个月里有 ` +
+        `${entM.length - covers.length} 个的 95% 区间没盖住总体的 ` +
+        `${pct(pooled)}，其余的高低仍然和噪声分不开。`);
+    }
   }
   note.push(`<b>看超额那一列，不要看总 R。</b>总 R 高的月份可能只是题好做；` +
     `超额为正才说明你的挑选和参数在那个月加了分。`);
@@ -2111,6 +2217,7 @@ function badge(){
   const done = n >= QS.length;
   $("b-jump").hidden = !QS.length;
   $("b-jump").textContent = done ? "回到题目" : "跳到未答的";
+  $("l-bal").hidden = $("b-jump").hidden;
   $("b-report").hidden = n === 0;
 }
 function restore(){
@@ -2156,7 +2263,7 @@ function reset(){
     try{ localStorage.removeItem("drill:"+q.id); }catch(e){}
     if (db) db.collection("drill").doc(q.id).delete().catch(()=>{});
   }
-  ans = {}; idx = 0;
+  ans = {}; idx = 0; navBack = [];
   $("report").hidden = true; $("qcard").hidden = false;
   render(); badge();
 }
@@ -2244,6 +2351,14 @@ $("b-pass").onclick = () => choose("pass");
 $("b-enter").onclick = () => choose("enter");
 $("b-go").onclick = submit;
 $("b-next").onclick = next;
+try{
+  const saved = localStorage.getItem("drill:balanced");
+  if (saved !== null) $("b-bal").checked = saved === "1";
+}catch(e){}
+$("b-bal").onchange = () => {
+  try{ localStorage.setItem("drill:balanced",
+                            $("b-bal").checked ? "1" : "0"); }catch(e){}
+};
 $("b-prev").onclick = prev;
 $("b-goto").onchange = () => goto1($("b-goto").value);
 /* `change` fires only when the value differs from what the field held, and
@@ -2308,7 +2423,7 @@ function loadSet(conf){
       if (hi) hi.textContent = pct(dr["dr1|≥0"]);
       if (lo) lo.textContent = pct(dr["dr1|<0"]);
     }
-    QS = orderFor(conf, d || []); ans = {}; idx = 0;
+    QS = orderFor(conf, d || []); ans = {}; idx = 0; navBack = [];
     if (!QS.length){
       $("prog").textContent = "没有题目";
       $("qcard").hidden = true; $("report").hidden = true;

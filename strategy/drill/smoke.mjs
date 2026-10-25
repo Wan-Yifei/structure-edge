@@ -75,7 +75,7 @@ const ctx = new Proxy({}, {
 });
 const mkEl = (id) => ({
   id, textContent: "", innerHTML: "", hidden: false, value: "",
-  disabled: false, style: {}, className: "",
+  disabled: false, checked: true, style: {}, className: "",
   onclick: null, oninput: null, onchange: null,
   focus() {}, setAttribute() {}, appendChild() {},
   getContext: () => ctx, width: 0, height: 0,
@@ -85,8 +85,14 @@ const mkEl = (id) => ({
 
 const loaded = [];
 global.window = { devicePixelRatio: 1 };
+/* orderFor draws a fresh seed from Math.random() when localStorage has
+   none, which made this harness non-deterministic: a check that depends on
+   WHICH questions get answered passed on one run and failed on the next.
+   Seeding both sets up front makes a failure reproducible, which is the
+   minimum a harness owes you. Override with SMOKE_SEED to sweep orders. */
+const SEED = process.env.SMOKE_SEED || "20261025";
 global.localStorage = {
-  _d: {},
+  _d: { "drill:seed:0": SEED, "drill:seed:1": SEED },
   getItem(k) { return this._d[k] ?? null; },
   setItem(k, v) { this._d[k] = v; },
   removeItem(k) { delete this._d[k]; },
@@ -124,6 +130,7 @@ global.clearInterval = () => {};
 const api = new Function(
   code + "\n;return {choose, submit, levels, settle, ruleLight, stepTo, loadSet, report, next," +
          "         prev, goto1, isAnswered: (id) => !!ans[id], getIdx: () => idx," +
+         "         cellOf, nextByDeficit," +
          "         getStep: () => step, getQS: () => QS};")();
 
 await new Promise((r) => setTimeout(r, 400));
@@ -402,8 +409,14 @@ const allText = vd + els.score.innerHTML;
 if (!/[+\u2212]\d/.test(allText))
   throw new Error("expected signed numbers in the verdict or scorecard");
 const bad = allText.match(/(^|[\s>(])-\d+\.\d+[^<]{0,24}/);
-if (bad)
-  throw new Error("ASCII hyphen on a negative: " + JSON.stringify(bad[0]));
+if (bad){
+  /* Print what surrounds it: the text is assembled from several notes and
+     the match alone does not say which one produced it. */
+  const at = allText.indexOf(bad[0]);
+  throw new Error("ASCII hyphen on a negative: " + JSON.stringify(bad[0]) +
+                  " | context: " +
+                  JSON.stringify(allText.slice(Math.max(0, at - 260), at + 100)));
+}
 console.log("ok   正负号：冒号分隔，负号用 \u2212，加减视觉等重");
 
 /* Order. Questions ship sorted by day and time, so in file order the first
@@ -1009,3 +1022,165 @@ console.log("\nJUMP OK");
     throw new Error("switching sets must leave a question on screen");
   console.log("ok   切换决策位置：计数归零但说明另一套仍在，题目和跳转都在");
 }
+
+
+/* ---- serving the bucket that is furthest behind ---------------------- *
+ * Measured over the 800 answers on file, coverage by kind was 浅回调 48%,
+ * 深回落 52% and 夹角 10% -- with zero 夹角 answered in August or
+ * September, where 50 and 42 of them exist. The kind the trader named as
+ * their weakness was the one a fixed order never reached.
+ *
+ * Everything above has already answered the whole set, and orderFor draws
+ * a fresh seed from Math.random() when localStorage has none, so this
+ * starts from a cleared, seeded state rather than from the leftovers.   */
+{
+  for (const k of Object.keys(localStorage._d))
+    if (/^drill:\d{4}-/.test(k) || /^drill:mine/.test(k))
+      delete localStorage._d[k];
+  localStorage.setItem("drill:seed:1", "20261025");
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  els["b-bal"].checked = true;
+
+  const QS = api.getQS();
+  const cells = new Map();
+  for (let i = 0; i < QS.length; i++){
+    const c = api.cellOf(QS[i]);
+    if (!cells.has(c)) cells.set(c, []);
+    cells.get(c).push(i);
+  }
+  if (cells.size < 2)
+    throw new Error("need at least two buckets to balance between");
+
+  /* Build the imbalance deliberately: fill the largest bucket part way
+     and leave the rest untouched. */
+  const big = [...cells.entries()].sort((a,b) => b[1].length - a[1].length)[0];
+  const fill = Math.min(40, big[1].length - 1);
+  for (let k = 0; k < fill; k++){
+    api.goto1(String(big[1][k] + 1));
+    els["s-stop"].value = "1.0";
+    els["s-tgt"].value = "2.0";
+    api.choose("pass");
+    api.submit();
+  }
+  const covOf = (c) => {
+    const idxs = cells.get(c);
+    const done = idxs.filter(i => api.isAnswered(QS[i].id)).length;
+    return done / idxs.length;
+  };
+  let want = null, best = Infinity;
+  for (const c of cells.keys()){
+    if (covOf(c) >= 1) continue;
+    if (covOf(c) < best){ best = covOf(c); want = c; }
+  }
+  if (want === big[0])
+    throw new Error("the fed bucket is still the emptiest; bad fixture");
+
+  api.next();
+  const got = QS[api.getIdx()];
+  if (api.isAnswered(got.id))
+    throw new Error("served a question that was already answered");
+  if (api.cellOf(got) !== want)
+    throw new Error(`served ${api.cellOf(got)} at coverage ` +
+                    `${(100*covOf(api.cellOf(got))).toFixed(0)}%, but ` +
+                    `${want} was behind at ${(100*best).toFixed(0)}%`);
+  console.log(`ok   按缺口出题：喂饱 ${big[0]} 之后，转到落后的 ${want}`);
+
+  /* Keep feeding and the deficit has to move on, or a bucket that starts
+     behind would be served for ever. */
+  const first = api.cellOf(got);
+  let n = 0;
+  while (api.cellOf(QS[api.getIdx()]) === first && n++ < 500){
+    els["s-stop"].value = "1.0";
+    els["s-tgt"].value = "2.0";
+    api.choose("pass");
+    api.submit();
+    api.next();
+  }
+  if (n >= 500)
+    throw new Error("the same bucket kept coming back after 500 answers");
+  console.log(`ok   喂饱之后换桶：${n} 题后从 ${first} 移开`);
+
+  /* Off, it is the plain walk it always was. */
+  els["b-bal"].checked = false;
+  const at = api.getIdx();
+  api.next();
+  if (api.getIdx() !== at + 1)
+    throw new Error(`toggle off should step to ${at+1}, went to ` +
+                    api.getIdx());
+  els["b-bal"].checked = true;
+  console.log("ok   关掉开关：恢复成按顺序走");
+
+  if (els["l-bal"].hidden !== els["b-jump"].hidden)
+    throw new Error("the toggle must appear with the jump control");
+  console.log("ok   开关和「跳到未答的」一起出现");
+}
+
+console.log("\nBALANCE OK");
+
+/* ---- the monthly table says how uncertain it is ---------------------- *
+ * The win rates by month were 50/56/70/52/49/43% on 4/18/20/61/45/23
+ * entries, and every Wilson interval covers the pooled 53%. The panel
+ * presented those as if they were differences.                          */
+{
+  /* Needs entries, and in more than one month, or there is nothing to be
+     uncertain about. */
+  const QS = api.getQS();
+  const byMonth = new Map();
+  for (let i = 0; i < QS.length; i++){
+    const m = QS[i].day.slice(0, 7);
+    if (!byMonth.has(m)) byMonth.set(m, []);
+    byMonth.get(m).push(i);
+  }
+  const months = [...byMonth.keys()].sort();
+  if (months.length < 2)
+    throw new Error("the set spans one month; nothing to compare");
+  // A deliberately lopsided pair: many entries in one month, few in another.
+  // Skip what the balance section already answered -- submit() refuses a
+  // second answer -- and take the two months with the most left, so the
+  // fixture does not depend on which months that section happened to eat.
+  const free = m => byMonth.get(m).filter(i => !api.isAnswered(QS[i].id));
+  const roomy = months.slice().sort((a, b) => free(b).length - free(a).length);
+  if (free(roomy[1]).length < 25)
+    throw new Error("not enough unanswered questions left for the fixture");
+  const plan = [[roomy[0], 25], [roomy[1], 4]];
+  for (const [m, k] of plan)
+    for (const i of free(m).slice(0, k)){
+      api.goto1(String(i + 1));
+      els["s-stop"].value = "1.0";
+      els["s-tgt"].value = "2.0";
+      api.choose("enter");
+      api.submit();
+    }
+
+  api.report();
+  const tbl = els.period.innerHTML;
+  if (!/\[\d+%, \d+%\]/.test(tbl))
+    throw new Error("no confidence interval beside the monthly win rate");
+  console.log("ok   月度胜率带上了 95% 区间");
+
+  const read = els["pd-read"].innerHTML;
+  if (!/区间|噪声/.test(read))
+    throw new Error("the reading notes say nothing about the uncertainty");
+  console.log("ok   读法里点明了区间/噪声");
+
+  /* The interval must widen as the sample shrinks, or it is decoration. */
+  // Per row: a single regex over the whole table runs past a month with
+  // no entries and picks up the NEXT month's interval.
+  const w = tbl.split("</tr>").map(row => {
+    const h = row.match(/(\d+) 题，进 (\d+)）/);
+    const ci = row.match(/\[(\d+)%, (\d+)%\]/);
+    return h && ci ? { ent: +h[2], width: +ci[2] - +ci[1] } : null;
+  }).filter(x => x && x.ent > 0);
+  if (w.length < 2)
+    throw new Error("expected two months with entries, got " + w.length +
+                    " | table: " + JSON.stringify(tbl.slice(0, 600)));
+  const bySize = w.slice().sort((a, b) => a.ent - b.ent);
+  if (bySize[0].width <= bySize[bySize.length - 1].width)
+    throw new Error("the smallest month must have the widest interval");
+  console.log(`ok   样本越小区间越宽（${bySize[0].ent} 笔 ` +
+              `${bySize[0].width} 点 vs ${bySize[bySize.length-1].ent} 笔 ` +
+              `${bySize[bySize.length-1].width} 点）`);
+}
+
+console.log("\nINTERVAL OK");
