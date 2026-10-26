@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.74.3 — 多日 VP 的「实时」其实一整天都在重播早上那一份 (2026-10-26)
+
+面板每 30 秒刷一次，图却一动不动：现价 87，当日 slab 还停在 82。
+
+缓存里的证据是干净的 —— SOXL 1m 当日只有 **53 根，最后一根 00:52**，正是凌晨
+打开面板那一刻。之后每一次刷新都是缓存命中。
+
+```
+2026-10-23   1201 根   .. 2026-10-23 20:00
+2026-10-25    239 根   .. 2026-10-25 23:59
+2026-10-26     53 根   .. 2026-10-26 00:52   ← 之后再无新数据
+```
+
+链条在 `KlineStore.missing_days`，而且是写在它自己的文档里的：
+
+> Today is treated as present if it already holds a bar, which keeps
+> repeated intraday calls off the API without ever freezing a partial
+> day into the coverage table.
+
+live 窗口问的是 10-25 → 10-27：10-27 在今天之后被跳过，10-25 已覆盖，10-26
+**有 bar 就算在** → 不缺 → `fetch_klines` 直接返回缓存。
+
+这条规则对回测是对的（否则每次调用都打 API），**所以不去改 store**，改在调用方：
+整个程序里只有这个面板要的是「尾巴」，那就由它自己说出来。live tick 现在带
+`force_refresh=True`。
+
+### 顺带一个一直在的性能坑
+
+`Days` 调到超过数据源能给的天数时，缓存永远填不满，于是
+`len(self._cache) < want` 恒为真，**每一次 30 秒的 tick 都会去拉整个窗口** ——
+Days=6 就是 26 天，而且是在主图共用的那条 GUI 线程上。把 live 分支提到最前面，
+顺手修掉：tick 永远只问 2 天。
+
+### 状态栏现在报最后一根的时间
+
+「refreshed every 30s」是对定时器的承诺，不是对数据的承诺 —— 喂死了的数据长得
+一模一样。现在写成 `· = in progress, last bar 00:52, refreshed every 30s`，
+这次这种情况扫一眼就看得见。
+
+### 测试
+
+17 → 21 项。调用记录改成 tuple 子类，原有断言（`start, end = calls[0]`、
+`calls == []`）一个字没动。四条新的：tick 必须要 fresh、真正发请求的 reload
+不许 force、`Days` 超出数据源时 tick 仍只问 2 天、状态栏含最后一根的钟点。
+把 `force_refresh=fresh` 改回 `False` 做变异，第一条立刻挂。
+
+已知遗留：这个文件里有测试失败时，模块级 `qapp` 的 teardown 在
+`processEvents()` 上会 abort，把失败信息盖掉一半。先前就有，与本次改动无关。
+
 ## v0.74.2 — 等过之后图跟着决策那根走；「再看一根」改用 d，上限 15 根 (2026-10-26)
 
 ### 快捷键没撞，但按钮在骗人

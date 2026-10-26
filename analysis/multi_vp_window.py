@@ -289,10 +289,21 @@ class MultiVPWindow(QMainWindow):
 
         # Calendar days to ask for: weekends and holidays are not sessions,
         # so a fixed multiple would come up short over a long break.
-        if len(self._cache) < want:
+        #
+        # The live tick is tested FIRST, and it asks for fresh data. The
+        # store counts today as covered the moment it holds one bar -- on
+        # purpose, so a backtest does not go back to the API for every
+        # call -- which means a plain fetch replays the morning's bars for
+        # the rest of the day. This panel is the one caller whose whole
+        # point is the tail, so it says so rather than changing the rule
+        # for everyone. Testing it first also keeps the window small: with
+        # Days raised past what the feed can serve, the branch below would
+        # otherwise send every 30s tick back for the entire span.
+        fresh = False
+        if span_days is not None:
+            span, fresh = span_days, True    # live tick
+        elif len(self._cache) < want:
             span = want * 3 + 8          # cache cannot serve this
-        elif span_days is not None:
-            span = span_days             # live tick
         else:
             span = 0                     # bins/VA%/join: redraw only
 
@@ -300,7 +311,8 @@ class MultiVPWindow(QMainWindow):
             end = pd.Timestamp.now().normalize() + pd.Timedelta(days=1)
             start = end - pd.Timedelta(days=span)
             k = fetch_klines(self._code, "1m", start.strftime("%Y-%m-%d"),
-                             end.strftime("%Y-%m-%d"))
+                             end.strftime("%Y-%m-%d"),
+                             force_refresh=fresh)
             if k is not None and not k.empty:
                 k = k.copy()
                 k["t"] = pd.to_datetime(k["time_key"])
@@ -471,8 +483,15 @@ class MultiVPWindow(QMainWindow):
                        d[5:] + (" \u00b7" if d == self._live_day else ""))
                       for i, (d, _) in enumerate(sess)]])
         first, last = sess[0][0], sess[-1][0]
-        live_note = ("   \u00b7 = in progress, refreshed every "
-                     f"{LIVE_REFRESH_MS // 1000}s" if self._live_day else "")
+        # The newest bar's own clock, not just the refresh interval: a feed
+        # that has stopped arriving looks exactly like one that is up to
+        # date when the panel only promises "every 30s".
+        live_note = ""
+        if self._live_day:
+            tail = sess[-1][1].index[-1]
+            live_note = (f"   \u00b7 = in progress, last bar "
+                         f"{tail.strftime('%H:%M')}, refreshed every "
+                         f"{LIVE_REFRESH_MS // 1000}s")
         self._status.setText(
             f"  {self._code}   {len(sess)} sessions   {first} .. {last}"
             f"   gold = POC, blue = VA edges{live_note}")

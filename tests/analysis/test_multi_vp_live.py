@@ -49,6 +49,15 @@ def _session(day, base, n=390, start="09:31", amp=1.5):
          "volume": vol})
 
 
+class _Call(tuple):
+    """A recorded fetch: still (start, end), plus what it asked for.
+
+    A tuple subclass so every assertion written against the old log --
+    `start, end = calls[0]`, `calls == []` -- keeps working unchanged.
+    """
+    fresh = False
+
+
 @pytest.fixture
 def live(qapp, monkeypatch):
     """Three finished sessions plus a short one dated 'today'."""
@@ -62,7 +71,9 @@ def live(qapp, monkeypatch):
     calls = []
 
     def fake(code, tf, start, end, *a, **k):
-        calls.append((start, end))
+        c = _Call((start, end))
+        c.fresh = bool(k.get("force_refresh"))
+        calls.append(c)
         return pd.concat(frames + [TODAY[0]], ignore_index=True)
 
     TODAY = [_session(today, 108, n=20)]       # 20 bars so far
@@ -316,3 +327,62 @@ class TestRthIsOffByDefault:
             assert w._live_day is None
         finally:
             w.close()
+
+class TestTheTickActuallyGetsNewBars:
+    """The panel refreshed every 30s and showed the same bars all day.
+
+    Measured on the real cache: SOXL 1m held 53 bars for 2026-10-26,
+    the newest stamped 00:52, while the market was trading five dollars
+    higher. Every tick since had been a cache hit.
+
+    The store is not wrong to do that -- `missing_days` counts today as
+    present as soon as it holds one bar, which is what keeps a backtest
+    off the API -- so the fix is at this call site, and these pin it
+    there rather than in the store.
+    """
+
+    def test_the_tick_asks_for_fresh_data(self, live):
+        w, _, _, calls, _ = live
+        calls.clear()
+        w.refresh_live()
+        assert len(calls) == 1
+        assert calls[0].fresh is True, (
+            "a live tick that honours the cache replays the morning's bars")
+
+    def test_a_reload_that_does_fetch_does_not_force(self, live):
+        """Only the tail is worth paying for: the cache is right about
+        every finished day behind it, and forcing would throw away a
+        9.9s fetch to re-learn what it already knows.
+
+        Days is raised first because a reload the cache can serve does
+        not fetch at all -- pinned elsewhere in this file."""
+        w, _, _, calls, _ = live
+        w._days.blockSignals(True); w._days.setValue(12)
+        w._days.blockSignals(False)
+        calls.clear()
+        w.reload()
+        assert len(calls) == 1
+        assert calls[0].fresh is False
+
+    def test_the_tick_stays_narrow_when_days_outruns_the_feed(self, live):
+        """Days above what the feed can serve left the cache permanently
+        short, and the 'cannot serve this' branch then widened every
+        single tick to the whole window -- a 26-day fetch every 30s, on
+        the thread the main chart draws on."""
+        w, _, _, calls, _ = live
+        w._days.blockSignals(True); w._days.setValue(12)
+        w._days.blockSignals(False)
+        calls.clear()
+        w.refresh_live()
+        assert len(calls) == 1
+        start, end = calls[0]
+        assert (pd.Timestamp(end) - pd.Timestamp(start)).days == 2, \
+            f"the tick widened to {start}..{end}"
+
+    def test_the_status_shows_the_newest_bar(self, live):
+        """'refreshed every 30s' is a promise about the timer, not about
+        the data: a stopped feed reads identically. The bar's own clock
+        is what makes a freeze visible."""
+        w, _, _, _, TODAY = live
+        last = pd.to_datetime(TODAY[0].time_key.iloc[-1])
+        assert last.strftime("%H:%M") in w._status.text(), w._status.text()
