@@ -144,7 +144,7 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
       <div class="row">
         <button id="b-pass" title="放过（快捷键 1）">放过</button>
         <button id="b-enter" title="入场（快捷键 2）">入场</button>
-        <button id="b-wait" title="再看一根再决定（快捷键 . ）">→ 再看一根</button>
+        <button id="b-wait" title="再看一根再决定（快捷键 d）">再看一根</button>
         <span id="kb-hint" class="kbhint"></span>
       </div>
       <div class="sliders" id="sl" hidden>
@@ -256,7 +256,12 @@ let step = 0, timer = null;   // bars of the future played so far
    An answered question reads its own recorded `waited` instead, so a
    revisit reproduces the attempt rather than the current state. */
 let step0 = 0;
-const WAIT_MAX = 10;
+/* The ceiling is 30, not a matter of taste: every question carries 60 bars
+   of future against a 30-bar settlement horizon, so waiting k bars leaves
+   a full window only while k <= 30. Past that a waited trade would settle
+   on a short window and quietly stop being comparable to an unwaited one.
+   15 keeps half the margin. Re-measure the banks before raising it. */
+const WAIT_MAX = 15;
 let _geo = null, _hover = null;   // chart geometry + cursor, for the crosshair
 
 /* Questions arrive sorted by day and time, so walking them in order served
@@ -471,9 +476,9 @@ function draw(q, reveal){
     /* Colour AND fill carry the direction, not colour alone: at four pixels
        wide the hollow/solid difference alone was invisible, which is how
        every candle ended up looking black. */
-    const x = X(i), mk = i === q.mark, up = c[i] >= o[i];
+    const x = X(i), mk = i === dm, up = c[i] >= o[i];
     const col = up ? upC : dnC;
-    g.globalAlpha = i > q.mark ? .95 : (mk ? 1 : .80);
+    g.globalAlpha = i > dm ? .95 : (mk ? 1 : .80);
     g.strokeStyle = col; g.lineWidth = mk ? 1.8 : 1.0;
     g.beginPath(); g.moveTo(x, Y(h[i])); g.lineTo(x, Y(l[i])); g.stroke();
     const y1 = Y(Math.max(o[i],c[i])), y2 = Y(Math.min(o[i],c[i]));
@@ -485,7 +490,10 @@ function draw(q, reveal){
   /* Kept so the crosshair can map pixels back to price and bar without
      recomputing the layout. */
   _geo = {lo, hi, n, last, PAD_L, W, Y0: PAD_T, H: PRICE_H, X, Y};
-  const mx = X(q.mark);
+  /* Everything that points at the bar being judged -- the rule, the bold
+     candle, the RSI and delta_r dots -- follows the decision, which moves
+     as bars are stepped through. */
+  const mx = X(dm);
   /* Just PAST the decision bar, not through it. Drawn down the bar's centre
      it split the candle in two and the body stopped being distinguishable
      from the wicks -- on the one bar the whole question is about. */
@@ -493,10 +501,20 @@ function draw(q, reveal){
   g.save(); g.setLineDash([2,3]); g.strokeStyle = acc; g.globalAlpha = .5;
   g.beginPath(); g.moveTo(mxEdge, PAD_T); g.lineTo(mxEdge, PAD_T+PRICE_H);
   g.stroke(); g.restore(); g.globalAlpha = 1;
+  /* Where the setup was, once the decision has moved off it. Faint on
+     purpose: it is the reference the waited bars are read against, not
+     the bar being judged any more. */
+  if (dm !== q.mark){
+    const sx = X(q.mark) + Math.max(bw / 2 + 2, (W / n) / 2);
+    g.save(); g.setLineDash([2,3]); g.strokeStyle = acc; g.globalAlpha = .18;
+    g.beginPath(); g.moveTo(sx, PAD_T); g.lineTo(sx, PAD_T+PRICE_H);
+    g.stroke(); g.restore(); g.globalAlpha = 1;
+  }
 
   // ---- entry, stop, target ----------------------------------------------
   const rail = CW - 6;
-  const lines = [[q.entry, acc, `入场 ${fmt(q.entry)}`]];
+  const ep = entryOf(q, dm);
+  const lines = [[ep, acc, `入场 ${fmt(ep)}`]];
   if (a && a.choice === "enter"){
     lines.push([a.stop, stopC, `止损 ${fmt(a.stop)}  −1R`]);
     lines.push([a.target, tgtC, `目标 ${fmt(a.target)}  +${a.targetR.toFixed(2)}R`]);
@@ -527,8 +545,8 @@ function draw(q, reveal){
   /* Which bar ended it. See hitArrow above for why this is recomputed
      rather than read off the stored answer. */
   if (a && a.choice === "enter" && a.stopAtr != null){
-    const st = settle(q, a.stopAtr, a.tgtAtr);
-    const j = q.mark + st.bar;
+    const st = settle(q, a.stopAtr, a.tgtAtr, dm);
+    const j = dm + st.bar;
     if (st.hit && st.hit !== "none" && j < last){
       const tp = st.hit === "tp";
       const y = Y(tp ? st.target : st.stop);
@@ -540,7 +558,7 @@ function draw(q, reveal){
   /* The decision candle again, over the entry/stop/target rules, so the
      bar being judged is the clearest thing on the chart. */
   {
-    const i = q.mark, up = c[i] >= o[i], col = up ? upC : dnC, x = X(i);
+    const i = dm, up = c[i] >= o[i], col = up ? upC : dnC, x = X(i);
     g.strokeStyle = col; g.lineWidth = 1.8;
     g.beginPath(); g.moveTo(x, Y(h[i])); g.lineTo(x, Y(l[i])); g.stroke();
     const y1 = Y(Math.max(o[i],c[i])), y2 = Y(Math.min(o[i],c[i]));
@@ -557,8 +575,8 @@ function draw(q, reveal){
      a target reached on bar 49 sat in plain sight above a verdict reading
      "never touched". Past the horizon the field is dimmed, so what counts
      and what is merely visible are two different-looking regions. */
-  if (reveal && last > q.mark + 1 + FWD){
-    const hx = X(q.mark + FWD);
+  if (reveal && last > dm + 1 + FWD){
+    const hx = X(dm + FWD);
     g.save();
     g.fillStyle = surf; g.globalAlpha = .62;
     g.fillRect(hx, PAD_T + 1, PAD_L + W - hx, PRICE_H - 2);
@@ -637,7 +655,7 @@ function draw(q, reveal){
     if (!started){ g.moveTo(x,y); started = true; } else g.lineTo(x,y);
   }
   g.stroke();
-  const rv = q.rsi[q.mark];
+  const rv = q.rsi[dm];
   if (rv != null){
     g.fillStyle = acc; g.beginPath(); g.arc(mx, RY(rv), 3, 0, 7); g.fill();
     tag(g, rail, RY(rv), `RSI ${rv.toFixed(1)}`, acc,
@@ -781,7 +799,7 @@ function draw(q, reveal){
       }
       g.stroke(); g.globalAlpha = 1;
     }
-    const dv = q.drs1 ? q.drs1[q.mark] : null;
+    const dv = q.drs1 ? q.drs1[dm] : null;
     if (dv != null){
       g.fillStyle = acc;
       g.beginPath(); g.arc(mx, DY(dv), 3, 0, 7); g.fill();
@@ -1133,7 +1151,7 @@ function render(){
     $("b-next").hidden = false;
     $("play").hidden = false;
     verdictFor(q, prior);
-    step = q.c.length - 1 - q.mark;
+    step = q.c.length - 1 - markOf(q);
     stepTo(step);
   } else {
     draw(q, false);
@@ -1182,8 +1200,8 @@ function waitBtn(){
   const done = !q || !!ans[q.id];
   b.hidden = done;
   b.disabled = done || step0 >= WAIT_MAX;
-  b.textContent = step0 ? `\u2192 再看一根 (${step0}/${WAIT_MAX})`
-                        : "\u2192 再看一根";
+  b.textContent = step0 ? `再看一根 (${step0}/${WAIT_MAX})`
+                        : "再看一根";
 }
 /* Position OR identity. A bare number is a position in the current order,
    which is only stable within one load: answered questions move to the
@@ -2464,7 +2482,7 @@ function autoPlay(){
      the trade closed are what tell you whether the exit was early or the
      location was simply wrong, and that is the part worth watching. The
      settling bar is still called out in the counter. */
-  const stopAt = q.c.length - 1 - q.mark;
+  const stopAt = q.c.length - 1 - markOf(q);
   timer = setInterval(() => {
     if (step >= stopAt){ clearInterval(timer); timer = null;
                          $("b-auto").textContent = "⏩ 自动"; return; }
@@ -2521,7 +2539,7 @@ function kbHint(){
   h.className = "kbhint";
   h.textContent = $("b-go").hidden
     ? "← → 翻题　回车 下一题　空格 播放　6 放到底　, . 走 K"
-    : "1 放过　2 入场　. 再看一根　3 止损　4 目标　5 提交　← → 翻题";
+    : "1 放过　2 入场　d 再看一根　3 止损　4 目标　5 提交　← → 翻题";
 }
 
 function kbNudge(dir, big){
@@ -2577,10 +2595,10 @@ document.addEventListener("keydown", e => {
         e.preventDefault(); stopAuto(); stepTo(QS[idx].c.length);
       }
       return;
-    case ".":
-      // Same verb either side of the answer: one more bar. Before it,
-      // that is another bar to judge on; after it, the reveal walking
-      // on. The playback handler above owns the second case.
+    case "d": case "D":
+      // Its own key rather than the arrow the button used to wear: the
+      // arrows turn the page, and `.` already walks the reveal once the
+      // question is answered. One verb, one key, no state to remember.
       if (answering){ e.preventDefault(); waitOne(); }
       return;
     case "w": case "W": case "ArrowUp":

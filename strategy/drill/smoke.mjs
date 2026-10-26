@@ -177,7 +177,7 @@ const api = new Function(
   code + "\n;return {choose, submit, levels, settle, ruleLight, stepTo, loadSet, report, next," +
          "         prev, goto1, isAnswered: (id) => !!ans[id], getIdx: () => idx," +
          "         cellOf, nextByDeficit, noFlow, stopAuto," +
-         "         waitOne, markOf, entryOf, WAIT_MAX, getStep0: () => step0," +
+         "         waitOne, markOf, entryOf, WAIT_MAX, FWD, getStep0: () => step0," +
          "         getStep: () => step, getQS: () => QS};")();
 
 await new Promise((r) => setTimeout(r, 400));
@@ -1512,6 +1512,20 @@ console.log("\nPLAYALL OK");
     throw new Error("entry should be the close of the bar now decided on");
   console.log("ok   等待：一次一根，入场价跟着走");
 
+  /* The picture, not just the arithmetic. The entry line went on being
+     drawn at the setup bar's price while the verdict settled from
+     somewhere else -- the chart and the answer disagreeing is worse than
+     either being wrong on its own, because only one of them is visible
+     while you decide. */
+  const ENTRY_TAG = "fillText:入场 ";
+  const drawnEntry = ctxCalls.filter((c) => c.startsWith(ENTRY_TAG)).pop();
+  if (!drawnEntry)
+    throw new Error("no entry line was drawn");
+  if (Math.abs(parseFloat(drawnEntry.slice(ENTRY_TAG.length))
+               - api.entryOf(q0, api.markOf(q0))) > 5e-3)
+    throw new Error(`the entry line still quotes the setup bar: ${drawnEntry}`);
+  console.log("ok   等待：图上的入场线也跟着走");
+
   for (let i = 0; i < 40; i++) api.waitOne();
   if (api.getStep0() !== api.WAIT_MAX)
     throw new Error(`capped at ${api.WAIT_MAX}, got ${api.getStep0()}`);
@@ -1519,9 +1533,21 @@ console.log("\nPLAYALL OK");
     throw new Error("the button should disable at the cap");
   console.log(`ok   等待：封顶 ${api.WAIT_MAX} 根，按钮随之禁用`);
 
+  /* The cap is only safe while it still leaves a full settlement window.
+     Pin the invariant rather than the number: raising WAIT_MAX past the
+     margin should fail here, not quietly settle waited trades on a short
+     window and go on comparing them with unwaited ones. */
+  for (const q of api.getQS()){
+    const future = q.c.length - 1 - q.mark;
+    if (future < api.WAIT_MAX + api.FWD)
+      throw new Error(`${q.id}: ${future} bars of future cannot carry ` +
+                      `WAIT_MAX ${api.WAIT_MAX} + FWD ${api.FWD}`);
+  }
+  console.log(`ok   封顶 ${api.WAIT_MAX} 根后仍留得下完整的 ${api.FWD} 根结算窗口`);
+
   /* The header must not keep showing the setup bar's readings. */
   const meta = els.meta.innerHTML;
-  if (!/\+10根/.test(meta))
+  if (!new RegExp(`\\+${api.WAIT_MAX}根`).test(meta))
     throw new Error("the header should say how far it has stepped: " +
                     meta.slice(0, 160));
   const dash = (meta.match(/—/g) || []).length;
@@ -1551,7 +1577,7 @@ console.log("\nPLAYALL OK");
   console.log("ok   记录带上 waited，且 R 来自等后那一根");
 
   const vd = els.vd.innerHTML;
-  if (!/你等了 10 根/.test(vd))
+  if (!new RegExp(`你等了 ${api.WAIT_MAX} 根`).test(vd))
     throw new Error("the reveal should say how long it waited");
   if (!/形态那一根就进是/.test(vd))
     throw new Error("the reveal must give the counterfactual: " +
@@ -1570,21 +1596,25 @@ console.log("\nPLAYALL OK");
     throw new Error("a revisit should read the recorded wait");
   console.log("ok   回看已答的题，复现当时等了多久");
 
-  /* The key, since the mouse is what this whole set of shortcuts is
-     for. Only before the answer: after it, "." walks the playback. */
+  /* The key, since the mouse is what this whole set of shortcuts is for.
+     Its own letter rather than an arrow or a dot: the arrows turn the
+     page and "." walks the playback, and a key that means two things
+     depending on state is the one you press by mistake. */
   api.next();
   const q2 = api.getQS()[api.getIdx()];
   const m2 = api.markOf(q2);
+  fireKey("d");
+  if (api.markOf(q2) !== m2 + 1)
+    throw new Error("'d' should step one bar before the decision");
   fireKey(".");
   if (api.markOf(q2) !== m2 + 1)
-    throw new Error("'.' should step one bar before the decision");
+    throw new Error("'.' must not move the decision bar");
   els["s-stop"].value = "1.0"; els["s-tgt"].value = "2.0";
   api.choose("pass"); api.submit();
-  const st = api.getStep();
-  fireKey(".");
+  fireKey("d");
   if (api.markOf(q2) !== m2 + 1)
-    throw new Error("'.' must not keep stepping the decision after the answer");
-  console.log("ok   键盘 . ：答题前走一根，答完归播放");
+    throw new Error("'d' must do nothing once the question is answered");
+  console.log("ok   键盘 d：答题前走一根，答完不再生效；. 不碰决策根");
 
   /* An answer from before this existed has no `waited` and must settle
      exactly as it always did. */
