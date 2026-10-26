@@ -220,18 +220,51 @@ class TestTheLight:
         assert not any(type(i).__name__ == "TextItem"
                        for i in viewer._dcvd_items),             "a second light is still being drawn into the DCVD panel"
 
-    def test_each_band_gets_its_own_colour(self, viewer):
-        from analysis.trade_viewer_qt import DCVD_LIGHT
+    def test_the_gate_is_what_turns_it_green(self, viewer):
+        """Green moved from the level to the flow gate. Over the study's
+        60 out-of-sample sessions the gate returned +0.363 R a trade
+        against +0.264 for the level, and the two disagree precisely
+        here: 0.4 on thin volume (+0.186) and heavy volume that never
+        reached 0.4 (+0.300). So the states are built to BE those two
+        disagreements, not merely three different numbers."""
+        from analysis.trade_viewer_qt import (DCVD_LIGHT_HEAVY,
+                                              DCVD_LIGHT_LEVEL,
+                                              DCVD_LIGHT_NONE)
+        base = steady(40, buy=3000, sell=2000)
 
-        seen = []
-        for last in ((8000, 2000), (6000, 4000), (3500, 6500)):
-            draw(viewer, steady(40) + [last])
-            lbl = self._label(viewer)
-            assert lbl is not None
-            seen.append(lbl.textItem.defaultTextColor().name())
-        assert len(set(map(str, seen))) == 3, f"bands share a colour: {seen}"
-        # And the thresholds are the ones the rule was measured at.
-        assert [lo for lo, _ in DCVD_LIGHT][:2] == [0.4, 0.0]
+        # Heavy, and deliberately UNDER 0.4: dr1 = 0.2 on ten times the
+        # usual volume. The old light was silent here.
+        g = draw(viewer, base + [(30000, 20000)])
+        assert g[-1], "the fixture's heavy bar did not clear the gate"
+        heavy = self._label(viewer).textItem.defaultTextColor().name()
+
+        # Over 0.4, on a SMALL bar -- the old green, now amber. On this
+        # flat tape every |x| is 0.2, so the gate is 0.2: thin means the
+        # signed volume is under a fifth of the usual total, which a
+        # lopsided ratio on a quiet bar is (ofi 900 against a scale of
+        # 5000) even though dr1 is 0.60.
+        g = draw(viewer, base + [(1200, 300)])
+        assert not g[-1], "the fixture's thin bar cleared the gate"
+        level = self._label(viewer).textItem.defaultTextColor().name()
+
+        # Neither: small bar, small ratio.
+        g = draw(viewer, base + [(700, 500)])
+        assert not g[-1]
+        none = self._label(viewer).textItem.defaultTextColor().name()
+
+        assert str(heavy).lower() == DCVD_LIGHT_HEAVY.lower(), \
+            f"heavy flow under 0.4 is not green: {heavy}"
+        assert str(level).lower() == DCVD_LIGHT_LEVEL.lower(), \
+            f"0.4 on thin volume is not amber: {level}"
+        assert str(none).lower() == DCVD_LIGHT_NONE.lower()
+        assert len({str(heavy), str(level), str(none)}) == 3
+
+    def test_the_label_says_which_state_it_is(self, viewer):
+        """The colour alone is a convention to memorise; the word is not."""
+        draw(viewer, steady(40) + [(30000, 20000)])
+        assert "大流量" in self._label(viewer).toPlainText()
+        draw(viewer, steady(40) + [(1200, 300)])
+        assert "量不足" in self._label(viewer).toPlainText()
 
     def test_it_reads_the_newest_bar(self, viewer):
         draw(viewer, steady(40) + [(9000, 1000)])

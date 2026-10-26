@@ -238,6 +238,34 @@ const DR_SCALE = {1: [0.517, 0.700, 0.93], 5: [0.316, 0.448, 0.68]};
    long and +0.247 short, against -0.101 and -0.062 for entering on every
    minute. Marked on both sides because the two came out symmetric. */
 const DR_DECISION = 0.4;
+/* The flow gate, identical to the viewer's: is this bar's signed volume
+   large for this stock right now? |x| in the top fifth of its own
+   trailing 60, where x = (buy-sell) / median(buy+sell). Strictly
+   trailing, so a bar never raises the hurdle it is asked to clear. */
+const FLOW_WIN = 60, FLOW_PCT = 0.80, FLOW_MIN = 20;
+
+function flowGate(q){
+  if (q._heavy) return q._heavy;
+  const xs = q.xs || null;
+  const n = (q.c || []).length;
+  const out = new Array(n).fill(false);
+  if (!xs) return (q._heavy = out);
+  for (let i = 0; i < n; i++){
+    if (xs[i] == null) continue;
+    const w = [];
+    for (let j = Math.max(0, i - FLOW_WIN); j < i; j++)
+      if (xs[j] != null) w.push(Math.abs(xs[j]));
+    if (w.length < FLOW_MIN) continue;
+    w.sort((a, b) => a - b);
+    /* Linear interpolation between ranks -- the same quantile pandas
+       computes, so the page and the backtest agree bar for bar rather
+       than nearly. */
+    const pos = FLOW_PCT * (w.length - 1);
+    const lo = Math.floor(pos), hi = Math.ceil(pos);
+    out[i] = Math.abs(xs[i]) >= w[lo] + (w[hi] - w[lo]) * (pos - lo);
+  }
+  return (q._heavy = out);
+}
 const FWD = 30, CW = 1040,
       CH = 520 + DR_H + GAP_H + FLOW_H + GAP_H + CAP_H + AXIS_H;
 const PRICE_H = 360, RSI_H = 96;
@@ -773,6 +801,7 @@ function draw(q, reveal){
        quantity, so a path is what it actually is. */
     const BW = Math.max(1, (X(1) - X(0)) * 0.8);
     const d1 = q.drs1;
+    const hv = flowGate(q);
     if (d1){
       for (let i = 0; i < last; i++){
         const v = d1[i];
@@ -780,7 +809,11 @@ function draw(q, reveal){
         const cl = Math.max(-p99*1.05, Math.min(p99*1.05, v));
         const y0 = DY(0), yy = DY(cl);
         g.fillStyle = v >= 0 ? upC : dnC;
-        g.globalAlpha = .9;
+        /* Height is the ratio, brightness is the size behind it. They
+           answer different questions and the panel used to show only
+           the first, which is how a heavy 0.35 and a thin 0.45 came to
+           look the same. */
+        g.globalAlpha = hv[i] ? .95 : .28;
         g.fillRect(X(i) - BW/2, Math.min(y0, yy),
                    BW, Math.max(1, Math.abs(yy - y0)));
       }
@@ -808,7 +841,7 @@ function draw(q, reveal){
     }
     g.fillStyle = ink3; g.font = "12px ui-monospace,monospace";
     g.textAlign = "left"; g.textBaseline = "top";
-    g.fillText(`Δr　绿红柱 = 1 根（决策值）/ 紫线 = 5 根　黄虚线 ±${DR_DECISION} 是实测阈值、` +
+    g.fillText(`Δr　柱 = 1 根（决策值）；亮 = 大流量，暗 = 流量不够　紫线 = 5 根　黄虚线 ±${DR_DECISION}、` +
                `灰虚线 p90 ${p90.toFixed(2)}（固定刻度，题与题可比）` +
                (dv == null ? "　决策点无逐笔数据" : ""),
                PAD_L + 3, dy0 + 3);
@@ -1438,7 +1471,19 @@ function ruleLight(q, m){
             d: `dr1 ${sr(now)}，主动卖占优。${lightStat("red")}`};
   /* The flip may be one bar back. Reaching 0.4 on the turn and reaching it
      the bar after measured the same; having no turn behind it at all did
-     not. */
+     not.
+
+     The flow gate is NOT part of this, and the attempt is worth
+     recording. Over 60 out-of-sample sessions of every RTH minute the
+     gate beats this rule (+0.363 R a trade against +0.238), so the
+     light was rewritten to run on it -- and the bank's own numbers
+     threw it out: green fell to 58 questions at 44.8% on c0 and 77 at
+     29.9% on c1, the latter BELOW that set's 33.6% base rate. These
+     questions are not random minutes; every mark is a location some
+     structural filter already chose, and inside that population the
+     flip carries what the gate does not. The panel shows the flow
+     either way -- see flowGate and the lit/dim bars -- so the reading
+     is available without the light claiming it. */
   const onBar = p1 != null && p1 < 0;
   const oneLate = p1 != null && p2 != null && p2 < 0
                   && p1 >= 0 && p1 < DR_DECISION;
@@ -1466,7 +1511,8 @@ function ruleLight(q, m){
 }
 
 const LIGHT_COL = {green: "var(--up)", red: "var(--dn)",
-                   amber: "var(--poc)", na: "var(--ink-3)"};
+                   amber: "var(--poc)", grey: "var(--ink-3)",
+                   na: "var(--ink-3)"};
 
 function lightHtml(q){
   const L = ruleLight(q, markOf(q));

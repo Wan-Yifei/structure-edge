@@ -692,17 +692,29 @@ DCVD_CONTEXT = 5
 # +0.308 and +0.309 across reward ratios from 1:1 to 1:2.
 DCVD_DECISION = 0.4
 
-# The light's bands, read off the latest bar. Level only -- the flip (the
-# rule's other half) is already on screen: a red bar followed by a green
-# one IS the flip, so a light repeating it would spend a colour on
-# something the eye has. The light reports the level, the bars report the
-# turn, and together they are the rule.
+# The light reads the newest bar, and what it reads changed.
 #
-# Amber is not "weak green". Between 0 and 0.4 measured +0.074 R a trade
-# against +0.282 for the full rule -- closer to nothing than to a signal.
-DCVD_LIGHT = [(DCVD_DECISION, "#26a69a"),   # >= 0.4
-              (0.0, "#ffa726"),             # 0 .. 0.4
-              (-1e9, "#ef5350")]            # < 0
+# It used to be the LEVEL alone: >= 0.4 green, 0..0.4 amber, below zero
+# red. The flow gate -- the same one that lights the bars -- measures
+# better on every RTH minute: over the study's 60 out-of-sample
+# sessions, long only and one position at a time, the gate returned
+# +0.363 R a trade against +0.264 for the level. The two disagree
+# exactly where it matters: 0.4 on thin volume was +0.186, while heavy
+# volume that never reached 0.4 was +0.300. The old light was green on
+# the weaker of the two and silent on the stronger.
+#
+# Their union is not the answer either. Green on "0.4 OR heavy" measured
+# +0.228, BELOW heavy alone (+0.319), because it drags the thin half
+# back in. So the gate is green, the level is demoted to amber, and 0.4
+# keeps its line on the panel -- it is still a general reference, it has
+# just stopped being what turns the light green on its own.
+#
+# The sign stays in the number and in the bars' own colour, which is why
+# there is no longer a red band: red encoded direction, and direction is
+# not what the light is gating on.
+DCVD_LIGHT_HEAVY = "#26a69a"    # the flow gate cleared
+DCVD_LIGHT_LEVEL = "#ffa726"    # |DCVD| >= 0.4 but the volume is thin
+DCVD_LIGHT_NONE = "#78909c"     # neither
 
 # Panel colours. The bars carry the sign, so they reuse the chart's own
 # buy/sell pair; the context line takes a hue used nowhere else so it cannot
@@ -5515,14 +5527,26 @@ class TradeViewerQt(QMainWindow):
         # progress, not a settled one -- it can change until the bar closes,
         # and that is the honest thing for it to do rather than lag a minute
         # behind the tape.
-        last_v = next((v for v in reversed(dcvd) if np.isfinite(v)), None)
-        if last_v is None:
+        last_i = next((i for i in range(n - 1, -1, -1)
+                       if np.isfinite(dcvd[i])), None)
+        if last_i is None:
             self._dcvd_light.setVisible(False)
         else:
-            col = next(c for lo, c in DCVD_LIGHT if last_v >= lo)
+            last_v = dcvd[last_i]
+            # Read at the SAME bar as the number beside it. Taking the
+            # last finite reading and the last gate flag separately would
+            # pair a value with another bar's volume on any day with a
+            # gap in the tape.
+            heavy = bool(self._dcvd_gate[last_i])
+            if heavy:
+                col, note = DCVD_LIGHT_HEAVY, "  \u5927\u6d41\u91cf"
+            elif abs(last_v) >= DCVD_DECISION:
+                col, note = DCVD_LIGHT_LEVEL, "  \u91cf\u4e0d\u8db3"
+            else:
+                col, note = DCVD_LIGHT_NONE, ""
             # Named, unlike the old badge: in the DCVD panel the context said
             # what the number was, and on the price chart nothing does.
-            self._dcvd_light.setText(f"\u25cf DCVD {last_v:+.2f}",
+            self._dcvd_light.setText(f"\u25cf DCVD {last_v:+.2f}{note}",
                                      color=col)
             self._dcvd_light.setVisible(True)
             self._pin_dcvd_light()

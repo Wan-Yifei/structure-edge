@@ -177,7 +177,9 @@ const api = new Function(
   code + "\n;return {choose, submit, levels, settle, ruleLight, stepTo, loadSet, report, next," +
          "         prev, goto1, isAnswered: (id) => !!ans[id], getIdx: () => idx," +
          "         cellOf, nextByDeficit, noFlow, stopAuto," +
-         "         waitOne, markOf, entryOf, WAIT_MAX, FWD, getStep0: () => step0," +
+         "         waitOne, markOf, entryOf, WAIT_MAX, FWD, flowGate," +
+         "         FLOW_WIN, FLOW_PCT, FLOW_MIN, DR_DECISION," +
+         "         getStep0: () => step0," +
          "         getStep: () => step, getQS: () => QS};")();
 
 await new Promise((r) => setTimeout(r, 400));
@@ -1633,3 +1635,102 @@ console.log("\nPLAYALL OK");
 function sr2(v){ return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2); }
 
 console.log("\nWAIT OK");
+
+/* ── 流量 ────────────────────────────────────────────────────────────
+ *
+ * delta_r is a ratio and says nothing about the size behind it: a quiet
+ * bar at 0.45 and a heavy one at 0.35 looked identical. The banks now
+ * carry `xs` -- signed volume over the median of the trailing 60 bars'
+ * total -- and the panel reads it as brightness, the same gate that
+ * lights the viewer's DCVD bars.
+ *
+ * The LIGHT does not use it. That was tried: over 60 out-of-sample
+ * sessions of every RTH minute the gate beats the light's own rule
+ * (+0.363 R a trade against +0.238), but on this bank -- where every
+ * mark is a location a structural filter already chose -- green fell
+ * to 58 questions at 44.8% on c0 and 77 at 29.9% on c1, the latter
+ * below that set's 33.6% base rate. So the reading is shown and the
+ * light is left alone.                                              */
+{
+  const qs = global.window.DRILL_c1.filter(x => x.xs);
+  if (!qs.length)
+    throw new Error("no question carries xs -- the bank was not migrated");
+
+  /* The gate, against a quantile written here rather than the page's.
+     Linear interpolation between ranks is what pandas computes, so the
+     page and the backtest agree bar for bar rather than nearly. */
+  function expect(xs, i){
+    if (xs[i] == null) return false;
+    const w = [];
+    for (let j = Math.max(0, i - api.FLOW_WIN); j < i; j++)
+      if (xs[j] != null) w.push(Math.abs(xs[j]));
+    if (w.length < api.FLOW_MIN) return false;
+    w.sort((a, b) => a - b);
+    const pos = api.FLOW_PCT * (w.length - 1);
+    const lo = Math.floor(pos), hi = Math.ceil(pos);
+    return Math.abs(xs[i]) >= w[lo] + (w[hi] - w[lo]) * (pos - lo);
+  }
+
+  let checked = 0, heavy = 0;
+  for (const q of qs.slice(0, 40)){
+    const got = api.flowGate(q);
+    for (let i = 0; i < q.c.length; i++){
+      if (got[i] !== expect(q.xs, i))
+        throw new Error(`${q.id} 第 ${i} 根：门槛 ${got[i]} 应为 ${expect(q.xs, i)}`);
+      checked++;
+      if (got[i]) heavy++;
+    }
+  }
+  /* A share, not just agreement: an all-false array would satisfy the
+     comparison above against itself. A fifth by construction, lower
+     here because a window's first bars have no 60 behind them. */
+  const share = heavy / checked;
+  if (share < 0.08 || share > 0.30)
+    throw new Error(`门槛命中 ${(100*share).toFixed(0)}%，不像前五分之一`);
+  console.log(`ok   流量门槛：${checked} 根逐根核对，命中 ${(100*share).toFixed(0)}%`);
+}
+
+{
+  /* And it reaches the pixels. The bars are drawn, not written into the
+     DOM, so this reads the canvas calls the stub records: both the lit
+     and the dim alpha have to appear, or the panel is showing one state
+     for everything and the ratio is all you can see again. */
+  const all = api.getQS();
+  const idx = all.findIndex(q => {
+    if (!q.xs) return false;
+    const hv = api.flowGate(q);
+    let lit = 0, dim = 0;
+    for (let i = 0; i <= q.mark; i++){
+      if (q.drs1[i] == null) continue;
+      if (hv[i]) lit++; else dim++;
+    }
+    return lit >= 3 && dim >= 3;
+  });
+  if (idx < 0) throw new Error("no question mixes heavy and quiet bars");
+  ctxOps.length = 0;
+  api.goto1(idx + 1);
+  /* Scoped to the run, not to the whole frame. Asking merely whether
+     0.28 appears anywhere passed with the brightness removed, because
+     the heatmap's cells carry computed alphas and one of them lands
+     there. The delta bars are drawn in a single loop, so they are a
+     CONSECUTIVE run of fillRects whose alphas come only from the two
+     values; the longest such run is them. */
+  const a = ctxOps.filter(o => o.op === "fillRect")
+                  .map(o => Math.round(o.alpha * 100) / 100);
+  let best = [], cur = [];
+  for (const v of a.concat([null])){
+    if (v === 0.95 || v === 0.28){ cur.push(v); continue; }
+    if (cur.length > best.length) best = cur;
+    cur = [];
+  }
+  if (best.length < 20)
+    throw new Error(`Δr 柱子那一段只有 ${best.length} 根，认不出来`);
+  if (!best.includes(0.95))
+    throw new Error("没有一根大流量柱子是高亮的");
+  if (!best.includes(0.28))
+    throw new Error("流量不够的柱子没有被压暗——整段都是同一个 alpha");
+  console.log(`ok   流量上图：连续 ${best.length} 根里亮暗并存` +
+              `（亮 ${best.filter(v => v === 0.95).length}）`);
+}
+
+console.log("\nFLOWMAG OK");

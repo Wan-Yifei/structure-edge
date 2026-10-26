@@ -204,6 +204,38 @@ def flow_series(buy, sell, n, lo, hi):
     return out
 
 
+FLOW_WIN = 60          # trailing bars the volume scale is taken over
+
+
+def flow_mag_series(buy, sell, lo, hi):
+    """Signed volume against its own recent normal, per bar in [lo, hi).
+
+    delta_r is a ratio and says nothing about size: a quiet bar and a
+    heavy one can share it. The viewer gates on this magnitude instead
+    -- |x| in the top fifth of its trailing 60 -- and over 60
+    out-of-sample sessions that gate was worth more than the 0.4 line
+    on the ratio (+0.363 R a trade against +0.264). The drill could not
+    show it at all, which is what this adds.
+
+        x_i = (buy - sell)_i / median(buy + sell over the previous 60)
+
+    The scale is taken from the whole session, not from the question's
+    window, so a window's first bars are scaled against real history.
+    Shifted, so a bar never sets the scale it is then divided by. None
+    where the bar's signed volume is under MIN_SIGNED, matching drs1.
+    """
+    tot = buy + sell
+    ok = tot >= MIN_SIGNED
+    scale = pd.Series(np.where(ok, tot, np.nan)).rolling(
+        FLOW_WIN, min_periods=20).median().shift(1).to_numpy()
+    out = []
+    for i in range(lo, hi):
+        s = scale[i]
+        out.append(None if not ok[i] or not np.isfinite(s) or s <= 0
+                   else round(float((buy[i] - sell[i]) / s), 2))
+    return out
+
+
 def flow(buy, sell, i, n):
     """delta_r over the n bars ending at i. Trailing, so nothing unseen."""
     b, s = buy[i - n + 1:i + 1].sum(), sell[i - n + 1:i + 1].sum()
@@ -577,6 +609,10 @@ def build_day(code: str, day: date | str, full: pd.DataFrame, confirm: int = 1,
             # stays a header number rather than earning a line.
             "drs1": flow_series(buy, sell, 1, s, e),
             "drs5": flow_series(buy, sell, 5, s, e),
+            # The size behind the ratio. See flow_mag_series: this is
+            # what the panel's lit/dim split reads, and it is the
+            # stronger of the two signals the light reports.
+            "xs": flow_mag_series(buy, sell, s, e),
         })
         vlo = float(min(L[s:i + 1])) - 0.02 * a
         vhi = float(max(H[s:i + 1])) + 0.02 * a
