@@ -31,12 +31,12 @@
     }
   },
   "targets": [
-    "US.SOXL",
     "US.QQQ",
-    "HK.02800",
-    "HK.07200"
+    "US.SOXL"
   ],
-  "target_categories": {},
+  "target_categories": {
+    "US.QQQ": "US index"
+  },
   "order_book_enabled": true,
   "remote_backup": {
     "enabled": true,
