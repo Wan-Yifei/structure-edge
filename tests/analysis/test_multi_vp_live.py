@@ -255,3 +255,64 @@ class TestTheFetchIsNotRepeated:
         w.show()
         w.refresh_live()
         assert len(calls) == 1, "and it must resume once shown"
+
+
+class TestRthIsOffByDefault:
+    """The switch exists because extended hours are thin and stretch the
+    value area. It defaults OFF anyway, because with it on the session in
+    progress cannot appear until about fifteen minutes after the open --
+    so for most of the day the panel stops at the last closed session and
+    looks like stale data.
+
+    That is exactly how it was first read: at 00:56 on a Monday the panel
+    ended at the previous Friday and the question was "why is it three
+    days behind".
+    """
+
+    def test_the_default(self, qapp, monkeypatch):
+        from analysis.multi_vp_window import MultiVPWindow
+        import feeds.fetcher as fetcher
+        monkeypatch.setattr(fetcher, "fetch_klines",
+                            lambda *a, **k: _session("2026-10-20", 100))
+        w = MultiVPWindow()
+        w._live_timer.stop()
+        try:
+            assert w._rth.isChecked() is False
+        finally:
+            w.close()
+
+    def test_an_overnight_only_session_shows_with_rth_off(self, qapp,
+                                                          monkeypatch):
+        """Today, a few hours before the open: bars exist, none of them
+        in regular hours."""
+        from analysis.multi_vp_window import MultiVPWindow
+        today = MultiVPWindow._today()
+        past = [str((pd.Timestamp(today) - pd.Timedelta(days=d)).date())
+                for d in (5, 4, 3)]
+        # Overnight belongs to `today` under the 20:00 boundary, so it is
+        # stamped on the previous evening.
+        prev_eve = str((pd.Timestamp(today) - pd.Timedelta(days=1)).date())
+        frames = [_session(d, 100) for d in past]
+        frames.append(_session(prev_eve, 108, n=200, start="20:01"))
+        import feeds.fetcher as fetcher
+        monkeypatch.setattr(fetcher, "fetch_klines",
+                            lambda *a, **k: pd.concat(frames,
+                                                      ignore_index=True))
+        w = MultiVPWindow()
+        w._live_timer.stop()
+        w._days.blockSignals(True); w._days.setValue(4)
+        w._days.blockSignals(False)
+        try:
+            assert w._rth.isChecked() is False
+            days = [d for d, _ in w._sessions()]
+            assert days[-1] == today, f"RTH off 时今天应当出现: {days}"
+            assert w._live_day == today
+
+            w._rth.blockSignals(True); w._rth.setChecked(True)
+            w._rth.blockSignals(False)
+            days = [d for d, _ in w._sessions()]
+            assert today not in days, (
+                f"RTH on 时今天没有盘中数据，不该出现: {days}")
+            assert w._live_day is None
+        finally:
+            w.close()

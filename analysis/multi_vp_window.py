@@ -115,10 +115,18 @@ class MultiVPWindow(QMainWindow):
 
         tb.addSeparator()
         self._rth = QCheckBox("RTH only")
-        self._rth.setChecked(True)
+        # Off by default. With it on, the session in progress cannot
+        # appear until about fifteen minutes after the open, so for most
+        # of the day the panel silently stops at the last closed session
+        # -- which reads as stale data rather than as a filter doing its
+        # job. Extended hours are thin and do stretch the value area,
+        # which is what the switch is for when that matters.
+        self._rth.setChecked(False)
         self._rth.setToolTip(
-            "Use only 09:30-16:00 bars. Extended-hours volume is thin and\n"
-            "mixing it in stretches the value area.")
+            "Use only 09:30-16:00 bars. Extended-hours volume is thin and"
+            " mixing it in stretches the value area -- but with this on,"
+            " the day in progress stays hidden until ~15 min after the"
+            " open.")
         self._rth.stateChanged.connect(lambda *_: self.reload())
         tb.addWidget(self._rth)
 
