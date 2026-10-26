@@ -144,6 +144,11 @@ _DELTA_DN_BRUSH = _alpha_brush(_DOWN, 180)
 # roughly 90 bars in.
 _DELTA_MIN_PX = 18.0
 
+# How often the session/range profile panel is rebuilt, at most. It costs
+# 82ms and it leaks four TextItems a time, and a session profile does not
+# move visibly between two redraws half a second apart.
+_PROFILE_MIN_MS = 5_000
+
 # Inverse-leveraged pairs. Hovering a price level on the key symbol also shows
 # where its inverse would be trading at that level, so a level picked on one
 # can be read straight off as a level on the other.
@@ -3029,6 +3034,9 @@ class TradeViewerQt(QMainWindow):
         self._flow_cache: dict | None = None
         # bucket key -> (bucket dict, its arrays); see _bucket_arrays.
         self._profile_cache: dict = {}
+        # When the profile panel was last rebuilt; see the throttle in
+        # _render.
+        self._profile_drawn_ms: float = -1e9
 
         self._bos_items:     list = []  # PlotCurveItem + TextItem per signal
         # Pool of delta labels, one per candle. Kept in the scene across
@@ -4226,13 +4234,31 @@ class TradeViewerQt(QMainWindow):
         # X-axis time labels
         self._set_xaxis_ticks(klines)
 
-        # Session vol profile (or range profile panel if active)
-        if self._range_region is not None:
-            self._clear_range_inline()
-            self._range_last_indices = (-1, -1)
-            self._rebuild_range_profile()
-        else:
-            self._rebuild_session_profile()
+        # Session vol profile (or range profile panel if active).
+        #
+        # Throttled, for two reasons. It is 82ms of a 220ms render, and
+        # a session-wide volume profile does not visibly move in half a
+        # second. And it leaks: every rebuild discards four TextItems
+        # that something in pyqtgraph's teardown keeps alive -- 4 per
+        # render measured, the same on the version before this round of
+        # work, so the leak is older than the redraw timer. At 0.5s it
+        # would be ~2GB an hour; at this interval it is a twentieth of
+        # that. The leak itself still wants fixing.
+        #
+        # A frame that is not a simple extension of the last one
+        # (_frame_dirty is None: new symbol, timeframe, day) always
+        # rebuilds -- that is when the profile really is different.
+        now_ms = time.monotonic() * 1000.0
+        fresh = (self._frame_dirty is None
+                 or now_ms - self._profile_drawn_ms >= _PROFILE_MIN_MS)
+        if fresh:
+            self._profile_drawn_ms = now_ms
+            if self._range_region is not None:
+                self._clear_range_inline()
+                self._range_last_indices = (-1, -1)
+                self._rebuild_range_profile()
+            else:
+                self._rebuild_session_profile()
 
         # Tick profile panel: normally hover-driven, so it holds whatever the
         # cursor last landed on. That is right for a closed candle -- its data
