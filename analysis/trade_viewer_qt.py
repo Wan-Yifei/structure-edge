@@ -145,8 +145,8 @@ _DELTA_DN_BRUSH = _alpha_brush(_DOWN, 180)
 _DELTA_MIN_PX = 18.0
 
 # How often the session/range profile panel is rebuilt, at most. It costs
-# 82ms and it leaks four TextItems a time, and a session profile does not
-# move visibly between two redraws half a second apart.
+# 82ms, and a session profile does not move visibly between two redraws
+# half a second apart.
 _PROFILE_MIN_MS = 5_000
 
 # Inverse-leveraged pairs. Hovering a price level on the key symbol also shows
@@ -2225,7 +2225,6 @@ class TradeViewerQt(QMainWindow):
         self._range_profile_timer.setSingleShot(True)
         self._range_profile_timer.timeout.connect(self._rebuild_range_profile)
         # Label-pinning connections on the profile ViewBox — cleared on each rebuild
-        self._profile_pin_conns:     list                       = []
 
         # Build UI
         self._build_toolbar(args)
@@ -3033,6 +3032,11 @@ class TradeViewerQt(QMainWindow):
         self._frame_dirty: set | None = None
         self._flow_cache: dict | None = None
         # bucket key -> (bucket dict, its arrays); see _bucket_arrays.
+        # (kind, item, y) for every label the profile panel pins to an
+        # edge. Replaced wholesale by each rebuild and read by the one
+        # permanent connection in _pin_profile_labels.
+        self._profile_pins: list = []
+
         self._profile_cache: dict = {}
         # When the profile panel was last rebuilt; see the throttle in
         # _render.
@@ -3364,6 +3368,12 @@ class TradeViewerQt(QMainWindow):
             autoReduceTextSpace=True, tickTextOffset=2)
         self._profile_widget.getPlotItem().getAxis("bottom").setStyle(
             autoReduceTextSpace=True, tickTextOffset=2)
+        # The only pin connection there is. Each rebuild used to connect
+        # its own closures and disconnect the previous set, and the
+        # disconnected ones stayed reachable -- four TextItems a render.
+        # See _pin_profile_labels.
+        self._profile_widget.getViewBox().sigRangeChanged.connect(
+            self._pin_profile_labels)
         # Disabled (not just left alone) so `scale` passed into
         # _VolumeAxisItem.tickStrings is always 1.0 -- _fmt_vol_short does
         # its own K/M abbreviation and would otherwise double up with
@@ -4236,14 +4246,13 @@ class TradeViewerQt(QMainWindow):
 
         # Session vol profile (or range profile panel if active).
         #
-        # Throttled, for two reasons. It is 82ms of a 220ms render, and
-        # a session-wide volume profile does not visibly move in half a
-        # second. And it leaks: every rebuild discards four TextItems
-        # that something in pyqtgraph's teardown keeps alive -- 4 per
-        # render measured, the same on the version before this round of
-        # work, so the leak is older than the redraw timer. At 0.5s it
-        # would be ~2GB an hour; at this interval it is a twentieth of
-        # that. The leak itself still wants fixing.
+        # Throttled because it is 82ms of what was a 220ms render and a
+        # session-wide volume profile does not visibly move in half a
+        # second.
+        #
+        # It was also holding back a leak of four TextItems a rebuild;
+        # that is fixed at the source now (see _pin_profile_labels), so
+        # what is left here is the cost, not the leak.
         #
         # A frame that is not a simple extension of the last one
         # (_frame_dirty is None: new symbol, timeframe, day) always
@@ -5811,15 +5820,42 @@ class TradeViewerQt(QMainWindow):
 
     # ── Session vol profile ───────────────────────────────────────────────────
 
-    def _disconnect_profile_pins(self) -> None:
-        """Disconnect all accumulated label-pinning slots from the profile ViewBox."""
-        vb = self._profile_widget.getViewBox()
-        for conn in self._profile_pin_conns:
-            try:
-                vb.sigRangeChanged.disconnect(conn)
-            except Exception:
-                pass
-        self._profile_pin_conns.clear()
+    def _clear_profile_pins(self) -> None:
+        """Forget the labels the previous rebuild pinned.
+
+        There is nothing to disconnect: the connection is made once, in
+        the constructor, and survives every rebuild. See
+        _pin_profile_labels.
+        """
+        self._profile_pins.clear()
+
+    def _pin_profile_labels(self, *_) -> None:
+        """Hold the profile panel's labels against the view edges.
+
+        Connected once for the window's lifetime and re-reading a list
+        that each rebuild replaces. Each rebuild used to define its own
+        closures, connect them, and disconnect the previous set; the
+        disconnected ones stayed reachable regardless and took their
+        labels with them -- four TextItems a render. Five explanations
+        were tested and none held (see the commit), so the pattern goes
+        rather than the symptom.
+
+        Three kinds: "r" rides the right edge (level labels, clear of
+        bars growing out from x=0), "l" the left (the previous
+        session's open and close), "tl" the top-left corner (the range
+        panel's stats header, which is a header and not a level).
+        """
+        pins = self._profile_pins
+        if not pins:
+            return
+        (xlo, xhi), (_ylo, yhi) = self._profile_widget.getViewBox().viewRange()
+        for kind, item, y in pins:
+            if kind == "l":
+                item.setPos(xlo, y)
+            elif kind == "tl":
+                item.setPos(xlo, yhi)
+            else:
+                item.setPos(xhi, y)
 
     def _reset_poc_state_if_redefined(self, range_val: str, n_bins: int) -> None:
         """Drop the held POC and its trail when the profile is no longer the
@@ -5911,7 +5947,7 @@ class TradeViewerQt(QMainWindow):
     def _rebuild_session_profile(self) -> None:
         if self._klines is None:
             return
-        self._disconnect_profile_pins()
+        self._clear_profile_pins()
         pw = self._profile_widget
         pw.clear()
         vb = pw.getViewBox()
@@ -5992,14 +6028,8 @@ class TradeViewerQt(QMainWindow):
         # Right edge, not left. The histogram grows rightward from x=0, so a
         # left-pinned label sits on top of every bar; the X range carries 15%
         # headroom past the longest one, which leaves the right edge clear.
-        def _pin_poc_labels() -> None:
-            xhi = vb.viewRange()[0][1]
-            for p, lbl_item in poc_labels:
-                lbl_item.setPos(xhi, p)
-
-        conn = vb.sigRangeChanged.connect(lambda *_: _pin_poc_labels())
-        self._profile_pin_conns.append(conn)
-        _pin_poc_labels()
+        self._profile_pins += [("r", lbl_item, p) for p, lbl_item
+                               in poc_labels]
 
         for price, lbl in [(vah, "VAH"), (val, "VAL")]:
             va_line = pg.InfiniteLine(
@@ -6015,13 +6045,7 @@ class TradeViewerQt(QMainWindow):
             pw.addItem(va_line,  ignoreBounds=True)
             pw.addItem(va_label, ignoreBounds=True)
 
-            def _pin_va(lbl_item=va_label, p=price) -> None:
-                xhi = vb.viewRange()[0][1]
-                lbl_item.setPos(xhi, p)
-
-            conn2 = vb.sigRangeChanged.connect(lambda *_, f=_pin_va: f())
-            self._profile_pin_conns.append(conn2)
-            _pin_va()
+            self._profile_pins.append(("r", va_label, price))
 
         # Project the current (latest) price onto the profile -- solid line,
         # distinct from POC/VAH/VAL's dashed style, so it reads as "where
@@ -6054,13 +6078,7 @@ class TradeViewerQt(QMainWindow):
         pw.addItem(price_line,  ignoreBounds=True)
         pw.addItem(price_label, ignoreBounds=True)
 
-        def _pin_price_label() -> None:
-            xhi = vb.viewRange()[0][1]
-            price_label.setPos(xhi, last_price)
-
-        conn3 = vb.sigRangeChanged.connect(lambda *_: _pin_price_label())
-        self._profile_pin_conns.append(conn3)
-        _pin_price_label()
+        self._profile_pins.append(("r", price_label, last_price))
 
         # Previous session's open and close, each drawn only when it
         # falls inside what the panel is showing. See _prev_session_levels
@@ -6083,12 +6101,7 @@ class TradeViewerQt(QMainWindow):
             # Pinned LEFT, unlike POC/VAH/VAL on the right: these are
             # reference prices rather than readings off this profile, and
             # stacking five labels in one corner makes all five unreadable.
-            def _pin_prev(item=lb, p=price) -> None:
-                item.setPos(vb.viewRange()[0][0], p)
-
-            self._profile_pin_conns.append(
-                vb.sigRangeChanged.connect(lambda *_, f=_pin_prev: f()))
-            _pin_prev()
+            self._profile_pins.append(("l", lb, price))
 
         max_vol = float(volumes.max())
         vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
@@ -6100,6 +6113,11 @@ class TradeViewerQt(QMainWindow):
         y_hi = max(hi, last_price)
         y_pad = (y_hi - y_lo) * 0.10
         vb.setYRange(y_lo - y_pad, y_hi + y_pad, padding=0)
+        # Place them once now that the range is final. The permanent
+        # connection keeps them there through later pans and zooms, but
+        # a range that ends up unchanged emits nothing, so the first
+        # placement cannot be left to the signal.
+        self._pin_profile_labels()
 
     def _prev_session_levels(self) -> list[tuple[float, str]]:
         """[(price, tag)] for the previous trading day's open and close.
@@ -6666,7 +6684,7 @@ class TradeViewerQt(QMainWindow):
         )
 
         # ── Right panel ───────────────────────────────────────────────────────
-        self._disconnect_profile_pins()
+        self._clear_profile_pins()
         pw = self._profile_widget
         pw.clear()
         vb = pw.getViewBox()
@@ -6720,18 +6738,18 @@ class TradeViewerQt(QMainWindow):
         # Level labels ride the right edge, clear of the bars growing out from
         # x=0. stats_item stays top-left: it is a panel header, not a level, and
         # keeping it there means it never collides with the four of them.
-        def _pin_panel_labels() -> None:
-            xlo, xhi = vb.viewRange()[0]
-            yhi = vb.viewRange()[1][1]
-            poc_lbl.setPos(xhi, poc);  poc_lbl.setText(f"POC {poc:.2f}")
-            vah_lbl.setPos(xhi, vah);  vah_lbl.setText(f"VAH {vah:.2f}")
-            val_lbl.setPos(xhi, val);  val_lbl.setText(f"VAL {val:.2f}")
-            price_lbl.setPos(xhi, last_price); price_lbl.setText(f"Last {last_price:.2f}")
-            stats_item.setPos(xlo, yhi)
+        # The text is fixed for this rebuild, so it is set here rather
+        # than on every range change.
+        poc_lbl.setText(f"POC {poc:.2f}")
+        vah_lbl.setText(f"VAH {vah:.2f}")
+        val_lbl.setText(f"VAL {val:.2f}")
+        price_lbl.setText(f"Last {last_price:.2f}")
+        self._profile_pins += [("r", poc_lbl, poc), ("r", vah_lbl, vah),
+                               ("r", val_lbl, val),
+                               ("r", price_lbl, last_price),
+                               ("tl", stats_item, 0.0)]
 
-        conn = vb.sigRangeChanged.connect(lambda *_: _pin_panel_labels())
-        self._profile_pin_conns.append(conn)
-        _pin_panel_labels()
+        self._pin_profile_labels()
 
         vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         vb.setXRange(0, max_vol * 1.15, padding=0)

@@ -127,19 +127,25 @@ class TestAFreshFrameAlwaysRebuilds:
         assert calls == []
 
 
-class TestTheLeakItLimits:
-    def test_a_rebuild_leaks_and_a_skipped_one_does_not(self, frame):
-        """The reason for the throttle, stated as a measurement.
+class TestRebuildingStrandsNothing:
+    def test_a_rebuild_leaves_no_labels_behind(self, frame):
+        """The leak the throttle used to be holding back.
 
-        Not a demand that the leak be fixed -- it predates this code and
-        lives in the teardown of discarded pyqtgraph items. What is
-        pinned is that skipping the rebuild skips the leak, so the
-        throttle is doing the job it is here for.
+        Each rebuild defined four label-pinning closures, connected
+        them to the ViewBox and disconnected the previous rebuild's.
+        The disconnected ones stayed reachable and took their labels
+        with them: four TextItems a render, which at a 0.5s redraw is
+        gigabytes an hour. There is now one connection, made once, over
+        a list the rebuild replaces -- nothing is connected or
+        disconnected per rebuild, so nothing can be stranded.
+
+        Forced rebuilds, not throttled renders, because the point is
+        that rebuilding itself is clean now.
         """
         import gc
         import pyqtgraph as pg
 
-        v, kl, calls = frame
+        v, kl, _calls = frame
         v._render(kl, {})
 
         def count():
@@ -147,21 +153,39 @@ class TestTheLeakItLimits:
             return sum(1 for o in gc.get_objects()
                        if isinstance(o, pg.TextItem))
 
-        # Throttled renders: no rebuild, so no new labels stranded.
-        a = count()
-        for _ in range(4):
+        for _ in range(3):                  # settle the pool
+            v._profile_drawn_ms = -1e9
             v._render(kl, {})
-        b = count()
-        assert calls[len(calls):] == []
-        held_back = b - a
+        before = count()
+        for _ in range(8):
+            v._profile_drawn_ms = -1e9
+            v._render(kl, {})
+        grew = count() - before
+        assert grew == 0, f"8 次重建多出 {grew} 个 TextItem"
 
-        # Forced rebuilds: the labels accumulate.
+    def test_one_connection_not_one_per_rebuild(self, frame):
+        """The mechanism, so a return to per-rebuild closures fails
+        here rather than silently leaking again."""
+        import types
+
+        v, kl, _calls = frame
+        for _ in range(5):
+            v._profile_drawn_ms = -1e9
+            v._render(kl, {})
+        import gc
+        gc.collect()
+        pins = [o for o in gc.get_objects()
+                if isinstance(o, types.FunctionType)
+                and "_rebuild_session_profile.<locals>" in o.__qualname__]
+        assert not pins, f"重建里又出现了闭包: {[f.__qualname__ for f in pins]}"
+
+    def test_the_pins_are_replaced_not_appended(self, frame):
+        v, kl, _calls = frame
+        v._profile_drawn_ms = -1e9
+        v._render(kl, {})
+        n = len(v._profile_pins)
         for _ in range(4):
             v._profile_drawn_ms = -1e9
             v._render(kl, {})
-        c = count()
-        rebuilt = c - b
-
-        assert rebuilt > held_back, (
-            f"skipped renders added {held_back}, rebuilds added {rebuilt} "
-            "-- the throttle is not limiting anything")
+        assert len(v._profile_pins) == n, (
+            f"pin 列表从 {n} 涨到 {len(v._profile_pins)}")
