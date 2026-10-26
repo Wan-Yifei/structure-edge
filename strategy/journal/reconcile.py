@@ -42,6 +42,11 @@ import pandas as pd
 # smallest real trade is 0.13%, so the threshold is not a fitted parameter.
 SCRATCH_USD = 2.0
 
+# How far a screenshot may sit from the position it is taken to describe.
+# Generous on purpose: the median is 32 seconds and the 90th percentile
+# 18 minutes, so this rejects the absurd rather than deciding the result.
+MATCH_TOL_S = 1800
+
 # Read off the R/R tool overlay, which prints account equity under each
 # outcome: stop 29,982.00 and target 30,088.61 on a 17-share position risking
 # 1.019/share puts the base at 29,999.  Used only to express P&L as a percent.
@@ -188,6 +193,86 @@ def _blank(v) -> bool:
     return str(v).strip().lower() in ("", "nan", "none")
 
 
+def _source(m, t) -> str:
+    """What the row's money rests on, including what disagreed.
+
+    A title that contradicts the statement is reported, not corrected
+    out of sight: it is the only signal that a write-up was filed
+    against the wrong instrument, and there are 44 of them.
+    """
+    if m is None:
+        return "journal only"
+    tag = "journal+account"
+    if int(m.get("n_pos", 1)) > 1:
+        tag += f" (x{int(m['n_pos'])} lots)"
+    if m.sym != t.sym:
+        tag += f" (stmt says {m.sym}, deck says {t.sym})"
+    return tag
+
+
+def _gap(t, open_, close_) -> float:
+    """Seconds from a capture to a position's own interval, 0 if inside."""
+    if t < open_:
+        return (open_ - t).total_seconds()
+    if t > close_:
+        return (t - close_).total_seconds()
+    return 0.0
+
+
+def _claim(logged: pd.DataFrame, real: pd.DataFrame,
+           shots: dict, day: str) -> dict:
+    """Which positions each write-up accounts for, keyed by its row index.
+
+    Positions do the choosing, not write-ups: an add-on is one idea and
+    several lots, so a write-up may collect more than one while every
+    position goes to at most one write-up.
+
+    The slide's instrument is not consulted. It is hand-written and
+    wrong often enough -- 44 positions across both months -- that using
+    it as a filter loses whole days; the caller reports the
+    disagreement instead.
+    """
+    cands = []
+    for i, t in logged.iterrows():
+        # shots holds the whole screens row, not just the stamp.
+        k = shots.get((day, int(t.slide)))
+        if k is not None and pd.notna(k.shot_ts):
+            cands.append((i, pd.to_datetime(k.shot_ts)))
+    if not cands or real.empty:
+        return {}
+    out: dict[int, list] = {}
+    for pi, p in real.iterrows():
+        best, best_gap = None, None
+        for i, k in cands:
+            g = _gap(k, p["open"], p["close"])
+            if g <= MATCH_TOL_S and (best_gap is None or g < best_gap):
+                best, best_gap = i, g
+        if best is not None:
+            out.setdefault(best, []).append(pi)
+    return out
+
+
+def _merge(real: pd.DataFrame, idxs: list) -> pd.Series:
+    """Several lots of one idea, added up.
+
+    Entry and exit are derived downstream from notional/qty and pnl/qty,
+    so summing those three is what makes R x risk = P&L hold for a
+    scaled position as it already did for a single lot.
+    """
+    g = real.loc[idxs]
+    return pd.Series({
+        "sym": g.sym.iloc[0],
+        "open": g["open"].min(),
+        "close": g["close"].max(),
+        "qty": int(g.qty.sum()),
+        "notional": float(g.notional.sum()),
+        "pnl": float(g.pnl.sum()),
+        "mins": float((g["close"].max() - g["open"].min()).total_seconds() / 60),
+        "n_pos": len(idxs),
+        "mixed": g.sym.nunique() > 1,
+    })
+
+
 def build(trades: pd.DataFrame, positions: pd.DataFrame,
           screens: pd.DataFrame, hand: pd.DataFrame) -> pd.DataFrame:
     """One row per journal trade, plus a row per unlogged scratch."""
@@ -230,15 +315,28 @@ def build(trades: pd.DataFrame, positions: pd.DataFrame,
         day_pos = positions[positions.day == day].sort_values("open")
         # Trades too small to be worth a write-up are the ones the deck most
         # reliably leaves out, so they are set aside before testing the match.
-        real = day_pos[day_pos.pnl.abs() >= SCRATCH_USD].reset_index(drop=True)
+        real = day_pos[day_pos.pnl.abs() >= SCRATCH_USD]
+        real_seq = real.reset_index(drop=True)
 
-        matched = (len(real) == len(logged)
-                   and all((p > 0) == (r == "WIN")
-                           for p, r in zip(real.pnl, logged.result))
-                   and list(real.sym) == list(logged.sym))
+        claims = _claim(logged, real, shots, day)
+        claimed = {pi for v in claims.values() for pi in v}
+        # The old all-or-nothing rule, kept for a day whose captures were
+        # never transcribed: counts, win/loss order and instrument order
+        # all agreeing is weak evidence, but it is better than none and
+        # it is what those days were matched on before.
+        fallback = (not claims
+                    and len(real_seq) == len(logged)
+                    and all((p > 0) == (r == "WIN")
+                            for p, r in zip(real_seq.pnl, logged.result))
+                    and list(real_seq.sym) == list(logged.sym))
 
         for i, t in logged.iterrows():
-            m = real.loc[i] if matched else None
+            if i in claims:
+                m = _merge(real, claims[i])
+            elif fallback:
+                m = real_seq.loc[i]
+            else:
+                m = None
             k = shots.get((day, int(t.slide)))
             own = by_slide.get(t.slide, {})
 
@@ -280,7 +378,12 @@ def build(trades: pd.DataFrame, positions: pd.DataFrame,
                 "Entry": zone,
                 "Setup": setup_tag(t.note),
                 "Context": context_tag(t.note),
-                "Direction": "short" if t.sym == "SOXS" else "long",
+                # From the statement where there is one: the slide title
+                # is hand-written and 10/13, 10/20 and 10/09's afternoon
+                # are all labelled SOXS against SOXL screenshots, SOXL
+                # prices and SOXL fills.
+                "Direction": ("short" if (m.sym if m is not None else t.sym)
+                              == "SOXS" else "long"),
                 # A capture the deck reuses from another slide has a row but
                 # no numbers, so every field here has to survive a NaN.
                 "Time frame": (int(k.tf) if k is not None and pd.notna(k.tf)
@@ -295,7 +398,7 @@ def build(trades: pd.DataFrame, positions: pd.DataFrame,
                 "Idx": int(t.seq),
                 "IdxWritten": (int(t.idx) if pd.notna(t.idx) else ""),
                 "Evaluation": t.note,
-                "Symbol": t.sym,
+                "Symbol": m.sym if m is not None else t.sym,
                 "Qty": int(m.qty) if m is not None else "",
                 "Notional": round(m.notional, 2) if m is not None else "",
                 "PnL$": round(m.pnl, 2) if m is not None else "",
@@ -305,7 +408,7 @@ def build(trades: pd.DataFrame, positions: pd.DataFrame,
                 "Target": (k.target if k is not None and pd.notna(k.target) else ""),
                 "ShotTime": (k.shot_ts if k is not None
                              and pd.notna(k.shot_ts) else ""),
-                "Source": "journal+account" if matched else "journal only",
+                "Source": _source(m, t),
                 "Slide": t.slide,
             })
 
@@ -326,9 +429,13 @@ def build(trades: pd.DataFrame, positions: pd.DataFrame,
         # day nothing is claimed, so the whole day's positions are emitted --
         # the journal rows carry no P&L there, so no money is counted twice and
         # the account's own total for the day stays recoverable from the ledger.
-        unlogged = (day_pos[day_pos.pnl.abs() < SCRATCH_USD] if matched
-                    else day_pos)
-        tag = "account only" if matched else "account (day unresolved)"
+        # Whatever no write-up claimed: the scratches the deck reliably
+        # leaves out, plus anything the captures could not place.
+        keep = [ix for ix in day_pos.index
+                if ix not in claimed
+                and not (fallback and ix in real.index)]
+        unlogged = day_pos.loc[keep]
+        tag = "account only"
         for _, m in unlogged.iterrows():
             rows.append({
                 "date": day, "Time": f"{m['open']:%H:%M:%S}", "Symbol": m.sym,
