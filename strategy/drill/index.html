@@ -144,6 +144,7 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
       <div class="row">
         <button id="b-pass" title="放过（快捷键 1）">放过</button>
         <button id="b-enter" title="入场（快捷键 2）">入场</button>
+        <button id="b-wait" title="再看一根再决定（快捷键 . ）">→ 再看一根</button>
         <span id="kb-hint" class="kbhint"></span>
       </div>
       <div class="sliders" id="sl" hidden>
@@ -251,6 +252,11 @@ let navBack = [];
 let kbMode = null;
 let DROPPED = 0;   // archive-less questions left out of this set
 let step = 0, timer = null;   // bars of the future played so far
+/* Bars stepped through BEFORE deciding, this attempt. Capped at WAIT_MAX.
+   An answered question reads its own recorded `waited` instead, so a
+   revisit reproduces the attempt rather than the current state. */
+let step0 = 0;
+const WAIT_MAX = 10;
 let _geo = null, _hover = null;   // chart geometry + cursor, for the crosshair
 
 /* Questions arrive sorted by day and time, so walking them in order served
@@ -371,7 +377,10 @@ function draw(q, reveal){
   /* `step` is how many bars past the decision have been played. The x-scale
      still spans the whole window so the candles do not jump sideways as they
      appear -- only the right-hand side fills in. */
-  const last = reveal ? Math.min(q.c.length, q.mark + 1 + step) : q.mark + 1;
+  /* Pre-decision the chart grows by whatever was stepped through; after
+     the answer the reveal plays on from the bar decided on. */
+  const dm = markOf(q);
+  const last = reveal ? Math.min(q.c.length, dm + 1 + step) : dm + 1;
   const h = q.h.slice(0,last), l = q.l.slice(0,last),
         o = q.o.slice(0,last), c = q.c.slice(0,last);
   let lo = Math.min(...l), hi = Math.max(...h);
@@ -979,12 +988,29 @@ function draw(q, reveal){
    the target with it, so you could never widen a stop while leaving the
    target where you wanted it. R is now DERIVED (tgtAtr / stopAtr) and shown,
    rather than being the thing you dial. */
-function levels(q, stopAtr, tgtAtr){
+/* The bar the decision is being made on: the setup's own bar plus
+   however many were stepped through first. An answered question reports
+   what it recorded, so revisiting one shows the attempt. */
+function markOf(q){
+  const a = ans[q.id];
+  return q.mark + (a ? (a.waited | 0) : (q === QS[idx] ? step0 : 0));
+}
+
+/* q.entry, not q.c[mark], when the decision is on the original bar: the
+   generator rounds entry to three decimals and the OHLC arrays to two,
+   and every answer on file settled against the former. */
+function entryOf(q, m){
+  return m === q.mark ? q.entry : q.c[m];
+}
+
+function levels(q, stopAtr, tgtAtr, m){
+  if (m === undefined) m = q.mark;
+  const entry = entryOf(q, m);
   const s = q.dir === "short" ? 1 : -1;        // stop sits against the trade
-  const stop = q.entry + s*stopAtr*q.atr;
-  const target = q.entry - s*tgtAtr*q.atr;
-  const risk = Math.abs(q.entry - stop);
-  return {stop, target, risk, rr: tgtAtr / stopAtr};
+  const stop = entry + s*stopAtr*q.atr;
+  const target = entry - s*tgtAtr*q.atr;
+  const risk = Math.abs(entry - stop);
+  return {stop, target, risk, rr: tgtAtr / stopAtr, entry};
 }
 /* A stubby arrow whose TIP sits exactly on (x, y). `dir` is +1 for one
    arriving from above (the target, reached from below) and -1 for one from
@@ -1007,37 +1033,74 @@ function hitArrow(g, x, y, dir, col){
   g.stroke();
   g.restore();
 }
-function settle(q, stopAtr, tgtAtr){
-  const {stop, target, risk, rr} = levels(q, stopAtr, tgtAtr);
+function settle(q, stopAtr, tgtAtr, m){
+  if (m === undefined) m = q.mark;
+  const {stop, target, risk, rr, entry} = levels(q, stopAtr, tgtAtr, m);
   const short = q.dir === "short";
-  for (let j = q.mark+1; j < Math.min(q.c.length, q.mark+1+FWD); j++){
+  for (let j = m+1; j < Math.min(q.c.length, m+1+FWD); j++){
     const tu = short ? q.l[j] <= target : q.h[j] >= target;
     const td = short ? q.h[j] >= stop   : q.l[j] <= stop;
-    if (tu && td) return {stop, target, rr, r:-1, bar:j-q.mark, hit:"both",
+    if (tu && td) return {stop, target, rr, r:-1, bar:j-m, hit:"both",
                           how:"同一根里两边都碰到,按最坏算"};
-    if (tu) return {stop, target, rr, r:rr, bar:j-q.mark, hit:"tp",
-                    how:`第 ${j-q.mark} 根触及目标`};
-    if (td) return {stop, target, rr, r:-1, bar:j-q.mark, hit:"sl",
-                    how:`第 ${j-q.mark} 根触及止损`};
+    if (tu) return {stop, target, rr, r:rr, bar:j-m, hit:"tp",
+                    how:`第 ${j-m} 根触及目标`};
+    if (td) return {stop, target, rr, r:-1, bar:j-m, hit:"sl",
+                    how:`第 ${j-m} 根触及止损`};
   }
-  const endI = Math.min(q.c.length-1, q.mark+FWD);
-  const move = short ? (q.entry - q.c[endI]) : (q.c[endI] - q.entry);
+  const endI = Math.min(q.c.length-1, m+FWD);
+  const move = short ? (entry - q.c[endI]) : (q.c[endI] - entry);
   /* The chart draws more future than the rule settles on, so a level
      reached past the horizon is on screen while the verdict says it never
      was. Saying which bar it happened on turns an apparent contradiction
      into the lesson: the horizon is part of the trade. */
   let late = "";
-  for (let j = q.mark+1+FWD; j < q.c.length; j++){
+  for (let j = m+1+FWD; j < q.c.length; j++){
     const tu = short ? q.l[j] <= target : q.h[j] >= target;
     const td = short ? q.h[j] >= stop   : q.l[j] <= stop;
     if (tu || td){
-      late = `（图上第 ${j-q.mark} 根才${tu ? "到目标" : "破止损"}，`
+      late = `（图上第 ${j-m} 根才${tu ? "到目标" : "破止损"}，`
            + `已出 ${FWD} 根结算窗，不计）`;
       break;
     }
   }
   return {stop, target, rr, r: move/risk, bar: FWD, hit:"none",
           how:`${FWD} 根内都没碰到,按收盘结算${late}`};
+}
+
+/* The header against whichever bar the decision is on.
+
+   rsi, drs1 and drs5 have a value for every bar and follow. dr15 and
+   rsi5 are single numbers measured at the setup bar, so once a bar has
+   been stepped they read "—": a stale reading dressed as a current one
+   is worse than no reading. */
+function renderMeta(q, m){
+  const waited = m - q.mark;
+  const px = entryOf(q, m);
+  const rv = q.rsi ? q.rsi[m] : null;
+  const d1 = q.drs1 ? q.drs1[m] : null;
+  const d5 = q.drs5 ? q.drs5[m] : null;
+  const d15 = waited ? null : q.dr15;
+  const r5 = waited ? null : q.rsi5;
+  const dcol = v => v == null ? "var(--ink-3)"
+                  : (v >= 0 ? "var(--ok)" : "var(--bad)");
+  const dtxt = v => v == null ? "—" : `${sr(v, 2)}`;
+  const tm = waited ? (q.t ? q.t[m] : q.tm) : q.tm;
+  $("meta").innerHTML =
+    `<span>${q.day} <b>${tm}</b>` +
+    (waited ? `<span style="color:var(--acc)"> +${waited}根</span>` : "") +
+    `</span>` +
+    `<span><b>${q.sym}</b> ${q.dir === "short" ? "做空" : "做多"}</span>` +
+    `<span>收盘 <b>${fmt(px)}</b></span>` +
+    `<span>ATR <b>${q.atr.toFixed(3)}</b></span>` +
+    `<span>RSI(6) <b>${rv == null ? "—" : rv.toFixed(1)}</b>` +
+    `<span style="color:var(--ink-3)"> / 5m ` +
+    `${r5 == null ? "—" : r5.toFixed(1)}</span></span>` +
+    `<span>Δr <b style="color:${dcol(d1)}">${dtxt(d1)}</b>` +
+    `<span style="color:var(--ink-3)"> / 5m </span>` +
+    `<b style="color:${dcol(d5)}">${dtxt(d5)}</b>` +
+    `<span style="color:var(--ink-3)"> / 15m </span>` +
+    `<b style="color:${dcol(d15)}">${dtxt(d15)}</b></span>` +
+    `<span>距 POC <b>${sr(100*(px-q.poc)/q.poc)}%</b></span>`;
 }
 
 function render(){
@@ -1047,32 +1110,17 @@ function render(){
     (nDone && nDone < QS.length
       ? `　（已答 ${nDone} 题排在前面，第 ${nDone+1} 题起是新的）` : "") +
     (DROPPED ? `　（另有 ${DROPPED} 题所在交易日没有逐笔归档，已排除）` : "");
-  const rv = q.rsi[q.mark];
-  const dcol = v => v == null ? "var(--ink-3)"
-                  : (v >= 0 ? "var(--ok)" : "var(--bad)");
-  const dtxt = v => v == null ? "—" : `${sr(v, 2)}`;
-  $("meta").innerHTML =
-    `<span>${q.day} <b>${q.tm}</b></span>` +
-    `<span><b>${q.sym}</b> ${q.dir === "short" ? "做空" : "做多"}</span>` +
-    `<span>收盘 <b>${fmt(q.entry)}</b></span>` +
-    `<span>ATR <b>${q.atr.toFixed(3)}</b></span>` +
-    `<span>RSI(6) <b>${rv == null ? "—" : rv.toFixed(1)}</b>` +
-    `<span style="color:var(--ink-3)"> / 5m ` +
-    `${q.rsi5 == null ? "—" : q.rsi5.toFixed(1)}</span></span>` +
-    `<span>Δr <b style="color:${dcol(q.dr1)}">${dtxt(q.dr1)}</b>` +
-    `<span style="color:var(--ink-3)"> / 5m </span>` +
-    `<b style="color:${dcol(q.dr5)}">${dtxt(q.dr5)}</b>` +
-    `<span style="color:var(--ink-3)"> / 15m </span>` +
-    `<b style="color:${dcol(q.dr15)}">${dtxt(q.dr15)}</b></span>` +
-    `<span>距 POC <b>${sr(100*(q.entry-q.poc)/q.poc)}%</b></span>`;
+  renderMeta(q, markOf(q));
   pick = null;
+  step0 = 0;
   stopAuto();
   step = 0;
   $("play").hidden = true;
   $("b-pass").setAttribute("aria-pressed","false");
   $("b-enter").setAttribute("aria-pressed","false");
   $("sl").hidden = true; $("b-go").disabled = true;
-  kbSet(null);                    // a new card starts with no mode
+  kbSet(null);
+  waitBtn();                    // a new card starts with no mode
   $("b-go").hidden = false; $("b-next").hidden = true; $("vd").hidden = true;
   syncOut();
   /* Coming back to one already answered: show it as it was left, settled and
@@ -1098,6 +1146,44 @@ function render(){
 function prev(){
   if (navBack.length){ idx = navBack.pop(); render(); return; }
   if (idx > 0){ idx--; render(); }
+}
+
+/* One more bar before deciding, up to WAIT_MAX.
+
+   "Give it five more minutes and see whether it comes back" is the
+   thought the question used to have no way to express, so it was
+   measuring something next to the decision rather than the decision.
+   One bar at a time, because that is how the wait actually feels --
+   each bar is its own small choice to keep waiting.
+
+   There is no way back: an unseen bar cannot be unseen, and a wait you
+   could undo would not be a wait. */
+function waitOne(){
+  const q = QS[idx];
+  if (!q || ans[q.id]) return;              // answered: nothing to wait for
+  if (step0 >= WAIT_MAX) return;
+  if (q.mark + step0 + 1 >= q.c.length) return;
+  step0++;
+  pick = null;
+  $("b-pass").setAttribute("aria-pressed", "false");
+  $("b-enter").setAttribute("aria-pressed", "false");
+  $("sl").hidden = true;
+  $("b-go").disabled = true;
+  kbSet(null);
+  waitBtn();
+  renderMeta(q, markOf(q));
+  draw(q, false);
+}
+
+function waitBtn(){
+  const q = QS[idx];
+  const b = $("b-wait");
+  if (!b) return;
+  const done = !q || !!ans[q.id];
+  b.hidden = done;
+  b.disabled = done || step0 >= WAIT_MAX;
+  b.textContent = step0 ? `\u2192 再看一根 (${step0}/${WAIT_MAX})`
+                        : "\u2192 再看一根";
 }
 /* Position OR identity. A bare number is a position in the current order,
    which is only stable within one load: answered questions move to the
@@ -1153,13 +1239,18 @@ function choose(k){
 function submit(){
   const q = QS[idx];
   let rec;
+  const m = q.mark + step0;
   if (pick === "pass") rec = {choice:"pass", r:0};
   else {
     const sa = +$("s-stop").value, ta = +$("s-tgt").value;
-    const s = settle(q, sa, ta);
+    const s = settle(q, sa, ta, m);
     rec = {choice:"enter", stopAtr:sa, tgtAtr:ta, targetR:s.rr, stop:s.stop,
-           target:s.target, r:s.r, how:s.how, bar:s.bar};
+           target:s.target, r:s.r, how:s.how, bar:s.bar, entry:s.entry ?? null};
   }
+  /* How many bars were stepped through before deciding. Absent on every
+     answer given before this existed, which reads as 0 -- correct, since
+     there was no way to wait. */
+  if (step0) rec.waited = step0;
   rec.kind = q.kind; rec.id = q.id;
   /* When, not just what. Without this the order answers were given is not
      recoverable from the page -- the record held no time, and `ans` is
@@ -1179,6 +1270,36 @@ function submit(){
 }
 
 /* The reveal, for a question just answered and for one revisited. */
+/* What waiting cost or bought: the same stop and target in ATR, settled
+   from the setup bar and from the bar actually taken. Both come off the
+   same arrays, so the comparison costs nothing and is the only thing
+   that makes waiting learnable -- without it you never find out whether
+   the pullback you waited for was worth the price you paid for it. */
+function waitBlock(q, rec){
+  const w = rec.waited | 0;
+  if (!w) return "";
+  const m = q.mark + w;
+  const here = entryOf(q, m), there = q.entry;
+  const better = q.dir === "short" ? here > there : here < there;
+  const moved = `入场价 ${fmt(there)} \u2192 ${fmt(here)}` +
+    `（${better ? "等到了更好的价" : "价格跑掉了"}）`;
+  if (rec.choice !== "enter"){
+    return `<p style="margin:8px 0 0;color:var(--ink-2);font-size:12.5px">` +
+      `<b>你等了 ${w} 根</b>才放过。${moved}</p>`;
+  }
+  const alt = settle(q, rec.stopAtr, rec.tgtAtr, q.mark);
+  const d = rec.r - alt.r;
+  const verdict = Math.abs(d) < 0.05
+    ? "等不等一样"
+    : (d > 0 ? "<b>这次等对了</b>" : "<b>这次等亏了</b>");
+  return `<p style="margin:8px 0 0;color:var(--ink-2);font-size:12.5px">` +
+    `<b>你等了 ${w} 根。</b>${moved}<br>` +
+    `同样的 ${rec.stopAtr.toFixed(2)} / ${rec.tgtAtr.toFixed(2)} ATR，` +
+    `形态那一根就进是 <b>${sr(alt.r, 2)} R</b>（${alt.how}），` +
+    `你这笔是 <b>${sr(rec.r, 2)} R</b> \u2014\u2014 ${verdict}` +
+    `（差 ${sr(d, 2)} R）。</p>`;
+}
+
 function verdictFor(q, rec){
   const vd = $("vd"); vd.hidden = false;
   const what = q.kind;
@@ -1246,8 +1367,9 @@ function verdictFor(q, rec){
     vd.innerHTML = `<h3>入场：<span class="big">${sr(rec.r, 2)} R</span></h3>` +
       `<p>${rec.how}。止损 ${fmt(rec.stop)},目标 ${fmt(rec.target)}。这是${what}。</p>` + mine;
   }
-  vd.innerHTML += lightHtml(q) + context(q);
+  vd.innerHTML += waitBlock(q, rec) + lightHtml(q) + context(q);
   $("b-go").hidden = true; $("b-next").hidden = false;
+  $("b-wait").hidden = true;
   kbHint();
 }
 
@@ -1286,8 +1408,9 @@ function lightStat(name){
   return `本题库 ${s[0]} 题，命中 ${(s[1]*100).toFixed(1)}%，` +
          `平均 <b>${r >= 0 ? "+" : "−"}${Math.abs(r).toFixed(3)} R</b>。`;
 }
-function ruleLight(q){
-  const m = q.mark, s = q.drs1;
+function ruleLight(q, m){
+  if (m === undefined) m = q.mark;
+  const s = q.drs1;
   if (!s) return null;
   const now = s[m];
   const p1 = m >= 1 ? s[m - 1] : null, p2 = m >= 2 ? s[m - 2] : null;
@@ -1328,7 +1451,7 @@ const LIGHT_COL = {green: "var(--up)", red: "var(--dn)",
                    amber: "var(--poc)", na: "var(--ink-3)"};
 
 function lightHtml(q){
-  const L = ruleLight(q);
+  const L = ruleLight(q, markOf(q));
   if (!L) return "";
   const c = LIGHT_COL[L.k];
   return `<div style="margin-top:12px;padding:8px 10px;border-left:3px solid ${c};` +
@@ -1385,6 +1508,16 @@ function context(q){
     s += `<p style="margin:0;color:var(--ink-2);font-size:12.5px">` +
       `<b>这一类没有基准率。</b>这是你自己选的入场点，不属于我测过的「深回落」` +
       `或「浅回调」，所以上面那些命中率对它不适用，这里不套用。</p></div>`;
+    return s;
+  }
+  /* A delayed entry is a different population. The rates below were
+     measured on entries at the setup bar; quoting them at a bar ten
+     minutes later would be the most convincing way to be wrong. */
+  const _w = (ans[q.id] || {}).waited | 0;
+  if (_w){
+    s += `<p style="margin:0;color:var(--ink-2);font-size:12.5px">` +
+      `<b>等过之后没有基准率。</b>上面那些命中率量的是「在形态那一根入场」，` +
+      `你这笔等了 ${_w} 根才决定，是另一个总体，套不上来。</p></div>`;
     return s;
   }
   s += `<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:4px">历史基准 · 同类位置，不是对这一笔的预测</div>`;
@@ -2312,7 +2445,7 @@ function confirmReset(){
    running past it would just show candles the trade was never in. */
 function stepTo(n){
   const q = QS[idx];
-  const maxStep = q.c.length - 1 - q.mark;
+  const maxStep = q.c.length - 1 - markOf(q);
   step = Math.max(0, Math.min(maxStep, n));
   const a = ans[q.id];
   const settled = a && a.bar ? a.bar : null;
@@ -2388,7 +2521,7 @@ function kbHint(){
   h.className = "kbhint";
   h.textContent = $("b-go").hidden
     ? "← → 翻题　回车 下一题　空格 播放　6 放到底　, . 走 K"
-    : "1 放过　2 入场　3 止损　4 目标　5 提交　← → 翻题　空格/回车 确认";
+    : "1 放过　2 入场　. 再看一根　3 止损　4 目标　5 提交　← → 翻题";
 }
 
 function kbNudge(dir, big){
@@ -2444,6 +2577,12 @@ document.addEventListener("keydown", e => {
         e.preventDefault(); stopAuto(); stepTo(QS[idx].c.length);
       }
       return;
+    case ".":
+      // Same verb either side of the answer: one more bar. Before it,
+      // that is another bar to judge on; after it, the reveal walking
+      // on. The playback handler above owns the second case.
+      if (answering){ e.preventDefault(); waitOne(); }
+      return;
     case "w": case "W": case "ArrowUp":
       if (kbMode){ e.preventDefault(); kbNudge(+1, e.shiftKey); }
       return;
@@ -2496,6 +2635,7 @@ document.addEventListener("keydown", e => {
 $("b-pass").onclick = () => choose("pass");
 $("b-enter").onclick = () => choose("enter");
 $("b-go").onclick = submit;
+$("b-wait").onclick = waitOne;
 $("b-next").onclick = next;
 try{
   const saved = localStorage.getItem("drill:balanced");

@@ -177,6 +177,7 @@ const api = new Function(
   code + "\n;return {choose, submit, levels, settle, ruleLight, stepTo, loadSet, report, next," +
          "         prev, goto1, isAnswered: (id) => !!ans[id], getIdx: () => idx," +
          "         cellOf, nextByDeficit, noFlow, stopAuto," +
+         "         waitOne, markOf, entryOf, WAIT_MAX, getStep0: () => step0," +
          "         getStep: () => step, getQS: () => QS};")();
 
 await new Promise((r) => setTimeout(r, 400));
@@ -1481,3 +1482,124 @@ console.log("\nNOFLOW OK");
 }
 
 console.log("\nPLAYALL OK");
+
+
+/* ---- waiting before deciding ---------------------------------------- *
+ * The question used to force a choice on the bar the setup was found,
+ * which is not the decision a trader makes: the real thought is "give
+ * it a few more minutes and see whether it comes back". One bar at a
+ * time, up to WAIT_MAX.
+ *
+ * The bank already carries what this needs -- 181 bars with mark at
+ * 120, against a 30-bar settlement horizon -- so a wait of up to 29
+ * still settles on a full window. Nothing was regenerated.           */
+{
+  for (const k of Object.keys(localStorage._d))
+    if (/^drill:\d{4}-/.test(k) || /^drill:mine/.test(k))
+      delete localStorage._d[k];
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  els["b-bal"].checked = false;          // walk in order, simpler to reason about
+
+  const q0 = api.getQS()[api.getIdx()];
+  if (api.markOf(q0) !== q0.mark)
+    throw new Error("a fresh question starts on the setup bar");
+
+  api.waitOne();
+  if (api.markOf(q0) !== q0.mark + 1)
+    throw new Error(`one step should move one bar, got ${api.markOf(q0)}`);
+  if (api.entryOf(q0, api.markOf(q0)) !== q0.c[q0.mark + 1])
+    throw new Error("entry should be the close of the bar now decided on");
+  console.log("ok   等待：一次一根，入场价跟着走");
+
+  for (let i = 0; i < 40; i++) api.waitOne();
+  if (api.getStep0() !== api.WAIT_MAX)
+    throw new Error(`capped at ${api.WAIT_MAX}, got ${api.getStep0()}`);
+  if (els["b-wait"].disabled !== true)
+    throw new Error("the button should disable at the cap");
+  console.log(`ok   等待：封顶 ${api.WAIT_MAX} 根，按钮随之禁用`);
+
+  /* The header must not keep showing the setup bar's readings. */
+  const meta = els.meta.innerHTML;
+  if (!/\+10根/.test(meta))
+    throw new Error("the header should say how far it has stepped: " +
+                    meta.slice(0, 160));
+  const dash = (meta.match(/—/g) || []).length;
+  if (dash < 2)
+    throw new Error("dr15 and rsi5 have no series; they must read — " +
+                    "once a bar is stepped, not a stale number");
+  console.log("ok   表头跟着决策那根走，没有序列的两项显示 —");
+
+  /* Settlement runs from the bar decided on. */
+  const m = api.markOf(q0);
+  const a = api.settle(q0, 1.0, 2.0, q0.mark);
+  const b = api.settle(q0, 1.0, 2.0, m);
+  if (a.stop === b.stop && a.target === b.target)
+    throw new Error("a later entry should move the levels");
+  console.log(`ok   结算从决策那根起算（形态根 ${sr2(a.r)} vs 等后 ${sr2(b.r)}）`);
+
+  /* Answer it and check the record and the reveal. */
+  els["s-stop"].value = "1.0"; els["s-tgt"].value = "2.0";
+  api.choose("enter");
+  api.submit();
+  const rec = JSON.parse(localStorage.getItem("drill:" + q0.id));
+  if (rec.waited !== api.WAIT_MAX)
+    throw new Error(`the record should carry waited, got ${rec.waited}`);
+  if (Math.abs(rec.r - b.r) > 1e-9)
+    throw new Error(`recorded ${rec.r} but settling at the waited bar ` +
+                    `gives ${b.r}`);
+  console.log("ok   记录带上 waited，且 R 来自等后那一根");
+
+  const vd = els.vd.innerHTML;
+  if (!/你等了 10 根/.test(vd))
+    throw new Error("the reveal should say how long it waited");
+  if (!/形态那一根就进是/.test(vd))
+    throw new Error("the reveal must give the counterfactual: " +
+                    vd.slice(0, 300));
+  console.log("ok   揭晓给出反事实（当时就进会是多少 R）");
+
+  if (!/等过之后没有基准率/.test(vd))
+    throw new Error("a delayed entry must not be quoted the base rates");
+  if (/历史基准 · 同类位置/.test(vd))
+    throw new Error("the base-rate block is still being shown");
+  console.log("ok   等过之后不再引用基准率");
+
+  /* Revisiting reproduces the attempt, not the current state. */
+  api.goto1(String(api.getIdx() + 1));
+  if (api.markOf(q0) !== q0.mark + api.WAIT_MAX)
+    throw new Error("a revisit should read the recorded wait");
+  console.log("ok   回看已答的题，复现当时等了多久");
+
+  /* The key, since the mouse is what this whole set of shortcuts is
+     for. Only before the answer: after it, "." walks the playback. */
+  api.next();
+  const q2 = api.getQS()[api.getIdx()];
+  const m2 = api.markOf(q2);
+  fireKey(".");
+  if (api.markOf(q2) !== m2 + 1)
+    throw new Error("'.' should step one bar before the decision");
+  els["s-stop"].value = "1.0"; els["s-tgt"].value = "2.0";
+  api.choose("pass"); api.submit();
+  const st = api.getStep();
+  fireKey(".");
+  if (api.markOf(q2) !== m2 + 1)
+    throw new Error("'.' must not keep stepping the decision after the answer");
+  console.log("ok   键盘 . ：答题前走一根，答完归播放");
+
+  /* An answer from before this existed has no `waited` and must settle
+     exactly as it always did. */
+  api.next();
+  const q1 = api.getQS()[api.getIdx()];
+  els["s-stop"].value = "1.0"; els["s-tgt"].value = "2.0";
+  api.choose("enter"); api.submit();
+  const r1 = JSON.parse(localStorage.getItem("drill:" + q1.id));
+  if ("waited" in r1)
+    throw new Error("no wait should write no field");
+  if (Math.abs(r1.r - api.settle(q1, 1.0, 2.0).r) > 1e-12)
+    throw new Error("an unwaited answer must settle as it always did");
+  console.log("ok   没等的题：不写 waited，结算与从前完全一致");
+}
+
+function sr2(v){ return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2); }
+
+console.log("\nWAIT OK");
