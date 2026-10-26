@@ -95,7 +95,7 @@ _RETENTION_EXEMPT     = {"US.SOXL"}  # codes kept in full, never time-pruned
 def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
               ctx_holder: list, codes: list,
               host: str, port: int, handler_class,
-              store=None):
+              store=None, config_path=None):
     """Auto-reconnect when no tick received for longer than *timeout_minutes*.
 
     Two-tier recovery:
@@ -106,6 +106,12 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
     rows older than _RETENTION_DAYS for codes not in _RETENTION_EXEMPT) and a
     PASSIVE WAL checkpoint, to prevent the ticks table and WAL file from growing
     unboundedly and degrading read performance.
+
+    With *config_path* it also re-reads the target list each tick and
+    applies any change to the live subscription, so editing targets in
+    the scheduler takes effect without a restart. `codes` is mutated in
+    place, which is what carries the change into _try_subscribe, the
+    rebuild and the retention prune.
     """
     from moomoo import OpenQuoteContext, SubType, RET_OK, Session
 
@@ -114,6 +120,14 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
     last_log_time    = time.time()
     last_resub_time: float | None = None
     watchdog_tick    = 0
+
+    reloader = None
+    if config_path:
+        from analysis.collector_targets import TargetReloader
+        reloader = TargetReloader(
+            config_path, codes, SubType.TICKER, log,
+            {"subscribe_push": True, "extended_time": True,
+             "session": Session.ALL})
 
     def _try_subscribe(ctx) -> bool:
         try:
@@ -158,6 +172,14 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
     while not stop_event.wait(check_interval):
         now = time.time()
         watchdog_tick += 1
+
+        if reloader is not None:
+            try:
+                changed = reloader.poll(ctx_holder[0])
+                if changed:
+                    log.info("%s", changed)
+            except Exception as exc:
+                log.warning("Target reload failed: %s", exc)
 
         if now - last_log_time >= timeout_sec:
             log.info("This session: %d ticks", state.get("session_count", 0))
@@ -298,7 +320,9 @@ def main(argv=None):
     threading.Thread(
         target=_watchdog,
         args=(state, timeout_minutes, stop_event,
-              ctx_holder, codes, args.host, args.port, HandlerClass, store),
+              ctx_holder, codes, args.host, args.port, HandlerClass, store,
+              # An explicit --codes is the caller's word, not the file's.
+              None if args.codes else args.config),
         daemon=True,
     ).start()
 

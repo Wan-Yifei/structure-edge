@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.74.4 — 改了采集目标，正在跑的采集器永远不知道 (2026-10-26)
+
+界面上 Stocks 写着 `US.QQQ, US.SOXL`，`config/schedule.json` 里也是，
+**而 ticks.db 里 QQQ 一共 21 笔**，全在 10-25 21:42 的 48 秒内——那是手动
+测试留下的，不是采集器采的。
+
+问 OpenD 自己：
+
+```
+total_used: 4,  remain: 1996
+TICKER: ['US.SOXL']   ORDER_BOOK: ['US.SOXL']
+QUOTE:  ['US.SOXL']   K_1M:       ['US.SOXL']
+```
+
+四条通道全只有 SOXL。额度剩 1996，所以不是配额、不是权限、不是 QQQ 特殊。
+
+| | 时间 |
+|---|---|
+| `config/schedule.json` 最后修改 | 10-25 **21:58:53** |
+| 两个采集器启动 | 10-25 **20:19:58 / 20:20:38** |
+
+采集器比配置早启动 1 小时 39 分。`tick_collector` 只在 `main()` 里读一次
+config，之后看门狗重订阅用的是内存里那份 `codes` 闭包——**改配置对活着的
+进程毫无影响，而界面不给任何提示**。这和多日 VP 那个「每 30 秒刷新」是同
+一类病：UI 报的是意图，不是实际状态。
+
+### 热覆盖
+
+看门狗本来就每 60 秒醒一次，而且 `codes` 是个 list，`_try_subscribe`、
+`_rebuild_ctx`、保留期 prune 读的都是同一个对象。所以热加载就是**原地改
+这个 list**：比 mtime → 读 targets → 求差 → unsubscribe 掉的、subscribe
+新的。其它三处自动跟上，不用各自知道有这回事。
+
+新模块 `analysis/collector_targets.py`，两个采集器各接一行。
+
+拒绝的情况比正常路径更要紧：
+
+- **空 targets 不执行**——照做就会退掉所有订阅。短暂过期好过停止采集。只警告一次
+- **半写入的文件不执行**——scheduler 是整文件重写，poll 可能正落在中间
+- **subscribe 被拒 → 不记录为已应用**，下一个 tick 重试
+- **unsubscribe 失败 → 照样从清单移除**——已经不要了，留着只会被 `_try_subscribe` 加回去
+
+scheduler 存盘后多一行日志，说清楚是热生效还是要等下次启动。
+
+### 测试
+
+新增 17 项。调用记录改成 tuple 子类，原有断言（`start, end = calls[0]`、
+`calls == []`）一个字没改。其中两项跑真正的看门狗循环，而不是只测那个类——
+把 `reloader.poll(...)` 换成 `None` 做变异，它们立刻挂。
+
+### 已知遗留
+
+当时还同时跑着**两份** tick_collector 和两份 order_book_collector
+（20:19:58 一份、20:20:38 一份），都往同一个 SQLite 写。`_launch_collector`
+的条件是「进程不存在或已退出」，所以活着的永远不会被重启，但也拦不住第二次
+启动。本次未处理。
+
 ## v0.74.3 — 多日 VP 的「实时」其实一整天都在重播早上那一份 (2026-10-26)
 
 面板每 30 秒刷一次，图却一动不动：现价 87，当日 slab 还停在 82。

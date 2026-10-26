@@ -614,6 +614,11 @@ class SchedulerApp(tk.Tk):
             if code not in existing:
                 self._log(f"Auto-added new target: {code}")
         self.cfg["targets"] = sorted(set(new_codes))
+        # Say so, because for sixteen hours it did not: the list used to
+        # reach the file and stop there, while this field and a running
+        # collector disagreed with nothing on screen to show it.
+        if set(new_codes) != existing:
+            self._targets_changed = sorted(set(new_codes))
         self.cfg.setdefault("target_categories", {})
         # Collectors
         self.cfg["order_book_enabled"] = bool(self.ob_var.get())
@@ -648,6 +653,15 @@ class SchedulerApp(tk.Tk):
             json.dump(merged, f, indent=2, ensure_ascii=False)
         self.cfg = merged
         self._log("Config saved.")
+        changed = getattr(self, "_targets_changed", None)
+        if changed:
+            self._targets_changed = None
+            running = any(p is not None and p.poll() is None
+                          for p in (self._proc, self._ob_proc))
+            self._log(
+                f"Targets now {', '.join(changed)}"
+                + ("  — running collectors pick this up within 60s"
+                   if running else "  — will apply when the collector starts"))
 
     # ── UI builders ───────────────────────────────────────────────────────────
 

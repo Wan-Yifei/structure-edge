@@ -156,7 +156,7 @@ _CHECKPOINT_INTERVAL = 10  # run PASSIVE checkpoint every N watchdog ticks
 def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
               ctx_holder: list, codes: list[str],
               host: str, port: int, handler_class,
-              store=None):
+              store=None, config_path=None):
     """Warn and reconnect when no OB update received for *timeout_minutes*.
 
     Two-tier recovery (mirrors tick_collector):
@@ -164,6 +164,10 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
       2. If that fails, close the dead ctx and rebuild a fresh one.
 
     Also runs a PASSIVE WAL checkpoint every _CHECKPOINT_INTERVAL ticks.
+
+    With *config_path* it re-reads the target list each tick and applies
+    any change to the live subscription, mirroring tick_collector: the
+    scheduler writes the file, the collector picks it up, no restart.
     """
     from moomoo import OpenQuoteContext, SubType
 
@@ -172,6 +176,13 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
     last_log_time    = time.time()
     last_resub_time: float | None = None
     tick_count       = 0
+
+    reloader = None
+    if config_path:
+        from analysis.collector_targets import TargetReloader
+        reloader = TargetReloader(
+            config_path, codes, SubType.ORDER_BOOK, log,
+            {"subscribe_push": True})
 
     def _try_subscribe(ctx) -> bool:
         try:
@@ -209,6 +220,14 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
     while not stop_event.wait(check_interval):
         tick_count += 1
         now = time.time()
+
+        if reloader is not None:
+            try:
+                changed = reloader.poll(ctx_holder[0])
+                if changed:
+                    log.info("%s", changed)
+            except Exception as exc:
+                log.warning("Target reload failed: %s", exc)
 
         if now - last_log_time >= timeout_sec:
             log.info("This session: %d rows", state.get("session_count", 0))
@@ -349,7 +368,8 @@ def main(argv=None):
     threading.Thread(
         target=_watchdog,
         args=(state, timeout_minutes, stop_event,
-              ctx_holder, codes, args.host, args.port, HandlerClass, store),
+              ctx_holder, codes, args.host, args.port, HandlerClass, store,
+              None if args.codes else args.config),
         daemon=True,
     ).start()
 
