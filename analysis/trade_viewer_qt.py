@@ -666,6 +666,17 @@ DCVD_FLOW_PCT = 0.80
 _DCVD_DIM_ALPHA = 70      # bars that did not clear the gate
 _DCVD_LIT_ALPHA = 215     # bars that did
 
+# Absorption: |x| >= G and the price move |A| standard deviations away
+# from what that flow should have delivered. Pre-registered in
+# backtest/absorption.py and measured out of sample over 60 sessions --
+# where TRADING it lost (-0.361 R long, -0.566 R short, against an
+# unconditional -0.101/-0.072). It is drawn because seeing that heavy
+# selling is being eaten is worth knowing while watching the tape; it is
+# not drawn because it is an entry. The window and the gate are DCVD's
+# own constants above, since it is literally the same gate.
+ABS_THRESHOLD = 1.5
+ABS_ATR_N = 14            # the study's ATR14, the unit A is measured in
+
 # A slower reading drawn behind the bars for context. The bars are each
 # minute's own imbalance; this is the direction of the stretch around them.
 # It is deliberately not the decision value -- see the note on the window.
@@ -2454,6 +2465,7 @@ class TradeViewerQt(QMainWindow):
             ("cvd",       "CVD"),   # Cumulative Volume Delta subplot
             ("adi",       "A/D"),   # Accumulation/Distribution Line subplot
             ("dcvd",      "DCVD"),  # normalised CVD slope, bounded -1..+1
+            ("absorb",    "ABS"),   # absorption markers on the price chart
             ("offex",     "OffEx"), # off-exchange flow as its own CVD line
             ("ema",       "EMA"),
             ("avwap",     "AVWAP"), # Anchored VWAP -- cumulative from a user-picked date
@@ -2487,10 +2499,44 @@ class TradeViewerQt(QMainWindow):
                     "over\nfive minutes removes the imbalance it measures.\n\n"
                     "The y-axis follows the window (measured p99), so "
                     "changing it\nneither squashes the bars nor clips their "
-                    "peaks.")
+                    "peaks.\n\n"
+                    "BRIGHT vs DIM is a second rule, and the stronger one. "
+                    "A bar\nis bright when this minute's signed volume "
+                    f"cleared the flow\ngate: |x| in the top "
+                    f"{100 - int(DCVD_FLOW_PCT * 100)}% of its own trailing "
+                    f"{DCVD_FLOW_WIN} bars,\nwhere x = (buy-sell) / median("
+                    "buy+sell). Over the same 60\nout-of-sample sessions, "
+                    "following a bright bar's own sign\nreturned +0.352 R "
+                    "short on heavy selling and +0.285 R long on\nheavy "
+                    "buying -- against +0.207/+0.247 for the height rule "
+                    "above.\n\n"
+                    "Height and brightness answer different questions: the "
+                    "height\nis the imbalance RATIO, the brightness is "
+                    "whether the volume\nbehind it was large for this stock "
+                    "right now. Only at a 1-bar\nwindow do the bar's sign "
+                    "and the gate's x agree bar for bar.")
                 self._dcvd_spin.valueChanged.connect(
                     self._on_dcvd_lookback_changed)
                 tb_ind.addWidget(self._dcvd_spin)
+            if key == "absorb":
+                cb.setToolTip(
+                    "Absorption markers on the price chart.\n\n"
+                    "A hollow triangle appears where heavy flow failed to "
+                    "move\nprice: the bar cleared the same flow gate that "
+                    "lights the\nDCVD bars, AND its move was at least "
+                    f"{ABS_THRESHOLD} standard deviations\naway from what "
+                    "that flow should have delivered.\n\n"
+                    "Gold triangle below the bar = heavy SELLING that did "
+                    "not push\nprice down. Purple above = heavy BUYING that "
+                    "did not lift it.\n\n"
+                    "THIS IS NOT AN ENTRY. Measured over 60 walk-forward "
+                    "out-of-\nsample sessions, trading these marks lost "
+                    "-0.361 R long and\n-0.566 R short, against an "
+                    "unconditional -0.101/-0.072. At the\nsame gate, going "
+                    "WITH the flow earned +0.352/+0.285. The mark\nis here "
+                    "to show you what the tape is doing, not what to do.\n\n"
+                    "Calibrated on 1-minute RTH bars; on other timeframes "
+                    "the\nthreshold has not been measured.")
             if key == "avwap":
                 self._avwap_anchor_edit = QLineEdit()
                 self._avwap_anchor_edit.setPlaceholderText("YYYY-MM-DD")
@@ -3170,6 +3216,8 @@ class TradeViewerQt(QMainWindow):
 
         self._dcvd_items: list = []
         self._dcvd_arr: np.ndarray | None = None
+
+        self._abs_items: list = []
 
         self._offex_arr: np.ndarray | None = None
         self._offex_label = pg.TextItem(
@@ -4219,6 +4267,11 @@ class TradeViewerQt(QMainWindow):
         self._clear_dcvd_items()
         if self._ind("dcvd"):
             self._draw_dcvd(klines, buckets, cm)
+
+        # Absorption markers (price chart)
+        self._clear_abs_items()
+        if self._ind("absorb"):
+            self._draw_absorption(klines, buckets, cm)
 
         # Chandelier exit suggestion (bottom-right corner label)
         if self._ind("chandelier"):
@@ -5423,6 +5476,123 @@ class TradeViewerQt(QMainWindow):
                 line.setZValue(5)
                 self._plot_dcvd.addItem(line)
                 self._dcvd_items.append(line)
+
+    @staticmethod
+    def _abs_day(h, l, c, buy, sell):
+        """(bull, bear) masks for one trading day's bars.
+
+        Every rolling quantity ends at the previous bar, so a bar is
+        never part of the fit, the scale or the gate it is judged
+        against -- the no-lookahead rule the study registered.
+
+        Three of those windows run in series, so the warm-up is longer
+        than any one of them: 20 bars before the volume scale exists, 20
+        more before lambda has a fit, 20 more before the residual has a
+        spread to be standardised by. Nothing is marked before roughly
+        bar 60 of a session, and a session shorter than that is marked
+        not at all.
+        """
+        m = len(c)
+        bull = np.zeros(m, dtype=bool)
+        bear = np.zeros(m, dtype=bool)
+        if m < 25:
+            return bull, bear
+
+        tr = np.full(m, np.nan)
+        for i in range(1, m):
+            tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]),
+                        abs(l[i] - c[i - 1]))
+        a = np.full(m, np.nan)
+        n = ABS_ATR_N
+        if m > n:
+            a[n] = np.nanmean(tr[1:n + 1])
+            for i in range(n + 1, m):
+                a[i] = (a[i - 1] * (n - 1) + tr[i]) / n
+
+        tot = buy + sell
+        ok = tot >= DCVD_MIN_SIGNED
+        ofi = np.where(ok, buy - sell, np.nan)
+        dp = np.r_[np.nan, np.diff(c)]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            y = pd.Series(dp / a)
+        scale = pd.Series(np.where(ok, tot, np.nan)).rolling(
+            DCVD_FLOW_WIN, min_periods=20).median().shift(1)
+        x = pd.Series(ofi) / scale
+        xy = (x * y).rolling(DCVD_FLOW_WIN, min_periods=20).sum().shift(1)
+        xx = (x * x).rolling(DCVD_FLOW_WIN, min_periods=20).sum().shift(1)
+        lam = xy / xx.replace(0.0, np.nan)
+        eps = y - lam * x
+        sd = eps.rolling(DCVD_FLOW_WIN, min_periods=20).std().shift(1)
+        A = (eps / sd.replace(0.0, np.nan)).to_numpy()
+        gate = (x.abs().rolling(DCVD_FLOW_WIN, min_periods=20)
+                .quantile(DCVD_FLOW_PCT).shift(1).to_numpy())
+
+        xa = x.to_numpy()
+        fire = (np.isfinite(xa) & np.isfinite(gate) & np.isfinite(A)
+                & (np.abs(xa) >= gate))
+        bull = fire & (xa < 0) & (A >= ABS_THRESHOLD)
+        bear = fire & (xa > 0) & (A <= -ABS_THRESHOLD)
+        return bull, bear
+
+    def _absorption_flags(self, klines: pd.DataFrame, buckets: dict,
+                          cm: int):
+        """(bull, bear) masks over the whole frame, a trading day at a time.
+
+        Split by day because every window here is trailing: one reaching
+        back over the 20:00 boundary would fit this session's flow
+        against the previous session's, and the overnight gap would enter
+        as a price move no flow explains.
+        """
+        n = len(klines)
+        bull = np.zeros(n, dtype=bool)
+        bear = np.zeros(n, dtype=bool)
+        if n < 25:
+            return bull, bear
+        buy, sell, day = self._bar_flow(klines, buckets, cm)
+        h = klines["high"].to_numpy(float)
+        l = klines["low"].to_numpy(float)
+        c = klines["close"].to_numpy(float)
+        start = 0
+        for i in range(1, n + 1):
+            if i < n and day[i] == day[start]:
+                continue
+            sl = slice(start, i)
+            b, e = self._abs_day(h[sl], l[sl], c[sl], buy[sl], sell[sl])
+            bull[sl] = b
+            bear[sl] = e
+            start = i
+        return bull, bear
+
+    def _draw_absorption(self, klines: pd.DataFrame, buckets: dict,
+                         cm: int) -> None:
+        """Hollow triangles where the study's condition fired.
+
+        Hollow, and clear of the bar rather than on it: this marks the
+        candle, it does not replace reading it. Gold below for selling
+        that was absorbed, purple above for buying -- the same two
+        colours the delta labels use for buyer- and seller-dominant.
+        """
+        bull, bear = self._absorption_flags(klines, buckets, cm)
+        if not (bull.any() or bear.any()):
+            return
+        low = klines["low"].to_numpy(float)
+        high = klines["high"].to_numpy(float)
+        idx = np.arange(len(klines))
+        for mask, ys, sym, col in ((bull, low * 0.9985, "t1", _UP),
+                                   (bear, high * 1.0015, "t", _DOWN)):
+            if not mask.any():
+                continue
+            item = pg.ScatterPlotItem(
+                x=idx[mask], y=ys[mask], symbol=sym, size=10,
+                brush=None, pen=pg.mkPen(_qc(col, 235), width=1.6))
+            item.setZValue(60)
+            self._plot_c.addItem(item)
+            self._abs_items.append(item)
+
+    def _clear_abs_items(self) -> None:
+        for item in self._abs_items:
+            self._plot_c.removeItem(item)
+        self._abs_items.clear()
 
     def _clear_dcvd_items(self) -> None:
         for item in self._dcvd_items:

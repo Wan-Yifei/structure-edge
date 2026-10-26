@@ -467,3 +467,27 @@ class TestCheckedAtStartupActuallyActs:
         """Walls default on, so the chain has to be being fetched."""
         assert viewer._ind_checks["option_walls"].isChecked()
         assert viewer._option_timer.isActive()
+
+
+class TestTheBrightnessIsExplained:
+    """The lit/dim split encodes the stronger of the panel's two rules --
+    the flow gate, +0.352 R against the height rule's +0.207 -- and
+    nothing on screen said so. The numbers in that sentence have to
+    track the constants, or the panel documents a gate it does not
+    apply."""
+
+    def test_the_tooltip_names_the_gate_it_actually_uses(self, viewer):
+        from analysis.trade_viewer_qt import DCVD_FLOW_PCT, DCVD_FLOW_WIN
+        tip = viewer._dcvd_spin.toolTip()
+        assert f"{DCVD_FLOW_WIN} bars" in tip, "the window is not named"
+        assert f"top {100 - int(DCVD_FLOW_PCT * 100)}%" in tip, \
+            "the percentile is not named, or does not match the constant"
+        assert "+0.352" in tip and "+0.285" in tip, \
+            "the gate rule's measured return is not stated"
+
+    def test_it_says_the_two_rules_are_different(self, viewer):
+        """Height is a ratio, brightness is a magnitude. Reading one as
+        the other is the mistake the tooltip exists to stop."""
+        tip = viewer._dcvd_spin.toolTip()
+        assert "RATIO" in tip
+        assert "1-bar" in tip, "the sign-agreement caveat is missing"
