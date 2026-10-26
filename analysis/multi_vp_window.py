@@ -26,7 +26,7 @@ from datetime import timedelta
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel, QMainWindow,
                              QPushButton, QSpinBox, QToolBar, QWidget)
@@ -40,6 +40,12 @@ _PATH = "#cfd8dc"
 _PROF = "#37474f"
 
 RTH_LO, RTH_HI = 9.5, 16.0
+# Bars before the session in progress is worth drawing. Completed days are
+# held to 60 -- fewer than that is bad data, not a short day.
+LIVE_MIN_BARS = 15
+# How often the live session is refetched. Only the newest trading day is
+# pulled, not the ~26-day window a full reload asks for.
+LIVE_REFRESH_MS = 30_000
 # Width of a session's widest profile bar, as a fraction of the slab. Less
 # than one so the heaviest bin stops short of the next session rather than
 # running into it -- two slabs touching read as one.
@@ -60,6 +66,13 @@ class MultiVPWindow(QMainWindow):
         self.setWindowTitle("Multi-Day Volume Profile")
         self.resize(1180, 680)
         self._code = "US.SOXL"
+        # Sessions already fetched, keyed by (code, RTH). The fetch is
+        # 9.9s of a 9.9s reload and only the newest day can change.
+        self._cache: dict = {}
+        self._cache_key = None
+        # The trading day still in progress, when it is one of the
+        # sessions on screen.
+        self._live_day = None
         self._items: list = []
 
         tb = QToolBar()
@@ -72,7 +85,7 @@ class MultiVPWindow(QMainWindow):
         self._days.setValue(6)
         self._days.setFixedWidth(52)
         self._days.setToolTip("How many trading sessions to look back")
-        self._days.valueChanged.connect(self.reload)
+        self._days.valueChanged.connect(lambda *_: self.reload())
         tb.addWidget(self._days)
 
         tb.addSeparator()
@@ -86,7 +99,7 @@ class MultiVPWindow(QMainWindow):
             "Price bins per session. Too many and a day's profile breaks\n"
             "into spikes; too few and one wide bin swallows the value-area\n"
             "edge.")
-        self._bins.valueChanged.connect(self.reload)
+        self._bins.valueChanged.connect(lambda *_: self.reload())
         tb.addWidget(self._bins)
 
         tb.addSeparator()
@@ -97,7 +110,7 @@ class MultiVPWindow(QMainWindow):
         self._va.setSingleStep(5)
         self._va.setFixedWidth(52)
         self._va.setToolTip("Share of volume the value area covers; 70 is the standard")
-        self._va.valueChanged.connect(self.reload)
+        self._va.valueChanged.connect(lambda *_: self.reload())
         tb.addWidget(self._va)
 
         tb.addSeparator()
@@ -106,13 +119,13 @@ class MultiVPWindow(QMainWindow):
         self._rth.setToolTip(
             "Use only 09:30-16:00 bars. Extended-hours volume is thin and\n"
             "mixing it in stretches the value area.")
-        self._rth.stateChanged.connect(self.reload)
+        self._rth.stateChanged.connect(lambda *_: self.reload())
         tb.addWidget(self._rth)
 
         self._join = QCheckBox("Join VA")
         self._join.setChecked(True)
         self._join.setToolTip("Dashed lines between consecutive sessions' VAH / VAL")
-        self._join.stateChanged.connect(self.reload)
+        self._join.stateChanged.connect(lambda *_: self.reload())
         tb.addWidget(self._join)
 
         self._shared = QCheckBox("Shared grid")
@@ -123,20 +136,26 @@ class MultiVPWindow(QMainWindow):
             "panel. Unchecked, each session is binned over its own range:\n"
             "a quiet day's shape reads better, but the days stop being\n"
             "comparable.")
-        self._shared.stateChanged.connect(self.reload)
+        self._shared.stateChanged.connect(lambda *_: self.reload())
         tb.addWidget(self._shared)
 
         self._labels = QCheckBox("Level prices")
         self._labels.setChecked(True)
         self._labels.setToolTip("Print POC / VAH / VAL beside each session")
-        self._labels.stateChanged.connect(self.reload)
+        self._labels.stateChanged.connect(lambda *_: self.reload())
         tb.addWidget(self._labels)
 
         tb.addSeparator()
         btn = QPushButton("↻")
         btn.setFixedWidth(30)
         btn.setToolTip("Refetch")
-        btn.clicked.connect(self.reload)
+        btn.clicked.connect(self.reload_all)
+
+        # Only the newest trading day; a full reload is ~10s and all of
+        # it is the fetch, so this must not be that.
+        self._live_timer = QTimer(self)
+        self._live_timer.timeout.connect(self.refresh_live)
+        self._live_timer.start(LIVE_REFRESH_MS)
         tb.addWidget(btn)
 
         self._status = QLabel("  ")
@@ -238,40 +257,76 @@ class MultiVPWindow(QMainWindow):
             self._code = code
             self.reload()
 
-    def _sessions(self) -> list[tuple[str, pd.DataFrame]]:
-        """The last N trading days of 1m bars, oldest first."""
+    @staticmethod
+    def _today() -> str:
+        """The trading day now in progress, on the 20:00 ET boundary."""
+        return str((pd.Timestamp.now() + pd.Timedelta(hours=4))
+                   .normalize().date())
+
+    def _sessions(self, span_days: int | None = None
+                  ) -> list[tuple[str, pd.DataFrame]]:
+        """The last N trading days of 1m bars, oldest first.
+
+        Sessions already fetched are kept, because the fetch is 9.9s of
+        a 9.9s reload while the binning is 5ms, and only the newest day
+        can have changed.
+        """
         from feeds.fetcher import fetch_klines
 
         want = int(self._days.value())
+        key = (self._code, self._rth.isChecked())
+        if self._cache_key != key:
+            self._cache = {}
+            self._cache_key = key
+
         # Calendar days to ask for: weekends and holidays are not sessions,
         # so a fixed multiple would come up short over a long break.
-        span = want * 3 + 8
-        end = pd.Timestamp.now().normalize() + pd.Timedelta(days=1)
-        start = end - pd.Timedelta(days=span)
-        k = fetch_klines(self._code, "1m", start.strftime("%Y-%m-%d"),
-                         end.strftime("%Y-%m-%d"))
-        if k is None or k.empty:
-            return []
-        k = k.copy()
-        k["t"] = pd.to_datetime(k["time_key"])
-        k = k.sort_values("t").drop_duplicates("t").set_index("t")
-        out = []
+        if len(self._cache) < want:
+            span = want * 3 + 8          # cache cannot serve this
+        elif span_days is not None:
+            span = span_days             # live tick
+        else:
+            span = 0                     # bins/VA%/join: redraw only
+
+        if span:
+            end = pd.Timestamp.now().normalize() + pd.Timedelta(days=1)
+            start = end - pd.Timedelta(days=span)
+            k = fetch_klines(self._code, "1m", start.strftime("%Y-%m-%d"),
+                             end.strftime("%Y-%m-%d"))
+            if k is not None and not k.empty:
+                k = k.copy()
+                k["t"] = pd.to_datetime(k["time_key"])
+                k = k.sort_values("t").drop_duplicates("t").set_index("t")
+                self._absorb(k)
+
+        days = sorted(self._cache)[-want:]
+        out = [(d, self._cache[d]) for d in days]
+        today = self._today()
+        self._live_day = today if out and out[-1][0] == today else None
+        return out
+
+    def _absorb(self, k: pd.DataFrame) -> None:
+        """Split a fetched frame into trading days and keep them."""
         # The trading day runs 20:00 ET -> next 20:00, matching
         # _trading_day_of_bucket in trade_viewer_qt and the boundary CVD
         # resets on. Adding four hours before taking the date applies that
         # rule: 19:59 stays put, 20:00 rolls into the next day. Grouping by
         # calendar date would cut the overnight session in half.
         tday = (k.index + pd.Timedelta(hours=4)).normalize()
+        today = self._today()
         for d, g in k.groupby(tday):
             if self._rth.isChecked():
                 hh = g.index.hour + g.index.minute / 60
                 g = g[(hh > RTH_LO) & (hh <= RTH_HI)]
+            day = str(pd.Timestamp(d).date())
             # A handful of bars is a holiday stub, not a session; its
             # "value area" would be one bar wide and would drag the scale.
-            if len(g) < 60:
+            # The day in progress is held to LIVE_MIN_BARS instead: a real
+            # half-day still has 210 RTH bars, so relaxing it lets no stub
+            # in, and waiting an hour for today to appear was the point.
+            if len(g) < (LIVE_MIN_BARS if day == today else 60):
                 continue
-            out.append((str(pd.Timestamp(d).date()), g))
-        return out[-want:]
+            self._cache[day] = g
 
     # ── drawing ─────────────────────────────────────────────────────────
     def _clear(self) -> None:
@@ -288,7 +343,28 @@ class MultiVPWindow(QMainWindow):
         self._plot.addItem(item, ignoreBounds=ignore)
         self._items.append(item)
 
-    def reload(self) -> None:
+    def reload_all(self) -> None:
+        """The refresh button: back to the feed for every session, not
+        just the newest."""
+        self._cache = {}
+        self.reload()
+
+    def refresh_live(self) -> None:
+        """Redraw with only the newest trading day refetched.
+
+        Two calendar days, not one: a trading day starts at 20:00 the
+        previous evening, so it straddles the date. Measured at ~0.9s
+        for four days against 10s for a full reload; two is the least
+        that still covers the boundary.
+
+        Skipped while the window is not on screen. The fetch blocks the
+        GUI thread, which the main chart shares, so a hidden panel must
+        not be stalling it every half minute.
+        """
+        if self._cache and self.isVisible():
+            self.reload(span_days=2)
+
+    def reload(self, span_days: int | None = None) -> None:
         from strategy.smc.fvg import compute_volume_profile
         # Imported here rather than at module scope: trade_viewer_qt imports
         # THIS module lazily when the button is pressed, so a top-level
@@ -297,7 +373,7 @@ class MultiVPWindow(QMainWindow):
 
         self._clear()
         try:
-            sess = self._sessions()
+            sess = self._sessions(span_days)
         except Exception as exc:
             self._status.setText(f"  fetch failed: {exc}")
             return
@@ -326,6 +402,7 @@ class MultiVPWindow(QMainWindow):
             #                                    shared grid, per-day otherwise
             w = vols / vols.max() * slab * BAR_SPAN
 
+            live = day == self._live_day
             self._add(pg.BarGraphItem(
                 x0=np.full(len(centers), float(i)), y=centers,
                 width=w, height=h * 0.92,
@@ -353,8 +430,14 @@ class MultiVPWindow(QMainWindow):
             # Price path across the slab, so the profile has its sequence.
             c = g["close"].to_numpy(float)
             xs = np.linspace(i, i + slab * BAR_SPAN, len(c))
+            # Dashed on the session still being built: its value area
+            # will keep moving, and drawn identically to a finished one
+            # it invites a comparison that does not hold yet.
             self._add(pg.PlotCurveItem(
-                x=xs, y=c, pen=pg.mkPen(_qc(_PATH, 150), width=1)))
+                x=xs, y=c, pen=pg.mkPen(
+                    _qc(_PATH, 150), width=1,
+                    style=(Qt.PenStyle.DashLine if live
+                           else Qt.PenStyle.SolidLine))))
 
             if prev is not None and self._join.isChecked():
                 pi, (pvah, pval) = prev
@@ -376,12 +459,15 @@ class MultiVPWindow(QMainWindow):
             self._plot.setXRange(-0.1, len(sess) + 0.1, padding=0)
         self._place_labels()
         ax = self._plot.getPlotItem().getAxis("bottom")
-        ax.setTicks([[(i + BAR_SPAN / 2, d[5:]) for i, (d, _) in
-                      enumerate(sess)]])
+        ax.setTicks([[(i + BAR_SPAN / 2,
+                       d[5:] + (" \u00b7" if d == self._live_day else ""))
+                      for i, (d, _) in enumerate(sess)]])
         first, last = sess[0][0], sess[-1][0]
+        live_note = ("   \u00b7 = in progress, refreshed every "
+                     f"{LIVE_REFRESH_MS // 1000}s" if self._live_day else "")
         self._status.setText(
             f"  {self._code}   {len(sess)} sessions   {first} .. {last}"
-            f"   gold = POC, blue = VA edges")
+            f"   gold = POC, blue = VA edges{live_note}")
 
 
 def main() -> None:
