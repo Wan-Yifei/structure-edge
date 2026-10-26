@@ -62,3 +62,48 @@ def test_dom_window_constructs(qapp, tmp_path):
                   ticks_db_path=tmp_path / "ticks.db")
     w.show()
     _settle(qapp, w)
+
+
+class TestClosingTheViewerTakesItsChildrenWithIt:
+    """Three floating windows are built without a parent, so each is a
+    top-level window in its own right and the viewer closing does not
+    close any of them by itself. closeEvent has to, and Multi-VP was the
+    one it had been left out of: the window stayed on screen with no
+    owner, the event loop stayed alive because of it, and its 30s timer
+    kept running against a moomoo context the teardown had already
+    closed. Since v0.74.3 that timer asks for FRESH data, so an orphan
+    opens a new connection every half minute.
+
+    A plain QWidget stands in for each: the point is the teardown list,
+    not what the windows do.
+    """
+
+    def _viewer_with_children(self, qapp):
+        from PyQt6.QtWidgets import QWidget
+        from analysis.trade_viewer_qt import TradeViewerQt
+
+        v = TradeViewerQt()
+        kids = {}
+        for attr in ("_mvp_window", "_liq_hm_window", "_dom_window"):
+            w = QWidget()
+            w.show()
+            setattr(v, attr, w)
+            kids[attr] = w
+        for _ in range(10):
+            qapp.processEvents()
+        return v, kids
+
+    def test_every_child_window_is_closed(self, qapp):
+        v, kids = self._viewer_with_children(qapp)
+        v.close()
+        qapp.processEvents()
+        for attr, w in kids.items():
+            assert not w.isVisible(), f"{attr} was left on screen"
+            assert getattr(v, attr) is None, f"{attr} was not released"
+
+    def test_multi_vp_in_particular(self, qapp):
+        """The one that was reported: close the viewer, it is still there."""
+        v, kids = self._viewer_with_children(qapp)
+        v.close()
+        qapp.processEvents()
+        assert not kids["_mvp_window"].isVisible()

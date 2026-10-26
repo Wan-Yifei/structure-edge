@@ -143,6 +143,11 @@ _DELTA_DN_BRUSH = _alpha_brush(_DOWN, 180)
 # they overlap into a smear. At a 1600px wide plot this shows them from
 # roughly 90 bars in.
 _DELTA_MIN_PX = 18.0
+# Pixels per bar below which the heatmap's per-level bins stop being
+# readable and the body shows the bar's delta sign instead. Above it the
+# heatmap is drawn as before. One switch, not a fade: a half-drawn
+# heatmap is worse than either state.
+_HM_MIN_PX = 8.0
 
 # How often the session/range profile panel is rebuilt, at most. It costs
 # 82ms, and a session profile does not move visibly between two redraws
@@ -1126,6 +1131,11 @@ class CandlestickItem(pg.GraphicsObject):
         super().__init__()
         self._klines:      pd.DataFrame | None = None
         self._buckets:     dict | None         = None
+        self._delta:       np.ndarray | None   = None   # per-bar buy-sell
+        # True once the view is too far out for the heatmap to read, so
+        # the bodies are baked in delta colours instead. Flipping it is
+        # what invalidates the pictures; see paint().
+        self._far:         bool                = False
         self._candle_mins: int                 = 1
         self._show_heatmap: bool               = True
         self._red_up:      bool                = False   # True = red up, green down
@@ -1149,13 +1159,18 @@ class CandlestickItem(pg.GraphicsObject):
     def set_data(self, klines: pd.DataFrame, buckets: dict | None,
                  candle_mins: int, show_heatmap: bool = True,
                  red_up: bool = False,
-                 dirty_bars: set | None = None) -> None:
+                 dirty_bars: set | None = None,
+                 delta: np.ndarray | None = None) -> None:
         """Hand over the frame; `dirty_bars` says which bars moved.
 
         dirty_bars is None by default and then nothing is reused -- the
         same full rebuild this did before. A caller that knows what
         changed (the live path) passes the bar indices, and only the
         pictures covering those bars are dropped.
+
+        `delta` is per-bar buy-minus-sell, used only when the view is
+        too far out for the heatmap to be legible. None leaves the body
+        plain at that zoom, which is what it did before.
         """
         n = len(klines)
         cfg = (candle_mins, show_heatmap, red_up)
@@ -1181,6 +1196,7 @@ class CandlestickItem(pg.GraphicsObject):
 
         self._klines       = klines
         self._buckets      = buckets
+        self._delta        = delta
         self._candle_mins  = candle_mins
         self._show_heatmap = show_heatmap
         self._red_up       = red_up
@@ -1279,9 +1295,29 @@ class CandlestickItem(pg.GraphicsObject):
 
         # Pass 1 — bodies + heatmap overlay
         p.setPen(Qt.PenStyle.NoPen)
+        delta = self._delta
         for i, o, h, l, c, body_lo, body_hi, pd_ in candle_data:
             is_bull  = c >= o
-            if self._show_heatmap and pd_:
+            if self._far and delta is not None and i < len(delta):
+                # Too far out for the heatmap to say anything, so the
+                # body says delta instead: fill by the sign of the flow,
+                # outline in the candle's own colour so direction and
+                # flow are two separate readings rather than one.
+                d = float(delta[i])
+                edge = _qc(_bull_col if is_bull else _bear_col)
+                if d > 0:
+                    p.setBrush(QBrush(_qc(_UP)))
+                elif d < 0:
+                    p.setBrush(QBrush(_qc(_DOWN)))
+                else:
+                    # No signed flow for this bar. Left in its own
+                    # colour rather than coloured gold or purple, so a
+                    # gap in the tape cannot be read as balanced flow.
+                    p.setBrush(QBrush(edge))
+                p.setPen(pg.mkPen(edge, width=0))
+                p.drawRect(QRectF(i - 0.35, body_lo, 0.7, body_hi - body_lo))
+                p.setPen(Qt.PenStyle.NoPen)
+            elif self._show_heatmap and pd_:
                 # Draw faint base body first (direction reference only),
                 # then overlay high-contrast buy/sell bins on top.
                 base_col = _qc(_bull_col if is_bull else _bear_col, 50)
@@ -1390,6 +1426,24 @@ class CandlestickItem(pg.GraphicsObject):
     def paint(self, p: QPainter, *args) -> None:
         if self._klines is None or self._klines.empty:
             return
+
+        # Which mode the bodies are baked in has to be settled BEFORE
+        # baking: the pictures outlive a zoom, so crossing the line is
+        # the one moment they stop being valid.
+        vr0 = self.viewRect()
+        vb = self.getViewBox()
+        far = self._far
+        if (self._show_heatmap and self._delta is not None
+                and vr0 is not None and vb is not None
+                and vr0.width() > 0 and vb.width() > 0):
+            far = (vb.width() / vr0.width()) < _HM_MIN_PX
+        if far != self._far:
+            self._far = far
+            self._chunks.clear()
+            self._part = None
+            self._part_rng = (0, 0)
+            self._last = None
+
         self._ensure_pictures()
 
         # Replay only the chunks the view can see. Qt pays for a
@@ -4182,9 +4236,17 @@ class TradeViewerQt(QMainWindow):
 
         # Candlesticks. The dirty set is what lets the item keep the
         # chunks it already baked; see CandlestickItem._ensure_pictures.
+        # Per-bar delta for the zoomed-out body colour. _bar_flow is the
+        # cache three overlays already share, so asking for it here costs
+        # nothing it was not going to cost anyway.
+        bar_delta = None
+        if show_hm and buckets:
+            _b, _s, _ = self._bar_flow(klines, buckets, cm)
+            bar_delta = _b - _s
         self._candle_item.set_data(klines, buckets if show_hm else None, cm,
                                    show_heatmap=show_hm, red_up=red_up,
-                                   dirty_bars=self._frame_dirty)
+                                   dirty_bars=self._frame_dirty,
+                                   delta=bar_delta)
 
         # FVG zones
         self._fvg_item.set_data(
@@ -7622,6 +7684,16 @@ class TradeViewerQt(QMainWindow):
         if self._liq_hm_window is not None:
             _close_with_hang_watchdog(self._liq_hm_window, "LiqHmWindow")
             self._liq_hm_window = None
+        # Multi-VP was built without a parent, like the other two, and was
+        # the one left out of this list. So closing the viewer left it on
+        # screen with no owner, the event loop alive because of it, and
+        # its 30s timer still running -- now against a moomoo context the
+        # teardown below has already closed, and since v0.74.3 that timer
+        # asks for fresh data, so an orphan opens a new connection every
+        # half minute for as long as the window is up.
+        if self._mvp_window is not None:
+            _close_with_hang_watchdog(self._mvp_window, "MultiVPWindow")
+            self._mvp_window = None
         if self._dom_window is not None:
             self._dom_window.close()
             self._dom_window = None

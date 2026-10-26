@@ -1,5 +1,73 @@
 # Changelog
 
+## v0.74.6 — 关掉主窗口，多日 VP 还在；远距离的 heatmap 换成 delta 填色 (2026-10-26)
+
+### 一、关掉 viewer，多日 VP 留在屏幕上，进程不退
+
+三个浮动窗口（LiqHm、DOM、Multi-VP）建的时候**都没给 parent**，所以每个
+都是独立顶层窗口，主窗口关掉不会带走它们。`closeEvent` 里专门有一段逐个
+关掉它们，注释也写明了为什么：
+
+> Close child floating windows first so their timers/workers stop before
+> the moomoo context is torn down. Without this the app event loop keeps
+> running (quitOnLastWindowClosed won't fire while they're still open).
+
+**三个里漏了 Multi-VP。** 后果是一串：窗口留在屏幕上没有归属 →
+`quitOnLastWindowClosed` 永不触发，进程不退 → 它的 30 秒定时器继续跑，而
+主窗口已经把 moomoo context 拆了 → **而 v0.74.3 之后那个定时器是
+`force_refresh` 的**，所以一个没人看得见的孤儿窗口会每半分钟开一个新连接
+去打 API，一直打下去。
+
+最后这点是 v0.74.3 刚放大的：在那之前它只是空转读缓存。
+
+### 二、远距离时，蜡烛实体改用 delta 填色
+
+heatmap 在一根 0.7 宽的 K 里画逐价位的格子。整天视野下那根只有三个像素，
+格子糊成一片——面板开着、每次烘焙都在画它，而什么也看不出来。
+
+delta 的数字标签早就有同样的处理（低于 18 px/根就不画）。这里是实体的同
+一个做法：低于 **8 px/根**，实体按该根 delta 的符号实心填充，**金色净买、
+紫色净卖，边框保留蜡烛自己的涨跌色**——方向和流向成为两个独立的读数。拉
+近就回到 heatmap。
+
+`delta == 0`（那根没有有向成交）保持蜡烛原色，不染金也不染紫：tape 有缺口
+不能被读成「买卖平衡」。
+
+**判定在 `paint()` 而不是 `_bake()`。** 图片是按 chunk 烘好、跨缩放复用的，
+所以跨过那条线的那一刻，才是它们失效的唯一时刻。
+
+实测（1440 根、每根 20 个价位层）：
+
+```
+set_data 交接数据（不烘焙）       5.9 ms
+全量重烘 · heatmap 模式         202.3 ms
+全量重烘 · delta 模式            91.2 ms
+```
+
+**没有重新取数、没有重算 _bar_flow、没有重建 buckets**——delta 数组在
+`set_data` 时一次交进去，而 `_bar_flow` 本来就是三个 overlay 共用的缓存。
+切换掉的只有烘好的 QPicture，而且只在跨线那一次付钱；同一模式内缩放为 0。
+
+拉远反而更便宜（91 ms），因为整个逐价位 overlay 被跳过了。
+
+暂未做：两套图片各留一份。那样反复拉远拉近从第二次起是 0 ms，代价是内存
+翻倍、`set_data` 的脏位失效要同时处理两套。
+
+### 测试
+
++9，全量 1275 passed。
+
+子窗口那两条钉的是收尾名单：三个全部被关闭并释放，以及 Multi-VP 单独一条
+（「关掉 viewer 它还在」就是报上来的现象）。
+
+切换那七条钉的是**代价**，也就是这次真正要保证的东西：同模式内连续缩放三
+次重烘 0 次；跨线一次，重烘数量**精确等于** chunks + part + last；阈值两侧
+各 0.5 px 验证防常量漂移；`delta=None` 或 heatmap 关掉则永不切换。
+
+两条变异：删掉 `closeEvent` 里的 Multi-VP 收尾 → 子窗口那两条挂；跨线时不
+清 chunks → 计数那条挂。后者一开始是**假过**的，因为它只断言「重烘过」，而
+`_part` 和 `_last` 本来就每次重烘，改成精确计数才抓得住。
+
 ## v0.74.5 — 吸收标记上图，顺带把 DCVD 的亮暗说清楚 (2026-10-26)
 
 起因是一段看不懂的行情：10-26 12:49–13:07，SOXL 涨 1.9%，而几乎每一根

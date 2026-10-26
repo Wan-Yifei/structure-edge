@@ -401,3 +401,133 @@ class TestDirectionOutline:
         bare = tv.CandlestickItem()
         bare.set_data(kl, {}, 1, show_heatmap=True)
         assert 0x26A69A in self._colours(bare)
+
+
+class TestTheHeatmapDeltaSwitch:
+    """Far out, the heatmap's per-level bins are a smear, so the body
+    carries the bar's delta sign instead. The pictures outlive a zoom,
+    so the only honest place to decide this is paint() -- and crossing
+    the line is the one moment what was baked stops being valid.
+
+    What these pin is the COST: no data is recomputed, and zooming
+    within either mode rebakes nothing. The flip itself is one full
+    bake, which is the price of not keeping two sets of pictures.
+    """
+
+    @staticmethod
+    def _frame(n=300):
+        from core.time_utils import candle_start
+        rng = np.random.default_rng(5)
+        c = 100 + np.cumsum(rng.normal(0, 0.05, n))
+        t0 = pd.Timestamp("2026-10-26 09:31")
+        rows, buckets = [], {}
+        for i in range(n):
+            end = t0 + timedelta(minutes=i + 1)
+            o = c[i - 1] if i else c[0]
+            hi, lo = max(o, c[i]) + 0.05, min(o, c[i]) - 0.05
+            rows.append((end.strftime("%Y-%m-%d %H:%M"), o, hi, lo, c[i],
+                         4000.0))
+            bk = candle_start(end - timedelta(minutes=1), 1)
+            buckets[bk] = {float(c[i]): {"buy": 300.0, "sell": 200.0,
+                                         "neutral": 0.0}}
+        kl = pd.DataFrame(rows, columns=["time_key", "open", "high", "low",
+                                         "close", "volume"])
+        return kl, buckets, rng.normal(0, 500, n)
+
+    @staticmethod
+    def _look(item, span, px):
+        """Pretend the view shows `span` bars across `px` pixels."""
+        from PyQt6.QtCore import QRectF
+
+        class _VB:
+            def width(self_inner):
+                return px
+
+        item.viewRect = lambda: QRectF(0.0, 0.0, float(span), 1.0)
+        item.getViewBox = lambda: _VB()
+
+    def _paint(self, item):
+        from PyQt6.QtGui import QPicture
+        pic = QPicture()
+        p = QPainter(pic)
+        item.paint(p)
+        p.end()
+
+    def _item(self, qapp, **kw):
+        kl, buckets, delta = self._frame()
+        item = tv.CandlestickItem()
+        item.set_data(kl, buckets, 1, delta=delta, **kw)
+        return item
+
+    def test_far_out_the_body_carries_delta(self, qapp):
+        item = self._item(qapp)
+        self._look(item, span=300, px=600)        # 2 px per bar
+        self._paint(item)
+        assert item._far is True
+
+    def test_zoomed_in_the_heatmap_stays(self, qapp):
+        item = self._item(qapp)
+        self._look(item, span=30, px=600)         # 20 px per bar
+        self._paint(item)
+        assert item._far is False
+
+    def test_the_line_is_the_constant(self, qapp):
+        """Just either side of _HM_MIN_PX, so the threshold cannot drift
+        from the one the comment and the tooltip describe."""
+        for px_per_bar, want in ((tv._HM_MIN_PX - 0.5, True),
+                                 (tv._HM_MIN_PX + 0.5, False)):
+            item = self._item(qapp)
+            self._look(item, span=100, px=100 * px_per_bar)
+            self._paint(item)
+            assert item._far is want, f"{px_per_bar} px/bar -> {item._far}"
+
+    def test_zooming_within_a_mode_rebakes_nothing(self, qapp, monkeypatch):
+        item = self._item(qapp)
+        self._look(item, span=300, px=600)
+        self._paint(item)                          # first bake
+        n = []
+        orig = item._bake
+        monkeypatch.setattr(item, "_bake",
+                            lambda a, b: (n.append(1), orig(a, b))[1])
+        for span in (280, 260, 240):               # still far out
+            self._look(item, span=span, px=600)
+            self._paint(item)
+        assert n == [], f"rebaked {len(n)} picture(s) on a plain zoom"
+
+    def test_crossing_rebakes_every_picture_once(self, qapp, monkeypatch):
+        """Counted exactly, not just "more than zero": part and last are
+        rebaked whatever happens, so a flip that forgot to drop the
+        CHUNKS would still look like it had done something."""
+        item = self._item(qapp)
+        self._look(item, span=300, px=600)
+        self._paint(item)
+        expected = len(item._chunks) + (item._part is not None) + 1
+        assert len(item._chunks) >= 2, "the frame must span several chunks"
+        n = []
+        orig = item._bake
+        monkeypatch.setattr(item, "_bake",
+                            lambda a, b: (n.append(1), orig(a, b))[1])
+        self._look(item, span=20, px=600)          # cross into heatmap
+        self._paint(item)
+        assert len(n) == expected, (
+            f"crossing baked {len(n)} of {expected} pictures -- the "
+            f"chunks were kept in the wrong mode")
+        self._paint(item)                          # same view again
+        assert len(n) == expected, "a second paint rebaked again"
+
+    def test_without_delta_nothing_switches(self, qapp):
+        """The old behaviour, unchanged: no delta, no second mode."""
+        kl, buckets, _ = self._frame()
+        item = tv.CandlestickItem()
+        item.set_data(kl, buckets, 1)
+        self._look(item, span=300, px=600)
+        self._paint(item)
+        assert item._far is False
+
+    def test_with_the_heatmap_off_nothing_switches(self, qapp):
+        """There is nothing to replace, and the body already shows its
+        own direction at full strength."""
+        item = self._item(qapp, show_heatmap=False)
+        self._look(item, span=300, px=600)
+        self._paint(item)
+        assert item._far is False
