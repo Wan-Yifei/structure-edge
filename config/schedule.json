@@ -31,7 +31,10 @@
     }
   },
   "targets": [
-    "US.SOXL"
+    "US.SOXL",
+    "US.QQQ",
+    "HK.02800",
+    "HK.07200"
   ],
   "target_categories": {},
   "order_book_enabled": true,
