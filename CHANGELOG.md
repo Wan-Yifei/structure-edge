@@ -1,5 +1,97 @@
 # Changelog
 
+## v0.76.0 — 采集器加单实例锁：上一代 scheduler 的孤儿还在写同一个库 (2026-10-27)
+
+### 怎么发现的
+
+用户贴来一段 `[ob_collector]` 的 traceback,问 scheduler 出了什么事。
+**scheduler 没事** —— 它还活着,而且就在报错 49 秒后正常启动了当晚的采集器。
+那段 traceback 是 `logging` 自己的 `handleError` 打的,不是崩溃。
+
+倒着读才是因果链。被记录的那条消息在最后一行:
+
+```
+Push callback use too much time: conn=... proto=3013 time=9.530991554260254
+```
+
+推送回调卡了 9.5 秒 → SDK 写这条 WARNING → `TimedRotatingFileHandler` 去
+rename 共享日志文件 → 被别的 moomoo 进程占着 → `PermissionError: [WinError 32]`
+→ logging 把错误打出来继续跑。
+
+`order_book_collector.py` 里早有一段注释说明 `%APPDATA%\com.moomoo.OpenD\Log\
+py_*.log` 是机器上所有 moomoo 进程共用的,并且用 `set_futu_debug_model(False)`
+把 DEBUG 级的每条推送关掉了 —— 但 "Push callback use too much time" 是
+**WARNING**,过不了那个滤网,旧的缓解措施挡不住。
+
+进程表才是答案:
+
+```
+tick_collector       16184   10/25 20:19   父进程 22092 ← 已经死了（孤儿）
+order_book_collector 14680   10/25 20:19   父进程 22092 ← 已经死了（孤儿）
+main.py scheduler    29988   10/26 13:31
+tick_collector       29596   10/27 18:11   父进程 21020 ← 当前 scheduler
+order_book_collector 37492   10/27 18:11   父进程 21020 ← 当前 scheduler
+```
+
+两代采集器在同时跑。`order_book_store` 是 **SQLite**(不是 DuckDB),多写者在
+写锁上排队,而 `insert_snapshot` 是**同步跑在 SDK 推送回调线程上**的 —— 回调
+被写锁堵住就成了 9.5 秒,同时两边还往同一张表里写重复快照。
+
+顺带纠正之前记录里的一条:进程表里每个逻辑进程是两条,venv 的 `python.exe`
+和它 exec 出来的 uv `python.exe`。那是 shim,不是重复。**真正的重复是跨代的
+孤儿。**
+
+### 根因
+
+```python
+if self._ob_proc is None or self._ob_proc.poll() is not None:
+```
+
+`_launch_collector` 的守卫只知道**自己这一代 scheduler 启的进程**。上一代
+scheduler 没走 `_kill_collector` 就没了(崩了或直接关窗),它的采集器留在那儿,
+新 scheduler 看不见,照样再起一个。
+
+### 改法
+
+`core/single_instance.py`:对一个打开的文件加**建议锁**(Windows 用
+`msvcrt.locking`,其它平台用 `fcntl.flock`),两个采集器各持一个名字。
+
+**不是 pid 文件**:锁由内核在持有者退出时释放,无论它是正常退出还是被 kill,
+所以被杀掉的进程不会留下陈旧的锁。pid 文件会,而从那种状态恢复要靠猜一个
+记下来的 pid 是不是还是同一个程序。pid 另写一个文件,**只用于报错信息**。
+
+`wait_s=8.0`:scheduler 杀掉旧的紧接着就起新的,如果在半秒的重叠上直接失败,
+结果是一个都不剩。
+
+拿不到锁 → `exit(2)`,错误信息里带上持有者 pid。
+
+### 测试
+
+`tests/core/test_single_instance.py`,8 条,**全部跨进程**:同进程内的检查在
+一个只靠模块级变量记状态的实现上也会通过。
+
+持有者进程**自己报 pid**,不用 `proc.pid` —— venv 的 `python.exe` 是 shim,
+真正拿锁的是它 exec 出来的子进程。这一条是写测试时踩出来的,和进程表里每个
+采集器都显示两次是同一回事。
+
+变异 7 个全部抓住(锁没加 / 拿不到也不报错 / `wait_s` 被忽略 / `wait_s=0` 死等 /
+pid 不写 / pid 写失败就崩 / 不同名字共用一把锁)。
+
+另外跑了一次端到端:锁被占着时,真正的脚本 `exit=2` 并打印 already running;
+锁空着时同样的命令 `exit=1` 卡在 config —— 所以拒绝的是锁,不是别的。
+
+全量 1291 → **1299**。
+
+### 还没做
+
+- 推送回调里同步写 SQLite 这件事本身没动。孤儿清掉之后争用没了,但一个写者
+  遇到长 checkpoint 仍然会堵住回调。要彻底解,得把 `insert_snapshot` 挪到队列
+  后面的写线程里。
+- scheduler 这边没加「启动时扫一遍有没有同名旧进程」。有了锁就不需要了 ——
+  旧的还在跑,新的自己会退,日志里说得清清楚楚。
+
+---
+
 ## v0.75.0 — 吸收标记的门槛改成按时段自适应；红绿灯换回红绿 (2026-10-27)
 
 ### 1. 为什么 10:30 那根明明是 −0.87 的大流量却没有标记

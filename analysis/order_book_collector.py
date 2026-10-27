@@ -24,6 +24,8 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from core import single_instance
+
 _ET = ZoneInfo("America/New_York")
 
 logging.basicConfig(
@@ -305,6 +307,15 @@ Examples:
 
 def main(argv=None):
     args = _parse_args(argv)
+
+    # One collector per database. A scheduler only knows the processes
+    # it started itself, so one left behind by a previous scheduler is
+    # invisible to the next one -- see core/single_instance.
+    try:
+        _lock = single_instance.acquire("order_book_collector", wait_s=8.0)
+    except single_instance.AlreadyRunning as exc:
+        log.error("%s", exc)
+        sys.exit(2)
 
     if args.codes:
         codes           = args.codes

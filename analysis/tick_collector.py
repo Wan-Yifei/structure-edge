@@ -20,6 +20,8 @@ import threading
 import time
 from datetime import datetime
 
+from core import single_instance
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -248,6 +250,15 @@ Examples:
 
 def main(argv=None):
     args = _parse_args(argv)
+
+    # One collector per database. A scheduler only knows the processes
+    # it started itself, so one left behind by a previous scheduler is
+    # invisible to the next one -- see core/single_instance.
+    try:
+        _lock = single_instance.acquire("tick_collector", wait_s=8.0)
+    except single_instance.AlreadyRunning as exc:
+        log.error("%s", exc)
+        sys.exit(2)
 
     # ── resolve target codes and timeout ──────────────────────────────────
     timeout_minutes = args.timeout
