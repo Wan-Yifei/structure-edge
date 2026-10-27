@@ -5773,7 +5773,13 @@ class TradeViewerQt(QMainWindow):
         repaint. An empty pair means no seed, which leaves the in-frame
         behaviour exactly as it was.
         """
-        code = getattr(self, "_code", None)
+        # The symbol lives in the toolbar field, which is what every
+        # other overlay reads. `self._code` belongs to
+        # OptionChainFetcher, not to this window: reading it here
+        # returned None on every real frame while the tests, which set
+        # the attribute themselves, manufactured the very precondition
+        # they were meant to check. Nothing was ever seeded in the app.
+        code = self._code_edit.text().strip() if self._code_edit else ""
         if not code:
             return {}, {}
         key = (code, str(before_day), bw)

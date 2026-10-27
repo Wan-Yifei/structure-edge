@@ -440,7 +440,7 @@ class TestTheProfileComesFromMoreThanTheChartHolds:
                                                  one_day):
         from feeds import delta_bars
         kl, buckets, j = one_day
-        viewer._code = "US.TEST"
+        viewer._code_edit.setText("US.TEST")
         viewer._abs_seed_key = None
         monkeypatch.setattr(delta_bars, "load_cached",
                             lambda *a, **k: _seed_frame(6))
@@ -453,7 +453,7 @@ class TestTheProfileComesFromMoreThanTheChartHolds:
         that had quietly stopped needing the profile at all."""
         from feeds import delta_bars
         kl, buckets, _j = one_day
-        viewer._code = "US.TEST"
+        viewer._code_edit.setText("US.TEST")
         viewer._abs_seed_key = None
         monkeypatch.setattr(delta_bars, "load_cached", lambda *a, **k: None)
         bull, bear = viewer._absorption_flags(kl, buckets, CM)
@@ -465,11 +465,12 @@ class TestTheProfileComesFromMoreThanTheChartHolds:
         gate it is judged against."""
         from feeds import delta_bars
         kl, buckets, _j = one_day
-        viewer._code = "US.TEST"
+        viewer._code_edit.setText("US.TEST")
         viewer._abs_seed_key = None
         seen = {}
 
         def _spy(code, start, end):
+            seen["code"] = code
             seen["start"], seen["end"] = pd.Timestamp(start), pd.Timestamp(end)
             return _seed_frame(6)
 
@@ -479,6 +480,13 @@ class TestTheProfileComesFromMoreThanTheChartHolds:
         assert seen["end"] < first, \
             f"种子取到了被判定的那天：end={seen['end']} first={first}"
         assert seen["start"] < seen["end"]
+        # The symbol has to come from where the rest of the window reads
+        # it. Taking it from an attribute this window does not have gave
+        # None on every real frame, while these tests -- which used to
+        # set that attribute themselves -- manufactured the precondition
+        # they were meant to check, and nothing was ever seeded in app.
+        assert seen["code"] == "US.TEST", \
+            f"种子问的是 {seen['code']}，工具栏里是 US.TEST"
 
     def test_an_unreadable_cache_does_not_stop_the_chart(
             self, viewer, monkeypatch, one_day):
@@ -486,7 +494,7 @@ class TestTheProfileComesFromMoreThanTheChartHolds:
         must not cost the repaint."""
         from feeds import delta_bars
         kl, buckets, _j = one_day
-        viewer._code = "US.TEST"
+        viewer._code_edit.setText("US.TEST")
         viewer._abs_seed_key = None
 
         def _boom(*_a, **_k):
@@ -502,7 +510,7 @@ class TestTheProfileComesFromMoreThanTheChartHolds:
         first RTH bucket -- which is also what separates `mins > lo`
         from `mins >= lo`."""
         from feeds import delta_bars
-        viewer._code = "US.TEST"
+        viewer._code_edit.setText("US.TEST")
         viewer._abs_seed_key = None
         monkeypatch.setattr(delta_bars, "load_cached",
                             lambda *a, **k: _seed_frame(6))
@@ -522,7 +530,7 @@ class TestTheProfileComesFromMoreThanTheChartHolds:
         to set the threshold it is judged against, one frame later."""
         from feeds import delta_bars
         kl, buckets, _j = one_day
-        viewer._code = "US.TEST"
+        viewer._code_edit.setText("US.TEST")
         viewer._abs_seed_key = None
         monkeypatch.setattr(delta_bars, "load_cached",
                             lambda *a, **k: _seed_frame(6))
@@ -538,7 +546,7 @@ class TestTheProfileComesFromMoreThanTheChartHolds:
         read on every frame is a dropped frame."""
         from feeds import delta_bars
         kl, buckets, _j = one_day
-        viewer._code = "US.TEST"
+        viewer._code_edit.setText("US.TEST")
         viewer._abs_seed_key = None
         calls = []
 
