@@ -707,6 +707,27 @@ _DCVD_LIT_ALPHA = 215     # bars that did
 ABS_THRESHOLD = 1.5
 ABS_ATR_N = 14            # the study's ATR14, the unit A is measured in
 
+# The study's own window: RTH 09:31-16:00, with the overnight and
+# premarket sessions taking no part -- backtest/absorption.py says so in
+# as many words and filters on it. Bars are stamped at their END, so a bar
+# ending 09:31 is the one covering 09:30-09:31.
+ABS_RTH_LO, ABS_RTH_HI = 9.5, 16.0
+
+# The scale and the gate are read off the SAME TIME OF DAY in previous
+# sessions, not off a trailing bar count. Volume changes by 25x across
+# the open, and a trailing window straddling that change measures a bar
+# against a market that no longer exists: for an hour after the open the
+# gate sat around 35x the |x| actually on offer, so between 10:00 and
+# 11:00 nothing could be marked at all (1 mark in 136 sessions).
+#
+# Bucket width and history length barely matter -- 10/15/30-minute
+# buckets against 5/10/20 sessions all land at 6.3-6.6 marks a session
+# with 16-18% of them before 11:00 -- so these are picked for the
+# smallest history a loaded chart is likely to have.
+ABS_TOD_BUCKET_MIN = 15   # time-of-day bucket, in minutes
+ABS_TOD_SESSIONS = 20     # at most this many previous sessions per bucket
+ABS_TOD_MIN_SESSIONS = 2  # fewer than this -> no gate, and so no mark
+
 # A slower reading drawn behind the bars for context. The bars are each
 # minute's own imbalance; this is the direction of the stretch around them.
 # It is deliberately not the decision value -- see the note on the window.
@@ -2651,7 +2672,12 @@ class TradeViewerQt(QMainWindow):
                     "WITH the flow earned +0.352/+0.285. The mark\nis here "
                     "to show you what the tape is doing, not what to do.\n\n"
                     "Calibrated on 1-minute RTH bars; on other timeframes "
-                    "the\nthreshold has not been measured.")
+                    "the\nthreshold has not been measured.\n\n"
+                    "RTH only, and the gate is read off the SAME TIME OF "
+                    "DAY in\nprevious sessions -- the top fifth of the net "
+                    "flow that this\n15 minutes usually delivers. It needs "
+                    "at least 3 loaded\nsessions before any mark can "
+                    "appear.")
             if key == "avwap":
                 self._avwap_anchor_edit = QLineEdit()
                 self._avwap_anchor_edit.setPlaceholderText("YYYY-MM-DD")
@@ -5590,7 +5616,16 @@ class TradeViewerQt(QMainWindow):
             # Hue from the sign, brightness from the flow state. Taking
             # the hue from the same reading the number shows is what
             # keeps the badge from contradicting itself.
-            hue = _UP if last_v >= 0 else _DOWN
+            #
+            # The candle pair, not the gold/purple one the heatmap and
+            # the delta labels use for buyer- and seller-dominant. This
+            # badge is read as a traffic light, and gold in a traffic
+            # light is the amber that means "not yet" -- a heavy +0.88
+            # came out looking like a warning. The bug that started this
+            # was a negative reading painted teal, i.e. a hue that
+            # contradicted the sign; banning direction hues outright was
+            # a step too far, since direction is exactly what the sign is.
+            hue = _GREEN if last_v >= 0 else _RED
             if heavy:
                 col, note = _qc(hue, DCVD_LIGHT_HEAVY_A), "  heavy flow"
             elif abs(last_v) >= DCVD_DECISION:
@@ -5617,33 +5652,55 @@ class TradeViewerQt(QMainWindow):
                 self._dcvd_items.append(line)
 
     @staticmethod
-    def _abs_day(h, l, c, buy, sell):
-        """(bull, bear) masks for one trading day's bars.
+    def _abs_series(
+        h: np.ndarray, l: np.ndarray, c: np.ndarray,
+        buy: np.ndarray, sell: np.ndarray,
+        scale: np.ndarray | None = None,
+        gate: np.ndarray | None = None,
+        atr0: float | None = None,
+        prev: tuple[np.ndarray, np.ndarray] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+        """(x, y, A, gate, last ATR) for one session's bars.
 
         Every rolling quantity ends at the previous bar, so a bar is
         never part of the fit, the scale or the gate it is judged
         against -- the no-lookahead rule the study registered.
 
-        Three of those windows run in series, so the warm-up is longer
-        than any one of them: 20 bars before the volume scale exists, 20
-        more before lambda has a fit, 20 more before the residual has a
-        spread to be standardised by. Nothing is marked before roughly
-        bar 60 of a session, and a session shorter than that is marked
-        not at all.
+        `scale` and `gate` may be supplied per bar, which is how the
+        caller hands in a time-of-day profile built from PREVIOUS
+        sessions. Left out, both fall back to the trailing 60-bar form:
+        the median of this bar's own recent total volume, and the 80th
+        percentile of its own recent |x|.
+
+        `atr0` seeds Wilder's average from the previous session's last
+        value, and `prev` is that session's trailing (x, y) for lambda
+        and the residual spread. With both, a session can be marked from
+        its first bars; without them three 20-bar windows run in series
+        and nothing is marked before roughly bar 60.
+
+        `dp` is never carried across the boundary, seeded or not: the
+        overnight gap is a price move no flow explains, so a session's
+        first bar is always unmarked.
         """
         m = len(c)
-        bull = np.zeros(m, dtype=bool)
-        bear = np.zeros(m, dtype=bool)
-        if m < 25:
-            return bull, bear
+        nan = np.full(m, np.nan)
+        if m < 2:
+            return nan, nan, nan, nan, np.nan
 
-        tr = np.full(m, np.nan)
+        tr = np.empty(m)
+        tr[0] = h[0] - l[0]          # the overnight gap is not a true range
         for i in range(1, m):
             tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]),
                         abs(l[i] - c[i - 1]))
         a = np.full(m, np.nan)
         n = ABS_ATR_N
-        if m > n:
+        if atr0 is not None and np.isfinite(atr0):
+            run = float(atr0)
+            for i in range(m):
+                run = (run * (n - 1) + tr[i]) / n
+                a[i] = run
+        elif m > n:
+            # tr[0] is excluded here as it was before the seed existed.
             a[n] = np.nanmean(tr[1:n + 1])
             for i in range(n + 1, m):
                 a[i] = (a[i - 1] * (n - 1) + tr[i]) / n
@@ -5652,35 +5709,72 @@ class TradeViewerQt(QMainWindow):
         ok = tot >= DCVD_MIN_SIGNED
         ofi = np.where(ok, buy - sell, np.nan)
         dp = np.r_[np.nan, np.diff(c)]
+        if scale is None:
+            scale = (pd.Series(np.where(ok, tot, np.nan))
+                     .rolling(DCVD_FLOW_WIN, min_periods=20)
+                     .median().shift(1).to_numpy())
         with np.errstate(invalid="ignore", divide="ignore"):
-            y = pd.Series(dp / a)
-        scale = pd.Series(np.where(ok, tot, np.nan)).rolling(
-            DCVD_FLOW_WIN, min_periods=20).median().shift(1)
-        x = pd.Series(ofi) / scale
-        xy = (x * y).rolling(DCVD_FLOW_WIN, min_periods=20).sum().shift(1)
-        xx = (x * x).rolling(DCVD_FLOW_WIN, min_periods=20).sum().shift(1)
+            y = dp / a
+            x = ofi / np.asarray(scale, dtype=float)
+        if gate is None:
+            gate = (pd.Series(x).abs()
+                    .rolling(DCVD_FLOW_WIN, min_periods=20)
+                    .quantile(DCVD_FLOW_PCT).shift(1).to_numpy())
+
+        xt, yt = (np.empty(0), np.empty(0)) if prev is None else prev
+        xc = pd.Series(np.r_[xt, x])
+        yc = pd.Series(np.r_[yt, y])
+        k0 = len(xt)
+        xy = (xc * yc).rolling(DCVD_FLOW_WIN, min_periods=20).sum().shift(1)
+        xx = (xc * xc).rolling(DCVD_FLOW_WIN, min_periods=20).sum().shift(1)
         lam = xy / xx.replace(0.0, np.nan)
-        eps = y - lam * x
+        eps = yc - lam * xc
         sd = eps.rolling(DCVD_FLOW_WIN, min_periods=20).std().shift(1)
-        A = (eps / sd.replace(0.0, np.nan)).to_numpy()
-        gate = (x.abs().rolling(DCVD_FLOW_WIN, min_periods=20)
-                .quantile(DCVD_FLOW_PCT).shift(1).to_numpy())
+        A = (eps / sd.replace(0.0, np.nan)).to_numpy()[k0:]
+        return x, y, A, np.asarray(gate, dtype=float), a[-1]
 
-        xa = x.to_numpy()
-        fire = (np.isfinite(xa) & np.isfinite(gate) & np.isfinite(A)
-                & (np.abs(xa) >= gate))
-        bull = fire & (xa < 0) & (A >= ABS_THRESHOLD)
-        bear = fire & (xa > 0) & (A <= -ABS_THRESHOLD)
-        return bull, bear
+    @staticmethod
+    def _abs_day(h: np.ndarray, l: np.ndarray, c: np.ndarray,
+                 buy: np.ndarray, sell: np.ndarray,
+                 **kw) -> tuple[np.ndarray, np.ndarray]:
+        """(bull, bear) masks for one session's bars.
 
-    def _absorption_flags(self, klines: pd.DataFrame, buckets: dict,
-                          cm: int):
-        """(bull, bear) masks over the whole frame, a trading day at a time.
+        Bullish where heavy SELLING did not get its move, bearish where
+        heavy buying did not. See _abs_series for the quantities and for
+        what the keyword arguments do.
+        """
+        m = len(c)
+        bull = np.zeros(m, dtype=bool)
+        bear = np.zeros(m, dtype=bool)
+        if m < 25:
+            return bull, bear
+        x, _y, A, gate, _a = TradeViewerQt._abs_series(
+            h, l, c, buy, sell, **kw)
+        fire = (np.isfinite(x) & np.isfinite(gate) & np.isfinite(A)
+                & (np.abs(x) >= gate))
+        return (fire & (x < 0) & (A >= ABS_THRESHOLD),
+                fire & (x > 0) & (A <= -ABS_THRESHOLD))
 
-        Split by day because every window here is trailing: one reaching
-        back over the 20:00 boundary would fit this session's flow
-        against the previous session's, and the overnight gap would enter
-        as a price move no flow explains.
+    def _absorption_flags(
+        self, klines: pd.DataFrame, buckets: dict, cm: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """(bull, bear) masks over the whole frame, session by session.
+
+        RTH only -- the study excludes premarket and the overnight
+        session, and this used to not: it split on the 20:00 trading-day
+        boundary and fed 2,000-share overnight bars through the same
+        windows as 50,000-share RTH ones. 55% of the marks landed
+        outside RTH, and the |x| that the open's 25x volume jump blew up
+        then sat in the percentile window for an hour afterwards and
+        held the gate far above anything RTH could reach.
+
+        So the scale and the gate come from the same TIME OF DAY in
+        previous sessions instead, while lambda, the residual spread and
+        ATR continue across the boundary -- none of those depend on the
+        volume regime, and continuing them is what lets a session be
+        marked before 10:30 rather than warming up through its first
+        hour. Only `dp` stays inside the session, so the overnight gap
+        never enters as a move no flow explains.
         """
         n = len(klines)
         bull = np.zeros(n, dtype=bool)
@@ -5691,15 +5785,91 @@ class TradeViewerQt(QMainWindow):
         h = klines["high"].to_numpy(float)
         l = klines["low"].to_numpy(float)
         c = klines["close"].to_numpy(float)
-        start = 0
-        for i in range(1, n + 1):
-            if i < n and day[i] == day[start]:
+        tot = buy + sell
+
+        mins = np.full(n, -1, dtype=int)
+        for i, ts in enumerate(klines["time_key"].to_numpy()):
+            s = str(ts)
+            try:
+                mins[i] = int(s[11:13]) * 60 + int(s[14:16])
+            except (ValueError, IndexError):
+                mins[i] = -1
+        lo = int(round(ABS_RTH_LO * 60))
+        hi = int(round(ABS_RTH_HI * 60))
+
+        # Sessions in the order they occur. RTH bars of one trading day
+        # are contiguous, so grouping by day keeps them in time order.
+        order: list = []                       # trading days, chronological
+        by_day: dict[object, list[int]] = {}   # day -> its RTH bar indices
+        for i in np.where((mins > lo) & (mins <= hi))[0]:
+            d = day[i]
+            if d is None:
                 continue
-            sl = slice(start, i)
-            b, e = self._abs_day(h[sl], l[sl], c[sl], buy[sl], sell[sl])
-            bull[sl] = b
-            bear[sl] = e
-            start = i
+            if d not in by_day:
+                by_day[d] = []
+                order.append(d)
+            by_day[d].append(i)
+
+        # A bucket holds at least three bars of whatever timeframe is
+        # loaded, or a 15-minute bucket on a 1-hour chart would be one
+        # bar a session and its percentile would be a single number.
+        bw = max(ABS_TOD_BUCKET_MIN, 3 * cm)
+        # bucket -> one array of that bucket's values per past session
+        vol_hist: dict[int, list[np.ndarray]] = {}
+        ofi_hist: dict[int, list[np.ndarray]] = {}
+        atr0: float | None = None
+        tail: tuple[np.ndarray, np.ndarray] | None = None
+        for d in order:
+            idx = np.asarray(by_day[d], dtype=int)
+            if len(idx) < 25:
+                continue
+            bkt = (mins[idx] - lo) // bw
+            scale = np.full(len(idx), np.nan)
+            gate = np.full(len(idx), np.nan)
+            # The gate is the 80th percentile of the NET flow this bucket
+            # usually delivers, divided by the scale so it is in x's
+            # units. Taking the percentile of |x| directly instead needs
+            # x for the previous sessions, which needs the scale they
+            # did not have yet -- it bootstrapped twice over and no gate
+            # existed until the fifth loaded session.
+            for b in np.unique(bkt):
+                sel = bkt == b
+                vs = vol_hist.get(int(b), [])
+                os_ = ofi_hist.get(int(b), [])
+                if len(vs) < ABS_TOD_MIN_SESSIONS:
+                    continue
+                sc = float(np.median(np.concatenate(vs)))
+                if sc <= 0:
+                    continue
+                scale[sel] = sc
+                if len(os_) >= ABS_TOD_MIN_SESSIONS:
+                    gate[sel] = np.quantile(np.concatenate(os_),
+                                            DCVD_FLOW_PCT) / sc
+            x, y, A, g, atr_end = self._abs_series(
+                h[idx], l[idx], c[idx], buy[idx], sell[idx],
+                scale=scale, gate=gate, atr0=atr0, prev=tail)
+            fire = (np.isfinite(x) & np.isfinite(g) & np.isfinite(A)
+                    & (np.abs(x) >= g))
+            bull[idx] = fire & (x < 0) & (A >= ABS_THRESHOLD)
+            bear[idx] = fire & (x > 0) & (A <= -ABS_THRESHOLD)
+
+            # What the NEXT session is measured against. Appended after
+            # it was used, never before, or a bar would be in its own
+            # reference.
+            ok = tot[idx] >= DCVD_MIN_SIGNED
+            net = np.abs(buy[idx] - sell[idx])
+            for b in np.unique(bkt):
+                take = (bkt == b) & ok
+                if not take.any():
+                    continue
+                k = int(b)
+                vol_hist.setdefault(k, []).append(tot[idx][take])
+                ofi_hist.setdefault(k, []).append(net[take])
+                vol_hist[k] = vol_hist[k][-ABS_TOD_SESSIONS:]
+                ofi_hist[k] = ofi_hist[k][-ABS_TOD_SESSIONS:]
+            keep = slice(max(0, len(idx) - DCVD_FLOW_WIN), len(idx))
+            atr0 = atr_end
+            tail = (x[keep], y[keep])
         return bull, bear
 
     def _draw_absorption(self, klines: pd.DataFrame, buckets: dict,

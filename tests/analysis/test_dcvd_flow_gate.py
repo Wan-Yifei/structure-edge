@@ -204,10 +204,17 @@ class TestTheLight:
     would spend a colour on something the eye already has.
 
     HUE IS THE SIGN, BRIGHTNESS IS THE FLOW STATE. An earlier version
-    painted the cleared gate teal, the bull-candle colour, so a heavy
-    SELL reading announced itself in the colour that means up. The badge
-    now borrows the gold/purple pair every other flow mark on this chart
-    uses, and dims rather than changing hue when the gate is not cleared.
+    painted the cleared gate teal whatever the sign, so a heavy SELL
+    reading announced itself in the colour that means up.
+
+    The first fix for that swapped in the gold/purple pair the heatmap
+    and the delta labels use, on the reasoning that any hue a reader
+    parses as direction is wrong here. That went too far: the badge is
+    read as a traffic light, and gold is the amber that means "not yet",
+    so a heavy +0.88 looked like a warning. Direction is what the sign
+    IS -- the bug was a hue contradicting it, not the existence of a
+    hue. So: candle green above zero, candle red below, and brightness
+    for whether the gate cleared.
     """
 
     @staticmethod
@@ -228,11 +235,9 @@ class TestTheLight:
         """The reported bug, as a test.
 
         `DCVD -0.72  heavy flow` came out in #26a69a, the same teal as a
-        bull candle. Any hue a reader already parses as direction is
-        wrong here whatever it is, so this bars BOTH chart direction
-        colours rather than only the one that was shipped.
+        bull candle.
         """
-        from analysis.trade_viewer_qt import _GREEN, _RED, _DOWN
+        from analysis.trade_viewer_qt import _GREEN, _RED
         base = steady(40, buy=3000, sell=2000)
         # Heavy and NEGATIVE: ten times the usual size, selling.
         g = draw(viewer, base + [(20000, 30000)])
@@ -240,22 +245,29 @@ class TestTheLight:
         lbl = self._label(viewer)
         got = lbl.textItem.defaultTextColor()
         assert "-" in lbl.toPlainText(), "fixture is not a negative reading"
-        for banned in (_GREEN, _RED):
-            assert got.name().lower() != banned.lower(), \
-                f"负的读数画成了方向色 {got.name()}"
-        assert got.name().lower() == _DOWN.lower(), \
+        assert got.name().lower() != _GREEN.lower(), \
+            f"负的读数画成了多头色 {got.name()}"
+        assert got.name().lower() == _RED.lower(), \
             f"heavy selling should take the sell hue, got {got.name()}"
 
     def test_the_hue_follows_the_sign(self, viewer):
-        """Buying and selling differ in hue, not merely in the number."""
-        from analysis.trade_viewer_qt import _UP, _DOWN
+        """Buying and selling differ in hue, not merely in the number.
+
+        And in the pair a traffic light is read with: the second report
+        on this badge was a heavy +0.88 in gold, which reads as amber --
+        "strong buying" announced as a warning.
+        """
+        from analysis.trade_viewer_qt import _GREEN, _RED, _UP, _DOWN
         base = steady(40, buy=3000, sell=2000)
         draw(viewer, base + [(30000, 20000)])
         up = self._label(viewer).textItem.defaultTextColor().name()
         draw(viewer, base + [(20000, 30000)])
         dn = self._label(viewer).textItem.defaultTextColor().name()
-        assert up.lower() == _UP.lower() and dn.lower() == _DOWN.lower()
+        assert up.lower() == _GREEN.lower() and dn.lower() == _RED.lower()
         assert up != dn
+        for amber in (_UP, _DOWN):
+            assert up.lower() != amber.lower(), \
+                f"大流量读数用了热力图的金/紫，在红绿灯里读成黄灯：{up}"
 
     def test_the_gate_shows_as_brightness_not_as_another_hue(self, viewer):
         """Green moved off the level and onto the gate, but as opacity.
