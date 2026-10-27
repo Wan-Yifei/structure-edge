@@ -531,3 +531,112 @@ class TestTheHeatmapDeltaSwitch:
         self._look(item, span=300, px=600)
         self._paint(item)
         assert item._far is False
+
+
+class TestBinLegibility:
+    """A bin has to be readable against the background to say anything.
+
+    Volume inside a candle concentrates: measured across 11,262 drawn
+    bins of one SOXL session, the MEDIAN bin holds 20% of its candle's
+    busiest bin and the 10th percentile holds 2%. The old linear map
+    from that share to alpha therefore spent most of its range on bins
+    that barely exist -- the median bin painted at alpha 86, 66% of the
+    painted area sat under alpha 100, and gold and purple both came out
+    as the same dark smudge.
+
+    These fix the numbers at the rendered end rather than the formula,
+    so retuning the curve is free and flattening it is not. Every
+    threshold is a literal, deliberately NOT derived from _HM_GAMMA and
+    friends: a test that recomputes the constant it is guarding passes
+    whatever that constant becomes.
+    """
+
+    SHARE_TYPICAL = 0.20     # the median bin of a real session
+    SHARE_DIM = 0.02         # its 10th percentile
+
+    @staticmethod
+    def _bar(share, buy=True):
+        """A wickless bull bar: one busiest bin, every other at `share`."""
+        bins = tv.CandlestickItem.HEATMAP_BINS
+        t = pd.date_range("2026-10-23 09:31", periods=1, freq="1min")
+        kl = pd.DataFrame({
+            "time_key": t.strftime("%Y-%m-%d %H:%M:%S"),
+            "open": [100.0], "close": [101.0],
+            "high": [101.0], "low": [100.0], "volume": [1000.0]})
+        bk = candle_start(t[0].to_pydatetime() - timedelta(minutes=1), 1)
+        levels = np.linspace(100.0 + 1e-6, 101.0 - 1e-6, bins)
+        side = "buy" if buy else "sell"
+        other = "sell" if buy else "buy"
+        pdict = {float(p): {side: 1000.0 if j == bins // 2
+                            else 1000.0 * share,
+                            other: 0.0, "neutral": 0.0}
+                 for j, p in enumerate(levels)}
+        return kl, {bk: pdict}
+
+    @classmethod
+    def _typical_colour(cls, qapp, share, buy=True, w=400, h=400):
+        """The colour 19 of the 20 bins are painted in.
+
+        Taken as the mode of a centre column rather than by picking a
+        row: the mode cannot land on the outline, the busiest bin or the
+        background, and does not move when the bin layout shifts.
+        """
+        kl, buckets = cls._bar(share, buy)
+        item = tv.CandlestickItem()
+        item.set_data(kl, buckets, 1, show_heatmap=True)
+        img = QImage(w, h, QImage.Format.Format_ARGB32)
+        img.fill(tv.pg.mkColor(tv._BG))
+        p = QPainter(img)
+        r = item.boundingRect()
+        p.translate(0, h)
+        p.scale(w / r.width(), -h / r.height())
+        p.translate(-r.x(), -r.y())
+        item.paint(p)
+        p.end()
+        counts = {}
+        for y in range(h):
+            c = img.pixel(w // 2, y) & 0xFFFFFF
+            counts[c] = counts.get(c, 0) + 1
+        bg = tv.pg.mkColor(tv._BG).rgb() & 0xFFFFFF
+        counts.pop(bg, None)
+        return max(counts, key=counts.get)
+
+    @staticmethod
+    def _apart(a, b):
+        """Largest per-channel gap between two packed RGB values."""
+        return max(abs(((a >> s) & 0xFF) - ((b >> s) & 0xFF))
+                   for s in (16, 8, 0))
+
+    def test_the_median_bin_stands_off_the_background(self, qapp):
+        """It painted 85 apart before, which is the complaint."""
+        bg = tv.pg.mkColor(tv._BG).rgb() & 0xFFFFFF
+        c = self._typical_colour(qapp, self.SHARE_TYPICAL)
+        assert self._apart(c, bg) >= 120, (
+            f"中位格子离背景只有 {self._apart(c, bg)}，还是看不清")
+
+    def test_even_the_tenth_percentile_bin_is_visible(self, qapp):
+        """The 2%-share bin. 58 apart before -- the one that decides
+        whether the quiet half of a candle reads at all, and the one a
+        raised floor alone does not fix."""
+        bg = tv.pg.mkColor(tv._BG).rgb() & 0xFFFFFF
+        c = self._typical_colour(qapp, self.SHARE_DIM)
+        assert self._apart(c, bg) >= 90, (
+            f"最暗的格子离背景只有 {self._apart(c, bg)}")
+
+    def test_gold_and_purple_stay_apart_where_it_is_dimmest(self, qapp):
+        """Legibility against the background is half of it; the two
+        sides also have to be told apart, and they converge as alpha
+        falls. 45 apart before at this share."""
+        g = self._typical_colour(qapp, self.SHARE_DIM, buy=True)
+        p = self._typical_colour(qapp, self.SHARE_DIM, buy=False)
+        assert self._apart(g, p) >= 70, f"金紫只差 {self._apart(g, p)}"
+
+    def test_more_volume_is_still_brighter(self, qapp):
+        """The gamma compresses the ordering; it must not flatten or
+        invert it. A constant alpha would pass every test above."""
+        bg = tv.pg.mkColor(tv._BG).rgb() & 0xFFFFFF
+        d = [self._apart(self._typical_colour(qapp, s), bg)
+             for s in (0.02, 0.10, 0.20, 0.50)]
+        assert d == sorted(d) and len(set(d)) == len(d), \
+            f"亮度不再随成交量单调上升：{d}"
+        assert d[-1] - d[0] >= 40, f"量多量少几乎一样亮：{d}"

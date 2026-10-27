@@ -149,6 +149,31 @@ _DELTA_MIN_PX = 18.0
 # heatmap is worse than either state.
 _HM_MIN_PX = 8.0
 
+# How a bin's volume share becomes opacity.
+#
+# Volume inside a candle is concentrated, not spread: measured over
+# 11,262 drawn bins of one SOXL session, a bin holds a MEDIAN 20% of its
+# candle's busiest bin and the 10th percentile holds 2%. Mapping that
+# share to alpha linearly put the median bin at alpha 86 and left 66% of
+# the painted area under alpha 100 -- gold and purple both wash out to
+# the same dark smudge against the background, which is the whole of the
+# "can't read the heatmap" complaint.
+#
+# The gamma is the fix: raising the share to a power below 1 lifts the
+# crowded low end without reordering anything, the same move the
+# liquidity heatmap's gamma slider makes. It costs dynamic range at the
+# top -- a 1%-share bin and a 20%-share bin are closer in opacity than
+# they were -- and that is the trade being made deliberately, because
+# the ordering is still readable at alpha 120..245 and was not at 63.
+_HM_GAMMA = 0.45          # exponent on the bin's share of its candle
+_HM_ALPHA_MIN = 90        # a drawn bin never falls below this
+_HM_ALPHA_MAX = 245       # ... nor above it
+# Imbalance still dims a bin, but far less than it did. At a single
+# price level almost every bin is one-sided -- the median |ratio| is
+# 0.95 -- so the term mostly idled; where it does bite, a 50/50 bin, the
+# gold/purple choice really is close to arbitrary and deserves to recede.
+_HM_IMB_FLOOR = 0.55      # multiplier at a perfectly balanced bin
+
 # How often the session/range profile panel is rebuilt, at most. It costs
 # 82ms, and a session profile does not move visibly between two redraws
 # half a second apart.
@@ -1379,7 +1404,8 @@ class CandlestickItem(pg.GraphicsObject):
         Color convention (independent of red-up toggle):
             gold   (_UP)   = buyer-dominant bin  (#ffa005)
             purple (_DOWN) = seller-dominant bin (#ab47bc)
-        Alpha = f(volume density, directional imbalance): 60 … 230.
+        Alpha = f(volume density, directional imbalance), on the gamma
+        curve described at _HM_GAMMA: _HM_ALPHA_MIN … _HM_ALPHA_MAX.
         Wick-range bins are skipped entirely for a clean look.
         """
         price_range = high - low
@@ -1422,10 +1448,17 @@ class CandlestickItem(pg.GraphicsObject):
             if total_dir > 0:
                 ratio = (buys[b] - sells[b]) / total_dir   # -1 (pure sell)..+1 (pure buy)
                 col   = QColor(_UP if ratio >= 0 else _DOWN)   # gold / purple
-                # Alpha: baseline 60, up to 230; scales with volume density AND
-                # directional imbalance so pure-direction, high-volume bins are opaque.
+                # Volume share first, through the gamma, then imbalance
+                # dims it. Gamma before the imbalance multiplier, not
+                # after: the two answer different questions and raising
+                # their product to a power would let a one-sided bin
+                # borrow brightness it has no volume for.
                 imbalance = abs(ratio)                      # 0..1
-                alpha = int(min(230, 60 + 170 * vol_frac * (0.4 + 0.6 * imbalance)))
+                dim = _HM_IMB_FLOOR + (1.0 - _HM_IMB_FLOOR) * imbalance
+                span = _HM_ALPHA_MAX - _HM_ALPHA_MIN
+                alpha = int(min(_HM_ALPHA_MAX,
+                                _HM_ALPHA_MIN
+                                + span * (vol_frac ** _HM_GAMMA) * dim))
             else:
                 # Only neutral volume — draw light grey at reduced opacity
                 col   = QColor(_GREY)
