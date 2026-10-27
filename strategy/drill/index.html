@@ -406,7 +406,12 @@ function draw(q, reveal){
         dkSlow = cs.getPropertyValue("--dk-slow").trim(),
         upC = cs.getPropertyValue("--up").trim(),
         dnC = cs.getPropertyValue("--dn").trim(),
-        surf = cs.getPropertyValue("--surface").trim();
+        surf = cs.getPropertyValue("--surface").trim(),
+        /* The viewer's _UP/_DOWN, the same pair the heatmap bins, the
+           delta bars and the DCVD badge use. Hard-coded rather than a
+           CSS token because they are a cross-tool convention, not this
+           page's theme. */
+        upAbsC = "#ffa005", dnAbsC = "#ab47bc";
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   cv.width = CW*dpr; cv.height = CH*dpr; cv.style.aspectRatio = CW+"/"+CH;
   g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,CW,CH);
@@ -518,6 +523,35 @@ function draw(q, reveal){
     if (up) g.strokeRect(x-bw/2+.4, y1+.4, bw-.8, Math.max(.8,bh-.8));
     else { g.fillStyle = col; g.fillRect(x-bw/2, y1, bw, bh); }
     g.globalAlpha = 1;
+  }
+
+  /* ---- absorption ------------------------------------------------------
+     The viewer's marks, on the same bars: heavy flow the price refused to
+     follow. ▲ under the bar is 空头吸收 (the SELLING was absorbed, so the
+     mark is bullish); ▼ above it is 多头吸收. Hollow, so the bar stays
+     readable underneath -- the mark is a note about the bar, not a
+     replacement for it.
+
+     Measured, and reported next to the drawing rather than hidden: over
+     112 sessions these fire on 1.86% of bars, and what follows them runs
+     AGAINST the name. Drawn because they land on places worth looking at,
+     not because the direction is tradeable. */
+  if (q.ab){
+    const [absUp, absDn] = q.ab;
+    const tri = (xx, yy, dir, col) => {
+      const s = Math.max(4, bw*0.62);
+      g.strokeStyle = col; g.lineWidth = 1.4; g.globalAlpha = .95;
+      g.beginPath();
+      g.moveTo(xx, yy);
+      g.lineTo(xx - s, yy + dir*s*1.15);
+      g.lineTo(xx + s, yy + dir*s*1.15);
+      g.closePath(); g.stroke();
+      g.globalAlpha = 1;
+    };
+    for (const i of absUp || [])
+      if (i < last) tri(X(i), Y(l[i]) + 5, +1, upAbsC);
+    for (const i of absDn || [])
+      if (i < last) tri(X(i), Y(h[i]) - 5, -1, dnAbsC);
   }
   /* Kept so the crosshair can map pixels back to price and bar without
      recomputing the layout. */
@@ -1271,11 +1305,18 @@ function goto1(v){
 function syncOut(){
   const q = QS[idx];
   const sa = +$("s-stop").value, ta = +$("s-tgt").value;
-  const {stop, target, risk, rr} = levels(q, sa, ta);
+  /* Read the mark BEFORE the preview is planted. markOf() switches from
+     `step0` to the answer's `waited` as soon as ans[q.id] exists, so a
+     preview without one silently rewinds the chart to the original
+     decision bar -- and levels() with no `m` priced the stop off that
+     bar's entry while submit() recorded it off the stepped one. */
+  const m = markOf(q);
+  const {stop, target, risk, rr} = levels(q, sa, ta, m);
   $("o-stop").textContent = `${sa.toFixed(2)} ATR → ${fmt(stop)}  (风险 ${risk.toFixed(2)})`;
   $("o-tgt").textContent = `${ta.toFixed(2)} ATR → ${fmt(target)}  (${rr.toFixed(2)} R)`;
   if (pick === "enter"){
-    ans[q.id] = {choice:"enter", stop, target, targetR:rr, preview:true};
+    ans[q.id] = {choice:"enter", stop, target, targetR:rr, preview:true,
+                 waited: m - q.mark};
     draw(q, false);
     delete ans[q.id];
   }

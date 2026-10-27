@@ -21,7 +21,7 @@ const ctxOps = [];
 let curAlpha = 1, curStroke = "", curFill = "";
 /* y values of the path under construction: a stroke takes no
    arguments, so without them a stroke op cannot say WHAT it drew. */
-let curYs = [];
+let curYs = [], curXs = [];
 const alphaStack = [];
 const ctx = new Proxy({}, {
   get: (t, k) => {
@@ -50,19 +50,25 @@ const ctx = new Proxy({}, {
     /* Path fills and strokes carry no arguments, so only their count and
        the alpha in force say anything -- which is enough to tell whether a
        band was painted. */
-    if (k === "beginPath") return () => { curYs = []; };
+    if (k === "beginPath") return () => { curYs = []; curXs = []; };
     if (k === "moveTo" || k === "lineTo")
-      return (x, y) => { curYs.push(y); };
+      return (x, y) => { curYs.push(y); curXs.push(x); };
     if (k === "fill")
       return () => { ctxOps.push({ i: ctxOps.length, op: "fill",
                                    alpha: curAlpha, color: curFill }); };
     if (k === "stroke")
       return () => {
         const ys = curYs.filter((v) => typeof v === "number" && isFinite(v));
+        const xs2 = curXs.filter((v) => typeof v === "number" && isFinite(v));
         ctxOps.push({ i: ctxOps.length, op: "stroke", alpha: curAlpha,
                       color: curStroke, n: ys.length,
                       meanY: ys.length
-                        ? ys.reduce((a, b) => a + b, 0) / ys.length : null });
+                        ? ys.reduce((a, b) => a + b, 0) / ys.length : null,
+                      /* How far right the path reached. X(i) is linear in
+                         the bar index, so the largest of these over the
+                         candle strokes is the last bar drawn -- the only
+                         way to see a chart that rewound. */
+                      maxX: xs2.length ? Math.max(...xs2) : null });
       };
     return () => {};
   },
@@ -180,7 +186,7 @@ const api = new Function(
          "         waitOne, markOf, entryOf, WAIT_MAX, FWD, flowGate," +
          "         FLOW_WIN, FLOW_PCT, FLOW_MIN, DR_DECISION," +
          "         getStep0: () => step0," +
-         "         getStep: () => step, getQS: () => QS};")();
+         "         getStep: () => step, getQS: () => QS, syncOut, draw};")();
 
 await new Promise((r) => setTimeout(r, 400));
 
@@ -1791,3 +1797,178 @@ console.log("\nWAIT OK");
 }
 
 console.log("\nFLOWMAG OK");
+
+
+/* ---- absorption on the drill chart ---------------------------------- *
+ * The viewer's marks, on the same bars, from the `ab` the banks now
+ * carry. ▲ gold under the bar is 空头吸收 -- the SELLING was absorbed,
+ * so it is the bullish one; ▼ purple above is 多头吸收.               */
+{
+  const UPC = "#ffa005", DNC = "#ab47bc";
+  const all = api.getQS();
+  const withAb = all.filter(q => q.ab && (q.ab[0].length || q.ab[1].length));
+  if (!withAb.length) throw new Error("题库里一道带 ab 的题都没有");
+  console.log(`ok   题库带吸收标记：${withAb.length}/${all.length} 道`);
+
+  /* A question whose marks sit BEFORE the decision bar, so they are on
+     screen the moment it is asked. */
+  /* Unanswered: an answered one renders with reveal on, and then the
+     playback legitimately draws the marks in the future it has walked
+     to. The claim here is about what is on screen while the question
+     is still being asked. */
+  const idx = all.findIndex(q =>
+    q.ab && !api.isAnswered(q.id)
+    && [...q.ab[0], ...q.ab[1]].some(i => i <= api.markOf(q)));
+  if (idx < 0) throw new Error("没有一道未作答的题在决策根之前有吸收标记");
+  const q = all[idx];
+  ctxOps.length = 0;
+  api.goto1(idx + 1);
+
+  /* By colour, not by point count: a mark drawn past `last` reads an
+     undefined price, strokes a NaN path, and the recorder stores it with
+     n: 0. Keying on n === 3 skipped precisely the strokes that prove a
+     leak. Nothing else on this chart uses these two colours. */
+  const tri = ctxOps.filter(o => o.op === "stroke" &&
+                            (o.color === UPC || o.color === DNC));
+  if (tri.some(o => o.n !== 3))
+    throw new Error("吸收标记不是三点路径——画的不是三角形");
+  const dm = api.markOf(q);
+  const want = [...q.ab[0], ...q.ab[1]].filter(i => i <= dm).length;
+  if (tri.length !== want)
+    throw new Error(`画了 ${tri.length} 个三角，决策根之前应有 ${want} 个`);
+  console.log(`ok   吸收上图：决策根前 ${want} 个标记全部画出`);
+
+  /* The correctness one, on a question chosen to make it bite: marks on
+     BOTH sides of the decision bar. Guarded by "if there are any", as it
+     was first written, it ran on a question that had none and asserted
+     nothing. */
+  const fi = all.findIndex(x => {
+    if (!x.ab || api.isAnswered(x.id)) return false;
+    const m = api.markOf(x), a = [...x.ab[0], ...x.ab[1]];
+    return a.some(i => i <= m) && a.some(i => i > m);
+  });
+  if (fi < 0)
+    throw new Error("题库里没有一道题在决策根两侧都有吸收标记——这条没法验");
+  {
+    const qf = all[fi], mf = api.markOf(qf);
+    const a = [...qf.ab[0], ...qf.ab[1]];
+    const before = a.filter(i => i <= mf).length;
+    const after = a.filter(i => i > mf).length;
+    ctxOps.length = 0;
+    api.goto1(fi + 1);
+    const t = ctxOps.filter(o => o.op === "stroke" &&
+                            (o.color === UPC || o.color === DNC));
+    if (t.length !== before)
+      throw new Error(`决策根前 ${before} 个，却画了 ${t.length} 个` +
+                      `（未揭晓的那 ${after} 个泄出来了）`);
+    console.log(`ok   未揭晓的 ${after} 个标记没有画出来（前 ${before} 个照画）`);
+  }
+
+  /* Colour follows the side, and it is the viewer's pair -- a drill that
+     marked both sides the same colour would be showing where to look but
+     not which way the flow was eaten. */
+  const q2i = all.findIndex(x =>
+    x.ab && !api.isAnswered(x.id)
+    && x.ab[0].some(i => i <= api.markOf(x))
+    && x.ab[1].some(i => i <= api.markOf(x)));
+  if (q2i >= 0){
+    ctxOps.length = 0;
+    api.goto1(q2i + 1);
+    const t = ctxOps.filter(o => o.op === "stroke" &&
+                            (o.color === UPC || o.color === DNC));
+    const up = t.filter(o => o.color === UPC).length;
+    const dn = t.filter(o => o.color === DNC).length;
+    if (!up || !dn)
+      throw new Error(`两种吸收没有分色：▲${up} ▼${dn}`);
+    console.log(`ok   两种吸收分色：▲空头吸收 ${up} 个，▼多头吸收 ${dn} 个`);
+  }
+
+  /* Hollow. A filled triangle hides the bar it is annotating, and the
+     bar is the thing being practised. */
+  const filled = ctxOps.filter(o => o.op === "fill" &&
+                               (o.color === UPC || o.color === DNC));
+  if (filled.length)
+    throw new Error("吸收三角是实心的，会盖住它要标注的那根");
+  console.log("ok   吸收三角是空心的，不盖住 K 线");
+}
+
+console.log("\nABSORB OK");
+
+
+/* ---- the sliders must not rewind the chart -------------------------- *
+ * syncOut plants a preview answer so the stop and target get drawn.
+ * markOf() switches from step0 to the answer's `waited` the instant an
+ * answer exists, so a preview without one rewound the chart -- and
+ * levels() with no mark priced the stop off the wrong bar.            */
+{
+  const all = api.getQS();
+  const i = all.findIndex(q => !api.isAnswered(q.id)
+                               && q.c.length > q.mark + 20);
+  if (i < 0) throw new Error("找不到一道未作答、后面还有空间的题");
+  api.goto1(i + 1);
+  const q = all[i];
+
+  const STEPS = 3;
+  for (let s = 0; s < STEPS; s++) api.waitOne();
+  const m = api.markOf(q);
+  if (m !== q.mark + STEPS)
+    throw new Error(`再看一根没走：markOf ${m}，应为 ${q.mark + STEPS}`);
+
+  api.choose("enter");
+  const sa = +els["s-stop"].value, ta = +els["s-tgt"].value;
+
+  /* Half one: the prices. They must come from the stepped bar. */
+  const want = api.levels(q, sa, ta, m);
+  const wrong = api.levels(q, sa, ta, q.mark);
+  const shown = els["o-stop"].textContent;
+  if (Math.abs(want.stop - wrong.stop) < 1e-9)
+    throw new Error("这道题走前走后入场价相同，验不出来——换一道");
+  if (!shown.includes(want.stop.toFixed(2)))
+    throw new Error(`止损显示 "${shown}"，应按走后那根 ${want.stop.toFixed(2)}`);
+  if (shown.includes(wrong.stop.toFixed(2)))
+    throw new Error(`止损用的还是没走之前那根 ${wrong.stop.toFixed(2)}`);
+  console.log(`ok   调滑块：止损按走后那根算（${want.stop.toFixed(2)}，` +
+              `不是 ${wrong.stop.toFixed(2)}）`);
+
+  /* Half two: the chart itself, measured by how far RIGHT it drew.
+
+     Counting strokes does not work -- the profile rails, the stop and
+     target rules and the decision line are all two-point strokes too,
+     and their constant is large enough that a chart rewound by three
+     bars still cleared a count threshold. X(i) is linear in i, so the
+     rightmost point reached is the last bar drawn.
+
+     waitOne() must not be called here: it sets pick = null and syncOut
+     then skips the draw, which is how the first version of this had
+     nothing to count. */
+  /* Candle wicks only. The profile rails run from PAD_L to the right
+     edge of the profile pane on EVERY frame, so the canvas-wide maximum
+     is a constant that cannot see a rewind -- it read 918.0 either way.
+     The wicks are the only strokes wearing the candle colours, and
+     X(i) is linear in the bar index. */
+  /* The stub's getComputedStyle hands back the variable NAME, so a
+     colour read through a CSS token arrives as "--up". The
+     absorption marks are hard-coded hex and so arrive as hex. */
+  const CUP = "--up", CDN = "--dn";
+  const rightmost = () => {
+    const v = ctxOps.filter(o => o.op === "stroke" && o.maxX != null &&
+                            (o.color === CUP || o.color === CDN))
+                    .map(o => o.maxX);
+    return v.length ? Math.max(...v) : null;
+  };
+  ctxOps.length = 0;
+  api.draw(q, false);
+  const xRef = rightmost();          // the chart as the question stands
+
+  ctxOps.length = 0;
+  els["s-stop"].value = (sa + 0.25).toFixed(2);
+  api.syncOut();
+  const xNow = rightmost();
+  if (xNow == null) throw new Error("调滑块之后一根 K 线都没画");
+  if (xNow < xRef - 0.5)
+    throw new Error(`调滑块后图只画到 x=${xNow.toFixed(1)}，` +
+                    `调之前是 ${xRef.toFixed(1)}——图被退回了`);
+  console.log(`ok   调滑块：图右端仍在 x=${xNow.toFixed(1)}，没有退回决策根`);
+}
+
+console.log("\nSLIDER OK");
