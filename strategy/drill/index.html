@@ -278,6 +278,10 @@ let navBack = [];
    up here because render() clears it and render runs before the keyboard
    section near the bottom of this script. */
 let kbMode = null;
+/* True once the sliders have been walked, so space submits rather than
+   stepping into them again. Distinguishes "no slider active because we
+   have not started" from "...because we are done". */
+let kbDone = false;
 let DROPPED = 0;   // archive-less questions left out of this set
 let step = 0, timer = null;   // bars of the future played so far
 /* Bars stepped through BEFORE deciding, this attempt. Capped at WAIT_MAX.
@@ -1279,6 +1283,7 @@ function syncOut(){
 
 function choose(k){
   pick = k;
+  kbDone = false;
   $("b-pass").setAttribute("aria-pressed", String(k==="pass"));
   $("b-enter").setAttribute("aria-pressed", String(k==="enter"));
   $("sl").hidden = k !== "enter";
@@ -2569,6 +2574,7 @@ document.addEventListener("keydown", e => {
    stop when you meant the target. */
 function kbSet(mode){
   kbMode = mode;
+  if (mode) kbDone = false;
   $("s-stop").classList.toggle("kbfocus", mode === "stop");
   $("s-tgt").classList.toggle("kbfocus", mode === "tgt");
   kbHint();
@@ -2579,13 +2585,21 @@ function kbHint(){
   if (kbMode){
     h.className = "kbhint on";
     h.textContent = (kbMode === "stop" ? "调止损" : "调目标") +
-      "：W/→ 加　S/← 减（按住 Shift 五倍），空格或回车结束";
+      "：W/→ 加　S/← 减（按住 Shift 五倍），空格 " +
+      (kbMode === "stop" ? "去调目标" : "调完") + "　5 直接提交";
     return;
   }
   h.className = "kbhint";
-  h.textContent = $("b-go").hidden
-    ? "← → 翻题　回车 下一题　空格 播放　6 放到底　, . 走 K"
-    : "1 放过　2 入场　d 再看一根　3 止损　4 目标　5 提交　← → 翻题";
+  if ($("b-go").hidden){
+    h.textContent = "← → 翻题　回车 下一题　空格 播放　6 放到底　, . 走 K";
+  } else if (!$("sl").hidden && !kbDone && pick === "enter"
+             && !$("b-go").hidden){
+    h.textContent = "空格 去调止损 → 目标 → 提交　3 止损　4 目标　" +
+      "5 直接提交　d 再看一根";
+  } else {
+    h.textContent = "1 放过　2 入场　d 再看一根　3 止损　4 目标　" +
+      "5 提交　← → 翻题";
+  }
 }
 
 function kbNudge(dir, big){
@@ -2600,10 +2614,26 @@ function kbNudge(dir, big){
   syncOut();
 }
 
-/* 空格/回车 confirms whatever step is in hand: leave the slider if in
-   one, else submit, else move on. */
+/* 空格/回车 advances ONE stage: 选好 → 止损 → 目标 → 提交.
+
+   It used to submit the moment a choice was made, which meant `2` then
+   space skipped both sliders. That was never the right default: of 192
+   entries on file, none kept both sliders where they start and three
+   kept the stop, so the one-press path always threw away the part of
+   the answer being practised. `5` still submits from any stage. */
 function kbConfirm(key){
+  const sliders = !$("sl").hidden;
+  if (kbMode === "stop"){ kbSet(sliders ? "tgt" : null); return true; }
+  if (kbMode === "tgt"){ kbSet(null); kbDone = true; return true; }
   if (kbMode){ kbSet(null); return true; }
+  /* Chosen 入场 but not through the sliders yet: step in rather than
+     submit. A pass has no sliders and still submits on the first press.
+     Only while still answering: submit() leaves #sl on screen, so
+     without that guard Enter after the reveal walks back into the stop
+     slider instead of turning the page. */
+  if (!$("b-go").hidden && sliders && !kbDone && pick === "enter"){
+    kbSet("stop"); return true;
+  }
   if (!$("b-go").hidden && !$("b-go").disabled){ submit(); return true; }
   if (!$("b-next").hidden && key === "Enter"){ next(); return true; }
   return false;

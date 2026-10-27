@@ -1294,10 +1294,24 @@ console.log("\nINTERVAL OK");
     throw new Error(`ran past min: ${stop.value} < ${stop.min}`);
   console.log(`ok   夹在 [${stop.min}, ${stop.max}] 之内`);
 
+  /* Space advances a stage rather than dropping out: from the stop it
+     lands on the target. The reported bug was the other end of this --
+     `2` then space submitted at once, skipping both sliders. */
   fireKey(" ");
-  if (inStop()) throw new Error("space should leave the slider");
-  console.log("ok   空格：退出调整状态");
+  if (inStop()) throw new Error("space should leave the stop");
+  if (!inTgt()) throw new Error("space from the stop should reach the target");
+  if (!/调目标/.test(els["kb-hint"].textContent))
+    throw new Error("the hint must follow: " + els["kb-hint"].textContent);
+  console.log("ok   空格：止损 → 目标");
 
+  fireKey(" ");
+  if (inStop() || inTgt()) throw new Error("space should leave the target");
+  if (!els.vd.hidden) throw new Error("that space must not submit as well");
+  console.log("ok   空格：目标 → 调完（还没提交）");
+
+  /* Back into the stop by hand, so what follows starts where it used to. */
+  fireKey("3");
+  if (!inStop()) throw new Error("3 should return to the stop");
   const held = +stop.value;
   fireKey("4");
   if (!inTgt() || inStop())
@@ -1324,6 +1338,49 @@ console.log("\nINTERVAL OK");
   fireKey("5");
   if (els.vd.hidden) throw new Error("5 should submit and reveal");
   console.log("ok   键盘 5：提交");
+
+  /* ---- the reported bug, start to finish --------------------------- *
+   * `2` then space submitted on the spot. Of 192 recorded entries none
+   * kept both sliders at 1.00/2.00, so that press always discarded the
+   * part of the answer being practised.                                */
+  api.next();
+  await new Promise((r) => setTimeout(r, 60));
+  fireKey("2");
+  if (els.sl.hidden) throw new Error("2 should show the sliders");
+  fireKey(" ");
+  if (!els.vd.hidden)
+    throw new Error("2 then space submitted -- the bug is back");
+  if (!inStop())
+    throw new Error("2 then space should step into the stop");
+  console.log("ok   2 + 空格：进入调止损，没有直接提交");
+
+  fireKey(" ");
+  if (!inTgt()) throw new Error("second space should reach the target");
+  fireKey(" ");
+  if (inTgt() || inStop()) throw new Error("third space should finish");
+  if (!els.vd.hidden) throw new Error("third space must not submit");
+  fireKey(" ");
+  if (els.vd.hidden)
+    throw new Error("the fourth space should submit");
+  console.log("ok   空格走完 选好 → 止损 → 目标 → 提交");
+
+  /* A pass has no sliders, so it must still go on one press -- the
+     stepper must not make the cheap answer slower. */
+  api.next();
+  await new Promise((r) => setTimeout(r, 60));
+  fireKey("1");
+  if (!els.sl.hidden) throw new Error("1 should hide the sliders");
+  fireKey(" ");
+  if (els.vd.hidden) throw new Error("放过 should still submit on one space");
+  console.log("ok   放过：仍然一下空格就提交");
+
+  /* 5 stays the escape hatch for whoever wants the defaults. */
+  api.next();
+  await new Promise((r) => setTimeout(r, 60));
+  fireKey("2");
+  fireKey("5");
+  if (els.vd.hidden) throw new Error("5 must submit straight from 入场");
+  console.log("ok   5：从入场直接提交，快路还在");
 
   /* Space after the reveal belongs to the playback; that binding is older. */
   const at = api.getIdx();
