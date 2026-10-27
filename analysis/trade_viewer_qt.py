@@ -734,12 +734,28 @@ DCVD_DECISION = 0.4
 # keeps its line on the panel -- it is still a general reference, it has
 # just stopped being what turns the light green on its own.
 #
-# The sign stays in the number and in the bars' own colour, which is why
-# there is no longer a red band: red encoded direction, and direction is
-# not what the light is gating on.
-DCVD_LIGHT_HEAVY = "#26a69a"    # the flow gate cleared
-DCVD_LIGHT_LEVEL = "#ffa726"    # |DCVD| >= 0.4 but the volume is thin
-DCVD_LIGHT_NONE = "#78909c"     # neither
+# WHICH COLOUR, THOUGH. The first version of this painted the cleared
+# gate "#26a69a" -- the same teal as a bull candle -- so a reading of
+# DCVD -0.72 on heavy flow, which is heavy SELLING, arrived in the
+# colour this chart uses everywhere else to mean up. A badge whose hue
+# contradicts its own number is worse than no badge.
+#
+# So the light reads the way the rest of the chart reads, on two
+# channels instead of a traffic-light palette:
+#
+#     HUE        the sign -- the same gold/purple pair as the heatmap
+#                bins, the delta bars, the far-zoom bodies and the ABS
+#                markers. Gold is buying, purple is selling, here too.
+#     BRIGHTNESS the flow state -- full for a cleared gate, dimmed for
+#                a 0.4 reading on thin volume, exactly as the DCVD bars
+#                already dim themselves.
+#
+# Nothing green, nothing red: neither hue means anything in this
+# chart's vocabulary, and the one thing the light must not do is imply
+# a direction opposite to the number beside it.
+DCVD_LIGHT_HEAVY_A = 255        # the flow gate cleared
+DCVD_LIGHT_LEVEL_A = 150        # |DCVD| >= 0.4 but the volume is thin
+DCVD_LIGHT_NONE = "#78909c"     # neither -- no sign worth colouring
 
 # Panel colours. The bars carry the sign, so they reuse the chart's own
 # buy/sell pair; the context line takes a hue used nowhere else so it cannot
@@ -5571,12 +5587,16 @@ class TradeViewerQt(QMainWindow):
             # pair a value with another bar's volume on any day with a
             # gap in the tape.
             heavy = bool(self._dcvd_gate[last_i])
+            # Hue from the sign, brightness from the flow state. Taking
+            # the hue from the same reading the number shows is what
+            # keeps the badge from contradicting itself.
+            hue = _UP if last_v >= 0 else _DOWN
             if heavy:
-                col, note = DCVD_LIGHT_HEAVY, "  \u5927\u6d41\u91cf"
+                col, note = _qc(hue, DCVD_LIGHT_HEAVY_A), "  heavy flow"
             elif abs(last_v) >= DCVD_DECISION:
-                col, note = DCVD_LIGHT_LEVEL, "  \u91cf\u4e0d\u8db3"
+                col, note = _qc(hue, DCVD_LIGHT_LEVEL_A), "  thin volume"
             else:
-                col, note = DCVD_LIGHT_NONE, ""
+                col, note = _qc(DCVD_LIGHT_NONE), ""
             # Named, unlike the old badge: in the DCVD panel the context said
             # what the number was, and on the price chart nothing does.
             self._dcvd_light.setText(f"\u25cf DCVD {last_v:+.2f}{note}",

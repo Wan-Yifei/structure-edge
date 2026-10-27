@@ -203,8 +203,11 @@ class TestTheLight:
     a red bar followed by a green one IS the flip, so a light repeating it
     would spend a colour on something the eye already has.
 
-    Amber is not "weak green": between 0 and 0.4 measured +0.074 R a trade
-    against +0.282 for the full rule, which is nearer nothing than signal.
+    HUE IS THE SIGN, BRIGHTNESS IS THE FLOW STATE. An earlier version
+    painted the cleared gate teal, the bull-candle colour, so a heavy
+    SELL reading announced itself in the colour that means up. The badge
+    now borrows the gold/purple pair every other flow mark on this chart
+    uses, and dims rather than changing hue when the gate is not cleared.
     """
 
     @staticmethod
@@ -220,51 +223,94 @@ class TestTheLight:
         assert not any(type(i).__name__ == "TextItem"
                        for i in viewer._dcvd_items),             "a second light is still being drawn into the DCVD panel"
 
-    def test_the_gate_is_what_turns_it_green(self, viewer):
-        """Green moved from the level to the flow gate. Over the study's
-        60 out-of-sample sessions the gate returned +0.363 R a trade
-        against +0.264 for the level, and the two disagree precisely
-        here: 0.4 on thin volume (+0.186) and heavy volume that never
-        reached 0.4 (+0.300). So the states are built to BE those two
-        disagreements, not merely three different numbers."""
-        from analysis.trade_viewer_qt import (DCVD_LIGHT_HEAVY,
-                                              DCVD_LIGHT_LEVEL,
-                                              DCVD_LIGHT_NONE)
+    def test_a_negative_reading_is_never_painted_in_the_bull_colour(
+            self, viewer):
+        """The reported bug, as a test.
+
+        `DCVD -0.72  heavy flow` came out in #26a69a, the same teal as a
+        bull candle. Any hue a reader already parses as direction is
+        wrong here whatever it is, so this bars BOTH chart direction
+        colours rather than only the one that was shipped.
+        """
+        from analysis.trade_viewer_qt import _GREEN, _RED, _DOWN
+        base = steady(40, buy=3000, sell=2000)
+        # Heavy and NEGATIVE: ten times the usual size, selling.
+        g = draw(viewer, base + [(20000, 30000)])
+        assert g[-1], "the fixture's heavy bar did not clear the gate"
+        lbl = self._label(viewer)
+        got = lbl.textItem.defaultTextColor()
+        assert "-" in lbl.toPlainText(), "fixture is not a negative reading"
+        for banned in (_GREEN, _RED):
+            assert got.name().lower() != banned.lower(), \
+                f"负的读数画成了方向色 {got.name()}"
+        assert got.name().lower() == _DOWN.lower(), \
+            f"heavy selling should take the sell hue, got {got.name()}"
+
+    def test_the_hue_follows_the_sign(self, viewer):
+        """Buying and selling differ in hue, not merely in the number."""
+        from analysis.trade_viewer_qt import _UP, _DOWN
+        base = steady(40, buy=3000, sell=2000)
+        draw(viewer, base + [(30000, 20000)])
+        up = self._label(viewer).textItem.defaultTextColor().name()
+        draw(viewer, base + [(20000, 30000)])
+        dn = self._label(viewer).textItem.defaultTextColor().name()
+        assert up.lower() == _UP.lower() and dn.lower() == _DOWN.lower()
+        assert up != dn
+
+    def test_the_gate_shows_as_brightness_not_as_another_hue(self, viewer):
+        """Green moved off the level and onto the gate, but as opacity.
+
+        Over the study's 60 out-of-sample sessions the gate returned
+        +0.363 R a trade against +0.264 for the level, and the two
+        disagree precisely here: 0.4 on thin volume (+0.186) and heavy
+        volume that never reached 0.4 (+0.300). So the fixtures ARE
+        those two disagreements, not merely two different numbers --
+        and the pair must differ in alpha while sharing a hue.
+        """
+        from analysis.trade_viewer_qt import DCVD_LIGHT_NONE
         base = steady(40, buy=3000, sell=2000)
 
-        # Heavy, and deliberately UNDER 0.4: dr1 = 0.2 on ten times the
-        # usual volume. The old light was silent here.
+        # Heavy, deliberately UNDER 0.4: dr1 = 0.2 on ten times the size.
         g = draw(viewer, base + [(30000, 20000)])
         assert g[-1], "the fixture's heavy bar did not clear the gate"
-        heavy = self._label(viewer).textItem.defaultTextColor().name()
+        heavy = self._label(viewer).textItem.defaultTextColor()
 
-        # Over 0.4, on a SMALL bar -- the old green, now amber. On this
-        # flat tape every |x| is 0.2, so the gate is 0.2: thin means the
-        # signed volume is under a fifth of the usual total, which a
-        # lopsided ratio on a quiet bar is (ofi 900 against a scale of
-        # 5000) even though dr1 is 0.60.
+        # Over 0.4 on a SMALL bar -- the old green, now the dim one. On
+        # this flat tape every |x| is 0.2, so the gate is 0.2: a lopsided
+        # ratio on a quiet bar (ofi 900 against a scale of 5000) is thin
+        # even at dr1 = 0.60.
         g = draw(viewer, base + [(1200, 300)])
         assert not g[-1], "the fixture's thin bar cleared the gate"
-        level = self._label(viewer).textItem.defaultTextColor().name()
+        thin = self._label(viewer).textItem.defaultTextColor()
 
         # Neither: small bar, small ratio.
         g = draw(viewer, base + [(700, 500)])
         assert not g[-1]
-        none = self._label(viewer).textItem.defaultTextColor().name()
+        none = self._label(viewer).textItem.defaultTextColor()
 
-        assert str(heavy).lower() == DCVD_LIGHT_HEAVY.lower(), \
-            f"heavy flow under 0.4 is not green: {heavy}"
-        assert str(level).lower() == DCVD_LIGHT_LEVEL.lower(), \
-            f"0.4 on thin volume is not amber: {level}"
-        assert str(none).lower() == DCVD_LIGHT_NONE.lower()
-        assert len({str(heavy), str(level), str(none)}) == 3
+        assert heavy.rgb() == thin.rgb(), \
+            "闸门过没过不该换色相，只该换亮度"
+        assert heavy.alpha() > thin.alpha() + 40, \
+            f"大流量没有更亮：{heavy.alpha()} vs {thin.alpha()}"
+        assert none.name().lower() == DCVD_LIGHT_NONE.lower()
 
-    def test_the_label_says_which_state_it_is(self, viewer):
-        """The colour alone is a convention to memorise; the word is not."""
-        draw(viewer, steady(40) + [(30000, 20000)])
-        assert "大流量" in self._label(viewer).toPlainText()
-        draw(viewer, steady(40) + [(1200, 300)])
-        assert "量不足" in self._label(viewer).toPlainText()
+    def test_the_label_says_which_state_it_is_in_english(self, viewer):
+        """The colour alone is a convention to memorise; the word is not.
+
+        English, because every other mark on this chart is -- BOS,
+        CHoCH, Put Wall. A lone Chinese phrase among them reads as a
+        different system's label.
+        """
+        import re
+        # Not isascii(): the badge opens with a bullet on purpose, and
+        # that check would reject it along with the thing being banned.
+        cjk = re.compile(r"[\u4e00-\u9fff]")
+        for flows, word in (([(30000, 20000)], "heavy flow"),
+                            ([(1200, 300)], "thin volume")):
+            draw(viewer, steady(40) + flows)
+            t = self._label(viewer).toPlainText()
+            assert word in t, t
+            assert not cjk.search(t), f"标签里还有中文：{t!r}"
 
     def test_it_reads_the_newest_bar(self, viewer):
         draw(viewer, steady(40) + [(9000, 1000)])
