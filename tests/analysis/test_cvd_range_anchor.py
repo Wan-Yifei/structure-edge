@@ -138,7 +138,21 @@ class TestSignAndShape:
         viewer._draw_cvd(kl, buckets, CM)
         assert list(viewer._cvd_arr) == [-150, -300, -450, -600]
 
-    def test_bars_without_tick_coverage_hold_the_line_flat(self, viewer):
+    def test_bars_without_tick_coverage_are_not_drawn(self, viewer):
+        """A bar with no ticks has no cumulative delta, and saying 0 is
+        not the same as saying nothing.
+
+        This used to hold the line flat at the running total, which on a
+        real frame was most of the panel: the chart keeps every kline
+        that was fetched while the Range control loads ticks for one to
+        five days, so a 3,980-bar frame with one day of ticks had 2,881
+        points -- 72% -- sitting at exactly 0. Read as "buying and
+        selling are balanced", meant "nothing is known", and the climb
+        out of it into the first real value drew a vertical stroke that
+        set the panel's whole Y scale.
+        """
+        import math
+
         from core.time_utils import candle_start
 
         kl, buckets = _build(2)
@@ -146,7 +160,10 @@ class TestSignAndShape:
         del buckets[candle_start(bar_end - timedelta(minutes=CM), CM)]
         viewer._ind_checks["range_2d"].setChecked(True)
         viewer._draw_cvd(kl, buckets, CM)
-        assert list(viewer._cvd_arr) == [0, 100, 200, 300]
+        got = list(viewer._cvd_arr)
+        assert math.isnan(got[0]), f"没有逐笔的那根仍然画了值：{got[0]}"
+        assert got[1:] == [100, 200, 300], \
+            f"有逐笔的那几根被带歪了：{got[1:]}"
 
 
 class TestSharedWithTheProfile:
@@ -174,3 +191,74 @@ class TestSharedWithTheProfile:
             assert cvd[start_idx] == 100, (
                 f"{range_val}: CVD should restart at the profile's first bar")
             assert cvd[start_idx - 1] != 0 or start_idx == 0
+
+
+class TestThePanelFollowsTheView:
+    """CVD is an unbounded running sum, so the Y window has to follow the
+    X window or the curve walks out of the panel.
+
+    It was fitted at load and on each new bar, never on pan or zoom. A
+    session's CVD climbs hundreds of thousands of shares, so a few
+    minutes of panning left a window tens of thousands tall somewhere the
+    curve no longer was -- the panel read as empty, or showed a single
+    vertical stroke where the curve crossed it on its way past.
+    """
+
+    def _long_climb(self, v):
+        for val in ("1d", "2d", "3d", "7d"):
+            v._ind_checks[f"range_{val}"].setChecked(val == "7d")
+        kl, buckets = _build(5)
+        v._draw_cvd(kl, buckets, CM)
+        return kl
+
+    def test_a_pan_refits_the_panel(self, viewer):
+        kl = self._long_climb(viewer)
+        n = len(kl)
+        viewer._plot_c.setXRange(0, n - 1, padding=0)
+        viewer._plot_cvd.vb.viewRange()           # settle
+        viewer._plot_c.setXRange(n - 3, n - 1, padding=0)
+        lo, hi = viewer._plot_cvd.vb.viewRange()[1]
+        vis = [x for x in list(viewer._cvd_arr)[n - 3:] if x == x]
+        assert lo <= min(vis) and hi >= max(vis), \
+            f"窗口 [{lo:.0f},{hi:.0f}] 装不下可见的 {min(vis)}..{max(vis)}"
+        assert hi - lo < viewer._cvd_arr.max(), \
+            "缩放之后 Y 轴还是整条曲线的高度，等于没跟着看"
+
+    def test_a_window_with_no_coverage_is_left_alone(self, viewer):
+        """All-NaN in view: nanmin of that is NaN and setYRange(NaN)
+        blanks the panel, so the range must simply not move."""
+        from core.time_utils import candle_start
+
+        for val in ("1d", "2d", "3d", "7d"):
+            viewer._ind_checks[f"range_{val}"].setChecked(val == "7d")
+        kl, buckets = _build(3)
+        for b in list(buckets)[:BARS_PER_DAY]:     # day one loses its ticks
+            del buckets[b]
+        viewer._draw_cvd(kl, buckets, CM)
+        viewer._plot_cvd.setYRange(-7.0, 11.0, padding=0)
+        viewer._autorange_cumulative_subplots(0, BARS_PER_DAY - 1)
+        lo, hi = viewer._plot_cvd.vb.viewRange()[1]
+        assert (round(lo, 6), round(hi, 6)) == (-7.0, 11.0), \
+            f"全是 NaN 的窗口把 Y 轴改成了 [{lo},{hi}]"
+
+    def test_a_window_straddling_the_coverage_edge_still_fits(self, viewer):
+        """The common case, and the one the all-NaN guard does not cover.
+
+        numpy's min() propagates NaN, so a window holding both covered
+        and uncovered bars -- which is most windows, since the coverage
+        edge sits inside the loaded klines -- yields NaN and blanks the
+        panel. Only nanmin/nanmax get the real extent.
+        """
+        for val in ("1d", "2d", "3d", "7d"):
+            viewer._ind_checks[f"range_{val}"].setChecked(val == "7d")
+        kl, buckets = _build(3)
+        for b in list(buckets)[:BARS_PER_DAY]:     # day one loses its ticks
+            del buckets[b]
+        viewer._draw_cvd(kl, buckets, CM)
+        n = len(kl)
+        viewer._autorange_cumulative_subplots(0, n - 1)
+        lo, hi = viewer._plot_cvd.vb.viewRange()[1]
+        assert lo == lo and hi == hi, f"Y 轴被 NaN 污染：[{lo},{hi}]"
+        vis = [x for x in list(viewer._cvd_arr) if x == x]
+        assert lo <= min(vis) and hi >= max(vis), \
+            f"窗口 [{lo:.0f},{hi:.0f}] 装不下 {min(vis)}..{max(vis)}"

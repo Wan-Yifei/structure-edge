@@ -5306,8 +5306,11 @@ class TradeViewerQt(QMainWindow):
         """Draw Cumulative Volume Delta in the CVD subplot.
 
         Per-bar delta = buy_vol - sell_vol from tick-tagged trades (same
-        source as the Delta overlay); bars with no tick coverage contribute 0
-        (the line holds flat rather than gapping). Neutral-tagged volume is
+        source as the Delta overlay); bars with no tick coverage are NaN and
+        the line simply stops there, because 0 reads as "balanced" when it
+        means "not known" -- and on a frame holding more days of klines than
+        the Range control loads ticks for, that was 72% of the panel.
+        Neutral-tagged volume is
         excluded from the delta itself, same caveat as the Range Profile
         Buy/Sell stats -- moomoo's ticker_direction tags a large share of
         same-price prints NEUTRAL, so this only reflects a subset of volume.
@@ -5338,6 +5341,16 @@ class TradeViewerQt(QMainWindow):
         block = {d: (len(present) - 1 - i) // n_days
                  for i, d in enumerate(present)}
 
+        # Which bars actually have ticks behind them. A bar whose delta
+        # nets to zero with real trades in it is a different statement
+        # from one with no tick coverage, and "buy == sell" cannot stand
+        # in for "nothing known" -- same distinction the off-exchange
+        # line below draws with off_seen.
+        seen = np.zeros(n, dtype=bool)
+        for i, bk in enumerate(self._bucket_keys(klines, cm)):
+            if bk is not pd.NaT and buckets.get(bk):
+                seen[i] = True
+
         cvd = np.zeros(n, dtype=float)
         running    = 0.0
         prev_block = None
@@ -5349,6 +5362,15 @@ class TradeViewerQt(QMainWindow):
                     prev_block = b
             running += delta[i]
             cvd[i] = running
+        # Drawn as NaN where nothing was known, not held flat at the
+        # running total. The chart holds as many days of klines as were
+        # fetched while the Range control loads ticks for one to five of
+        # them, so the flat part was most of the panel: measured on a
+        # 3,980-bar frame with one day of ticks, 2,881 points -- 72% --
+        # sat at exactly 0, which reads as "delta is balanced" and is
+        # really "no data". It also put a vertical stroke where the line
+        # climbed out of that false zero into the first real value.
+        cvd[~seen] = np.nan
         self._cvd_arr = cvd
 
         # Off-exchange flow, accumulated on the same blocks, as its own line.
@@ -5420,8 +5442,13 @@ class TradeViewerQt(QMainWindow):
         # sign, matching the pattern of a signed histogram/area chart rather
         # than drawing two overlapping flat-at-zero pens (which would leave
         # a visible seam line cutting across the other side's fill).
-        cvd_pos = np.where(cvd >= 0, cvd, 0.0)
-        cvd_neg = np.where(cvd < 0, cvd, 0.0)
+        # The uncovered bars go to 0 in the FILLS rather than NaN: the
+        # fill level is 0 too, so a run of zeros paints nothing, while a
+        # NaN inside a filled curve leaves pyqtgraph closing the polygon
+        # across the gap.
+        fin = np.isfinite(cvd)
+        cvd_pos = np.where(fin & (cvd >= 0), cvd, 0.0)
+        cvd_neg = np.where(fin & (cvd < 0), cvd, 0.0)
         pos_fill = pg.PlotCurveItem(
             x=x, y=cvd_pos, pen=None,
             fillLevel=0.0, brush=_qc(_GREEN, 55),
@@ -5431,7 +5458,7 @@ class TradeViewerQt(QMainWindow):
             fillLevel=0.0, brush=_qc(_RED, 55),
         )
         outline = pg.PlotCurveItem(
-            x=x, y=cvd,
+            x=x, y=cvd, connect="finite",
             pen=pg.mkPen("#42a5f5", width=1.3),
         )
         for item in (pos_fill, neg_fill, outline):
@@ -7370,9 +7397,19 @@ class TradeViewerQt(QMainWindow):
         self._show_range_tick_profile(i0, i1)
 
     def _on_main_range_changed(self, _vb, ranges) -> None:
-        """Sync tick profile Y axis with the main candle chart on every zoom/pan."""
+        """Sync tick profile Y axis with the main candle chart on every zoom/pan.
+
+        The cumulative subplots go with it. Their Y was fitted only at
+        load and on each new bar, so panning or zooming left the window
+        where it was while the curve walked out of it -- a CVD that
+        climbs 1.5M over a session leaves a 30K-tall window within
+        minutes, and the panel then looks empty or shows one vertical
+        stroke where the curve crosses it.
+        """
         ylo, yhi = ranges[1]
         self._tick_profile_widget.setYRange(ylo, yhi, padding=0)
+        xlo, xhi = ranges[0]
+        self._autorange_cumulative_subplots(xlo, xhi)
 
     def _pin_heatmap_legend(self, *_) -> None:
         """Re-anchor the heatmap legend to the top-left of the candle view."""
@@ -7763,7 +7800,13 @@ class TradeViewerQt(QMainWindow):
                 self._kd_label.setVisible(False)
 
             # CVD: show cumulative delta value of the hovered bar.
-            if self._plot_cvd.isVisible() and self._cvd_arr is not None:
+            if (self._plot_cvd.isVisible() and self._cvd_arr is not None
+                    and np.isfinite(self._cvd_arr[
+                        max(0, min(idx, len(self._cvd_arr) - 1))])):
+                # A bar with no tick coverage has no cumulative delta to
+                # report. Printing the running total there would answer a
+                # question the data cannot -- it is the flat-zero line in
+                # label form.
                 cvd_idx = max(0, min(idx, len(self._cvd_arr) - 1))
                 cvd_val = float(self._cvd_arr[cvd_idx])
                 sign    = "+" if cvd_val >= 0 else ""
@@ -7930,9 +7973,13 @@ class TradeViewerQt(QMainWindow):
                 continue
             i1 = min(int(x_hi) + 1, len(arr))
             vis = arr[i0:i1]
-            if len(vis) == 0:
+            # NaN is "no tick coverage here", which is most of the series
+            # whenever the chart holds more days than the Range control
+            # loads ticks for. min() over that is NaN and setYRange(NaN)
+            # leaves the panel blank.
+            if len(vis) == 0 or not np.isfinite(vis).any():
                 continue
-            lo, hi = float(vis.min()), float(vis.max())
+            lo, hi = float(np.nanmin(vis)), float(np.nanmax(vis))
             pad = (hi - lo) * 0.1 or max(abs(hi), 1.0) * 0.1
             plot.setYRange(lo - pad, hi + pad, padding=0)
 
