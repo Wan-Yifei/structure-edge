@@ -388,6 +388,170 @@ class TestTheDayBoundary:
         assert not bull.any() and not bear.any()
 
 
+SEED_PLANT = 9.9e6      # unmistakable, and only outside RTH
+
+
+def _seed_frame(days, day0=datetime(2026, 10, 12), lo_min=9 * 60 + 30,
+                n=150):
+    """What the delta-bar cache would hand back for `days` sessions.
+
+    Each session carries one bar stamped 09:30 -- the close of the
+    premarket session, not part of RTH -- with a volume nothing inside
+    RTH comes near. The cache is not filtered, so the seed has to do it,
+    and a fixture made of RTH rows alone cannot tell whether it did.
+    """
+    rows = []
+    for k in range(days):
+        c, b, s = _ramped(n, base=100.0, seed=201 + k)
+        base = day0 + timedelta(days=k, minutes=lo_min)
+        rows.append((base, SEED_PLANT, SEED_PLANT))      # 09:30 exactly
+        for i in range(n):
+            rows.append((base + timedelta(minutes=i + 1), b[i], s[i]))
+    return pd.DataFrame(
+        {"buy": [r[1] for r in rows], "sell": [r[2] for r in rows]},
+        index=pd.DatetimeIndex([r[0] for r in rows]))
+
+
+class TestTheProfileComesFromMoreThanTheChartHolds:
+    """The chart holds 1 to 5 sessions; the profile needs more than that.
+
+    RANGE_DAYS tops out at 5 trading days of ticks and defaults to 1,
+    while a bucket needs two PREVIOUS sessions before it has a gate. So
+    a time-of-day profile built only from what is on screen marked
+    nothing at all at the two commonest settings -- 0, 0, 3 and 23 marks
+    for 1, 2, 3 and 5 loaded sessions, against 6.8 a session offline.
+    The study was validated over 112 sessions, which is exactly why the
+    hole did not show there.
+    """
+
+    @pytest.fixture
+    def one_day(self):
+        days = [_ramped(150, base=100.0, seed=77)]
+        c, b, s = days[0]
+        j = 100
+        tot = (b[j] + s[j]) * 1.6
+        s[j], b[j] = tot * 0.92, tot * 0.08
+        for m in range(j, len(c)):
+            c[m] += 0.30
+        kl, buckets = _frame_days(days, day0=datetime(2026, 10, 19))
+        return kl, buckets, j
+
+    def test_one_loaded_session_still_gets_marks(self, viewer, monkeypatch,
+                                                 one_day):
+        from feeds import delta_bars
+        kl, buckets, j = one_day
+        viewer._code = "US.TEST"
+        viewer._abs_seed_key = None
+        monkeypatch.setattr(delta_bars, "load_cached",
+                            lambda *a, **k: _seed_frame(6))
+        bull, _bear = viewer._absorption_flags(kl, buckets, CM)
+        assert bull[j], "只加载一个交易日时，种子没有把门槛喂进来"
+
+    def test_and_without_the_seed_it_marks_nothing(self, viewer,
+                                                   monkeypatch, one_day):
+        """The control. Without it the test above would pass on a build
+        that had quietly stopped needing the profile at all."""
+        from feeds import delta_bars
+        kl, buckets, _j = one_day
+        viewer._code = "US.TEST"
+        viewer._abs_seed_key = None
+        monkeypatch.setattr(delta_bars, "load_cached", lambda *a, **k: None)
+        bull, bear = viewer._absorption_flags(kl, buckets, CM)
+        assert not (bull.any() or bear.any())
+
+    def test_the_seed_stops_before_the_session_being_marked(
+            self, viewer, monkeypatch, one_day):
+        """No lookahead across the seam: a bar must not help set the
+        gate it is judged against."""
+        from feeds import delta_bars
+        kl, buckets, _j = one_day
+        viewer._code = "US.TEST"
+        viewer._abs_seed_key = None
+        seen = {}
+
+        def _spy(code, start, end):
+            seen["start"], seen["end"] = pd.Timestamp(start), pd.Timestamp(end)
+            return _seed_frame(6)
+
+        monkeypatch.setattr(delta_bars, "load_cached", _spy)
+        viewer._absorption_flags(kl, buckets, CM)
+        first = pd.Timestamp(str(kl["time_key"].iloc[0])[:10])
+        assert seen["end"] < first, \
+            f"种子取到了被判定的那天：end={seen['end']} first={first}"
+        assert seen["start"] < seen["end"]
+
+    def test_an_unreadable_cache_does_not_stop_the_chart(
+            self, viewer, monkeypatch, one_day):
+        """A profile that is merely missing costs the early marks. It
+        must not cost the repaint."""
+        from feeds import delta_bars
+        kl, buckets, _j = one_day
+        viewer._code = "US.TEST"
+        viewer._abs_seed_key = None
+
+        def _boom(*_a, **_k):
+            raise OSError("parquet is a directory today")
+
+        monkeypatch.setattr(delta_bars, "load_cached", _boom)
+        bull, bear = viewer._absorption_flags(kl, buckets, CM)
+        assert not (bull.any() or bear.any())
+
+    def test_the_seed_takes_only_rth(self, viewer, monkeypatch, one_day):
+        """The cache is the whole day; the study is 09:31-16:00. The bar
+        stamped 09:30 is the premarket's last, and it must not reach the
+        first RTH bucket -- which is also what separates `mins > lo`
+        from `mins >= lo`."""
+        from feeds import delta_bars
+        viewer._code = "US.TEST"
+        viewer._abs_seed_key = None
+        monkeypatch.setattr(delta_bars, "load_cached",
+                            lambda *a, **k: _seed_frame(6))
+        vol, ofi = viewer._abs_seed_profile(datetime(2026, 10, 19).date(), 15)
+        assert vol, "种子什么都没取到"
+        assert min(vol) >= 0, f"取到了 RTH 之前的桶：{sorted(vol)[:3]}"
+        pooled = np.concatenate(vol[0])
+        assert pooled.max() < SEED_PLANT, \
+            "09:30 那根盘前的量进了第一个 RTH 桶"
+        assert len(vol[0]) == 6, f"该有 6 个交易日，实际 {len(vol[0])}"
+
+    def test_a_repaint_does_not_grow_the_cached_seed(
+            self, viewer, monkeypatch, one_day):
+        """The seed is memoised and the caller appends the frame's own
+        sessions to it. Appending into the cached lists would feed one
+        repaint's session into the next repaint's gate -- a bar helping
+        to set the threshold it is judged against, one frame later."""
+        from feeds import delta_bars
+        kl, buckets, _j = one_day
+        viewer._code = "US.TEST"
+        viewer._abs_seed_key = None
+        monkeypatch.setattr(delta_bars, "load_cached",
+                            lambda *a, **k: _seed_frame(6))
+        viewer._absorption_flags(kl, buckets, CM)
+        before = {k: len(v) for k, v in viewer._abs_seed_val[0].items()}
+        viewer._absorption_flags(kl, buckets, CM)
+        after = {k: len(v) for k, v in viewer._abs_seed_val[0].items()}
+        assert before == after, "重绘一次，缓存的种子就长了一截"
+
+    def test_the_seed_is_read_once_per_symbol_and_day(
+            self, viewer, monkeypatch, one_day):
+        """It is read inside a repaint, so it is memoised; a parquet
+        read on every frame is a dropped frame."""
+        from feeds import delta_bars
+        kl, buckets, _j = one_day
+        viewer._code = "US.TEST"
+        viewer._abs_seed_key = None
+        calls = []
+
+        def _count(*a, **k):
+            calls.append(1)
+            return _seed_frame(6)
+
+        monkeypatch.setattr(delta_bars, "load_cached", _count)
+        viewer._absorption_flags(kl, buckets, CM)
+        viewer._absorption_flags(kl, buckets, CM)
+        assert len(calls) == 1, f"同一天读了 {len(calls)} 次"
+
+
 class TestTheViewerDrawsAndClears:
     def test_items_appear_and_go(self, viewer):
         days = [_ramped(150, base=100.0, seed=5 + k) for k in range(4)]

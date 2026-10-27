@@ -126,6 +126,41 @@ def load(code: str, start: datetime | str, end: datetime | str,
     return df.loc[start:end]
 
 
+def load_cached(code: str, start: datetime | str,
+                end: datetime | str) -> pd.DataFrame | None:
+    """Whatever the cache already holds for this range, or None.
+
+    `load` rebuilds from ticks.db when the request reaches outside the
+    cache, which for a 49M-row tick table is minutes. A caller on a UI
+    thread cannot spend that inside a repaint, and a feature that is
+    merely missing beats a frozen chart -- so this reads the parquet and
+    nothing else, and says None rather than building.
+
+    None means "nothing cached for this", never "no data": the caller
+    must have something to fall back on.
+
+    What comes back is whatever part of the range the cache holds, which
+    may be short at either end. `load` refuses a partial answer -- a
+    backtest silently given four days instead of five is the worse
+    failure -- but a caller building a rolling profile counts the
+    sessions it got and says so, and would rather have nine than none.
+    """
+    p = _cache_path(code)
+    if not p.exists():
+        return None
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    if end == end.normalize():
+        end = end + pd.Timedelta(days=1) - pd.Timedelta(minutes=1)
+    try:
+        df = pd.read_parquet(p)
+    except (OSError, ValueError):
+        return None
+    if df.empty:
+        return None
+    out = df.loc[start:end]
+    return out if len(out) else None
+
+
 def coverage(df: pd.DataFrame) -> pd.DataFrame:
     """Per-day bar count and the share of volume carrying a direction."""
     if df.empty:

@@ -71,3 +71,40 @@ class TestCacheIsNotShrunk:
                               pd.Timestamp("2026-05-21 12:00"))
         assert got.index.min() >= pd.Timestamp("2026-05-20")
         assert got.index.max() <= pd.Timestamp("2026-05-21 12:00")
+
+
+class TestLoadCachedNeverBuilds:
+    """The viewer reads this inside a repaint.
+
+    `load` rebuilds from ticks.db whenever the request reaches outside
+    the cache, and that table holds 49M rows for SOXL alone -- minutes,
+    inside a paint. So this one reads the parquet and says None rather
+    than building, and the caller does without.
+    """
+
+    def test_a_missing_cache_is_none_not_a_build(self, cache, monkeypatch):
+        monkeypatch.setattr(delta_bars, "build",
+                            lambda *a, **k: pytest.fail("rebuilt the cache"))
+        assert delta_bars.load_cached("US.X", "2026-10-13",
+                                      "2026-10-14") is None
+
+    def test_a_range_past_the_cache_is_not_a_build(self, cache, monkeypatch):
+        full = _frame("2026-10-13 00:00", 60 * 24)
+        delta_bars._cache_path("US.X").parent.mkdir(parents=True,
+                                                    exist_ok=True)
+        full.to_parquet(delta_bars._cache_path("US.X"))
+        monkeypatch.setattr(delta_bars, "build",
+                            lambda *a, **k: pytest.fail("rebuilt the cache"))
+        got = delta_bars.load_cached("US.X", "2026-10-13", "2026-10-20")
+        assert got is not None and len(got), \
+            "有一天在缓存里，却什么都没返回"
+        assert got.index.max() < pd.Timestamp("2026-10-15"), \
+            "返回了缓存里没有的日子"
+
+    def test_a_range_entirely_outside_is_none(self, cache):
+        full = _frame("2026-10-13 00:00", 60 * 24)
+        delta_bars._cache_path("US.X").parent.mkdir(parents=True,
+                                                    exist_ok=True)
+        full.to_parquet(delta_bars._cache_path("US.X"))
+        assert delta_bars.load_cached("US.X", "2026-09-01",
+                                      "2026-09-05") is None

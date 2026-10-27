@@ -5755,6 +5755,64 @@ class TradeViewerQt(QMainWindow):
         return (fire & (x < 0) & (A >= ABS_THRESHOLD),
                 fire & (x > 0) & (A <= -ABS_THRESHOLD))
 
+    def _abs_seed_profile(self, before_day, bw: int) -> tuple[dict, dict]:
+        """Per-bucket volume and net-flow history from sessions the chart
+        never loaded.
+
+        Without this the profile can only be built from sessions in the
+        frame, and the frame holds as many sessions as the tick range
+        setting asks for: RANGE_DAYS tops out at 5 and defaults to 1. Two
+        previous sessions are needed before a bucket has a gate, so at
+        1d and 2d NOTHING was ever marked -- measured at 0, 0, 3, 23
+        marks for 1, 2, 3 and 5 loaded sessions. The study behind the
+        mark was validated over 112 sessions of offline data, which is
+        why the hole did not show up there.
+
+        Read-only against the delta-bar cache, and never for the current
+        session: a rebuild walks ticks.db and would do it inside a
+        repaint. An empty pair means no seed, which leaves the in-frame
+        behaviour exactly as it was.
+        """
+        code = getattr(self, "_code", None)
+        if not code:
+            return {}, {}
+        key = (code, str(before_day), bw)
+        if getattr(self, "_abs_seed_key", None) == key:
+            return self._abs_seed_val
+        vol_hist: dict[int, list[np.ndarray]] = {}
+        ofi_hist: dict[int, list[np.ndarray]] = {}
+        try:
+            from feeds import delta_bars
+            end = pd.Timestamp(before_day) - pd.Timedelta(minutes=1)
+            start = (pd.Timestamp(before_day)
+                     - pd.Timedelta(days=ABS_TOD_SESSIONS * 2))
+            df = delta_bars.load_cached(code, start, end)
+            if df is not None and len(df):
+                lo = int(round(ABS_RTH_LO * 60))
+                hi = int(round(ABS_RTH_HI * 60))
+                mins = df.index.hour * 60 + df.index.minute
+                df = df[(mins > lo) & (mins <= hi)]
+                tot = (df["buy"] + df["sell"]).to_numpy(float)
+                net = np.abs((df["buy"] - df["sell"]).to_numpy(float))
+                bkt = ((df.index.hour * 60 + df.index.minute - lo)
+                       .to_numpy() // bw)
+                day = df.index.normalize().to_numpy()
+                ok = tot >= DCVD_MIN_SIGNED
+                for d in list(dict.fromkeys(day))[-ABS_TOD_SESSIONS:]:
+                    on = (day == d) & ok
+                    for b in np.unique(bkt[on]):
+                        take = on & (bkt == b)
+                        vol_hist.setdefault(int(b), []).append(tot[take])
+                        ofi_hist.setdefault(int(b), []).append(net[take])
+        except Exception as exc:                      # noqa: BLE001
+            # A missing or unreadable cache is not a reason to stop
+            # drawing the chart; it only costs the early marks.
+            self._log(f"Absorption profile unavailable: {exc}")
+            vol_hist, ofi_hist = {}, {}
+        self._abs_seed_key = key
+        self._abs_seed_val = (vol_hist, ofi_hist)
+        return self._abs_seed_val
+
     def _absorption_flags(
         self, klines: pd.DataFrame, buckets: dict, cm: int,
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -5814,9 +5872,14 @@ class TradeViewerQt(QMainWindow):
         # loaded, or a 15-minute bucket on a 1-hour chart would be one
         # bar a session and its percentile would be a single number.
         bw = max(ABS_TOD_BUCKET_MIN, 3 * cm)
-        # bucket -> one array of that bucket's values per past session
-        vol_hist: dict[int, list[np.ndarray]] = {}
-        ofi_hist: dict[int, list[np.ndarray]] = {}
+        # bucket -> one array of that bucket's values per past session,
+        # seeded from sessions before the frame so the first loaded one
+        # is not spent building a profile it could have been given.
+        vol_hist, ofi_hist = ({}, {})
+        if order:
+            vol_hist, ofi_hist = self._abs_seed_profile(order[0], bw)
+            vol_hist = {k: list(v) for k, v in vol_hist.items()}
+            ofi_hist = {k: list(v) for k, v in ofi_hist.items()}
         atr0: float | None = None
         tail: tuple[np.ndarray, np.ndarray] | None = None
         for d in order:
