@@ -314,8 +314,174 @@ class TestLabelPlacement:
 
     def test_a_clear_label_stays_on_its_level(self, win):
         """Only the crowded ones move. Spacing all three evenly would put
-        every label slightly wrong to fix a problem two do not have."""
+        every label slightly wrong to fix a problem two do not have.
+
+        "Stays" allows the few pixels of clearance the label is lifted by
+        so its own line does not run through the digits -- a nudge is a
+        whole label height, several times that, so the two do not blur."""
         w, _ = win
         w._place_labels()
+        vb = w._plot.getPlotItem().vb
+        (_, _), (y0, y1) = vb.viewRange()
+        px = (y1 - y0) / max(vb.height(), 1)
         lowest = min(w._tags, key=lambda r: r[2])
-        assert abs(lowest[0].pos().y() - lowest[2]) < 1e-9
+        off = lowest[0].pos().y() - lowest[2]
+        assert 0 <= off <= 4 * px, f"最低的标签被挪了 {off / px:.1f}px"
+
+
+def _rgb(hex_: str) -> tuple:
+    return tuple(int(hex_[k:k + 2], 16) for k in (1, 3, 5))
+
+
+def _longest_run(flags) -> int:
+    best = cur = 0
+    for f in flags:
+        cur = cur + 1 if f else 0
+        best = max(best, cur)
+    return best
+
+
+def _row_runs(img, box, ref, tol=36):
+    """Longest unbroken run of `ref`-coloured pixels per row of `box`, in
+    pixels. The caller divides by the width where a fraction is what it
+    means, and reads the pixels straight where the width is arbitrary."""
+    x0, y0, x1, y1 = box
+    out = []
+    for yy in range(max(0, y0), min(img.height(), y1 + 1)):
+        flags = []
+        for xx in range(max(0, x0), min(img.width(), x1 + 1)):
+            c = img.pixelColor(xx, yy)
+            flags.append(all(abs(a - b) <= tol for a, b in
+                             zip((c.red(), c.green(), c.blue()), ref)))
+        out.append(_longest_run(flags))
+    return out
+
+
+def _label_box(w, t):
+    """A label's own rectangle, in the plot widget's pixels."""
+    r = t.mapRectToScene(t.boundingRect())
+    tl = w._plot.mapFromScene(r.topLeft())
+    br = w._plot.mapFromScene(r.bottomRight())
+    x0, x1 = sorted((int(tl.x()), int(br.x())))
+    y0, y1 = sorted((int(tl.y()), int(br.y())))
+    return x0, y0, x1, y1
+
+
+def _level_row(w, price):
+    """The pixel row a price sits on in the plot widget."""
+    from PyQt6.QtCore import QPointF
+    vb = w._plot.getPlotItem().vb
+    pt = w._plot.mapFromScene(vb.mapViewToScene(QPointF(0.0, float(price))))
+    return int(pt.y())
+
+
+class TestTheLineDoesNotStrikeThroughItsLabel:
+    """A level label with its own line through the digits cannot be read.
+
+    The glyphs wear the same colour as the line, so counting coloured
+    pixels inside the label tells a strike-through from the digits not at
+    all. What separates them is continuity: a strike-through is one
+    unbroken run across the whole label and no row of 7pt monospace
+    digits is. So these measure, per row, the longest unbroken run.
+    """
+
+    @pytest.fixture
+    def shot(self, win, qapp):
+        w, days = win
+        w.resize(1100, 700)
+        w.show()
+        qapp.processEvents()
+        w.reload()
+        qapp.processEvents()
+        w._place_labels()
+        qapp.processEvents()
+        yield w, w._plot.grab().toImage()
+
+    def test_no_row_inside_a_label_is_an_unbroken_line(self, shot):
+        w, img = shot
+        from analysis.multi_vp_window import _GOLD, _VA
+        gold, va = _rgb(_GOLD), _rgb(_VA)
+        worst = []
+        for t, _x, p, i in w._tags:
+            txt = t.toPlainText()
+            ref = gold if txt.startswith("POC") else va
+            box = _label_box(w, t)
+            runs = _row_runs(img, box, ref)
+            assert runs, f"{txt} 的框落在画面外，量不到"
+            worst.append((max(runs) / max(box[2] - box[0] + 1, 1), txt, i))
+        hi, txt, i = max(worst)
+        assert hi <= 0.35, (f"第 {i} 段的 {txt} 有一行 {hi:.0%} 是连续线色"
+                            f"——线从数字中间穿过去了")
+
+    def test_the_probe_can_see_a_line_where_there_is_one(self, shot):
+        """The control. The same measurement along the level itself has to
+        come back as a long run -- otherwise the test above passes because
+        nothing is being measured.
+
+        In pixels, not as a fraction: the price path crosses the level a
+        few times per slab, so the span is broken into pieces whatever its
+        width, and what matters is that one piece is far longer than the
+        5-6px a digit's stroke gives."""
+        from analysis.multi_vp_window import _VA
+        w, img = shot
+        va = _rgb(_VA)
+        best = 0
+        for t, _x, p, i in w._tags:
+            if not t.toPlainText().startswith("VAH"):
+                continue
+            lx0, _, _, _ = _label_box(w, t)
+            row = _level_row(w, p)
+            box = (max(lx0 - 300, 0), row - 2, max(lx0 - 2, 1), row + 2)
+            best = max(best, max(_row_runs(img, box, va)))
+        assert best >= 25, (f"沿着 VAH 线量到的最长连续段只有 {best}px，"
+                            f"探针根本看不见线")
+
+    def test_every_label_carries_a_backdrop(self, shot):
+        """The widest bar of a session ends exactly where the labels are
+        anchored and they extend LEFT from there, so the profile is
+        behind the digits by construction, not by luck -- which is what
+        the backdrop is for.
+
+        A configuration check and not a pixel one on purpose. The share
+        of a label's box that stays background does separate the two
+        cases -- 87% with the backdrop against 61% without, measured
+        offscreen -- but the same pair comes back 77% against 65% on a
+        real display, because subpixel antialiasing colours the glyph
+        edges. A threshold between 65 and 77 would be asserting the
+        font-rendering stack. The z-order test below is what makes the
+        backdrop land over the bars rather than under them.
+        """
+        from analysis.multi_vp_window import _BG
+        w, _img = shot
+        bg = _rgb(_BG)
+        from PyQt6.QtCore import Qt as _Qt
+        for t, _x, _p, i in w._tags:
+            br = t.fill
+            assert br is not None and br.style() != _Qt.BrushStyle.NoBrush, (
+                f"第 {i} 段的 {t.toPlainText()} 没有底色")
+            c = br.color()
+            assert (c.red(), c.green(), c.blue()) == bg, (
+                f"底色不是画布背景色：{c.name()}")
+            assert c.alpha() >= 200, f"底色太透：alpha={c.alpha()}"
+
+    def test_a_label_is_painted_over_everything_it_names(self, shot):
+        """The price path and the next session's bars are added after the
+        labels, so equal z-values let them paint over the digits."""
+        w, _img = shot
+        import pyqtgraph as pg
+        tags = [t.zValue() for t, *_ in w._tags]
+        drawn = [it.zValue() for it in w._items
+                 if isinstance(it, (pg.PlotCurveItem, pg.BarGraphItem))]
+        assert tags and drawn
+        assert min(tags) > max(drawn)
+
+    def test_the_label_clears_its_own_level(self, shot):
+        """Geometry, independent of the pixels: the box sits above the
+        price it names, not centred on it."""
+        w, _img = shot
+        for t, _x, p, i in w._tags:
+            _x0, _y0, _x1, y1 = _label_box(w, t)
+            row = _level_row(w, p)
+            # y grows downward: the box's bottom edge is above the level.
+            assert y1 <= row, (f"第 {i} 段的 {t.toPlainText()} 下沿在 y={y1}，"
+                               f"价位在 y={row}——框骑在线上")

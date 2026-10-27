@@ -207,10 +207,15 @@ class MultiVPWindow(QMainWindow):
     def _place_labels(self) -> None:
         """Nudge labels apart where they would overlap, per session.
 
-        Each one starts on its own level. Within a session the three are
-        walked in price order and any that is nearer than one label
-        height to the one below is pushed up by the remainder, so only
-        the crowded ones move and the lowest stays put.
+        Each one starts just clear of its own level. Within a session the
+        three are walked in price order and any that is nearer than one
+        label height to the one below is pushed up by the remainder, so
+        only the crowded ones move and the lowest stays put.
+
+        The clearance is why this is in pixels and not in price: the
+        labels are anchored by their bottom edge, and the POC line is
+        2px wide with half of that above its own level, so a label
+        sitting exactly on the level has the line inside its glyph box.
         """
         if not self._tags:
             return
@@ -218,6 +223,7 @@ class MultiVPWindow(QMainWindow):
         (_, _), (y0, y1) = vb.viewRange()
         h_px = max(vb.height(), 1)
         gap = (y1 - y0) * (11.0 / h_px)      # one label height, in price
+        lift = (y1 - y0) * (3.0 / h_px)      # clearance over its own line
         if gap <= 0:
             return
         by_sess: dict[int, list] = {}
@@ -227,7 +233,8 @@ class MultiVPWindow(QMainWindow):
             group.sort(key=lambda r: r[0])
             placed = None
             for p, t, x in group:
-                y = p if placed is None else max(p, placed + gap)
+                base = p + lift
+                y = base if placed is None else max(base, placed + gap)
                 t.setPos(x, y)
                 placed = y
 
@@ -437,12 +444,23 @@ class MultiVPWindow(QMainWindow):
                     x=[i, i + slab * BAR_SPAN], y=[p, p],
                     pen=pg.mkPen(_qc(col), width=wd)))
                 if self._labels.isChecked():
-                    # Anchored at the right end of its own segment. The
-                    # vertical position is settled in _place_labels once
+                    # Anchored at the right end of its own segment, and
+                    # sitting ON TOP of the level rather than centred on it:
+                    # centred, the segment runs straight through the digits
+                    # and a 7pt monospace price becomes unreadable. The line
+                    # now underlines its own label. The fill is for the price
+                    # path and the profile bars, which cross here too.
+                    # The vertical position is settled in _place_labels once
                     # the range is known -- see there.
                     t = pg.TextItem(text=f"{nm} {p:.2f}", color=_qc(col),
-                                    anchor=(1.0, 0.5))
+                                    fill=pg.mkBrush(_qc(_BG, 225)),
+                                    anchor=(1.0, 1.0))
                     t.setFont(QFont("Monospace", 7))
+                    # Above everything: the price path and the next slab's
+                    # bars are drawn after these and would otherwise paint
+                    # over the digits, and the 2px POC line -- half of which
+                    # sits above its own level -- clips the label's bottom row.
+                    t.setZValue(20)
                     self._add(t, ignore=True)
                     t.setPos(i + slab * BAR_SPAN, p)
                     self._tags.append((t, i + slab * BAR_SPAN, p, i))
