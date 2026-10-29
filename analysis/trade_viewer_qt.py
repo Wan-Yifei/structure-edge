@@ -2516,8 +2516,10 @@ class TradeViewerQt(QMainWindow):
         # offex rides on the CVD panel, which is already on, and the
         # classifier is kept current every two minutes specifically so that
         # line is worth looking at -- leaving it off by default wasted that.
-        _default_checked = ("heatmap", "delta", "bos_choch", "cvd",
-                            "dcvd", "offex", "option_walls")
+        #
+        # BOS/CHoCH off, OB and ABS on: the layout actually worked from.
+        _default_checked = ("heatmap", "delta", "cvd", "dcvd", "offex",
+                            "option_walls", "ob", "absorb")
 
         # ── Row 2: SMC structural indicators ────────────────────────────────
         self.addToolBarBreak()
@@ -2546,7 +2548,7 @@ class TradeViewerQt(QMainWindow):
                 self._fvg_min_pct.setDecimals(2)
                 self._fvg_min_pct.setSuffix("%")
                 self._fvg_min_pct.setFixedWidth(72)
-                self._fvg_min_pct.setEnabled(False)
+                self._fvg_min_pct.setEnabled(key in _default_checked)
                 self._fvg_min_pct.setToolTip("FVG minimum gap size (% of price)")
                 self._fvg_min_pct.valueChanged.connect(self._trigger_fetch)
                 tb_smc.addWidget(self._fvg_min_pct)
@@ -2555,7 +2557,10 @@ class TradeViewerQt(QMainWindow):
                 self._ob_max_count.setRange(1, 20)
                 self._ob_max_count.setValue(4)
                 self._ob_max_count.setFixedWidth(50)
-                self._ob_max_count.setEnabled(False)
+                # follow the checkbox: _on_indicator_toggle only corrects
+                # this on the next toggle, so a default-on OB would sit
+                # drawn with its quota spinbox greyed out until touched.
+                self._ob_max_count.setEnabled(key in _default_checked)
                 self._ob_max_count.setToolTip(
                     "OB quota per side of price (strongest by volume). "
                     "Blocks already broken are capped at 1 per side on "
@@ -2730,7 +2735,10 @@ class TradeViewerQt(QMainWindow):
             ("post", "Post"),       ("night", "Night"),
         ]:
             cb = QCheckBox(label)
-            cb.setChecked(key == "regular")
+            # All four on: the volume profile is read as one continuous
+            # book across the day, so premarket and overnight levels
+            # belong in it rather than being dropped.
+            cb.setChecked(True)
             cb.stateChanged.connect(self._on_session_toggle)
             self._ind_checks[f"sess_{key}"] = cb
             tb_sess.addWidget(cb)

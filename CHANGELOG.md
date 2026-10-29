@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.78.1 — 改开图默认值:BOS/CHoCH 关,OB/ABS 开,四个时段全选 (2026-10-28)
+
+用户指定的开图布局。
+
+`analysis/trade_viewer_qt.py`:
+
+```
+_default_checked   去掉 bos_choch,加上 ob 和 absorb
+Session 四个勾      Regular / Pre / Post / Night 全部默认勾上
+                   （原来只有 Regular，成交量 profile 丢掉盘前和夜盘）
+```
+
+`analysis/liq_hm_window.py`:
+
+```
+Gamma   3.0 → 5.0
+Wall N  3   → 2
+```
+
+顺带修一个本来看不见、现在会看见的毛病:`_ob_max_count` 和
+`_fvg_min_pct` 两个 spinbox 在构造时写死 `setEnabled(False)`,真正的
+启用状态只在 `_on_indicator_toggle` 里纠正。原来两个指标都默认关,所以
+没人发现;OB 一旦默认开,它的配额框就会画出来却是灰的,要随便拨一下别的
+勾才活过来。改成跟着 `_default_checked` 取初值。
+
+`test_it_is_off_by_default` 改名 `test_it_is_on_by_default` —— 它的前提
+（「不是标准读图的一部分」）被这次改动推翻了。隔壁那条守着工具提示里
+「NOT AN ENTRY」和 −0.361R / −0.566R 的测试没动,默认开不等于能当入场用。
+
+离屏起了一次真窗口核对 14 个勾和两个 spinbox,全量 1301 个测试通过。
+
 ## v0.78.0 — 回滚吸收标记的时段门槛:它的前提在 viewer 里不成立 (2026-10-28)
 
 用户:「能把 `_absorption_flags` 先回滚到你改动之前吗？」

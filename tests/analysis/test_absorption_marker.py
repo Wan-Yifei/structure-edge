@@ -224,9 +224,14 @@ class TestTheViewerDrawsAndClears:
         viewer._clear_abs_items()
         assert viewer._abs_items == []
 
-    def test_it_is_off_by_default(self, viewer):
-        """It is a marker for watching, not part of the standard read."""
-        assert not viewer._ind_checks["absorb"].isChecked()
+    def test_it_is_on_by_default(self, viewer):
+        """It is drawn by default -- as something to look at, not to act on.
+
+        It used to default off on the grounds that it is "not part of the
+        standard read". Asked for on, so the only thing left guarding the
+        distinction is the tooltip, which the next test holds to.
+        """
+        assert viewer._ind_checks["absorb"].isChecked()
 
     def test_the_tooltip_refuses_to_be_an_entry(self, viewer):
         tip = viewer._ind_checks["absorb"].toolTip()

@@ -697,7 +697,7 @@ class LiqHmWindow(QWidget):
         self._gamma_spin.setRange(0.2, 10.0)
         self._gamma_spin.setSingleStep(0.1)
         self._gamma_spin.setDecimals(1)
-        self._gamma_spin.setValue(3.0)
+        self._gamma_spin.setValue(5.0)
         self._gamma_spin.setFixedWidth(52)
         self._gamma_spin.setToolTip(
             "Colour gamma correction.\n"
@@ -857,7 +857,7 @@ class LiqHmWindow(QWidget):
         row2.addWidget(_lbl("N:"))
         self._wall_n_spin = QSpinBox()
         self._wall_n_spin.setRange(1, 10)
-        self._wall_n_spin.setValue(3)
+        self._wall_n_spin.setValue(2)
         self._wall_n_spin.setFixedWidth(42)
         self._wall_n_spin.setToolTip(
             "How many walls to label on EACH side -- bid and ask are counted\n"
