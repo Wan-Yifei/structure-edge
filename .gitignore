@@ -74,3 +74,8 @@ strategy/drill/answer_order.js
 
 # Ledger-sourced drill questions are generated data too
 strategy/drill/questions_mine.js
+
+# One-off analysis figures (analysis/outputs/) -- generated pictures of
+# market data, same class as backtest/results/. The script that makes one
+# belongs in git; the PNG it writes does not.
+analysis/outputs/
