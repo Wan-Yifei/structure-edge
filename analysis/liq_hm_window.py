@@ -33,6 +33,9 @@ from PyQt6.QtWidgets import (
 )
 import pyqtgraph as pg
 
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+from analysis import viewer_config as vcfg
+
 # ── palette (matches trade_viewer_qt) ──────────────────────────────────────────
 _BG   = "#0d1117"
 _FG   = "#b0bec5"
@@ -685,7 +688,7 @@ class LiqHmWindow(QWidget):
         row1.setMovable(False)
 
         self._bid_ask_cb = QCheckBox("Bid/Ask")
-        self._bid_ask_cb.setChecked(True)
+        self._bid_ask_cb.setChecked(vcfg.liq("bid_ask"))
         self._bid_ask_cb.setToolTip(
             "Checked: teal = Bid, red = Ask (shown separately)\n"
             "Unchecked: combined with black → purple → yellow colormap")
@@ -697,7 +700,7 @@ class LiqHmWindow(QWidget):
         self._gamma_spin.setRange(0.2, 10.0)
         self._gamma_spin.setSingleStep(0.1)
         self._gamma_spin.setDecimals(1)
-        self._gamma_spin.setValue(5.0)
+        self._gamma_spin.setValue(vcfg.liq("gamma"))
         self._gamma_spin.setFixedWidth(52)
         self._gamma_spin.setToolTip(
             "Colour gamma correction.\n"
@@ -707,7 +710,7 @@ class LiqHmWindow(QWidget):
         row1.addWidget(self._gamma_spin)
 
         self._price_path_cb = QCheckBox("Price")
-        self._price_path_cb.setChecked(True)
+        self._price_path_cb.setChecked(vcfg.liq("price_path"))
         self._price_path_cb.setToolTip(
             "Overlay the mid-price path ((bid+ask)/2) per column as a white line.")
         self._price_path_cb.stateChanged.connect(self._on_price_path_changed)
@@ -718,7 +721,7 @@ class LiqHmWindow(QWidget):
         self._min_vol_spin = QSpinBox()
         self._min_vol_spin.setRange(0, 1_000_000)
         self._min_vol_spin.setSingleStep(100)
-        self._min_vol_spin.setValue(0)
+        self._min_vol_spin.setValue(vcfg.liq("min_vol"))
         self._min_vol_spin.setFixedWidth(75)
         self._min_vol_spin.setToolTip(
             "Minimum volume to include in heatmap and detection.\n"
@@ -732,7 +735,7 @@ class LiqHmWindow(QWidget):
         self._col_secs_spin = QSpinBox()
         self._col_secs_spin.setRange(1, 300)
         self._col_secs_spin.setSingleStep(1)
-        self._col_secs_spin.setValue(COL_SECS_DEF)
+        self._col_secs_spin.setValue(vcfg.liq("col_secs"))
         self._col_secs_spin.setFixedWidth(55)
         self._col_secs_spin.setToolTip(
             "Seconds per column.\n"
@@ -749,7 +752,7 @@ class LiqHmWindow(QWidget):
         self._max_cols_spin = QSpinBox()
         self._max_cols_spin.setRange(60, 1440)
         self._max_cols_spin.setSingleStep(60)
-        self._max_cols_spin.setValue(MAX_COLS_DEF)
+        self._max_cols_spin.setValue(vcfg.liq("max_cols"))
         self._max_cols_spin.setFixedWidth(60)
         self._max_cols_spin.setToolTip("Number of columns kept in memory")
         self._max_cols_spin.valueChanged.connect(self._on_max_cols_changed)
@@ -775,7 +778,7 @@ class LiqHmWindow(QWidget):
         self._n_price_spin = QSpinBox()
         self._n_price_spin.setRange(20, 500)
         self._n_price_spin.setSingleStep(20)
-        self._n_price_spin.setValue(N_PRICE)
+        self._n_price_spin.setValue(vcfg.liq("n_price"))
         self._n_price_spin.setFixedWidth(55)
         self._n_price_spin.setToolTip(
             "Price-axis resolution: number of bands the current price span is\n"
@@ -805,7 +808,7 @@ class LiqHmWindow(QWidget):
         row2.setMovable(False)
 
         self._ice_cb = QCheckBox("Iceberg")
-        self._ice_cb.setChecked(False)
+        self._ice_cb.setChecked(vcfg.liq("iceberg"))
         self._ice_cb.setToolTip(
             "Purple line: price level where resting volume repeatedly drops then\n"
             "refreshes — hallmark of a hidden large order refilling at a fixed price.")
@@ -816,7 +819,7 @@ class LiqHmWindow(QWidget):
         self._ice_min_ref_spin = QSpinBox()
         self._ice_min_ref_spin.setRange(1, 50)
         self._ice_min_ref_spin.setSingleStep(1)
-        self._ice_min_ref_spin.setValue(3)
+        self._ice_min_ref_spin.setValue(vcfg.liq("ice_min_ref"))
         self._ice_min_ref_spin.setFixedWidth(50)
         self._ice_min_ref_spin.setToolTip("Minimum refreshes to classify as iceberg")
         self._ice_min_ref_spin.valueChanged.connect(self._on_controls_changed)
@@ -825,7 +828,7 @@ class LiqHmWindow(QWidget):
         row2.addSeparator()
 
         self._spoof_cb = QCheckBox("Spoof")
-        self._spoof_cb.setChecked(False)
+        self._spoof_cb.setChecked(vcfg.liq("spoof"))
         self._spoof_cb.setToolTip(
             "Orange ▲/▼: large order that appears then vanishes without execution.\n"
             "▲ = bid spoof (false buy pressure)  ▼ = ask spoof (false sell pressure)")
@@ -836,7 +839,7 @@ class LiqHmWindow(QWidget):
         self._spoof_dur_spin = QSpinBox()
         self._spoof_dur_spin.setRange(3, 300)
         self._spoof_dur_spin.setSingleStep(5)
-        self._spoof_dur_spin.setValue(30)
+        self._spoof_dur_spin.setValue(vcfg.liq("spoof_dur"))
         self._spoof_dur_spin.setFixedWidth(50)
         self._spoof_dur_spin.setToolTip("Max seconds a large order can live before being flagged")
         self._spoof_dur_spin.valueChanged.connect(self._on_controls_changed)
@@ -845,7 +848,7 @@ class LiqHmWindow(QWidget):
         row2.addSeparator()
 
         self._wall_cb = QCheckBox("Walls")
-        self._wall_cb.setChecked(True)
+        self._wall_cb.setChecked(vcfg.liq("wall"))
         self._wall_cb.setToolTip(
             "Label the thickest resting levels with their exact price and size.\n"
             "Ranked by the largest size each price reached anywhere in the\n"
@@ -857,7 +860,7 @@ class LiqHmWindow(QWidget):
         row2.addWidget(_lbl("N:"))
         self._wall_n_spin = QSpinBox()
         self._wall_n_spin.setRange(1, 10)
-        self._wall_n_spin.setValue(2)
+        self._wall_n_spin.setValue(vcfg.liq("wall_n"))
         self._wall_n_spin.setFixedWidth(42)
         self._wall_n_spin.setToolTip(
             "How many walls to label on EACH side -- bid and ask are counted\n"
@@ -875,7 +878,7 @@ class LiqHmWindow(QWidget):
         row2.addSeparator()
 
         self._simb_cb = QCheckBox("Imbalance")
-        self._simb_cb.setChecked(True)
+        self._simb_cb.setChecked(vcfg.liq("imbalance"))
         self._simb_cb.setToolTip(
             "Lime bar   = bullish stacked imbalance (bid dominates N consecutive depth levels)\n"
             "Pink bar   = bearish stacked imbalance (ask dominates N consecutive depth levels)\n"
@@ -887,7 +890,7 @@ class LiqHmWindow(QWidget):
         self._simb_levels_spin = QSpinBox()
         self._simb_levels_spin.setRange(2, 10)
         self._simb_levels_spin.setSingleStep(1)
-        self._simb_levels_spin.setValue(3)
+        self._simb_levels_spin.setValue(vcfg.liq("simb_levels"))
         self._simb_levels_spin.setFixedWidth(45)
         self._simb_levels_spin.setToolTip("Minimum consecutive imbalanced depth levels")
         self._simb_levels_spin.valueChanged.connect(self._on_controls_changed)
@@ -897,7 +900,7 @@ class LiqHmWindow(QWidget):
         self._simb_ratio_spin = QDoubleSpinBox()
         self._simb_ratio_spin.setRange(1.5, 20.0)
         self._simb_ratio_spin.setSingleStep(0.5)
-        self._simb_ratio_spin.setValue(3.0)
+        self._simb_ratio_spin.setValue(vcfg.liq("simb_ratio"))
         self._simb_ratio_spin.setDecimals(1)
         self._simb_ratio_spin.setFixedWidth(52)
         self._simb_ratio_spin.setToolTip("bid/ask (or ask/bid) volume ratio threshold per level")
@@ -908,7 +911,7 @@ class LiqHmWindow(QWidget):
         self._simb_depth_spin = QSpinBox()
         self._simb_depth_spin.setRange(3, 50)
         self._simb_depth_spin.setSingleStep(1)
-        self._simb_depth_spin.setValue(10)
+        self._simb_depth_spin.setValue(vcfg.liq("simb_depth"))
         self._simb_depth_spin.setFixedWidth(45)
         self._simb_depth_spin.setToolTip(
             "Max depth ranks to analyse (top-of-book only).\n"
@@ -919,7 +922,7 @@ class LiqHmWindow(QWidget):
         row2.addSeparator()
 
         self._absorb_cb = QCheckBox("Aggressor")
-        self._absorb_cb.setChecked(True)
+        self._absorb_cb.setChecked(vcfg.liq("absorb"))
         self._absorb_cb.setToolTip(
             "Gold bubble   = dominant BUY aggression (net buyers > threshold).\n"
             "Purple bubble = dominant SELL aggression (net sellers > threshold).\n"
@@ -932,7 +935,7 @@ class LiqHmWindow(QWidget):
         self._absorb_min_vol_spin = QSpinBox()
         self._absorb_min_vol_spin.setRange(10, 100_000)
         self._absorb_min_vol_spin.setSingleStep(10)
-        self._absorb_min_vol_spin.setValue(500)
+        self._absorb_min_vol_spin.setValue(vcfg.liq("absorb_min_vol"))
         self._absorb_min_vol_spin.setFixedWidth(70)
         self._absorb_min_vol_spin.setToolTip(
             "Minimum |buy_vol − sell_vol| per column to show a bubble.")

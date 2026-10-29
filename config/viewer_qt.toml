@@ -1,0 +1,101 @@
+# Startup defaults for the PyQtGraph viewer (analysis/trade_viewer_qt.py)
+# and the Liquidity Heatmap window (analysis/liq_hm_window.py).
+#
+# This file sets what the windows OPEN with. It is never written back:
+# toggling a checkbox in a running window does not change this file, and
+# the next launch returns to whatever is written here.
+#
+# Delete a line -> that control falls back to its built-in default
+# (analysis/viewer_config.py, DEFAULTS). Delete the whole file -> every
+# control does. A key that is misspelt or given the wrong type is
+# reported in the viewer's log on startup, not silently ignored.
+#
+# Which indicators are AVAILABLE in the legacy matplotlib viewer is a
+# different file, config/trade_viewer.toml. Its ON/OFF state lives in
+# config/chart.json. Neither is read by the Qt viewer.
+
+# ── Toolbar checkboxes ───────────────────────────────────────────────────
+[indicators]
+# SMC row
+bos_choch     = false
+fvg           = false
+ob            = true
+
+# Indicators row
+heatmap       = true
+delta         = true
+kd_band       = false
+kd            = false
+cvd           = true
+adi           = false
+dcvd          = true
+absorb        = true    # ABS -- absorption markers. A marker for watching;
+                        # the tooltip states what it costs as an entry.
+offex         = true
+ema           = false
+avwap         = false
+vol           = false
+chandelier    = false
+atr_stop      = false
+red_up        = true
+
+# Order-flow row: tick profile size filter, then display mode
+tick_s        = true
+tick_m        = true
+tick_l        = true
+tick_vp       = false
+tick_net      = false
+
+# Options row. Walls draw on the chart; Alerts fire notifications.
+option_walls  = true
+option_alerts = false
+
+# ── Volume profile session filter and date range ─────────────────────────
+[session]
+# Any of "regular", "pre", "post", "night". All four = the profile reads
+# the day as one continuous book.
+segments = ["regular", "pre", "post", "night"]
+# Trading days covered by the session profile and the CVD window:
+# "1d", "2d", "3d" or "7d" (7d = five sessions).
+range    = "1d"
+
+# ── Toolbar spinboxes ────────────────────────────────────────────────────
+[numbers]
+redraw_secs        = 0.5
+fvg_min_pct        = 1.0
+ob_max_count       = 4
+dcvd_lookback      = 1     # 1 is the window that predicts; wider is for
+                           # looking around, not for deciding.
+avwap_sigma        = 0
+profile_bins       = 120
+poc_trail          = 2
+poc_hysteresis_pct = 5
+tick_imb_ratio     = 3.0
+option_dte         = 7
+option_wall_count  = 4
+option_poll_secs   = 15
+option_threshold   = 500
+
+# ── Liquidity Heatmap window ─────────────────────────────────────────────
+[liq_hm]
+bid_ask        = true
+price_path     = true
+iceberg        = false
+spoof          = false
+wall           = true
+imbalance      = true
+absorb         = true
+
+gamma          = 5.0   # >1 suppresses midtones: only the densest bands stay
+                       # bright. Lower it when deep thin levels black out.
+min_vol        = 0
+col_secs       = 1
+max_cols       = 240
+n_price        = 100
+ice_min_ref    = 3
+spoof_dur      = 30
+wall_n         = 2     # walls labelled per side, bid and ask counted apart
+simb_levels    = 3
+simb_ratio     = 3.0
+simb_depth     = 10
+absorb_min_vol = 500

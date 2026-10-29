@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.79.0 — Qt viewer 的开图默认值搬进 config,不再改代码 (2026-10-28)
+
+用户:「我希望新的 QT viewer 也是从一个 config 读取,而不是动代码」
+
+上一版(v0.78.1)为了换一套开图布局改了四处 Python。新增
+`config/viewer_qt.toml` + `analysis/viewer_config.py`,把这些值搬出代码。
+
+### 覆盖范围
+
+```
+[indicators]  25 个勾：SMC 三个、Indicators 行十四个、red_up、
+              逐笔 S/M/L + VP/Net、Options 两个
+[session]     四个时段选哪些 + Range（1d/2d/3d/7d）
+[numbers]     13 个工具栏 spinbox
+[liq_hm]      热力图 7 个勾 + 12 个数值（含 Gamma、Wall N）
+```
+
+`analysis/viewer_config.py` 里的 `DEFAULTS` 同时是**schema 和兜底值**:
+文件缺失、读不出、或者没提某个键,都退回它。所以删掉配置文件,行为和
+现在一模一样。
+
+### 为什么要 schema
+
+**一个拼错的键什么都不做,比没有配置文件更糟** —— 它看起来生效了。
+所以 `DEFAULTS` 不认识的键、类型不对的值、不存在的时段名或 Range,
+都会在开图时写进状态栏,而不是悄悄忽略:
+
+```
+viewer_qt.toml: unknown key [indicators] absorbb
+viewer_qt.toml: [indicators] ob = 'yes' has the wrong type; keeping True
+viewer_qt.toml: [session] range = '9d' is not one of ['1d','2d','3d','7d']
+```
+
+这几行一度自己就是崩溃点:报告写在 `_build_toolbar` 里,而 `_log` 要用
+状态栏,状态栏在工具栏之后才建。配置文件没毛病时 `problems()` 是空的,
+那个循环从来没执行过 —— **第一个写错键的人会拿到 AttributeError 而不是
+提示**。改成在 `__init__` 末尾报告,并补了回归测试。
+
+### 不进 config 的
+
+`Liquidity Heatmap` / `Multi-Day VP` / `DOM` / `Range Profile` /
+`Scanner Signals` 五个浮窗按钮仍然硬编码为关。让它们能配置等于开图就自动
+弹窗、起 worker、连库,是另一回事,没顺手做。
+
+### 顺带:一条跑十次失败六次的测试
+
+`tests/analysis/test_collector_targets.py` 的 `cfg` fixture 把 mtime 设成
+「文件当前 mtime + 10」。一个测试里的两次写入落在同一个时钟刻度时,两次
++10 得到同一个戳,reloader 比 mtime 认为没变,`ctx.subs` 是空的,测试以
+IndexError 失败。**在 HEAD 上十次跑失败六次**,和本次改动无关,只是被导入
+时序推了一下才暴露。改成让戳在 fixture 内单调递进,十次全过。
+
+(修之前我一度以为是自己的改动引起的——HEAD 上头三次恰好都过了。)
+
+15 个新测试,其中四个是拿写好的配置去起真窗口再把控件读回来,因为只测
+loader 证明不了界面在听它。全量 1318 个测试,连跑五次全过。
+
 ## v0.78.1 — 改开图默认值:BOS/CHoCH 关,OB/ABS 开,四个时段全选 (2026-10-28)
 
 用户指定的开图布局。

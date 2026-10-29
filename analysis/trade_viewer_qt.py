@@ -69,6 +69,7 @@ from PyQt6.QtWidgets import (
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
+from analysis import viewer_config as vcfg
 from core.time_utils import candle_start
 from feeds.fetcher import fetch_klines
 from strategy.smc.market_structure import detect_bos_choch
@@ -2357,6 +2358,13 @@ class TradeViewerQt(QMainWindow):
         self._build_central()
         self._build_statusbar()
 
+        # Anything wrong with config/viewer_qt.toml -- an unknown key, a
+        # value of the wrong type -- is said out loud here rather than
+        # swallowed, because a config whose typos do nothing looks like it
+        # worked. It has to wait for the status bar: _log writes to it.
+        for _msg in vcfg.problems():
+            self._log(f"viewer_qt.toml: {_msg}")
+
         # Apply dark theme
         self.setStyleSheet(f"""
             QMainWindow, QWidget {{ background: {_BG}; color: {_FG}; }}
@@ -2496,7 +2504,7 @@ class TradeViewerQt(QMainWindow):
         self._redraw_spin.setRange(0.5, 10.0)
         self._redraw_spin.setSingleStep(0.5)
         self._redraw_spin.setDecimals(1)
-        self._redraw_spin.setValue(0.5)
+        self._redraw_spin.setValue(vcfg.num("redraw_secs"))
         self._redraw_spin.setFixedWidth(60)
         self._redraw_spin.setToolTip(
             "How often the chart repaints from ticks already received. "
@@ -2513,13 +2521,11 @@ class TradeViewerQt(QMainWindow):
         tb1.addWidget(self._conn_btn)
 
         self._ind_checks: dict[str, QCheckBox | QRadioButton] = {}
-        # offex rides on the CVD panel, which is already on, and the
-        # classifier is kept current every two minutes specifically so that
-        # line is worth looking at -- leaving it off by default wasted that.
-        #
-        # BOS/CHoCH off, OB and ABS on: the layout actually worked from.
-        _default_checked = ("heatmap", "delta", "cvd", "dcvd", "offex",
-                            "option_walls", "ob", "absorb")
+        # Which overlays a chart opens with lives in config/viewer_qt.toml,
+        # not here -- see analysis/viewer_config.py for the key list and
+        # the fallbacks used when the file is absent. Complaints about that
+        # file are reported once the status bar exists, at the end of
+        # __init__: _log writes to it, and it is built after this.
 
         # ── Row 2: SMC structural indicators ────────────────────────────────
         self.addToolBarBreak()
@@ -2536,7 +2542,7 @@ class TradeViewerQt(QMainWindow):
             ("ob",        "OB"),
         ]:
             cb = QCheckBox(label)
-            cb.setChecked(key in _default_checked)
+            cb.setChecked(vcfg.flag(key))
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
             tb_smc.addWidget(cb)
@@ -2544,23 +2550,23 @@ class TradeViewerQt(QMainWindow):
                 self._fvg_min_pct = QDoubleSpinBox()
                 self._fvg_min_pct.setRange(0.05, 5.0)
                 self._fvg_min_pct.setSingleStep(0.05)
-                self._fvg_min_pct.setValue(1.00)
+                self._fvg_min_pct.setValue(vcfg.num("fvg_min_pct"))
                 self._fvg_min_pct.setDecimals(2)
                 self._fvg_min_pct.setSuffix("%")
                 self._fvg_min_pct.setFixedWidth(72)
-                self._fvg_min_pct.setEnabled(key in _default_checked)
+                self._fvg_min_pct.setEnabled(vcfg.flag(key))
                 self._fvg_min_pct.setToolTip("FVG minimum gap size (% of price)")
                 self._fvg_min_pct.valueChanged.connect(self._trigger_fetch)
                 tb_smc.addWidget(self._fvg_min_pct)
             if key == "ob":
                 self._ob_max_count = QSpinBox()
                 self._ob_max_count.setRange(1, 20)
-                self._ob_max_count.setValue(4)
+                self._ob_max_count.setValue(vcfg.num("ob_max_count"))
                 self._ob_max_count.setFixedWidth(50)
                 # follow the checkbox: _on_indicator_toggle only corrects
                 # this on the next toggle, so a default-on OB would sit
                 # drawn with its quota spinbox greyed out until touched.
-                self._ob_max_count.setEnabled(key in _default_checked)
+                self._ob_max_count.setEnabled(vcfg.flag(key))
                 self._ob_max_count.setToolTip(
                     "OB quota per side of price (strongest by volume). "
                     "Blocks already broken are capped at 1 per side on "
@@ -2594,7 +2600,7 @@ class TradeViewerQt(QMainWindow):
             ("atr_stop",  "ATR Stop"),  # fixed k x ATR stop lines from an anchor
         ]:
             cb = QCheckBox(label)
-            cb.setChecked(key in _default_checked)
+            cb.setChecked(vcfg.flag(key))
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
             tb_ind.addWidget(cb)
@@ -2604,7 +2610,7 @@ class TradeViewerQt(QMainWindow):
                 # window so either stays readable.
                 self._dcvd_spin = QSpinBox()
                 self._dcvd_spin.setRange(1, 30)
-                self._dcvd_spin.setValue(DCVD_LOOKBACK)
+                self._dcvd_spin.setValue(vcfg.num("dcvd_lookback"))
                 self._dcvd_spin.setFixedWidth(48)
                 self._dcvd_spin.setToolTip(
                     "DCVD lookback, in bars (the coloured bars).\n"
@@ -2678,7 +2684,7 @@ class TradeViewerQt(QMainWindow):
                 tb_ind.addWidget(self._avwap_anchor_edit)
                 self._avwap_sigma_spin = QSpinBox()
                 self._avwap_sigma_spin.setRange(0, 3)
-                self._avwap_sigma_spin.setValue(0)
+                self._avwap_sigma_spin.setValue(vcfg.num("avwap_sigma"))
                 self._avwap_sigma_spin.setFixedWidth(36)
                 self._avwap_sigma_spin.setToolTip(
                     "Number of volume-weighted standard-deviation bands to draw\n"
@@ -2713,7 +2719,7 @@ class TradeViewerQt(QMainWindow):
 
         # Color scheme toggle
         cb_red_up = QCheckBox("Red Up")
-        cb_red_up.setChecked(True)
+        cb_red_up.setChecked(vcfg.flag("red_up"))
         cb_red_up.setToolTip(
             "Checked = red rises, green falls (CN convention)\n"
             "Unchecked = green rises, red falls (Western convention)")
@@ -2730,15 +2736,13 @@ class TradeViewerQt(QMainWindow):
         toolbar_rows.append(tb_sess)
 
         tb_sess.addWidget(_lbl("Session:"))
+        _sess_on = vcfg.sessions()
         for key, label in [
             ("regular", "Regular"), ("pre", "Pre"),
             ("post", "Post"),       ("night", "Night"),
         ]:
             cb = QCheckBox(label)
-            # All four on: the volume profile is read as one continuous
-            # book across the day, so premarket and overnight levels
-            # belong in it rather than being dropped.
-            cb.setChecked(True)
+            cb.setChecked(key in _sess_on)
             cb.stateChanged.connect(self._on_session_toggle)
             self._ind_checks[f"sess_{key}"] = cb
             tb_sess.addWidget(cb)
@@ -2756,7 +2760,7 @@ class TradeViewerQt(QMainWindow):
         self._range_group = QButtonGroup(self)
         for val, label in [("1d", "1D"), ("2d", "2D"), ("3d", "3D"), ("7d", "1W")]:
             rb = QRadioButton(label)
-            rb.setChecked(val == "1d")
+            rb.setChecked(val == vcfg.get("session", "range"))
             rb.toggled.connect(self._on_range_changed)
             self._ind_checks[f"range_{val}"] = rb
             self._range_group.addButton(rb)
@@ -2766,7 +2770,7 @@ class TradeViewerQt(QMainWindow):
         tb_sess.addWidget(_lbl("Bins:"))
         self._profile_bins_spin = QSpinBox()
         self._profile_bins_spin.setRange(20, 300)
-        self._profile_bins_spin.setValue(120)
+        self._profile_bins_spin.setValue(vcfg.num("profile_bins"))
         self._profile_bins_spin.setFixedWidth(48)
         self._profile_bins_spin.setToolTip(
             "Number of price bins in the session volume profile (right panel) --\n"
@@ -2777,7 +2781,7 @@ class TradeViewerQt(QMainWindow):
         tb_sess.addWidget(_lbl("POCs:"))
         self._poc_trail_spin = QSpinBox()
         self._poc_trail_spin.setRange(1, 6)
-        self._poc_trail_spin.setValue(2)
+        self._poc_trail_spin.setValue(vcfg.num("poc_trail"))
         self._poc_trail_spin.setFixedWidth(40)
         self._poc_trail_spin.setToolTip(
             "How many POCs to mark in the session profile, newest first.\n"
@@ -2792,7 +2796,7 @@ class TradeViewerQt(QMainWindow):
         tb_sess.addWidget(_lbl("Hold:"))
         self._poc_hyst_spin = QSpinBox()
         self._poc_hyst_spin.setRange(0, 50)
-        self._poc_hyst_spin.setValue(5)
+        self._poc_hyst_spin.setValue(vcfg.num("poc_hysteresis_pct"))
         self._poc_hyst_spin.setSuffix("%")
         self._poc_hyst_spin.setFixedWidth(56)
         self._poc_hyst_spin.setToolTip(
@@ -2824,7 +2828,7 @@ class TradeViewerQt(QMainWindow):
             ("tick_l", "L", "Large orders  (volume > day p67)"),
         ]:
             cb = QCheckBox(label)
-            cb.setChecked(True)
+            cb.setChecked(vcfg.flag(key))
             cb.setToolTip(tip)
             cb.stateChanged.connect(self._on_tick_size_toggle)
             self._ind_checks[key] = cb
@@ -2832,7 +2836,7 @@ class TradeViewerQt(QMainWindow):
 
         tb3.addSeparator()
         cb_vp = QCheckBox("VP")
-        cb_vp.setChecked(False)
+        cb_vp.setChecked(vcfg.flag("tick_vp"))
         cb_vp.setToolTip(
             "Tick profile: show the hovered candle (or selected range) as a\n"
             "volume profile -- one bar per price level for TOTAL traded volume,\n"
@@ -2846,7 +2850,7 @@ class TradeViewerQt(QMainWindow):
         tb3.addWidget(cb_vp)
 
         cb_net = QCheckBox("Net")
-        cb_net.setChecked(False)
+        cb_net.setChecked(vcfg.flag("tick_net"))
         cb_net.setToolTip(
             "Tick profile: show a single net (buy − sell) bar per price level\n"
             "instead of separate diverging buy/sell bars")
@@ -2859,7 +2863,7 @@ class TradeViewerQt(QMainWindow):
         self._tick_imb_ratio = QDoubleSpinBox()
         self._tick_imb_ratio.setRange(1.5, 20.0)
         self._tick_imb_ratio.setSingleStep(0.5)
-        self._tick_imb_ratio.setValue(3.0)
+        self._tick_imb_ratio.setValue(vcfg.num("tick_imb_ratio"))
         self._tick_imb_ratio.setDecimals(1)
         self._tick_imb_ratio.setFixedWidth(52)
         self._tick_imb_ratio.setToolTip(
@@ -2948,7 +2952,7 @@ class TradeViewerQt(QMainWindow):
             # Walls draw on the chart; Alerts fire notifications. Turning the
             # drawing on by default is harmless, starting a notification
             # stream unasked is not, so only the first is in the set.
-            cb.setChecked(key in _default_checked)
+            cb.setChecked(vcfg.flag(key))
             cb.stateChanged.connect(self._on_option_indicator_toggle)
             self._ind_checks[key] = cb
             tb_opt.addWidget(cb)
@@ -2959,7 +2963,7 @@ class TradeViewerQt(QMainWindow):
         tb_opt.addWidget(_lbl("DTE:"))
         self._option_dte_spin = QSpinBox()
         self._option_dte_spin.setRange(0, 30)
-        self._option_dte_spin.setValue(7)
+        self._option_dte_spin.setValue(vcfg.num("option_dte"))
         self._option_dte_spin.setFixedWidth(40)
         self._option_dte_spin.setToolTip("Max days-to-expiry for the option chain polled")
         tb_opt.addWidget(self._option_dte_spin)
@@ -2976,7 +2980,8 @@ class TradeViewerQt(QMainWindow):
         tb_opt.addWidget(_lbl("Walls:"))
         self._option_wall_count_spin = QSpinBox()
         self._option_wall_count_spin.setRange(1, 10)
-        self._option_wall_count_spin.setValue(4)   # 4 per side reads the GEX structure, not just its peak
+        self._option_wall_count_spin.setValue(vcfg.num("option_wall_count"))
+        # 4 per side reads the GEX structure, not just its peak
         self._option_wall_count_spin.setFixedWidth(36)
         self._option_wall_count_spin.setToolTip(
             "Number of Call Wall / Put Wall lines to draw per side, strongest\n"
@@ -2989,7 +2994,7 @@ class TradeViewerQt(QMainWindow):
         tb_opt.addWidget(_lbl("Poll(s):"))
         self._option_interval_spin = QSpinBox()
         self._option_interval_spin.setRange(5, 300)
-        self._option_interval_spin.setValue(15)
+        self._option_interval_spin.setValue(vcfg.num("option_poll_secs"))
         self._option_interval_spin.setFixedWidth(45)
         self._option_interval_spin.setToolTip(
             "Seconds between option-chain polls -- drives both Option Walls\n"
@@ -3001,7 +3006,7 @@ class TradeViewerQt(QMainWindow):
         tb_opt.addWidget(_lbl("Threshold:"))
         self._option_threshold_spin = QSpinBox()
         self._option_threshold_spin.setRange(1, 100_000)
-        self._option_threshold_spin.setValue(500)
+        self._option_threshold_spin.setValue(vcfg.num("option_threshold"))
         self._option_threshold_spin.setFixedWidth(65)
         self._option_threshold_spin.setToolTip(
             "Option Alerts: minimum single-contract volume increase between\n"
@@ -3165,11 +3170,13 @@ class TradeViewerQt(QMainWindow):
         # zero height when their indicator is off instead of leaving a gap.
         self._chart_widget.ci.layout.setRowStretchFactor(0, 5)
         # Read from the checkboxes, not from literals. These were hardcoded
-        # and hand-synced to _default_checked -- the "CVD on by default"
+        # and hand-synced to the default-on set -- the "CVD on by default"
         # comment was that sync, performed once and never repeated. Adding
         # DCVD to the set then checked its box while leaving its row
         # collapsed, because a box that starts checked never emits
         # stateChanged and the handler that reveals the row never ran.
+        # Now that the set comes from config/viewer_qt.toml, any literal
+        # here would go stale the first time the file is edited.
         for plot, row, key in ((self._plot_v,    1, "vol"),
                                (self._plot_kd,   2, "kd"),
                                (self._plot_cvd,  3, "cvd"),
