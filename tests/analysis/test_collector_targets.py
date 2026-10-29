@@ -11,6 +11,7 @@ happy path: a half-written file and an empty list must never be obeyed,
 because unsubscribing everything is worse than being briefly stale.
 """
 import json
+import os
 import pathlib
 import sys
 import threading
@@ -60,15 +61,22 @@ class _Ctx:
 @pytest.fixture
 def cfg(tmp_path):
     p = tmp_path / "schedule.json"
+    stamp = [0.0]
 
     def write(targets, raw=None):
         p.write_text(raw if raw is not None
                      else json.dumps({"targets": targets}), encoding="utf-8")
         # mtime has a coarse resolution on some filesystems; the reloader
         # compares it, so a same-second rewrite must still register.
+        #
+        # Stepping past the file's CURRENT stamp is not enough: both
+        # writes in a test can land in one clock tick, and then +10 from
+        # each lands on the same value, the reloader sees no change and
+        # the test fails with an empty ctx.subs. That is why this file
+        # failed 6 runs in 10 before the stamp was made to carry over.
         st = p.stat()
-        import os
-        os.utime(p, (st.st_atime, st.st_mtime + 10))
+        stamp[0] = max(st.st_mtime, stamp[0]) + 10
+        os.utime(p, (st.st_atime, stamp[0]))
         return p
 
     write(["US.SOXL"])
