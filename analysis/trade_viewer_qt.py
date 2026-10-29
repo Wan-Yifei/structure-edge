@@ -707,27 +707,6 @@ _DCVD_LIT_ALPHA = 215     # bars that did
 ABS_THRESHOLD = 1.5
 ABS_ATR_N = 14            # the study's ATR14, the unit A is measured in
 
-# The study's own window: RTH 09:31-16:00, with the overnight and
-# premarket sessions taking no part -- backtest/absorption.py says so in
-# as many words and filters on it. Bars are stamped at their END, so a bar
-# ending 09:31 is the one covering 09:30-09:31.
-ABS_RTH_LO, ABS_RTH_HI = 9.5, 16.0
-
-# The scale and the gate are read off the SAME TIME OF DAY in previous
-# sessions, not off a trailing bar count. Volume changes by 25x across
-# the open, and a trailing window straddling that change measures a bar
-# against a market that no longer exists: for an hour after the open the
-# gate sat around 35x the |x| actually on offer, so between 10:00 and
-# 11:00 nothing could be marked at all (1 mark in 136 sessions).
-#
-# Bucket width and history length barely matter -- 10/15/30-minute
-# buckets against 5/10/20 sessions all land at 6.3-6.6 marks a session
-# with 16-18% of them before 11:00 -- so these are picked for the
-# smallest history a loaded chart is likely to have.
-ABS_TOD_BUCKET_MIN = 15   # time-of-day bucket, in minutes
-ABS_TOD_SESSIONS = 20     # at most this many previous sessions per bucket
-ABS_TOD_MIN_SESSIONS = 2  # fewer than this -> no gate, and so no mark
-
 # A slower reading drawn behind the bars for context. The bars are each
 # minute's own imbalance; this is the direction of the stretch around them.
 # It is deliberately not the decision value -- see the note on the window.
@@ -5782,90 +5761,14 @@ class TradeViewerQt(QMainWindow):
         return (fire & (x < 0) & (A >= ABS_THRESHOLD),
                 fire & (x > 0) & (A <= -ABS_THRESHOLD))
 
-    def _abs_seed_profile(self, before_day, bw: int) -> tuple[dict, dict]:
-        """Per-bucket volume and net-flow history from sessions the chart
-        never loaded.
+    def _absorption_flags(self, klines: pd.DataFrame, buckets: dict,
+                          cm: int):
+        """(bull, bear) masks over the whole frame, a trading day at a time.
 
-        Without this the profile can only be built from sessions in the
-        frame, and the frame holds as many sessions as the tick range
-        setting asks for: RANGE_DAYS tops out at 5 and defaults to 1. Two
-        previous sessions are needed before a bucket has a gate, so at
-        1d and 2d NOTHING was ever marked -- measured at 0, 0, 3, 23
-        marks for 1, 2, 3 and 5 loaded sessions. The study behind the
-        mark was validated over 112 sessions of offline data, which is
-        why the hole did not show up there.
-
-        Read-only against the delta-bar cache, and never for the current
-        session: a rebuild walks ticks.db and would do it inside a
-        repaint. An empty pair means no seed, which leaves the in-frame
-        behaviour exactly as it was.
-        """
-        # The symbol lives in the toolbar field, which is what every
-        # other overlay reads. `self._code` belongs to
-        # OptionChainFetcher, not to this window: reading it here
-        # returned None on every real frame while the tests, which set
-        # the attribute themselves, manufactured the very precondition
-        # they were meant to check. Nothing was ever seeded in the app.
-        code = self._code_edit.text().strip() if self._code_edit else ""
-        if not code:
-            return {}, {}
-        key = (code, str(before_day), bw)
-        if getattr(self, "_abs_seed_key", None) == key:
-            return self._abs_seed_val
-        vol_hist: dict[int, list[np.ndarray]] = {}
-        ofi_hist: dict[int, list[np.ndarray]] = {}
-        try:
-            from feeds import delta_bars
-            end = pd.Timestamp(before_day) - pd.Timedelta(minutes=1)
-            start = (pd.Timestamp(before_day)
-                     - pd.Timedelta(days=ABS_TOD_SESSIONS * 2))
-            df = delta_bars.load_cached(code, start, end)
-            if df is not None and len(df):
-                lo = int(round(ABS_RTH_LO * 60))
-                hi = int(round(ABS_RTH_HI * 60))
-                mins = df.index.hour * 60 + df.index.minute
-                df = df[(mins > lo) & (mins <= hi)]
-                tot = (df["buy"] + df["sell"]).to_numpy(float)
-                net = np.abs((df["buy"] - df["sell"]).to_numpy(float))
-                bkt = ((df.index.hour * 60 + df.index.minute - lo)
-                       .to_numpy() // bw)
-                day = df.index.normalize().to_numpy()
-                ok = tot >= DCVD_MIN_SIGNED
-                for d in list(dict.fromkeys(day))[-ABS_TOD_SESSIONS:]:
-                    on = (day == d) & ok
-                    for b in np.unique(bkt[on]):
-                        take = on & (bkt == b)
-                        vol_hist.setdefault(int(b), []).append(tot[take])
-                        ofi_hist.setdefault(int(b), []).append(net[take])
-        except Exception as exc:                      # noqa: BLE001
-            # A missing or unreadable cache is not a reason to stop
-            # drawing the chart; it only costs the early marks.
-            self._log(f"Absorption profile unavailable: {exc}")
-            vol_hist, ofi_hist = {}, {}
-        self._abs_seed_key = key
-        self._abs_seed_val = (vol_hist, ofi_hist)
-        return self._abs_seed_val
-
-    def _absorption_flags(
-        self, klines: pd.DataFrame, buckets: dict, cm: int,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """(bull, bear) masks over the whole frame, session by session.
-
-        RTH only -- the study excludes premarket and the overnight
-        session, and this used to not: it split on the 20:00 trading-day
-        boundary and fed 2,000-share overnight bars through the same
-        windows as 50,000-share RTH ones. 55% of the marks landed
-        outside RTH, and the |x| that the open's 25x volume jump blew up
-        then sat in the percentile window for an hour afterwards and
-        held the gate far above anything RTH could reach.
-
-        So the scale and the gate come from the same TIME OF DAY in
-        previous sessions instead, while lambda, the residual spread and
-        ATR continue across the boundary -- none of those depend on the
-        volume regime, and continuing them is what lets a session be
-        marked before 10:30 rather than warming up through its first
-        hour. Only `dp` stays inside the session, so the overnight gap
-        never enters as a move no flow explains.
+        Split by day because every window here is trailing: one reaching
+        back over the 20:00 boundary would fit this session's flow
+        against the previous session's, and the overnight gap would enter
+        as a price move no flow explains.
         """
         n = len(klines)
         bull = np.zeros(n, dtype=bool)
@@ -5876,96 +5779,15 @@ class TradeViewerQt(QMainWindow):
         h = klines["high"].to_numpy(float)
         l = klines["low"].to_numpy(float)
         c = klines["close"].to_numpy(float)
-        tot = buy + sell
-
-        mins = np.full(n, -1, dtype=int)
-        for i, ts in enumerate(klines["time_key"].to_numpy()):
-            s = str(ts)
-            try:
-                mins[i] = int(s[11:13]) * 60 + int(s[14:16])
-            except (ValueError, IndexError):
-                mins[i] = -1
-        lo = int(round(ABS_RTH_LO * 60))
-        hi = int(round(ABS_RTH_HI * 60))
-
-        # Sessions in the order they occur. RTH bars of one trading day
-        # are contiguous, so grouping by day keeps them in time order.
-        order: list = []                       # trading days, chronological
-        by_day: dict[object, list[int]] = {}   # day -> its RTH bar indices
-        for i in np.where((mins > lo) & (mins <= hi))[0]:
-            d = day[i]
-            if d is None:
+        start = 0
+        for i in range(1, n + 1):
+            if i < n and day[i] == day[start]:
                 continue
-            if d not in by_day:
-                by_day[d] = []
-                order.append(d)
-            by_day[d].append(i)
-
-        # A bucket holds at least three bars of whatever timeframe is
-        # loaded, or a 15-minute bucket on a 1-hour chart would be one
-        # bar a session and its percentile would be a single number.
-        bw = max(ABS_TOD_BUCKET_MIN, 3 * cm)
-        # bucket -> one array of that bucket's values per past session,
-        # seeded from sessions before the frame so the first loaded one
-        # is not spent building a profile it could have been given.
-        vol_hist, ofi_hist = ({}, {})
-        if order:
-            vol_hist, ofi_hist = self._abs_seed_profile(order[0], bw)
-            vol_hist = {k: list(v) for k, v in vol_hist.items()}
-            ofi_hist = {k: list(v) for k, v in ofi_hist.items()}
-        atr0: float | None = None
-        tail: tuple[np.ndarray, np.ndarray] | None = None
-        for d in order:
-            idx = np.asarray(by_day[d], dtype=int)
-            if len(idx) < 25:
-                continue
-            bkt = (mins[idx] - lo) // bw
-            scale = np.full(len(idx), np.nan)
-            gate = np.full(len(idx), np.nan)
-            # The gate is the 80th percentile of the NET flow this bucket
-            # usually delivers, divided by the scale so it is in x's
-            # units. Taking the percentile of |x| directly instead needs
-            # x for the previous sessions, which needs the scale they
-            # did not have yet -- it bootstrapped twice over and no gate
-            # existed until the fifth loaded session.
-            for b in np.unique(bkt):
-                sel = bkt == b
-                vs = vol_hist.get(int(b), [])
-                os_ = ofi_hist.get(int(b), [])
-                if len(vs) < ABS_TOD_MIN_SESSIONS:
-                    continue
-                sc = float(np.median(np.concatenate(vs)))
-                if sc <= 0:
-                    continue
-                scale[sel] = sc
-                if len(os_) >= ABS_TOD_MIN_SESSIONS:
-                    gate[sel] = np.quantile(np.concatenate(os_),
-                                            DCVD_FLOW_PCT) / sc
-            x, y, A, g, atr_end = self._abs_series(
-                h[idx], l[idx], c[idx], buy[idx], sell[idx],
-                scale=scale, gate=gate, atr0=atr0, prev=tail)
-            fire = (np.isfinite(x) & np.isfinite(g) & np.isfinite(A)
-                    & (np.abs(x) >= g))
-            bull[idx] = fire & (x < 0) & (A >= ABS_THRESHOLD)
-            bear[idx] = fire & (x > 0) & (A <= -ABS_THRESHOLD)
-
-            # What the NEXT session is measured against. Appended after
-            # it was used, never before, or a bar would be in its own
-            # reference.
-            ok = tot[idx] >= DCVD_MIN_SIGNED
-            net = np.abs(buy[idx] - sell[idx])
-            for b in np.unique(bkt):
-                take = (bkt == b) & ok
-                if not take.any():
-                    continue
-                k = int(b)
-                vol_hist.setdefault(k, []).append(tot[idx][take])
-                ofi_hist.setdefault(k, []).append(net[take])
-                vol_hist[k] = vol_hist[k][-ABS_TOD_SESSIONS:]
-                ofi_hist[k] = ofi_hist[k][-ABS_TOD_SESSIONS:]
-            keep = slice(max(0, len(idx) - DCVD_FLOW_WIN), len(idx))
-            atr0 = atr_end
-            tail = (x[keep], y[keep])
+            sl = slice(start, i)
+            b, e = self._abs_day(h[sl], l[sl], c[sl], buy[sl], sell[sl])
+            bull[sl] = b
+            bear[sl] = e
+            start = i
         return bull, bear
 
     def _draw_absorption(self, klines: pd.DataFrame, buckets: dict,

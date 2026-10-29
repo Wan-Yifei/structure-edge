@@ -68,75 +68,6 @@ def _quiet(n, base=100.0, vol=2000.0, slope=4e-5, seed=7):
     return list(closes), list(buys), list(sells)
 
 
-def _frame_days(days, day0=datetime(2026, 10, 19), lo_min=9 * 60 + 30):
-    """Several RTH sessions in one frame.
-
-    `days` is a list of (closes, buys, sells) per session; session k's
-    bar i ends at 09:31 + i minutes on day0 + k. The time-of-day profile
-    reads previous sessions, so anything exercising it needs at least
-    three of them -- a single day marks nothing by construction.
-    """
-    from core.time_utils import candle_start
-
-    rows, buckets = [], {}
-    for k, (closes, buys, sells) in enumerate(days):
-        base = day0 + timedelta(days=k, minutes=lo_min)
-        prev = closes[0]
-        for i, (c, b, s) in enumerate(zip(closes, buys, sells)):
-            hi, lo = max(c, prev) + 0.05, min(c, prev) - 0.05
-            end = base + timedelta(minutes=CM * (i + 1))
-            rows.append((end.strftime("%Y-%m-%d %H:%M"), prev, hi, lo, c,
-                         float(b + s)))
-            bk = candle_start(end - timedelta(minutes=CM), CM)
-            buckets[bk] = {float(c): {"buy": float(b), "sell": float(s),
-                                      "neutral": 0.0}}
-            prev = c
-    kl = pd.DataFrame(rows, columns=["time_key", "open", "high", "low",
-                                     "close", "volume"])
-    return kl, buckets
-
-
-def _ramped(n, base=100.0, seed=7, peak=10.0, decay=40.0, vol0=2000.0):
-    """A session whose volume opens high and decays, as a real one does.
-
-    The flat-volume stretch _quiet builds cannot show what went wrong:
-    the bug was a trailing window straddling a volume regime change, and
-    with no change there is nothing to straddle. Here bar 0 trades
-    `peak` x the late-session rate, which is what left the gate stuck
-    far above anything the rest of the session could reach.
-    """
-    rng = np.random.default_rng(seed)
-    i = np.arange(n, dtype=float)
-    vol = vol0 * (1.0 + (peak - 1.0) * np.exp(-i / decay))
-    ofi = rng.normal(0, 0.2, n) * vol
-    buys = vol + ofi / 2
-    sells = vol - ofi / 2
-    dp = 4e-5 * ofi / (vol / 2000.0) + rng.normal(0, 0.01, n)
-    closes = base + np.cumsum(dp)
-    return list(closes), list(buys), list(sells)
-
-
-def _pre_then_rth(n_pre, n_rth, base=100.0, seed=7, thin=6.0):
-    """A thin premarket stretch followed by a real session.
-
-    This is the shape the bug lived in: premarket trades a fraction of
-    the RTH rate -- on the real feed the median was 1,650 shares a bar
-    against RTH's 10,944 -- so a trailing window spanning the open
-    measures a bar against a market that is gone, and the |x| that
-    produces holds the percentile above anything RTH can reach for the
-    hour behind it.
-
-    Flat, not ramped, and not _quiet: _quiet's imbalance is a fixed 400
-    shares whatever the volume, so at a premarket rate it drives buy and
-    sell NEGATIVE and every bar falls under the 300-share floor -- the
-    contamination then never happens and the control passes vacuously.
-    """
-    pc, pb, ps = _ramped(n_pre, base=base, seed=seed, peak=1.0,
-                         vol0=2000.0 / thin)
-    rc, rb, rs = _ramped(n_rth, base=pc[-1], seed=seed + 100)
-    return pc + rc, pb + rb, ps + rs
-
-
 def _hl(c):
     c = np.asarray(c, float)
     prev = np.r_[c[0], c[:-1]]
@@ -246,130 +177,23 @@ class TestItCannotSeeForward:
 
 
 class TestTheDayBoundary:
-    def test_only_rth_is_marked(self, viewer):
-        """The study is RTH 09:31-16:00, overnight and premarket taking
-        no part in it -- backtest/absorption.py says so. This used to
-        split on the 20:00 trading-day boundary instead, which fed 2,000-
-        share overnight bars through the same windows as the 50,000-share
-        RTH ones -- 55% of the marks landed outside RTH."""
-        days = [_ramped(150, base=100.0 + 2 * k, seed=11 + k)
-                for k in range(4)]
-        # An unmistakable absorption bar in the premarket of the last
-        # session: heavy one-sided selling, price up.
-        c, b, s = days[-1]
-        c[20] = c[19] + 0.9
-        s[20] = 400_000.0
-        b[20] = 2_000.0
-        kl, buckets = _frame_days(days, lo_min=8 * 60)     # 08:01 onward
+    def test_a_short_day_cannot_borrow_the_previous_one(self, viewer):
+        """Windows are trailing, and one reaching over 20:00 would fit
+        this session's flow against the last session's -- with the
+        overnight gap entering as a move no flow explains."""
+        # Starting 18:30, bar i covers 18:30+i, so the 20:00 boundary puts
+        # bars 0..89 in one trading day and 90..99 in the next.
+        c, b, s = _quiet(90, base=100.0)
+        c[80] = c[79] + 0.9                       # a real event in day one
+        s[80] = 40000.0
+        c2, b2, s2 = _quiet(10, base=120.0)       # a new day, 20 points up
+        kl, buckets = _frame(c + c2, b + b2, s + s2,
+                             t0=datetime(2026, 10, 26, 18, 30))
         bull, bear = viewer._absorption_flags(kl, buckets, CM)
-        mins = [int(str(t)[11:13]) * 60 + int(str(t)[14:16])
-                for t in kl["time_key"]]
-        for i in np.where(bull | bear)[0]:
-            assert 9 * 60 + 30 < mins[i] <= 16 * 60, \
-                f"标记落在 RTH 之外：{kl['time_key'].iloc[i]}"
-
-    def test_the_first_bar_of_a_session_is_never_marked(self, viewer):
-        """`dp` is the only quantity that does not continue across the
-        boundary, because the overnight gap is a price move no flow
-        explains -- the original reason for splitting by day at all."""
-        days = [_ramped(150, base=100.0 + 9 * k, seed=3 + k)
-                for k in range(5)]
-        # Each first bar is made into something that WOULD be marked if
-        # the gap counted as its move: heavily one-sided, several times
-        # the usual size. Without this the check passes whether or not
-        # dp is carried over, because no first bar happens to qualify --
-        # mutation testing is what says which of the two it is.
-        for k in range(1, 5):
-            c, b, s = days[k]
-            tot = (b[0] + s[0]) * 4
-            s[0], b[0] = tot * 0.95, tot * 0.05
-        kl, buckets = _frame_days(days)
-        bull, bear = viewer._absorption_flags(kl, buckets, CM)
-        firsts = {k * 150 for k in range(5)}
-        hit = firsts & set(np.where(bull | bear)[0].tolist())
-        assert not hit, f"交易日第一根被标记了：{sorted(hit)}"
-
-    def test_a_session_is_marked_before_its_sixtieth_bar(self, viewer):
-        """lambda, the residual spread and ATR continue across sessions,
-        which is what makes the first hour reachable. Warming all three
-        up inside the session left nothing markable before 10:30, and on
-        the real feed that was 0 marks in 09:31-10:30 over 136
-        sessions."""
-        days = [_ramped(200, base=100.0, seed=21 + k) for k in range(6)]
-        c, b, s = days[-1]
-        c[12] = c[11] + 0.5                   # 09:43, inside the old warm-up
-        s[12] = 120_000.0
-        b[12] = 2_000.0
-        kl, buckets = _frame_days(days)
-        bull, _bear = viewer._absorption_flags(kl, buckets, CM)
-        assert bull[5 * 200 + 12], \
-            "续窗之后第 12 根仍然没标 —— 热身还是在交易日内重来"
-
-    def test_the_open_does_not_set_the_gate_for_the_whole_morning(
-            self, viewer):
-        """The bug, stated as a test.
-
-        A trailing percentile of |x| keeps the open's blown-up values for
-        sixty bars after the open, so the hour behind it is judged
-        against a market that has already gone. On the real feed that hour
-        held 1 mark in 136 sessions. Each planted bar here is one-sided
-        and fails to move price, and is sized to what ITS OWN time of day
-        trades -- not to the open -- so only a time-of-day gate can see
-        them.
-        """
-        n_pre, n_rth = 60, 150                    # 08:31-09:30, 09:31-12:00
-        days = [_pre_then_rth(n_pre, n_rth, base=100.0, seed=41 + k)
-                for k in range(8)]
-        # One plant a session, so each is judged against an unshaken
-        # series: several in one session make the later ones unremarkable
-        # by inflating the ATR and the residual spread the earlier ones
-        # left behind.
-        at = {3: 60, 4: 70, 5: 80, 6: 90, 7: 100}     # 10:31 - 11:11
-        for k, j in at.items():
-            c, b, s = days[k]
-            i = n_pre + j
-            tot = (b[i] + s[i]) * 1.6             # big for this minute,
-            s[i], b[i] = tot * 0.92, tot * 0.08   # tiny next to the open
-            for m in range(i, len(c)):            # and price goes the
-                c[m] += 0.30                      # other way
-        kl, buckets = _frame_days(days, lo_min=8 * 60 + 30)
-        bull, _bear = viewer._absorption_flags(kl, buckets, CM)
-        per = n_pre + n_rth
-        got = [k for k, j in at.items() if bull[k * per + n_pre + j]]
-
-        # The control: the whole day through one trailing window, which
-        # is what this did before -- premarket and RTH in the same
-        # percentile, so the open's blown-up |x| sets the gate for the
-        # hour behind it.
-        old = []
-        for k, j in at.items():
-            c, b, s = days[k]
-            cc = np.asarray(c, float)
-            hh, ll = _hl(cc)
-            ob, _ = viewer._abs_day(hh, ll, cc, np.asarray(b, float),
-                                    np.asarray(s, float))
-            if ob[n_pre + j]:
-                old.append(k)
-        assert len(got) >= 4, f"时段门槛只标到第 {got} 天，预期大部分"
-        assert len(got) > len(old), \
-            f"换门槛没有带来差别：时段 {got} vs 整天滚动 {old}"
-
-    def test_a_session_is_not_in_its_own_reference(self, viewer):
-        """The profile is appended after it is used, never before. The
-        other way round a bar helps set the bar it is judged against,
-        which reads as a gate that quietly tracks whatever just
-        happened."""
-        days = [_ramped(150, base=100.0, seed=61 + k) for k in range(4)]
-        kl, buckets = _frame_days(days)
-        before = viewer._absorption_flags(kl, buckets, CM)[0].copy()
-        # Blow up ONE bar of the last session. Nothing in an earlier
-        # session may move, and the bucket's own gate must not absorb it.
-        c, b, s = days[-1]
-        s[140] = (b[140] + s[140]) * 40
-        kl2, buckets2 = _frame_days(days)
-        after = viewer._absorption_flags(kl2, buckets2, CM)[0]
-        assert (before[:3 * 150] == after[:3 * 150]).all(), \
-            "改最后一个交易日的一根，前面几天的标记变了"
+        fired = set(np.where(bull | bear)[0].tolist())
+        assert 80 in fired, "the day-one event was lost in the split"
+        assert all(i < 90 for i in fired), \
+            f"a mark landed in the 10-bar second day: {sorted(fired)}"
 
     def test_a_session_shorter_than_the_warm_up_marks_nothing(self, viewer):
         """Three trailing windows run in series -- 20 bars for the volume
@@ -388,186 +212,12 @@ class TestTheDayBoundary:
         assert not bull.any() and not bear.any()
 
 
-SEED_PLANT = 9.9e6      # unmistakable, and only outside RTH
-
-
-def _seed_frame(days, day0=datetime(2026, 10, 12), lo_min=9 * 60 + 30,
-                n=150):
-    """What the delta-bar cache would hand back for `days` sessions.
-
-    Each session carries one bar stamped 09:30 -- the close of the
-    premarket session, not part of RTH -- with a volume nothing inside
-    RTH comes near. The cache is not filtered, so the seed has to do it,
-    and a fixture made of RTH rows alone cannot tell whether it did.
-    """
-    rows = []
-    for k in range(days):
-        c, b, s = _ramped(n, base=100.0, seed=201 + k)
-        base = day0 + timedelta(days=k, minutes=lo_min)
-        rows.append((base, SEED_PLANT, SEED_PLANT))      # 09:30 exactly
-        for i in range(n):
-            rows.append((base + timedelta(minutes=i + 1), b[i], s[i]))
-    return pd.DataFrame(
-        {"buy": [r[1] for r in rows], "sell": [r[2] for r in rows]},
-        index=pd.DatetimeIndex([r[0] for r in rows]))
-
-
-class TestTheProfileComesFromMoreThanTheChartHolds:
-    """The chart holds 1 to 5 sessions; the profile needs more than that.
-
-    RANGE_DAYS tops out at 5 trading days of ticks and defaults to 1,
-    while a bucket needs two PREVIOUS sessions before it has a gate. So
-    a time-of-day profile built only from what is on screen marked
-    nothing at all at the two commonest settings -- 0, 0, 3 and 23 marks
-    for 1, 2, 3 and 5 loaded sessions, against 6.8 a session offline.
-    The study was validated over 112 sessions, which is exactly why the
-    hole did not show there.
-    """
-
-    @pytest.fixture
-    def one_day(self):
-        days = [_ramped(150, base=100.0, seed=77)]
-        c, b, s = days[0]
-        j = 100
-        tot = (b[j] + s[j]) * 1.6
-        s[j], b[j] = tot * 0.92, tot * 0.08
-        for m in range(j, len(c)):
-            c[m] += 0.30
-        kl, buckets = _frame_days(days, day0=datetime(2026, 10, 19))
-        return kl, buckets, j
-
-    def test_one_loaded_session_still_gets_marks(self, viewer, monkeypatch,
-                                                 one_day):
-        from feeds import delta_bars
-        kl, buckets, j = one_day
-        viewer._code_edit.setText("US.TEST")
-        viewer._abs_seed_key = None
-        monkeypatch.setattr(delta_bars, "load_cached",
-                            lambda *a, **k: _seed_frame(6))
-        bull, _bear = viewer._absorption_flags(kl, buckets, CM)
-        assert bull[j], "只加载一个交易日时，种子没有把门槛喂进来"
-
-    def test_and_without_the_seed_it_marks_nothing(self, viewer,
-                                                   monkeypatch, one_day):
-        """The control. Without it the test above would pass on a build
-        that had quietly stopped needing the profile at all."""
-        from feeds import delta_bars
-        kl, buckets, _j = one_day
-        viewer._code_edit.setText("US.TEST")
-        viewer._abs_seed_key = None
-        monkeypatch.setattr(delta_bars, "load_cached", lambda *a, **k: None)
-        bull, bear = viewer._absorption_flags(kl, buckets, CM)
-        assert not (bull.any() or bear.any())
-
-    def test_the_seed_stops_before_the_session_being_marked(
-            self, viewer, monkeypatch, one_day):
-        """No lookahead across the seam: a bar must not help set the
-        gate it is judged against."""
-        from feeds import delta_bars
-        kl, buckets, _j = one_day
-        viewer._code_edit.setText("US.TEST")
-        viewer._abs_seed_key = None
-        seen = {}
-
-        def _spy(code, start, end):
-            seen["code"] = code
-            seen["start"], seen["end"] = pd.Timestamp(start), pd.Timestamp(end)
-            return _seed_frame(6)
-
-        monkeypatch.setattr(delta_bars, "load_cached", _spy)
-        viewer._absorption_flags(kl, buckets, CM)
-        first = pd.Timestamp(str(kl["time_key"].iloc[0])[:10])
-        assert seen["end"] < first, \
-            f"种子取到了被判定的那天：end={seen['end']} first={first}"
-        assert seen["start"] < seen["end"]
-        # The symbol has to come from where the rest of the window reads
-        # it. Taking it from an attribute this window does not have gave
-        # None on every real frame, while these tests -- which used to
-        # set that attribute themselves -- manufactured the precondition
-        # they were meant to check, and nothing was ever seeded in app.
-        assert seen["code"] == "US.TEST", \
-            f"种子问的是 {seen['code']}，工具栏里是 US.TEST"
-
-    def test_an_unreadable_cache_does_not_stop_the_chart(
-            self, viewer, monkeypatch, one_day):
-        """A profile that is merely missing costs the early marks. It
-        must not cost the repaint."""
-        from feeds import delta_bars
-        kl, buckets, _j = one_day
-        viewer._code_edit.setText("US.TEST")
-        viewer._abs_seed_key = None
-
-        def _boom(*_a, **_k):
-            raise OSError("parquet is a directory today")
-
-        monkeypatch.setattr(delta_bars, "load_cached", _boom)
-        bull, bear = viewer._absorption_flags(kl, buckets, CM)
-        assert not (bull.any() or bear.any())
-
-    def test_the_seed_takes_only_rth(self, viewer, monkeypatch, one_day):
-        """The cache is the whole day; the study is 09:31-16:00. The bar
-        stamped 09:30 is the premarket's last, and it must not reach the
-        first RTH bucket -- which is also what separates `mins > lo`
-        from `mins >= lo`."""
-        from feeds import delta_bars
-        viewer._code_edit.setText("US.TEST")
-        viewer._abs_seed_key = None
-        monkeypatch.setattr(delta_bars, "load_cached",
-                            lambda *a, **k: _seed_frame(6))
-        vol, ofi = viewer._abs_seed_profile(datetime(2026, 10, 19).date(), 15)
-        assert vol, "种子什么都没取到"
-        assert min(vol) >= 0, f"取到了 RTH 之前的桶：{sorted(vol)[:3]}"
-        pooled = np.concatenate(vol[0])
-        assert pooled.max() < SEED_PLANT, \
-            "09:30 那根盘前的量进了第一个 RTH 桶"
-        assert len(vol[0]) == 6, f"该有 6 个交易日，实际 {len(vol[0])}"
-
-    def test_a_repaint_does_not_grow_the_cached_seed(
-            self, viewer, monkeypatch, one_day):
-        """The seed is memoised and the caller appends the frame's own
-        sessions to it. Appending into the cached lists would feed one
-        repaint's session into the next repaint's gate -- a bar helping
-        to set the threshold it is judged against, one frame later."""
-        from feeds import delta_bars
-        kl, buckets, _j = one_day
-        viewer._code_edit.setText("US.TEST")
-        viewer._abs_seed_key = None
-        monkeypatch.setattr(delta_bars, "load_cached",
-                            lambda *a, **k: _seed_frame(6))
-        viewer._absorption_flags(kl, buckets, CM)
-        before = {k: len(v) for k, v in viewer._abs_seed_val[0].items()}
-        viewer._absorption_flags(kl, buckets, CM)
-        after = {k: len(v) for k, v in viewer._abs_seed_val[0].items()}
-        assert before == after, "重绘一次，缓存的种子就长了一截"
-
-    def test_the_seed_is_read_once_per_symbol_and_day(
-            self, viewer, monkeypatch, one_day):
-        """It is read inside a repaint, so it is memoised; a parquet
-        read on every frame is a dropped frame."""
-        from feeds import delta_bars
-        kl, buckets, _j = one_day
-        viewer._code_edit.setText("US.TEST")
-        viewer._abs_seed_key = None
-        calls = []
-
-        def _count(*a, **k):
-            calls.append(1)
-            return _seed_frame(6)
-
-        monkeypatch.setattr(delta_bars, "load_cached", _count)
-        viewer._absorption_flags(kl, buckets, CM)
-        viewer._absorption_flags(kl, buckets, CM)
-        assert len(calls) == 1, f"同一天读了 {len(calls)} 次"
-
-
 class TestTheViewerDrawsAndClears:
     def test_items_appear_and_go(self, viewer):
-        days = [_ramped(150, base=100.0, seed=5 + k) for k in range(4)]
-        c, b, s = days[-1]
-        c[100] = c[99] + 0.6
-        s[100] = 200_000.0
-        b[100] = 2_000.0
-        kl, buckets = _frame_days(days)
+        c, b, s = _quiet(90)
+        c[80] = c[79] + 0.9
+        s[80] = 40000.0
+        kl, buckets = _frame(c, b, s)
         viewer._clear_abs_items()
         viewer._draw_absorption(kl, buckets, CM)
         assert viewer._abs_items, "nothing was drawn for a planted event"
