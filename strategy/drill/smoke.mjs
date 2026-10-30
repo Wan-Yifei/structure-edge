@@ -194,7 +194,7 @@ const api = new Function(
          "         waitOne, markOf, entryOf, WAIT_MAX, FWD, flowGate," +
          "         FLOW_WIN, FLOW_PCT, FLOW_MIN, DR_DECISION," +
          "         getStep0: () => step0," +
-         "         getStep: () => step, getQS: () => QS, syncOut, draw};")();
+         "         getStep: () => step, getQS: () => QS, syncOut, draw, reset};")();
 
 await new Promise((r) => setTimeout(r, 400));
 
@@ -2169,3 +2169,65 @@ console.log("\nABSORB OK");
 }
 
 console.log("\nSLIDER OK");
+
+
+/* ---- 清空重做：两段确认，以及它承诺的「顺序不变」 ------------------- *
+ * The two buttons read as one choice and are not: clearing keeps the
+ * order, shuffling keeps the answers. Someone who clears in order to start
+ * over gets the same questions in the same sequence, which is worth
+ * saying at the moment the button is armed -- a tooltip is no use to a
+ * hand already on it. This pins both the arming and the promise. */
+{
+  const ids = () => api.getQS().map(q => q.id);
+
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  api.reset(); api.reset();                    // start from a clean set
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  const BASE = ids();
+
+  for (const i of [4, 18, 41]) {
+    api.goto1(i + 1);
+    els["s-stop"].value = "1.0";
+    els["s-tgt"].value = "2.0";
+    api.choose(i % 2 ? "pass" : "enter");
+    api.submit();
+  }
+  const answered = api.getQS().filter((q) => api.isAnswered(q.id)).length;
+  if (answered < 3) throw new Error("the fixture did not answer anything");
+
+  // First click arms it and says nothing has happened yet.
+  api.reset();
+  if (api.getQS().filter((q) => api.isAnswered(q.id)).length !== answered)
+    throw new Error("一次点击就清空了，确认那一步没拦住");
+  if (els["b-reset"].textContent !== "再点一次确认清空")
+    throw new Error(`按钮没有进入确认态：${els["b-reset"].textContent}`);
+  if (els["reset-hint"].hidden !== false)
+    throw new Error("确认态下没有显示顺序提示");
+  if (!/重新洗牌/.test(els["reset-hint"].textContent || ""))
+    throw new Error("提示没有指向「重新洗牌」，等于没说怎么换顺序");
+
+  // Second click clears, and disarms.
+  api.reset();
+  if (api.getQS().some((q) => api.isAnswered(q.id)))
+    throw new Error("第二次点击没有清空");
+  if (els["b-reset"].textContent !== "清空重做")
+    throw new Error("清空后按钮停在确认态");
+  if (els["reset-hint"].hidden !== true)
+    throw new Error("清空后提示还留在屏幕上");
+
+  // And the promise the hint makes: same questions, same order.
+  api.loadSet("1");
+  await new Promise((r) => setTimeout(r, 300));
+  const after = ids();
+  let diff = 0;
+  for (let i = 0; i < Math.max(after.length, BASE.length); i++)
+    if (after[i] !== BASE[i]) diff++;
+  if (diff)
+    throw new Error(`清空后顺序变了 ${diff} / ${BASE.length} 题，` +
+                    `提示说的「顺序不变」就是假的`);
+  console.log(`ok   清空重做：两段确认、提示指向重新洗牌，${BASE.length} 题顺序不变`);
+}
+
+console.log("\nRESET OK");

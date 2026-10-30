@@ -114,9 +114,14 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
         title="位置序号，或题目时间如 10-15 11:32。序号只在本次加载内稳定——下次加载时已答的会排到前面。"
         placeholder="序号或 10-15 11:32"></label>
     <button id="b-reset" style="padding:5px 10px;font-size:12px"
-      title="清空所有答案，重新开始">清空重做</button>
+      title="清空当前这一套的答案。出题顺序不变——同一批题会按同样的次序再来一遍。想换顺序，另点「重新洗牌」。">清空重做</button>
     <button id="b-shuffle" style="padding:5px 10px;font-size:12px"
       title="重新打乱出题顺序，不影响已答的记录">重新洗牌</button>
+    <!-- Filled by armReset(), not written here: the wording belongs next to
+         the logic it describes, and a string only in the markup cannot be
+         asserted on. Shown only while the reset is armed -- the two buttons
+         read as one choice and are not. -->
+    <span id="reset-hint" hidden style="font-size:12px;color:var(--poc)"></span>
     <label style="margin-left:auto;font-size:12px;color:var(--ink-3)">决策位置
       <select id="conf" style="font-size:12px;padding:4px 6px">
         <option value="1">最低点之后 1 根（确认）</option>
@@ -2469,12 +2474,26 @@ function reset(){
   render(); badge();
 }
 let resetArmed = false;
+/* One place sets both, because the label and the hint have to arm and
+   disarm together -- three call sites each flipping two things is how one
+   of them ends up leaving the hint on screen after the window closes. */
+const RESET_HINT = "顺序不变——同一批题会按同样的次序再来一遍。" +
+                   "想换顺序，另点「重新洗牌」。";
+function armReset(on){
+  resetArmed = on;
+  $("b-reset").textContent = on ? "再点一次确认清空" : "清空重做";
+  $("reset-hint").textContent = on ? RESET_HINT : "";
+  $("reset-hint").hidden = !on;
+}
 function confirmReset(){
-  /* The viewer never shows confirm(), so the button asks for itself. */
-  if (resetArmed){ resetArmed = false; $("b-reset").textContent = "清空重做"; return true; }
-  resetArmed = true;
-  $("b-reset").textContent = "再点一次确认清空";
-  setTimeout(() => { resetArmed = false; $("b-reset").textContent = "清空重做"; }, 4000);
+  /* The viewer never shows confirm(), so the button asks for itself. The
+     armed window is also the only moment the order/shuffle distinction can
+     be put in front of someone -- a tooltip is no use to a hand already on
+     the button, and these two buttons read as one choice when they are
+     two: clearing keeps the order, shuffling keeps the answers. */
+  if (resetArmed){ armReset(false); return true; }
+  armReset(true);
+  setTimeout(() => { if (resetArmed) armReset(false); }, 4000);
   return false;
 }
 
