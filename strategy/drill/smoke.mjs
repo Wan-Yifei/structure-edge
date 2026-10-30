@@ -806,12 +806,24 @@ console.log("\nJUMP OK");
   api.goto1(fresh + 1);
   if (els.vd.hidden !== true)
     throw new Error("the verdict panel is visible before answering");
+  /* The LIVE light is a separate element and must be up before the answer:
+     in the market it is read before the entry, so a drill that hides it
+     rehearses a process nobody runs. */
+  if (!/规则：/.test(els.lv.innerHTML || ""))
+    throw new Error("the live light is missing before answering");
+  if (!/当前这根/.test(els.lv.innerHTML || ""))
+    throw new Error("the live light does not say which bar it reads");
   api.choose("pass"); api.submit();
   if (els.vd.hidden !== false)
     throw new Error("the verdict panel stayed hidden after answering");
   if (!/规则：/.test(els.vd.innerHTML))
     throw new Error("the light is missing from the reveal");
-  console.log("ok   规则红绿灯：三态正确，且答题前不显示");
+  /* ...and the live one hands over rather than sitting beside it, still
+     moving as the future is stepped: two lights, one of them live, are two
+     answers to one question. */
+  if (/规则：/.test(els.lv.innerHTML || ""))
+    throw new Error("the live light is still up after answering");
+  console.log("ok   规则红绿灯：三态正确；答题前亮实时灯，答题后交给揭晓面板");
 }
 
 /* The same light on the chart. It is drawn, not written into the DOM, so
@@ -823,19 +835,44 @@ console.log("\nJUMP OK");
   const fresh = all.findIndex(x => !api.isAnswered(x.id));
   if (fresh < 0) throw new Error("every question is already answered");
 
+  const litNow = () => ctxCalls.filter(c => c.startsWith("fillText:"))
+                               .some(c => /做多|别做|不触发|无数据/.test(c));
+
   ctxCalls.length = 0;
   api.goto1(fresh + 1);
-  const before = ctxCalls.filter(c => c.startsWith("fillText:"))
-                         .some(c => /做多|别做|不触发|无数据/.test(c));
-  if (before) throw new Error("the chart light is drawn before answering");
+  /* Drawn while still deciding. It used to be reveal-only, on the argument
+     that a light burning while you decide is a button to follow rather than
+     a question to answer -- true, and it loses to the fact that live this
+     light is read BEFORE the entry. */
+  if (!litNow()) throw new Error("the chart light is missing before answering");
 
-  api.choose("pass"); api.submit();
+  /* And it follows the bar: step one and the badge has to be recomputed
+     there, or it is reporting a minute that has gone. */
+  {
+    const q = api.getQS()[api.getIdx()];
+    const a = api.ruleLight(q, q.mark);
+    let k = 0;
+    for (let i = 1; i <= api.WAIT_MAX; i++){
+      const b = api.ruleLight(q, q.mark + i);
+      if (b && a && b.k !== a.k){ k = i; break; }
+    }
+    if (k){
+      const TXT = {green: "做多", red: "别做", amber: "不触发", na: "无数据"};
+      for (let i = 0; i < k; i++) api.waitOne();
+      ctxCalls.length = 0;
+      api.draw(q, false);
+      const want = TXT[api.ruleLight(q, q.mark + k).k];
+      if (!ctxCalls.includes("fillText:" + want))
+        throw new Error(`走了 ${k} 根后，图上的灯没跟着变成「${want}」`);
+      api.goto1(fresh + 1);             // back to the setup bar
+    }
+  }
+
   ctxCalls.length = 0;
+  api.choose("pass"); api.submit();
   api.stepTo(0);                       // force a redraw of the revealed chart
-  const after = ctxCalls.filter(c => c.startsWith("fillText:"))
-                        .some(c => /做多|别做|不触发|无数据/.test(c));
-  if (!after) throw new Error("the chart light is missing after answering");
-  console.log("ok   主图红绿灯：答题后才画出");
+  if (!litNow()) throw new Error("the chart light is missing after answering");
+  console.log("ok   主图红绿灯：答题前就亮，且跟着 ▶ 走");
 
 /* ...and that nothing paints over it afterwards. The settlement-horizon
    veil covers the price panel from the horizon to its right edge at 0.62

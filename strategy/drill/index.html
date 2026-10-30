@@ -141,6 +141,14 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
   <div class="card" id="qcard">
     <div class="meta" id="meta"></div>
     <canvas id="cv" width="1040" height="520" aria-label="价格、筹码分布与 RSI"></canvas>
+    <!-- The rule's reading of the bar being decided on, live. It used to
+         appear only after answering, on the argument that a light burning
+         while you decide is a button to follow rather than a question to
+         answer. That argument loses to the one the drill exists for: live,
+         the light IS part of the decision, so hiding it here rehearses a
+         process that is not the one being run. It costs the scoreboard its
+         meaning as a measure of unaided judgement -- see the note in it. -->
+    <div id="lv"></div>
     <div class="ctrl" id="ctrl">
       <div class="row">
         <button id="b-pass" title="放过（快捷键 1）">放过</button>
@@ -666,10 +674,15 @@ function draw(q, reveal){
      from the horizon to the right edge, which is exactly where this
      corner is, and painting the light first left it dimmed to 38%
      along with the bars it sits over. The light is a verdict on the
-     whole question, not part of the future being set aside. Same three states and
-     the same colours as the panel below, and like it, only once the answer
-     is in -- a light burning while you are still deciding is a button to
-     follow, not a question to answer.
+     whole question, not part of the future being set aside.
+
+     Shown while still deciding, not only at the reveal. It used to be
+     reveal-only, on the argument that a light burning while you decide is
+     a button to follow rather than a question to answer. True, and it
+     loses anyway: in the market this light is read BEFORE the entry, so a
+     drill that hides it rehearses a process nobody runs. What it costs is
+     the scoreboard's standing as a measure of unaided judgement, and the
+     report says so rather than leaving it implied.
 
      Bottom-right because that corner is the only one nothing else claims:
      the OHLC readout runs along the top, and the entry/stop/target rails
@@ -679,14 +692,17 @@ function draw(q, reveal){
      Sized to be read, not hunted for: it was a 24px box with 13px text and
      a 5.5px dot, which is smaller than the axis labels around it and had
      to be looked for on a 1040px chart. */
-  if (reveal){
+  {
     /* `dm`, not q.mark. ruleLight defaults its bar to the SETUP bar, and
        this call used to take that default while the panel below it passed
        markOf(q) -- so on any question where bars were stepped before
        deciding, the two lights on the same page answered about different
        minutes and could disagree outright. Seen on 2026-06-11 12:23 after
        waiting 11 bars: dr1 was -0.197 at the setup and +0.494 at 12:34,
-       so the chart burned red 别做 over a decision the panel called 不触发. */
+       so the chart burned red 别做 over a decision the panel called 不触发.
+
+       dm also makes it follow ▶ 下一根 while deciding, which is the whole
+       point of showing it then. */
     const L = ruleLight(q, dm);
     if (L){
       const col = {green: upC, red: dnC, amber: pocC, na: ink3}[L.k];
@@ -1063,6 +1079,12 @@ function renderMeta(q, m){
     `<span style="color:var(--ink-3)"> / 15m </span>` +
     `<b style="color:${dcol(d15)}">${dtxt(d15)}</b></span>` +
     `<span>距 POC <b>${sr(100*(px-q.poc)/q.poc)}%</b></span>`;
+
+  /* The light goes with the header, not with the verdict, because both are
+     readings of the SAME bar `m` -- hang it anywhere else and the two drift
+     apart the moment ▶ 下一根 is pressed. */
+  const lv = $("lv");
+  if (lv) lv.innerHTML = ans[q.id] ? "" : lightHtml(q, m, true);
 }
 
 function render(){
@@ -1228,6 +1250,10 @@ function submit(){
      this existed are ordered by answer_order.js instead. */
   rec.at = Date.now();
   ans[q.id] = rec; save(q.id, rec);
+  /* The live light hands over to the verdict's copy, which is frozen on
+     the bar just decided. Two of them on screen, one of them still moving
+     as the future is stepped, would be two answers to one question. */
+  $("lv").innerHTML = "";
   /* The future stays hidden and is stepped in one bar at a time -- watching
      it arrive is the part that trains anything; a chart that jumps straight
      to the outcome only ever shows you that you were right or wrong. */
@@ -1433,10 +1459,16 @@ const LIGHT_COL = {green: "var(--up)", red: "var(--dn)",
                    amber: "var(--poc)", grey: "var(--ink-3)",
                    na: "var(--ink-3)"};
 
-function lightHtml(q){
-  const L = ruleLight(q, markOf(q));
+/* `live` is the same light shown while still deciding, which is how it is
+   read in the market. The only difference is the footnote: before an answer
+   it has to say that it moves, because it is a reading of the bar you are
+   standing on and ▶ 下一根 changes it. */
+function lightHtml(q, m, live){
+  if (m === undefined) m = markOf(q);
+  const L = ruleLight(q, m);
   if (!L) return "";
   const c = LIGHT_COL[L.k];
+  const w = m - q.mark;
   /* Sized to match the on-chart badge. A 10px dot and a 13px heading made
      the verdict smaller than the explanation under it. */
   return `<div style="margin-top:12px;padding:12px 14px;border-left:5px solid ${c};` +
@@ -1446,7 +1478,11 @@ function lightHtml(q){
          `<b style="color:${c};font-size:19px;vertical-align:middle">${L.t}</b>` +
          `<div style="margin-top:6px;font-size:13px;color:var(--ink-2)">${L.d}</div>` +
          `<div style="margin-top:5px;font-size:11.5px;color:var(--ink-3)">` +
-         `答题后才显示——答题前亮起来的灯就不是训练了。</div></div>`;
+         (live
+           ? `读的是当前这根（${q.t[m]}${w ? `，已走 ${w} 根` : ""}）——` +
+             `按 ▶ 下一根 它会跟着变。`
+           : `读的是你决策那一根（${q.t[m]}${w ? `，等了 ${w} 根` : ""}）。`) +
+         `</div></div>`;
 }
 
 function context(q){
@@ -1730,6 +1766,16 @@ function report(){
     `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
 
   const notes = [];
+  /* Stated, not left implied: the light is now on screen before the answer,
+     so these numbers measure you-with-the-rule, not you. That is deliberate
+     -- it is how the decision is made live -- but it means a score here can
+     no longer be read as evidence about unaided judgement, and the earlier
+     runs on file were taken under the other arrangement. */
+  notes.push(`<b>规则灯在答题前就亮着。</b>所以下面这些数字量的是` +
+    `「你 + 规则」，不是「你」。这是故意的 —— 实盘就是看着灯做决定 —— ` +
+    `但它有两个后果：和<b>答题前看不到灯</b>的那些旧记录不能直接比；` +
+    `跟着灯走时，这里的成绩会向规则本身的基准率靠拢，` +
+    `而规则的基准率在上面每一盏灯的说明里都标着。`);
   notes.push(`<b>你 ${sr(totR, 2)} R。</b> ` +
     `同样这些题,全部进场按 1:1 是 ${sr(allIn11, 2)} R,` +
     `按 2:1 是 ${sr(allIn, 2)} R,全部放过是 0 R。` +
