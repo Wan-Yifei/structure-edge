@@ -126,7 +126,8 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
   </div>
   <p class="hint">SOXL 1 分钟,决策前 120 根、后 60 根。右侧是当时能画出来的筹码分布(只用到决策那根为止),下方是 RSI(6)。
   上方 <b>Δr</b> 是主动成交失衡的 1 / 5 / 15 分钟回看窗口 —— 都只含已收盘的 K,没有前视。
-  决策前 30 分钟如果有逐秒挂单档位的归档,会以背景热力图画出来(只有开始归档之后的交易日才有)。
+  柱子<b>高度</b>是比值,<b>金色描边</b>是这一根的成交量大不大(|x| 落在自己前 60 根的前 20%)——
+  两个不同的问题,所以用两种编码:高而无边 = 方向明确但量不够,矮而有边 = 量够但方向不明确。
   题目混了三类位置:<b>深回落</b>(从 30 根高点跌掉 1 个 ATR 以上)、<b>浅回调</b>(只是前 10 根最低),
   以及<b>夹角</b>(DK 快线转头向下、与慢线收拢到 0.25 ATR 以内,或刚刚交叉 —— 这一类多半还没破低)。
   <b>这三类的命中率量下来几乎一样</b>(都在 33% 上下,区间重叠),所以标签本身不带信息,
@@ -209,25 +210,17 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
    that quote a rate stay hidden rather than showing a stale one. */
 let BUCKETS = {}, PA = {}, CROSS = {}, ALLIN = null, RMETA = null;
 
-const FLOW_H = 272, GAP_H = 14, CAP_H = 18, AXIS_H = 16, DR_H = 104;
+const GAP_H = 14, AXIS_H = 16, DR_H = 220;
 
-/* The live heatmap's own bid/ask pair, so the two panels read the same
-   way: teal is the bid side / buying, red is the ask side / selling.
-   Single-hue layers with an alpha ramp, which is what that tool draws when
-   its bid/ask toggle is on -- the combined black->purple->amber ramp is its
-   OTHER mode, and it cannot show which side is holding. */
-const HM_BID = "#26a69a", HM_ASK = "#ef5350";
-/* Older question files carry one combined grid with no side. Neutral, so
-   it cannot be mistaken for a side that was never recorded. */
-const HM_FLAT = "#9fb4c7";
-/* 3.0, matching the live tool's default, and it has to be above 1 here.
-   Taking the log already lifted the dim end -- measured on a real session
-   the bytes land between p10 142 and p90 203 of 255 -- so without a gamma
-   that pushes midtones back down, percentile-normalising on top of that
-   paints almost every cell bright and the walls stop standing out. */
-const HM_GAMMA = 3.0;
-const HM_UP = "#35b87a", HM_DN = "#e0646f",
-      HM_RULE = "rgba(255,255,255,.22)", HM_EDGE = "#4cb6bf";
+/* The flow gate, outlined on the delta_r bar it fires on.
+
+   A colour of its own rather than a brighter teal or red: the fill already
+   carries the sign, and the gate is a separate yes/no about SIZE. It used
+   to be alpha alone, .95 against .28 on a ~4px bar, and that is not a
+   signal anyone reads while deciding -- measured on the 2026-10-29 run,
+   12 of 17 entries were taken with the gate OFF by a trader who believed
+   the rule they were following was "only enter on heavy flow". */
+const GATE_EDGE = "#ffc857";
 /* |delta_r| quantiles by window, measured over 38,049 RTH minutes / 104
    sessions of SOXL (2026-05-19..10-16): [p75, p90, p99]. The panel is
    scaled from these, never from the question on screen -- +0.30 has to mean
@@ -266,10 +259,21 @@ function flowGate(q){
   }
   return (q._heavy = out);
 }
-const FWD = 30, CW = 1040,
-      CH = 520 + DR_H + GAP_H + FLOW_H + GAP_H + CAP_H + AXIS_H;
-const PRICE_H = 360, RSI_H = 96;
+const FWD = 30, CW = 1040;
+/* Both panels are taller than they were. The 272px order-flow strip that
+   used to sit below took the room, and it was drawn on axes of its own --
+   30 minutes at 10 seconds a column, under a chart spanning 120 minutes at
+   one bar a minute, over a price range taken from the whole session rather
+   than from those 30 minutes. Nothing in it lined up with a candle, and on
+   88% of questions it was not the resting book at all but a traded-volume
+   grid filled to 3%. It is gone; the space went to the price panel and to
+   delta_r, where the entry rule is actually read. */
+const PRICE_H = 480, RSI_H = 96;
 const PROF_W = 110, LBL_W = 128, PAD_L = 8, PAD_T = 12;
+/* Summed from the parts. The old literal 520 silently baked in
+   PRICE_H = 360, so changing that constant moved the panels without
+   growing the canvas under them. */
+const CH = PAD_T + PRICE_H + GAP_H + RSI_H + GAP_H + DR_H + AXIS_H + 38;
 let QS = [], idx = 0, ans = {}, pick = null, db = null;
 /* Where 下一题 came from. With 按缺口出题 on, next() jumps rather than
    steps, so idx-- would land somewhere the reader was never at. */
@@ -668,31 +672,35 @@ function draw(q, reveal){
      follow, not a question to answer.
 
      Bottom-right because that corner is the only one nothing else claims:
-     the heatmap legend sits top-left, the OHLC readout runs along the top,
-     and the entry/stop/target rails leave from the right edge at their own
-     prices, which are never this low in the panel. */
+     the OHLC readout runs along the top, and the entry/stop/target rails
+     leave from the right edge at their own prices, which are never this
+     low in the panel.
+
+     Sized to be read, not hunted for: it was a 24px box with 13px text and
+     a 5.5px dot, which is smaller than the axis labels around it and had
+     to be looked for on a 1040px chart. */
   if (reveal){
     const L = ruleLight(q);
     if (L){
       const col = {green: upC, red: dnC, amber: pocC, na: ink3}[L.k];
       g.save();
-      g.font = "13px ui-monospace,monospace";
+      g.font = "600 21px ui-monospace,monospace";
       const txt = {green: "做多", red: "别做", amber: "不触发",
                    na: "无数据"}[L.k];
       const tw = g.measureText(txt).width;
-      const bw = tw + 30, bh = 24;
-      const bx = PAD_L + W - bw - 8, by = PAD_T + PRICE_H - bh - 8;
-      g.globalAlpha = .92; g.fillStyle = surf;
+      const bw = tw + 52, bh = 44;
+      const bx = PAD_L + W - bw - 10, by = PAD_T + PRICE_H - bh - 10;
+      g.globalAlpha = .95; g.fillStyle = surf;
       g.fillRect(bx, by, bw, bh);
       g.globalAlpha = 1;
-      g.strokeStyle = col; g.lineWidth = 1.4;
-      g.strokeRect(bx + .5, by + .5, bw - 1, bh - 1);
+      g.strokeStyle = col; g.lineWidth = 2.5;
+      g.strokeRect(bx + 1.25, by + 1.25, bw - 2.5, bh - 2.5);
       g.fillStyle = col;
       g.beginPath();
-      g.arc(bx + 13, by + bh / 2, 5.5, 0, 7);
+      g.arc(bx + 22, by + bh / 2, 9, 0, 7);
       g.fill();
       g.textAlign = "left"; g.textBaseline = "middle";
-      g.fillText(txt, bx + 23, by + bh / 2 + .5);
+      g.fillText(txt, bx + 38, by + bh / 2 + 1);
       g.restore();
     }
   }
@@ -837,25 +845,44 @@ function draw(q, reveal){
        see -- which is why this panel read as noise. Bars, one per candle,
        coloured by sign. The 5-bar reading stays a line: it IS a running
        quantity, so a path is what it actually is. */
-    const BW = Math.max(1, (X(1) - X(0)) * 0.8);
+    /* A floor of 4px: the gate outline below needs something to go round,
+       and a 1px bar with a 1.4px stroke is just a stroke. */
+    const BW = Math.max(4, (X(1) - X(0)) * 0.8);
     const d1 = q.drs1;
     const hv = flowGate(q);
+    const barBox = i => {
+      const cl = Math.max(-p99*1.05, Math.min(p99*1.05, d1[i]));
+      const y0 = DY(0), yy = DY(cl);
+      return [X(i) - BW/2, Math.min(y0, yy), BW,
+              Math.max(1, Math.abs(yy - y0))];
+    };
     if (d1){
       for (let i = 0; i < last; i++){
-        const v = d1[i];
-        if (v == null) continue;
-        const cl = Math.max(-p99*1.05, Math.min(p99*1.05, v));
-        const y0 = DY(0), yy = DY(cl);
-        g.fillStyle = v >= 0 ? upC : dnC;
-        /* Height is the ratio, brightness is the size behind it. They
-           answer different questions and the panel used to show only
-           the first, which is how a heavy 0.35 and a thin 0.45 came to
-           look the same. */
-        g.globalAlpha = hv[i] ? .95 : .28;
-        g.fillRect(X(i) - BW/2, Math.min(y0, yy),
-                   BW, Math.max(1, Math.abs(yy - y0)));
+        if (d1[i] == null) continue;
+        const [bx, by, bw, bh] = barBox(i);
+        g.fillStyle = d1[i] >= 0 ? upC : dnC;
+        /* Height is the ratio, the gate is the size behind it. They answer
+           different questions and the panel used to show only the first,
+           which is how a heavy 0.35 and a thin 0.45 came to look the same. */
+        g.globalAlpha = hv[i] ? 1 : .3;
+        g.fillRect(bx, by, bw, bh);
       }
       g.globalAlpha = 1;
+      /* The gate, outlined, in a SECOND pass so a neighbouring bar's fill
+         can never paint over it. This is the condition the entry rule is
+         on. Carried by opacity alone it was not read: on the 2026-10-29
+         run 12 of 17 entries were taken with it off, median |x| 0.18
+         against thresholds of 0.24-0.95. */
+      g.strokeStyle = GATE_EDGE; g.lineWidth = 1.4;
+      for (let i = 0; i < last; i++){
+        if (!hv[i] || d1[i] == null) continue;
+        const [bx, by, bw, bh] = barBox(i);
+        /* Half-pixel offsets so the stroke lands on the pixel grid rather
+           than smeared across two, which at this width reads as a blur. */
+        g.strokeRect(Math.round(bx) + .5, Math.round(by) + .5,
+                     Math.round(bw) - 1, Math.max(2, Math.round(bh)) - 1);
+      }
+      g.lineWidth = 1;
     }
     const d5 = q.drs5;
     if (d5){
@@ -879,7 +906,9 @@ function draw(q, reveal){
     }
     g.fillStyle = ink3; g.font = "12px ui-monospace,monospace";
     g.textAlign = "left"; g.textBaseline = "top";
-    g.fillText(`Δr　柱 = 1 根（决策值）；亮 = 大流量，暗 = 流量不够　紫线 = 5 根　黄虚线 ±${DR_DECISION}、` +
+    g.fillText(`Δr　柱 = 1 根（决策值），高度 = 比值、` +
+               `金色描边 = 大流量（门槛亮）、暗淡无边 = 流量不够　` +
+               `紫线 = 5 根　黄虚线 ±${DR_DECISION}、` +
                `灰虚线 p90 ${p90.toFixed(2)}（固定刻度，题与题可比）` +
                (dv == null ? "　决策点无逐笔数据" : ""),
                PAD_L + 3, dy0 + 3);
@@ -906,169 +935,6 @@ function draw(q, reveal){
           surf === "#fff" ? "#1b2626" : "#0a1110");
   }
 
-  // ---- order flow strip: 30 minutes before the decision ----------------
-  const fy0 = ry0 + RSI_H + GAP_H + DR_H + GAP_H + CAP_H;
-  /* Ends exactly under the decision line above it, so nothing in here can
-     ever appear over the chart's hidden future. */
-  const FW = mx - PAD_L;
-  g.strokeStyle = soft; g.lineWidth = 1;
-  g.strokeRect(PAD_L + .5, fy0 + .5, FW - 1, FLOW_H - 1);
-  const H30 = q.hm, B30 = q.bub;
-  if (!H30 && !q.tvp && !(B30 && B30.length)){
-    g.fillStyle = ink3; g.font = "13px ui-monospace,monospace";
-    g.textBaseline = "middle"; g.textAlign = "center";
-    g.fillText("这一天没有订单流归档", PAD_L + FW / 2, fy0 + FLOW_H / 2);
-    g.textAlign = "left";
-  } else {
-    /* The strip spans the 30 minutes ending at the decision, independent of
-       the price chart's x-scale, so the columns are readable. */
-    const BG0 = H30 || q.tvp;
-    const NC = (BG0 && BG0.nc) || 180;
-    const SEC = (BG0 && BG0.sec) || 10;
-    const flo = BG0 ? BG0.lo : lo, fhi = BG0 ? BG0.hi : hi;
-    const FY = p => fy0 + FLOW_H - ((p - flo) / (fhi - flo || 1)) * FLOW_H;
-    const FX = c => PAD_L + (c / NC) * FW;
-    /* Traded volume arrives sparse ([row, col, value] triples) because its
-       grid is ~95% empty; the resting book arrives dense. Normalise to one
-       lookup so the drawing loop does not care which it got. */
-    g.save();
-    g.beginPath();
-    g.rect(PAD_L + 1, fy0 + 1, FW - 2, FLOW_H - 2);
-    g.clip();
-
-    const BG = H30 || q.tvp;
-    if (BG){
-      /* Two layers, one per side, in the live tool's own pair: teal for
-         bids / buying, red for asks / selling. Summed into one colour a bid
-         wall and the ask wall above it look identical, and the panel stops
-         answering the only question it is there for -- which side is
-         holding. Older question files carry a single combined grid; those
-         still render, in one neutral hue, because pretending to know the
-         side would be worse than admitting it is not there. */
-      const layers = [];
-      if (BG.db || BG.da){          // resting book, dense, split
-        for (const [k, col] of [["db", HM_BID], ["da", HM_ASK]])
-          if (BG[k]){
-            const bytes = atob(BG[k]);
-            layers.push([col, (r, c) => bytes.charCodeAt(r * BG.nc + c)]);
-          }
-      } else if (BG.sb || BG.sa){   // traded, sparse, split by aggressor
-        for (const [k, col] of [["sb", HM_BID], ["sa", HM_ASK]])
-          if (BG[k] && BG[k].length){
-            const m = new Map();
-            for (const [r, c, v] of BG[k]) m.set(r * BG.nc + c, v);
-            layers.push([col, (r, c) => m.get(r * BG.nc + c) || 0]);
-          }
-      } else if (BG.d){             // legacy combined, dense
-        const bytes = atob(BG.d);
-        layers.push([HM_FLAT, (r, c) => bytes.charCodeAt(r * BG.nc + c)]);
-      } else if (BG.s){             // legacy combined, sparse
-        const m = new Map();
-        for (const [r, c, v] of BG.s) m.set(r * BG.nc + c, v);
-        layers.push([HM_FLAT, (r, c) => m.get(r * BG.nc + c) || 0]);
-      }
-
-      /* The field is black because these hues are chosen against black --
-         on the light theme their dim end would sit on white and read as
-         nothing at all. */
-      g.save();
-      g.fillStyle = "#06080b";
-      g.fillRect(PAD_L + 1, fy0 + 1, FW - 2, FLOW_H - 2);
-
-      /* Brightness is referenced to a high PERCENTILE, not the maximum:
-         against the maximum one wall sets the ceiling for the whole panel
-         and ordinary size near the touch -- real, present in the data --
-         renders too dim to see. The percentile is taken over BOTH layers
-         together so the sides stay comparable; per layer, a thin ask would
-         look as solid as a heavy bid. Same correction the live tool makes. */
-      const vals = [];
-      for (const [, at] of layers)
-        for (let r = 0; r < BG.nb; r++)
-          for (let c = 0; c < NC; c++){
-            const v = at(r, c);
-            if (v > 0) vals.push(BG.log ? v : Math.log1p(v));
-          }
-      let ref = 0;
-      if (vals.length){
-        vals.sort((a, b) => a - b);
-        ref = vals[Math.min(vals.length - 1,
-                            Math.floor(vals.length * 0.99))] || 0;
-      }
-      if (ref > 0){
-        const cw = Math.max(1, FW / NC);
-        for (const [col, at] of layers){
-          for (let r = 0; r < BG.nb; r++){
-            const p0 = flo + (r / BG.nb) * (fhi - flo);
-            const p1 = flo + ((r + 1) / BG.nb) * (fhi - flo);
-            const ya = FY(p1), yb = FY(p0);
-            for (let c = 0; c < NC; c++){
-              const raw = at(r, c);
-              if (raw <= 0) continue;
-              let n = Math.min(1, (BG.log ? raw : Math.log1p(raw)) / ref);
-              n = Math.pow(n, HM_GAMMA);
-              if (n < 0.02) continue;
-              g.globalAlpha = Math.min(200, n * 190 + 14) / 255;
-              g.fillStyle = col;
-              g.fillRect(FX(c), ya, cw, Math.max(1, yb - ya));
-            }
-          }
-        }
-      }
-      g.globalAlpha = 1;
-      g.restore();
-    }
-    if (B30 && B30.length){
-      const vmax = Math.max(...B30.map(b => b[2]));
-      for (const [c, px, vol, side] of B30){
-        if (px < flo || px > fhi) continue;
-        // Radius on sqrt so AREA tracks volume, which is how the eye reads it.
-        const rr = 2 + 7 * Math.sqrt(vol / (vmax || 1));
-        g.beginPath();
-        g.arc(FX(c) + FW / NC / 2, FY(px), rr, 0, 7);
-        g.fillStyle = side > 0 ? HM_UP : HM_DN;
-        g.globalAlpha = .62; g.fill();
-        g.globalAlpha = 1; g.lineWidth = 1.2;
-        g.strokeStyle = side > 0 ? HM_UP : HM_DN; g.stroke();
-      }
-    }
-    g.restore();            // end of the clipped field
-
-    /* This strip has its OWN time axis -- 30 minutes ending at the decision,
-       where the chart above spans three hours. Stacked without saying so,
-       the right-hand side reads as the chart's hidden future. Hence the
-       labelled ticks, the solid wall at the right, and the word 决策. */
-    g.save();
-    g.strokeStyle = HM_EDGE; g.lineWidth = 2; g.globalAlpha = .9;
-    g.beginPath(); g.moveTo(PAD_L + FW, fy0); g.lineTo(PAD_L + FW, fy0 + FLOW_H);
-    g.stroke();
-    g.restore(); g.globalAlpha = 1;
-
-    g.fillStyle = ink3; g.font = "12px ui-monospace,monospace";
-    g.textBaseline = "top"; g.textAlign = "center";
-    for (const m of [30, 20, 10]){
-      const x = PAD_L + FW * (1 - m / 30);
-      g.save(); g.setLineDash([2, 4]); g.strokeStyle = HM_RULE;
-      g.lineWidth = 1;
-      g.beginPath(); g.moveTo(x, fy0); g.lineTo(x, fy0 + FLOW_H); g.stroke();
-      g.restore();
-      g.fillText(`−${m}分`, x + 14, fy0 + FLOW_H + 3);
-    }
-    g.fillStyle = acc;
-    g.fillText("决策", PAD_L + FW - 12, fy0 + FLOW_H + 3);
-    g.textAlign = "left";
-
-    /* Above the frame, not inside it: the profile and the bubbles occupy
-       the top-left corner this used to sit in, and the two overprinted. */
-    g.fillStyle = ink3; g.textBaseline = "bottom";
-    g.textAlign = "left";
-    g.fillText((H30 ? "挂单热力" : "成交量分布") + " + 主动成交气泡",
-               PAD_L + 1, fy0 - 4);
-    g.textAlign = "right";
-    g.fillText(`每列 ${SEC} 秒` +
-               (q.bubMin ? `　气泡 ≥ ${q.bubMin.toLocaleString()} 股净量` : "") +
-               "　与上方价格图不同轴", PAD_L + FW - 1, fy0 - 4);
-    g.textAlign = "left"; g.textBaseline = "top";
-  }
   g.textAlign = "left";
 }
 
@@ -1564,13 +1430,15 @@ function lightHtml(q){
   const L = ruleLight(q, markOf(q));
   if (!L) return "";
   const c = LIGHT_COL[L.k];
-  return `<div style="margin-top:12px;padding:8px 10px;border-left:3px solid ${c};` +
+  /* Sized to match the on-chart badge. A 10px dot and a 13px heading made
+     the verdict smaller than the explanation under it. */
+  return `<div style="margin-top:12px;padding:12px 14px;border-left:5px solid ${c};` +
          `background:var(--line-soft)">` +
-         `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;` +
-         `background:${c};margin-right:7px;vertical-align:middle"></span>` +
-         `<b style="color:${c}">${L.t}</b>` +
-         `<div style="margin-top:3px;font-size:12.5px;color:var(--ink-2)">${L.d}</div>` +
-         `<div style="margin-top:4px;font-size:11.5px;color:var(--ink-3)">` +
+         `<span style="display:inline-block;width:18px;height:18px;border-radius:50%;` +
+         `background:${c};margin-right:10px;vertical-align:middle"></span>` +
+         `<b style="color:${c};font-size:19px;vertical-align:middle">${L.t}</b>` +
+         `<div style="margin-top:6px;font-size:13px;color:var(--ink-2)">${L.d}</div>` +
+         `<div style="margin-top:5px;font-size:11.5px;color:var(--ink-3)">` +
          `答题后才显示——答题前亮起来的灯就不是训练了。</div></div>`;
 }
 

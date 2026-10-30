@@ -47,6 +47,14 @@ const ctx = new Proxy({}, {
         ctxOps.push({ i: ctxOps.length, op: "fillRect", alpha: curAlpha,
                       x, y, w, h });
       };
+    /* Recorded with its colour: the flow gate's outline is a strokeRect in
+       a colour of its own, and nothing else in the page draws one, so this
+       is how a test can tell the gate was marked at all. */
+    if (k === "strokeRect")
+      return (x, y, w, h) => {
+        ctxOps.push({ i: ctxOps.length, op: "strokeRect", alpha: curAlpha,
+                      color: curStroke, x, y, w, h });
+      };
     /* Path fills and strokes carry no arguments, so only their count and
        the alpha in force say anything -- which is enough to tell whether a
        band was painted. */
@@ -535,16 +543,57 @@ if (!/第 1 \//.test(els.prog.textContent))
   throw new Error("jump should clamp to the first question");
 console.log("ok   跳题：越界两端都收住");
 
-/* The strip must not extend past the decision line. Its width is derived
-   from the decision bar's x, so a bubble can never be drawn over the
-   chart's hidden future -- which is what made it LOOK like a leak even
-   though the window (decision-30min, decision] never held one. */
 const src = fs.readFileSync(path.join(dir, "index.html"), "utf8");
-if (!/const FW = mx - PAD_L;/.test(src))
-  throw new Error("the flow strip no longer ends at the decision line");
-if (/FX = c => PAD_L \+ \(c \/ NC\) \* W;/.test(src))
-  throw new Error("the flow strip is spanning the full plot width again");
-console.log("ok   订单流条带右边缘对齐决策线，未来区下方留空");
+
+/* The order-flow strip is gone. It was drawn on its own axes -- 30 minutes
+   at 10s a column under a chart spanning 120 minutes at a bar a minute,
+   over the whole session's price range -- so nothing in it lined up with a
+   candle, and on 88% of questions it carried a traded-volume grid filled
+   to 3% rather than the resting book. These guard against it coming back
+   by accident along with its constants. */
+for (const [re, what] of [[/\bFLOW_H\b/, "FLOW_H"], [/\bCAP_H\b/, "CAP_H"],
+                          [/\bHM_GAMMA\b/, "HM_GAMMA"],
+                          [/\bfy0\b/, "the strip's origin fy0"]])
+  if (re.test(src))
+    throw new Error(`${what} is back -- the order-flow strip was removed`);
+/* and the space it held went somewhere, not nowhere */
+if (!/const PRICE_H = 480/.test(src) || !/\bDR_H = 220\b/.test(src))
+  throw new Error("the freed height is no longer going to price / delta_r");
+/* CH summed from the parts: the old literal 520 baked in PRICE_H = 360, so
+   raising PRICE_H moved the panels without growing the canvas. */
+if (!/const CH = PAD_T \+ PRICE_H/.test(src))
+  throw new Error("CH is back to a literal that can go stale");
+console.log("ok   订单流条带已移除，腾出的高度给了价格图和 Δr");
+
+/* The flow gate is the condition the entry rule is on. It used to be
+   carried by bar opacity alone (.95 against .28 on a ~4px bar), which is
+   not a signal anyone reads while deciding: on the 2026-10-29 run 12 of 17
+   entries were taken with the gate OFF. It now gets an outline, drawn in a
+   second pass so a neighbouring bar's fill cannot paint over it. */
+if (!/const GATE_EDGE = /.test(src))
+  throw new Error("the flow gate has no outline colour of its own");
+if (!/g\.strokeStyle = GATE_EDGE/.test(src))
+  throw new Error("the flow gate is not outlined on the delta_r bars");
+{
+  const i = src.indexOf("g.strokeStyle = GATE_EDGE");
+  const fill = src.lastIndexOf("g.fillRect(bx, by, bw, bh)", i);
+  if (fill < 0)
+    throw new Error("the gate outline is not a separate pass after the fills");
+}
+if (!/金色描边/.test(src))
+  throw new Error("the legend does not say what the outline means");
+console.log("ok   流量门槛在 Δr 柱上有描边，且画在填充之后");
+
+/* The verdict light was a 24px box with 13px text and a 5.5px dot --
+   smaller than the axis labels beside it, on a 1040px chart. */
+{
+  const m = src.match(/const bw = tw \+ (\d+), bh = (\d+);/);
+  if (!m || +m[2] < 36)
+    throw new Error(`the rule light is back to ${m ? m[2] : "?"}px tall`);
+  if (!/g\.font = "600 2\dpx ui-monospace/.test(src))
+    throw new Error("the rule light's text is small again");
+}
+console.log("ok   规则灯放大了");
 
 /* The per-period panel: grouped by the question's month, calendar order,
    with the excess over the mechanical entry stated per month. */
@@ -580,11 +629,12 @@ console.log("ok   订单流条带右边缘对齐决策线，未来区下方留�
 
 console.log("\nREPORT OK");
 
-/* Layout. Two lines of caption used to be drawn INSIDE the strip's box, in
-   the corner the volume profile and the bubbles occupy, so text and data
-   overprinted. The caption sits above the frame now; this pins the
-   arithmetic so a height change cannot quietly put it back over the data or
-   clip the axis labels off the canvas. */
+/* Layout. Three stacked panels now -- price, RSI, delta_r -- and the
+   canvas has to hold all of them plus the axis row. The height used to be
+   a literal (520 + ...) with PRICE_H = 360 baked into it, so raising
+   PRICE_H moved every panel down without growing the canvas and the bottom
+   one ran off the end. CH is summed from the parts in the page; this
+   mirrors that sum and checks the panels land inside it. */
 {
   // Parsed without a regex on purpose: every escape in this file has to
   // survive a shell heredoc to get here, and the backslashes did not.
@@ -596,15 +646,19 @@ console.log("\nREPORT OK");
     return v;
   };
   const ry0 = num("PAD_T") + num("PRICE_H") + num("GAP_H");
-  const fy0 = ry0 + num("RSI_H") + num("GAP_H") + num("CAP_H");
-  const CH = 520 + num("FLOW_H") + num("GAP_H") + num("CAP_H") + num("AXIS_H");
-  if (num("CAP_H") < 12)
-    throw new Error("no room above the strip for its caption");
-  if (fy0 <= ry0 + num("RSI_H"))
-    throw new Error("the strip overlaps the RSI panel");
-  if (fy0 + num("FLOW_H") + 14 >= CH)
-    throw new Error("the strip's axis labels fall off the canvas");
-  console.log(`ok   版面：字幕在框外，底部刻度 ${fy0 + num("FLOW_H") + 14} < 画布 ${CH}`);
+  const dy0 = ry0 + num("RSI_H") + num("GAP_H");
+  const CH = num("PAD_T") + num("PRICE_H") + num("GAP_H") + num("RSI_H") +
+             num("GAP_H") + num("DR_H") + num("AXIS_H") + 38;
+  if (dy0 <= ry0 + num("RSI_H"))
+    throw new Error("the delta_r panel overlaps the RSI panel");
+  if (dy0 + num("DR_H") + num("AXIS_H") > CH)
+    throw new Error("the delta_r panel runs off the bottom of the canvas");
+  /* The caption is drawn inside this panel at its top, and the bars fill
+     the rest. Below about 120px the two start sharing pixels. */
+  if (num("DR_H") < 120)
+    throw new Error("delta_r is too short for its caption plus bars");
+  console.log(`ok   版面：Δr 底边 ${dy0 + num("DR_H") + num("AXIS_H")} ` +
+              `≤ 画布 ${CH}，Δr 高 ${num("DR_H")}px`);
 }
 
 console.log("\nLAYOUT OK");
@@ -1772,28 +1826,56 @@ console.log("\nWAIT OK");
   if (idx < 0) throw new Error("no question mixes heavy and quiet bars");
   ctxOps.length = 0;
   api.goto1(idx + 1);
-  /* Scoped to the run, not to the whole frame. Asking merely whether
-     0.28 appears anywhere passed with the brightness removed, because
-     the heatmap's cells carry computed alphas and one of them lands
-     there. The delta bars are drawn in a single loop, so they are a
-     CONSECUTIVE run of fillRects whose alphas come only from the two
-     values; the longest such run is them. */
+  /* Scoped to the run, not to the whole frame: other things on the page
+     carry computed alphas that can land on these values. The delta bars
+     are drawn in a single loop, so they are a CONSECUTIVE run of fillRects
+     whose alphas come only from the two values; the longest such run is
+     them. */
   const a = ctxOps.filter(o => o.op === "fillRect")
                   .map(o => Math.round(o.alpha * 100) / 100);
   let best = [], cur = [];
   for (const v of a.concat([null])){
-    if (v === 0.95 || v === 0.28){ cur.push(v); continue; }
+    if (v === 1 || v === 0.3){ cur.push(v); continue; }
     if (cur.length > best.length) best = cur;
     cur = [];
   }
   if (best.length < 20)
     throw new Error(`Δr 柱子那一段只有 ${best.length} 根，认不出来`);
-  if (!best.includes(0.95))
+  if (!best.includes(1))
     throw new Error("没有一根大流量柱子是高亮的");
-  if (!best.includes(0.28))
+  if (!best.includes(0.3))
     throw new Error("流量不够的柱子没有被压暗——整段都是同一个 alpha");
+
+  /* Brightness alone is what failed in practice -- on 2026-10-29, 12 of 17
+     entries were taken with the gate off by someone who believed they were
+     only entering on heavy flow. So the gate also gets an outline, and the
+     count of outlines has to match the count of lit bars exactly: one too
+     few and a heavy bar goes unmarked, one too many and a quiet bar is
+     wearing the gate's colour. */
+  const q = api.getQS()[idx];
+  const hv = api.flowGate(q);
+  /* Counted over the bars actually DRAWN, not over 0..mark: an answered
+     question is revealed, so the loop runs past the decision to the end of
+     the stepped future. best.length is how many non-null bars were filled,
+     which is exactly that range however the reveal state came out. */
+  let lit = 0, seen = 0;
+  for (let i = 0; i < q.drs1.length && seen < best.length; i++){
+    if (q.drs1[i] == null) continue;
+    seen++;
+    if (hv[i]) lit++;
+  }
+  const edges = ctxOps.filter(o => o.op === "strokeRect" &&
+                              String(o.color).toLowerCase() === "#ffc857");
+  if (edges.length !== lit)
+    throw new Error(`大流量柱 ${lit} 根，描边 ${edges.length} 个——对不上`);
+  /* After the fills, or a neighbour's fill paints over it. */
+  const lastFill = Math.max(...ctxOps.filter(
+    o => o.op === "fillRect" && (o.alpha === 1 || o.alpha === 0.3)).map(o => o.i));
+  if (Math.min(...edges.map(o => o.i)) < lastFill)
+    throw new Error("描边画在填充之前，会被相邻柱子盖掉");
   console.log(`ok   流量上图：连续 ${best.length} 根里亮暗并存` +
-              `（亮 ${best.filter(v => v === 0.95).length}）`);
+              `（亮 ${best.filter(v => v === 1).length}），` +
+              `${edges.length} 根描边且画在填充之后`);
 }
 
 console.log("\nFLOWMAG OK");
