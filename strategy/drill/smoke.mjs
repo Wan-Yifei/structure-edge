@@ -194,7 +194,7 @@ const api = new Function(
          "         waitOne, markOf, entryOf, WAIT_MAX, FWD, flowGate," +
          "         FLOW_WIN, FLOW_PCT, FLOW_MIN, DR_DECISION," +
          "         getStep0: () => step0," +
-         "         getStep: () => step, getQS: () => QS, syncOut, draw, reset};")();
+         "         getStep: () => step, getQS: () => QS, syncOut, draw, reset, setStopAtPrice, stopFromStructure, grabStop};")();
 
 await new Promise((r) => setTimeout(r, 400));
 
@@ -2231,3 +2231,93 @@ console.log("\nSLIDER OK");
 }
 
 console.log("\nRESET OK");
+
+/* ---- 止损按价格放，目标按 R:R ----------------------------------------- *
+ * The stop is the denominator of every R on the scoreboard, and in the
+ * market it is placed by looking at the chart. The two ATR ranges stay the
+ * model underneath -- every record on file is written in them -- so these
+ * check the conversion, not a new storage format.
+ *
+ * Measured on the c1 pool, taking every green: a stop under the recent
+ * swing paid +0.417 R a trade in the chronological holdout against +0.100
+ * for a fixed 2.37 ATR, paired by session +0.317 R [+0.173, +0.463]. */
+{
+  const stop = els["s-stop"], tgt = els["s-tgt"];
+  const rr = els["s-rr"], lock = els["s-rrlock"];
+  const all = api.getQS();
+  const fresh = all.findIndex((x) => !api.isAnswered(x.id));
+  if (fresh < 0) throw new Error("every question is already answered");
+  api.goto1(fresh + 1);
+  const q = api.getQS()[api.getIdx()];
+  const m = api.markOf(q);
+  const entry = api.entryOf(q, m);
+
+  // A price goes in, the ATR the record speaks comes out.
+  api.choose("enter");
+  lock.checked = false;
+  const px = entry - 1.5 * q.atr;
+  api.setStopAtPrice(px);
+  if (Math.abs(+stop.value - 1.5) > 0.02)
+    throw new Error(`拖到 ${px.toFixed(2)} 应得 1.50 ATR，实得 ${stop.value}`);
+  const { stop: back } = api.levels(q, +stop.value, +tgt.value, m);
+  if (Math.abs(back - px) > 0.02 * q.atr)
+    throw new Error(`换算回来是 ${back.toFixed(2)}，不是放下去的 ${px.toFixed(2)}`);
+  console.log("ok   止损：图上的价格换算成记录里的 ATR，再换回来对得上");
+
+  // Locked, moving the stop keeps the ratio -- the point of a TP/RR rule.
+  lock.checked = true;
+  rr.value = "2.5";
+  api.setStopAtPrice(entry - 1.0 * q.atr);
+  const a = api.levels(q, +stop.value, +tgt.value, m);
+  api.setStopAtPrice(entry - 2.0 * q.atr);
+  const b = api.levels(q, +stop.value, +tgt.value, m);
+  if (Math.abs(a.rr - 2.5) > 0.02 || Math.abs(b.rr - 2.5) > 0.02)
+    throw new Error(`锁住 R:R 2.5，拖完得到 ${a.rr.toFixed(2)} / ${b.rr.toFixed(2)}`);
+  if (!(b.risk > a.risk * 1.5))
+    throw new Error("止损并没有真的变宽");
+  if (!(Math.abs(b.target - entry) > Math.abs(a.target - entry) * 1.5))
+    throw new Error("锁着 R:R，止损拉宽了目标却没跟着走远");
+  console.log("ok   锁 R:R：拖止损时盈亏比不变，目标跟着走");
+
+  // Unlocked, the target is its own ATR distance and must not follow.
+  lock.checked = false;
+  api.setStopAtPrice(entry - 1.0 * q.atr);
+  const t0 = +tgt.value;
+  api.setStopAtPrice(entry - 2.0 * q.atr);
+  if (Math.abs(+tgt.value - t0) > 1e-9)
+    throw new Error(`解锁后目标仍被拖动：${t0} → ${tgt.value}`);
+  console.log("ok   解锁：目标是独立的 ATR 距离，拖止损不动它");
+
+  // The structural placement the measurement liked.
+  lock.checked = true;
+  api.stopFromStructure();
+  const want = Math.min(...q.l.slice(Math.max(0, m - 9), m + 1))
+             - 0.10 * q.atr;
+  const got = api.levels(q, +stop.value, +tgt.value, m).stop;
+  if (Math.abs(got - want) > 0.02 * q.atr)
+    throw new Error(`按结构放应在 ${want.toFixed(2)}，实得 ${got.toFixed(2)}`);
+  if (got >= Math.min(...q.l.slice(Math.max(0, m - 9), m + 1)))
+    throw new Error("结构止损没有落在近 10 根最低点下方");
+  console.log("ok   按结构放：落在近 10 根最低点下方 0.1 ATR");
+
+  // Out of range prices clamp instead of writing a record that cannot be
+  // represented -- the slider's own bounds are the record's bounds.
+  api.setStopAtPrice(entry - 99 * q.atr);
+  if (+stop.value > 5.0001)
+    throw new Error(`止损没有被收在滑块范围内：${stop.value}`);
+  api.setStopAtPrice(entry + 5 * q.atr);      // above a long's entry
+  if (+stop.value < 0.2499)
+    throw new Error(`反向的止损没有被收住：${stop.value}`);
+  console.log("ok   止损：超出可记录范围的价格被收住，而不是写进记录");
+
+  // It is grabbable only while an entry is being composed.
+  if (typeof api.grabStop !== "function")
+    throw new Error("grabStop 没有暴露");
+  api.choose("pass");
+  api.draw(q, false);
+  if (api.grabStop(0) || api.grabStop(300))
+    throw new Error("选了放过还能抓止损线");
+  console.log("ok   止损线：只有在组装入场时才抓得住");
+}
+
+console.log("\nSTOP OK");

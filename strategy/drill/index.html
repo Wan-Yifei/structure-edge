@@ -140,8 +140,11 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
   命中<span id="dr-hi"> 约四成</span>、&lt;0 的只有<span id="dr-lo"> 两成多</span>。
   默认在<b>最低点之后一根</b>做决定 —— 低点要等它收了才知道是低点,右上角可以切回当根对比。
   提交之后<b>后面的 K 线不会一次放出来</b>:按 <b>▶ 下一根</b>(或方向键 →)一根一根走,
-  <b>⏩ 自动</b>(空格)会播到结算那一根为止。止损和目标<b>各自独立按 ATR 设</b>,
-  拉止损不会把目标拖着走,盈亏比由两者相除得出。</p>
+  <b>⏩ 自动</b>(空格)会播到结算那一根为止。
+  <b>止损在图上拖</b>(鼠标移到那条红虚线上会变成上下箭头),或按<b>按结构放</b>
+  落到近 10 根最低点下方 0.1 ATR;<b>目标按 R:R 设</b>,
+  <b>锁 R:R</b> 开着时拖止损目标跟着走、盈亏比不变。关掉它就回到旧行为:
+  目标是独立的 ATR 距离,拖止损不影响它。</p>
 
   <div class="card" id="qcard">
     <div class="meta" id="meta"></div>
@@ -161,6 +164,11 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
         <button id="b-wait" title="再看一根再决定（快捷键 d）">再看一根</button>
         <span id="kb-hint" class="kbhint"></span>
       </div>
+      <!-- The two ranges stay the model: everything downstream -- levels(),
+           settle(), the stored record -- speaks ATR, and changing that would
+           invalidate every answer on file. What changed is how they are
+           driven. The stop is dragged on the chart at a price, the target is
+           dialled as R:R, and these two convert. -->
       <div class="sliders" id="sl" hidden>
         <label for="s-stop">止损</label>
         <input type="range" id="s-stop" min="0.25" max="5" step="0.05" value="1.00">
@@ -168,6 +176,19 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
         <label for="s-tgt">目标</label>
         <input type="range" id="s-tgt" min="0.25" max="8" step="0.05" value="2.00">
         <output id="o-tgt"></output>
+      </div>
+      <div class="sliders" id="sl2" hidden style="gap:10px;align-items:center">
+        <span style="font-size:12px;color:var(--ink-3)">
+          把图上的<b style="color:var(--dn)">止损虚线</b>拖到你看到的结构位；</span>
+        <button id="b-stop-struct" style="padding:4px 9px;font-size:12px"
+          title="放到决策根往前 10 根的最低点下方 0.1 ATR。全绿灯入场下，这个放法在后半段留出里是每笔 +0.417 R，2.37 ATR 的固定宽度是 +0.100 R（区间跨零）。">按结构放</button>
+        <label for="s-rr" style="font-size:12px">R:R</label>
+        <input type="number" id="s-rr" min="0.25" max="10" step="0.1" value="2.0"
+          style="width:64px;font-size:12px;padding:3px 5px">
+        <label style="font-size:12px;color:var(--ink-3);cursor:pointer"
+          title="开：拖止损时目标跟着走，盈亏比不变——按 TP/RR 下单就要这个。关：目标是独立的 ATR 距离，拖止损不影响它（旧行为）。">
+          <input type="checkbox" id="s-rrlock" checked style="vertical-align:-1px"> 锁 R:R</label>
+        <span id="o-risk" style="font-size:12px;color:var(--ink-2)"></span>
       </div>
       <div class="row">
         <button id="b-prev" title="上一题（快捷键 ← 或 P）">← 上一题</button>
@@ -1115,7 +1136,7 @@ function render(){
   $("play").hidden = true;
   $("b-pass").setAttribute("aria-pressed","false");
   $("b-enter").setAttribute("aria-pressed","false");
-  $("sl").hidden = true; $("b-go").disabled = true;
+  $("sl").hidden = true; $("sl2").hidden = true; $("b-go").disabled = true;
   kbSet(null);
   waitBtn();                    // a new card starts with no mode
   $("b-go").hidden = false; $("b-next").hidden = true; $("vd").hidden = true;
@@ -1125,7 +1146,7 @@ function render(){
      answer overwrite the first, and the first is the one being measured. */
   const prior = ans[q.id];
   if (prior){
-    $("sl").hidden = prior.choice !== "enter";
+    $("sl").hidden = $("sl2").hidden = prior.choice !== "enter";
     $("b-go").hidden = true;
     $("b-next").hidden = false;
     $("play").hidden = false;
@@ -1164,7 +1185,7 @@ function waitOne(){
   pick = null;
   $("b-pass").setAttribute("aria-pressed", "false");
   $("b-enter").setAttribute("aria-pressed", "false");
-  $("sl").hidden = true;
+  $("sl").hidden = $("sl2").hidden = true;
   $("b-go").disabled = true;
   kbSet(null);
   waitBtn();
@@ -1212,7 +1233,16 @@ function goto1(v){
 
 function syncOut(){
   const q = QS[idx];
-  const sa = +$("s-stop").value, ta = +$("s-tgt").value;
+  const sa = +$("s-stop").value;
+  /* With the lock on, the target follows the stop so the reward:risk the
+     order was planned at survives moving the stop -- which is how a TP/RR
+     rule is actually written. With it off, the target stays an independent
+     ATR distance, the behaviour the sliders were built for. */
+  if ($("s-rrlock") && $("s-rrlock").checked){
+    const rrWant = Math.min(10, Math.max(0.25, +$("s-rr").value || 2));
+    $("s-tgt").value = Math.min(8, Math.max(0.25, rrWant * sa)).toFixed(2);
+  }
+  const ta = +$("s-tgt").value;
   /* Read the mark BEFORE the preview is planted. markOf() switches from
      `step0` to the answer's `waited` as soon as ans[q.id] exists, so a
      preview without one silently rewinds the chart to the original
@@ -1222,6 +1252,14 @@ function syncOut(){
   const {stop, target, risk, rr} = levels(q, sa, ta, m);
   $("o-stop").textContent = `${sa.toFixed(2)} ATR → ${fmt(stop)}  (风险 ${risk.toFixed(2)})`;
   $("o-tgt").textContent = `${ta.toFixed(2)} ATR → ${fmt(target)}  (${rr.toFixed(2)} R)`;
+  /* The R:R box shows the truth even when it is not the thing being
+     dialled, so the two readings can never disagree on screen. */
+  if ($("s-rr") && !($("s-rrlock") && $("s-rrlock").checked))
+    $("s-rr").value = rr.toFixed(2);
+  if ($("o-risk"))
+    $("o-risk").textContent =
+      `止损 ${fmt(stop)}　风险 ${risk.toFixed(2)}（${sa.toFixed(2)} ATR）` +
+      `　目标 ${fmt(target)}`;
   if (pick === "enter"){
     ans[q.id] = {choice:"enter", stop, target, targetR:rr, preview:true,
                  waited: m - q.mark};
@@ -1235,7 +1273,7 @@ function choose(k){
   kbDone = false;
   $("b-pass").setAttribute("aria-pressed", String(k==="pass"));
   $("b-enter").setAttribute("aria-pressed", String(k==="enter"));
-  $("sl").hidden = k !== "enter";
+  $("sl").hidden = $("sl2").hidden = k !== "enter";
   $("b-go").disabled = false;
   syncOut();
   if (k === "pass") draw(QS[idx], false);
@@ -2600,6 +2638,11 @@ function kbNudge(dir, big){
      1.1500000000000001, and the ATR readout would print it. */
   el.value = (Math.round(
     Math.min(+el.max, Math.max(+el.min, v)) / unit) * unit).toFixed(2);
+  /* Nudging the target by hand is the same statement as dragging it: the
+     target is now the thing being set, so the lock has to let go. Without
+     this the next syncOut() recomputes it from R:R and the keypress has no
+     effect at all. */
+  if (kbMode === "tgt" && $("s-rrlock").checked) $("s-rrlock").checked = false;
   syncOut();
 }
 
@@ -2695,6 +2738,61 @@ document.addEventListener("keydown", e => {
   }
 });
 
+/* Dragging the stop.
+
+   The stop is the denominator of every R on the scoreboard, and in the
+   market it is placed by looking at the chart, not by dialling a multiple
+   of ATR. So it is grabbed where it is drawn. The slider stays the model
+   underneath -- everything downstream speaks ATR and the records on file
+   were written in it -- and this converts a price back into one.
+
+   Measured on the whole c1 pool, taking every green light and splitting
+   the sessions in half: a stop under the recent swing paid +0.417 R a
+   trade in the holdout against +0.100 for a fixed 2.37 ATR, paired by
+   session +0.317 R [+0.173, +0.463]. The mechanism is the 30-bar window --
+   a 2.37 ATR stop at 2:1 puts the target 4.74 ATR away and 41.5% of those
+   trades never reach either side, against 11.3% for the structural stop. */
+let _dragStop = false;
+function priceAtY(y){
+  if (!_geo) return null;
+  return _geo.lo + (_geo.Y0 + _geo.H - y) / _geo.H * (_geo.hi - _geo.lo);
+}
+/* Only while an entry is being composed: there is no stop to move before
+   the side is chosen, and an answered question is a record, not a draft. */
+function grabStop(y){
+  const q = QS[idx];
+  if (!q || ans[q.id] || pick !== "enter" || !_geo) return false;
+  const m = markOf(q);
+  const {stop} = levels(q, +$("s-stop").value, +$("s-tgt").value, m);
+  const sy = _geo.Y(stop);
+  return Math.abs(sy - y) <= 9;
+}
+function setStopAtPrice(px){
+  const q = QS[idx];
+  if (!q || px == null) return;
+  const m = markOf(q);
+  const entry = entryOf(q, m);
+  const raw = (q.dir === "short" ? px - entry : entry - px) / q.atr;
+  /* Clamped to the slider's own range rather than to anything new: a stop
+     outside it cannot be represented in the record. */
+  const sa = Math.min(5, Math.max(0.25, raw));
+  $("s-stop").value = sa.toFixed(2);
+  syncOut();
+}
+/* The placement the measurement liked: under the last 10 bars' low. Offered
+   as a button, not forced as a default -- the point of dragging is that the
+   level is a judgement, and a button that silently pre-empted it would be
+   the ATR rule again under another name. */
+function stopFromStructure(){
+  const q = QS[idx];
+  if (!q) return;
+  const m = markOf(q);
+  const lo10 = Math.min(...q.l.slice(Math.max(0, m - 9), m + 1));
+  const hi10 = Math.max(...q.h.slice(Math.max(0, m - 9), m + 1));
+  setStopAtPrice(q.dir === "short" ? hi10 + 0.10 * q.atr
+                                   : lo10 - 0.10 * q.atr);
+}
+
 /* Redraws the whole canvas per move. At this size that is a fraction of a
    millisecond, and the alternative -- a second overlay canvas -- buys
    nothing but a second set of coordinates to keep in sync. Suppressed while
@@ -2705,14 +2803,30 @@ document.addEventListener("keydown", e => {
     const q = QS[idx];
     if (q) draw(q, !!ans[q.id]);
   };
+  const atY = (e) => {
+    const r = cv.getBoundingClientRect();
+    return {x: (e.clientX - r.left) * (CW / r.width),
+            y: (e.clientY - r.top) * (CH / r.height)};
+  };
+  cv.onmousedown = (e) => {
+    const p = atY(e);
+    if (!grabStop(p.y)) return;
+    _dragStop = true;
+    e.preventDefault();
+  };
   cv.onmousemove = (e) => {
     if (timer) return;
-    const r = cv.getBoundingClientRect();
-    _hover = {x: (e.clientX - r.left) * (CW / r.width),
-              y: (e.clientY - r.top) * (CH / r.height)};
+    const p = atY(e);
+    if (_dragStop){ setStopAtPrice(priceAtY(p.y)); return; }
+    _hover = p;
+    /* A cursor that changes on the line is the only hint that it can be
+       dragged; without it the feature is discoverable by accident only. */
+    cv.style.cursor = grabStop(p.y) ? "ns-resize" : "";
     redraw();
   };
-  cv.onmouseleave = () => { _hover = null; redraw(); };
+  const endDrag = () => { if (_dragStop){ _dragStop = false; syncOut(); } };
+  cv.onmouseup = endDrag;
+  cv.onmouseleave = () => { endDrag(); _hover = null; redraw(); };
 }
 
 $("b-pass").onclick = () => choose("pass");
@@ -2746,7 +2860,16 @@ $("b-jump").onclick = () => { jump(); $("report").hidden = true;
   $("qcard").hidden = false; render(); };
 $("b-report").onclick = report;
 $("s-stop").oninput = syncOut;
-$("s-tgt").oninput = syncOut;
+$("s-tgt").oninput = () => {
+  /* Moving the target by hand is a statement about the target, so it also
+     restates the R:R -- leaving the box showing the old ratio would make
+     the two controls disagree on screen. */
+  if ($("s-rrlock").checked) $("s-rrlock").checked = false;
+  syncOut();
+};
+$("s-rr").oninput = syncOut;
+$("s-rrlock").onchange = syncOut;
+$("b-stop-struct").onclick = stopFromStructure;
 matchMedia("(prefers-color-scheme:dark)").addEventListener("change",
   () => draw(QS[idx], !!ans[QS[idx].id]));
 
