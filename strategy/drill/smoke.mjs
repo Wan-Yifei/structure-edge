@@ -864,6 +864,33 @@ console.log("\nJUMP OK");
       const want = TXT[api.ruleLight(q, q.mark + k).k];
       if (!ctxCalls.includes("fillText:" + want))
         throw new Error(`走了 ${k} 根后，图上的灯没跟着变成「${want}」`);
+
+      /* And the step count must not follow you to the next question.
+         render() reset step0 AFTER calling renderMeta, so markOf() there
+         still held the previous question's count: a fresh card showed
+         "+15 根" and quoted dr1 from bar mark+15, while draw() -- running
+         after the reset -- drew bar mark. Four commits old, and invisible
+         until the live light was hung off renderMeta and started
+         contradicting the badge on the chart. */
+      const nxt = all.findIndex((x, j) => j > fresh && !api.isAnswered(x.id));
+      if (nxt > 0){
+        api.goto1(nxt + 1);
+        if (/\+\d+\s*根/.test(els.meta.innerHTML || ""))
+          throw new Error("换题后表头还带着上一题走过的根数：" +
+                          (els.meta.innerHTML.match(/\+\d+\s*根/) || [])[0]);
+        const q2 = all[nxt];
+        const want2 = TXT[api.ruleLight(q2, q2.mark).k];
+        if (!/规则：/.test(els.lv.innerHTML || ""))
+          throw new Error("换题后没有实时灯");
+        if (!els.lv.innerHTML.includes(want2))
+          throw new Error(`换题后实时灯说「${els.lv.innerHTML.match(/规则：(..)/)
+            ?.[1] ?? "?"}」，形态根上应该是「${want2}」`);
+        ctxCalls.length = 0;
+        api.draw(q2, false);
+        if (!ctxCalls.includes("fillText:" + want2))
+          throw new Error(`换题后图上的灯和下方面板不一致，` +
+                          `面板说「${want2}」`);
+      }
       api.goto1(fresh + 1);             // back to the setup bar
     }
   }

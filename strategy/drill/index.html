@@ -1094,9 +1094,17 @@ function render(){
     (nDone && nDone < QS.length
       ? `　（已答 ${nDone} 题排在前面，第 ${nDone+1} 题起是新的）` : "") +
     (DROPPED ? `　（另有 ${DROPPED} 题所在交易日没有逐笔归档，已排除）` : "");
-  renderMeta(q, markOf(q));
+  /* step0 BEFORE renderMeta, not after. markOf() reads step0, so rendering
+     the header first reads the bar count left over from the PREVIOUS
+     question: arrive at a fresh question having stepped 15 bars on the last
+     one and the header said "+15 根" and quoted dr1 from bar mark+15, while
+     draw() -- which runs after the reset -- drew bar mark. Four commits old
+     and invisible while it only moved a few numbers in the header; once the
+     live light was hung off renderMeta it became two lights contradicting
+     each other, green 做多 on the chart against red 别做 underneath. */
   pick = null;
   step0 = 0;
+  renderMeta(q, markOf(q));
   stopAuto();
   step = 0;
   $("play").hidden = true;
