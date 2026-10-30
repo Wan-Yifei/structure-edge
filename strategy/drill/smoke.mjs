@@ -861,6 +861,57 @@ console.log("\nJUMP OK");
       `(alpha ${over[0].alpha})`);
   console.log("ok   主图红绿灯：结算灰罩不会盖在它上面");
 
+/* ...and that it is a verdict on the bar the decision was MADE on.
+
+   ruleLight defaults its bar to the setup bar. The chart's call took that
+   default while the panel below passed markOf(q), so on any question where
+   bars were stepped before deciding the two lights on one page answered
+   about different minutes. Seen on 2026-06-11 12:23 after waiting 11 bars:
+   dr1 -0.197 at the setup and +0.494 at 12:34, so the chart burned red
+   别做 while the panel said 不触发. */
+{
+  const TXT = {green: "做多", red: "别做", amber: "不触发", na: "无数据"};
+  const all = api.getQS();
+  let pick = -1, wait = 0;
+  for (let i = 0; i < all.length && pick < 0; i++){
+    const q = all[i];
+    if (api.isAnswered(q.id) || !q.drs1) continue;
+    const at0 = api.ruleLight(q, q.mark);
+    if (!at0) continue;
+    for (let k = 1; k <= api.WAIT_MAX; k++){
+      const atK = api.ruleLight(q, q.mark + k);
+      if (atK && atK.k !== at0.k){ pick = i; wait = k; break; }
+    }
+  }
+  if (pick < 0)
+    throw new Error("no unanswered question where waiting changes the light");
+
+  const q = all[pick];
+  api.goto1(pick + 1);
+  for (let k = 0; k < wait; k++) api.waitOne();
+  api.choose("pass");
+  api.submit();
+  ctxOps.length = 0;
+  api.stepTo(0);
+  const drawn = ctxOps.find(
+    (o) => o.op === "fillText" && /^(做多|别做|不触发|无数据)$/.test(o.txt));
+  if (!drawn) throw new Error("the rule light was not drawn after waiting");
+  const want = TXT[api.ruleLight(q, q.mark + wait).k];
+  const stale = TXT[api.ruleLight(q, q.mark).k];
+  if (drawn.txt === stale && stale !== want)
+    throw new Error(`等了 ${wait} 根后，图上的灯还在说形态那根的事：` +
+                    `画的是「${drawn.txt}」，决策那根应该是「${want}」`);
+  if (drawn.txt !== want)
+    throw new Error(`图上的灯画的是「${drawn.txt}」，` +
+                    `ruleLight 在决策根上给的是「${want}」`);
+  /* And the panel below has to be saying the same thing, since the whole
+     failure was the two of them disagreeing. */
+  if (!(els.vd.innerHTML || "").includes(want))
+    throw new Error(`下方面板没有说「${want}」，两个灯又对不上了`);
+  console.log(`ok   主图红绿灯：等 ${wait} 根后按决策那根算（${stale}→${want}），` +
+              `与下方面板一致`);
+}
+
 /* The DK channel ribbon. It is a path fill plus two strokes, so it leaves
    no text and no fillRect -- the suite passed it for a week by never
    running it, because the question files on disk had no dk1/dk2 and the

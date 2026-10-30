@@ -680,7 +680,14 @@ function draw(q, reveal){
      a 5.5px dot, which is smaller than the axis labels around it and had
      to be looked for on a 1040px chart. */
   if (reveal){
-    const L = ruleLight(q);
+    /* `dm`, not q.mark. ruleLight defaults its bar to the SETUP bar, and
+       this call used to take that default while the panel below it passed
+       markOf(q) -- so on any question where bars were stepped before
+       deciding, the two lights on the same page answered about different
+       minutes and could disagree outright. Seen on 2026-06-11 12:23 after
+       waiting 11 bars: dr1 was -0.197 at the setup and +0.494 at 12:34,
+       so the chart burned red 别做 over a decision the panel called 不触发. */
+    const L = ruleLight(q, dm);
     if (L){
       const col = {green: upC, red: dnC, amber: pocC, na: ink3}[L.k];
       g.save();
