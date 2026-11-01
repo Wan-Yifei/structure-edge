@@ -2593,7 +2593,7 @@ document.addEventListener("keydown", e => {
 });
 
 /* ---- answering without the mouse ------------------------------------
-   1 放过  2 入场  3 调止损  4 调目标  5 提交，W/S 加减，空格或回车确认。
+   1 放过  2 入场  3 调止损  4 调目标  5 提交，W/S 上下移线，空格或回车确认。
 
    3 and 4 put the keyboard into a slider and 空格/回车 steps back out.
    The mode is shown in #kb-hint and as an outline on the live slider,
@@ -2611,8 +2611,11 @@ function kbHint(){
   const h = $("kb-hint");
   if (kbMode){
     h.className = "kbhint on";
+    /* "加/减" described the slider's number, which for a stop runs the
+       opposite way to the line on screen. The hand is on the line, so the
+       hint names the line's direction. */
     h.textContent = (kbMode === "stop" ? "调止损" : "调目标") +
-      "：W/→ 加　S/← 减（按住 Shift 五倍），空格 " +
+      "：W/→ 上移　S/← 下移（按住 Shift 五倍），空格 " +
       (kbMode === "stop" ? "去调目标" : "调完") + "　5 直接提交";
     return;
   }
@@ -2629,11 +2632,23 @@ function kbHint(){
   }
 }
 
+/* `dir` is a direction ON SCREEN: +1 moves the line up, -1 down. Both
+   sliders hold a DISTANCE in ATR, and distance grows away from entry --
+   which is upward for a long's target but downward for its stop. So the
+   stop used to travel opposite to the key that drove it: ArrowUp pushed
+   the line down. The target was right only because its distance happens
+   to point the same way as the key.
+
+   Short questions invert both, so the sign is derived rather than
+   hardcoded -- the pool is long-only today and this must not quietly
+   become wrong if that changes. */
 function kbNudge(dir, big){
   if (!kbMode) return;
   const el = $(kbMode === "stop" ? "s-stop" : "s-tgt");
   const unit = +el.step || 0.05;
-  const v = +el.value + dir * (big ? 5 : 1) * unit;
+  const away = (kbMode === "stop" ? -1 : 1) *
+               ((QS[idx] || {}).dir === "short" ? -1 : 1);
+  const v = +el.value + dir * away * (big ? 5 : 1) * unit;
   /* Snap back onto the slider's grid: 1.00 + 3*0.05 is
      1.1500000000000001, and the ATR readout would print it. */
   el.value = (Math.round(

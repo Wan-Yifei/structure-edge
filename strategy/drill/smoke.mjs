@@ -1442,17 +1442,41 @@ console.log("\nINTERVAL OK");
   if (!/调止损/.test(els["kb-hint"].textContent))
     throw new Error("the hint must name the mode: " +
                     els["kb-hint"].textContent);
-  const v0 = +stop.value;
+  /* Asserted on the PRICE of the line, not on the slider's number. Both
+     sliders hold a DISTANCE, and distance grows away from entry -- so for
+     a long's stop "bigger number" means "lower line". The old assertion
+     was on the number and therefore pinned the bug: W, the up key, used to
+     push the stop line DOWN. What the hand expects is the line, so that is
+     what this measures. Step size is checked in ATR alongside, since the
+     slider is still the model underneath. */
+  const q0 = api.getQS()[api.getIdx()];
+  const m0 = api.markOf(q0);
+  const lineY = () => api.levels(q0, +stop.value, +tgt.value, m0).stop;
+  const v0 = +stop.value, y0 = lineY();
   fireKey("w");
-  if (Math.abs(+stop.value - (v0 + 0.05)) > 1e-9)
-    throw new Error(`W should add one step, ${v0} -> ${stop.value}`);
-  fireKey("s"); fireKey("s");
+  if (!(lineY() > y0))
+    throw new Error(`W 是向上键，止损线却从 ${y0.toFixed(2)} 走到 ` +
+                    `${lineY().toFixed(2)}`);
   if (Math.abs(+stop.value - (v0 - 0.05)) > 1e-9)
-    throw new Error(`S should subtract, got ${stop.value}`);
+    throw new Error(`一步应是 0.05 ATR，${v0} -> ${stop.value}`);
+  fireKey("s"); fireKey("s");
+  if (!(lineY() < y0))
+    throw new Error("S 是向下键，止损线却没有下去");
   fireKey("w", { shift: true });
-  if (Math.abs(+stop.value - (v0 + 0.20)) > 1e-9)
-    throw new Error(`Shift+W should be five steps, got ${stop.value}`);
-  console.log(`ok   键盘 W/S：一步 0.05，Shift 五步（${v0} → ${stop.value}）`);
+  if (Math.abs(+stop.value - (v0 - 0.20)) > 1e-9)
+    throw new Error(`Shift+W 应是五步，got ${stop.value}`);
+  console.log(`ok   键盘 W/S：止损线跟着箭头方向走，一步 0.05 ATR`);
+
+  /* And the target, which was already right -- pinned so the fix to the
+     stop cannot silently invert it. */
+  fireKey("4");
+  const tLine = () => api.levels(q0, +stop.value, +tgt.value, m0).target;
+  const tgtY0 = tLine();
+  fireKey("w");
+  if (!(tLine() > tgtY0))
+    throw new Error("W 是向上键，目标线却下去了");
+  fireKey("s");
+  fireKey("3");
 
   /* Floating point: 1.00 + 3*0.05 is 1.1500000000000001 and the ATR
      readout would print it. */
@@ -1614,8 +1638,12 @@ console.log("\nKEYS OK");
   fireKey("ArrowRight");
   if (api.getIdx() !== held)
     throw new Error("→ must not change question while a slider is live");
-  if (Math.abs(+els["s-stop"].value - (v0 + 0.05)) > 1e-9)
-    throw new Error(`→ should nudge the slider, got ${els["s-stop"].value}`);
+  /* One step, either sign. WHICH way a key moves the line is the W/S
+     test's job; asserting it here too would encode the stop's geometry in
+     two places and this copy pinned the old, inverted one. */
+  if (Math.abs(Math.abs(+els["s-stop"].value - v0) - 0.05) > 1e-9)
+    throw new Error(`→ should nudge the slider one step, ` +
+                    `got ${els["s-stop"].value} from ${v0}`);
   fireKey("ArrowLeft");
   if (Math.abs(+els["s-stop"].value - v0) > 1e-9)
     throw new Error("← should nudge back");
