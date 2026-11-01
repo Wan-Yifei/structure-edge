@@ -181,7 +181,7 @@ h2{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
         <span style="font-size:12px;color:var(--ink-3)">
           把图上的<b style="color:var(--dn)">止损虚线</b>拖到你看到的结构位；</span>
         <button id="b-stop-struct" style="padding:4px 9px;font-size:12px"
-          title="放到决策根往前 10 根的最低点下方 0.1 ATR。全绿灯入场下，这个放法在后半段留出里是每笔 +0.417 R，2.37 ATR 的固定宽度是 +0.100 R（区间跨零）。">按结构放</button>
+          title="放到决策根往前 10 根的最低点下方 0.1 ATR——在这批题上中位宽度约 0.96 ATR。被验证的是「别用 2.37 ATR 配 R:R 2」：换成同宽度(0.96 ATR)的死板止损做对照，结构位本身的增量只有 +0.127 R，区间 [−0.023,+0.278] 跨零。所以这个按钮是个方便的起点，不是一条被证明的放法——线还是你自己拖。">按结构放</button>
         <label for="s-rr" style="font-size:12px">R:R</label>
         <input type="number" id="s-rr" min="0.25" max="10" step="0.1" value="2.0"
           style="width:64px;font-size:12px;padding:3px 5px">
@@ -2746,12 +2746,26 @@ document.addEventListener("keydown", e => {
    underneath -- everything downstream speaks ATR and the records on file
    were written in it -- and this converts a price back into one.
 
-   Measured on the whole c1 pool, taking every green light and splitting
-   the sessions in half: a stop under the recent swing paid +0.417 R a
-   trade in the holdout against +0.100 for a fixed 2.37 ATR, paired by
-   session +0.317 R [+0.173, +0.463]. The mechanism is the 30-bar window --
-   a 2.37 ATR stop at 2:1 puts the target 4.74 ATR away and 41.5% of those
-   trades never reach either side, against 11.3% for the structural stop. */
+   Measured on the c1 pool, taking every green light, holdout half only
+   (385 trades / 56 sessions, R:R 2, bootstrap resampling SESSIONS):
+
+     structure, low10 - 0.1 ATR   +0.440 R gross   +0.253 net
+     fixed 0.96 ATR (same width)  +0.313 R gross   +0.196 net
+     fixed 2.37 ATR              +0.077 R gross   +0.030 net
+
+   What that supports is "do not run a 2.37 ATR stop at R:R 2", paired by
+   session +0.363 R [+0.202, +0.530]. It does NOT support the structural
+   placement itself: against a fixed stop of the SAME width the structure
+   is worth +0.127 R [-0.023, +0.278], which crosses zero. Roughly 0.24 of
+   the 0.363 is simply narrowing the stop.
+
+   The mechanism is reachability, not the settlement window. An earlier
+   version of this note said the wide stop's 41.5% unresolved trades "take
+   a rounding fee at the close" -- backwards. Those 37.7% average +0.516 R
+   and are that arm's second largest POSITIVE contributor. The wide stop
+   loses because at R:R 2 its target sits 4.74 ATR out and is reached only
+   16.9% of the time in 30 bars, while its stop is still hit 45.5%; the
+   narrow stop's target is 1.92 ATR out and is reached 43.6%. */
 let _dragStop = false;
 function priceAtY(y){
   if (!_geo) return null;
