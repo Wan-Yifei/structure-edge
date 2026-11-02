@@ -614,8 +614,15 @@ class LiqHmWindow(QWidget):
         self._col_ts:  list[datetime] = []
 
         # Raw snapshot buffer for iceberg / spoof detection
-        # Each entry: {ts, side, price, volume}
+        # Each entry: {ts, seq, side, price, volume}
         self._raw_snaps: list[dict] = []
+        # Arrival order within a column, since every push in one shares that
+        # column's timestamp. Initialised here as well as in _reset_grid:
+        # __init__ never calls _reset_grid, so a future append path that runs
+        # before the first reset would raise AttributeError. Unreachable today
+        # (_needs_init gates the bulk fill, and a bare _push_column dies on
+        # bin_size == 0 first), which is exactly why it is worth pinning.
+        self._snap_seq: int = 0
 
         # Best bid / ask from the most recent snapshot (盘口)
         self._best_bid: float | None = None

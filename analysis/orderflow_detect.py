@@ -65,14 +65,21 @@ def detect_icebergs(
     # have fired between every genuine pair and blocked detection outright
     # (reported as "iceberg detection stopped working entirely" when Col(s)
     # dropped from 30 to 1). That throttle is gone -- order_book_collector
-    # now writes every push that yields a complete book, and US.SOXL RTH
-    # measures 6.6-6.9 snapshots a second, median gap 4 ms. So the floor no
-    # longer guards anything; what it does now is let the FEED's own pauses
-    # reset a segment, and those reach 8s in a normal session. Left as it is
-    # because the detector it serves does not work either (it flags 92% of
-    # eligible levels and survives shuffling its input's time order) -- fix
-    # the criterion first, then come back and derive this from the measured
-    # snapshot interval rather than from a constant that no longer exists.
+    # now writes every push that yields a complete book.
+    #
+    # What the floor does NOW, measured on db/order_book.db (the written
+    # stream, which is the one this detector reads back), US.SOXL, two
+    # sessions: 5.65 snapshots a second, median gap 274 ms on 2026-10-30 and
+    # 33 ms on 11-02, longest pause 60 s and 169 s. Gaps over 5 s happen
+    # 147-204 times a session. So the floor is not idle -- the FEED's own
+    # pauses trip it a couple of hundred times a day, resetting segments at
+    # moments that have nothing to do with a level leaving the book.
+    #
+    # Left as it is because the detector it serves does not work either: it
+    # flags 92% of eligible levels, and shuffling its input's time order
+    # RAISES the count (383 real against 423 shuffled over 14 windows). Fix
+    # the criterion first; the number to derive this from afterwards is the
+    # 147-204 pauses, not a constant that no longer exists.
     GAP_SECS     = max(col_secs * 1.5, 5.0)
 
     # Group by (side, price_bin) — sides must not be mixed
