@@ -80,11 +80,19 @@ _SIDE_STALE_SECS = 10.0  # drop a cached side once it's gone this long without a
 # Sizing on the densest rate means the hours target is a floor across every
 # session, at the cost of some disk in the quiet ones.
 #
-# Disk: ~2,093 B per snapshot on disk including the index (measured), so SOXL's
-# 24h works out to ~1.1 GB and each additional code to ~0.3 GB.
+# Disk: ~2,093 B per snapshot on disk including the index (measured), so SOXL
+# runs ~0.57 GB per trading session and each additional code ~0.3 GB.
+#
+# SOXL was on 24h, which bought one complete session plus fragments: a count
+# of 2026-11-02 found 10-30 (274,388 rows, the only whole day), 10-31 (18),
+# 11-01 (44,892, a Sunday's overnight) and 11-02 in progress. Raised to five
+# sessions because the episode-level work on this book cannot be done on one
+# day, and unlike everything else here the book only accumulates FORWARD --
+# a session pruned before the question is asked is gone for good. 61.5h is
+# 5 x 274,388 rows at the regular-session rate; ~2.9 GB.
 _SNAPSHOTS_PER_SEC = 6.2                       # measured, regular session
 _RETENTION_HOURS_DEFAULT = 6.5                 # one regular session
-_RETENTION_HOURS_OVERRIDE = {"US.SOXL": 24.0}  # a full 20:00->20:00 cycle
+_RETENTION_HOURS_OVERRIDE = {"US.SOXL": 61.5}  # five trading sessions
 
 
 def _keep_for_hours(hours: float) -> int:
