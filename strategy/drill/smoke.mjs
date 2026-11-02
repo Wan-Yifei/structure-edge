@@ -191,7 +191,7 @@ const api = new Function(
   code + "\n;return {choose, submit, levels, settle, ruleLight, stepTo, loadSet, report, next," +
          "         prev, goto1, isAnswered: (id) => !!ans[id], getIdx: () => idx," +
          "         cellOf, nextByDeficit, noFlow, stopAuto," +
-         "         waitOne, markOf, entryOf, WAIT_MAX, FWD, flowGate," +
+         "         waitOne, markOf, entryOf, WAIT_MAX, FWD, flowGate, flowOk," +
          "         FLOW_WIN, FLOW_PCT, FLOW_MIN, DR_DECISION," +
          "         getStep0: () => step0," +
          "         getStep: () => step, getQS: () => QS, syncOut, draw, reset, setStopAtPrice, stopFromStructure, grabStop};")();
@@ -2019,6 +2019,38 @@ console.log("\nWAIT OK");
   console.log(`ok   流量上图：连续 ${best.length} 根里亮暗并存` +
               `（亮 ${best.filter(v => v === 1).length}），` +
               `${edges.length} 根描边且画在填充之后`);
+
+  /* "Not judged" used to be drawn exactly like "judged and found small":
+     flowGate filled its array with false and returned the same false for a
+     bar with no reading, a bar with too little history, and a bar the gate
+     looked at and rejected. The faded fill then said "did not clear" about
+     all three. The bars with no gate now carry their own neutral outline,
+     and it has to be disjoint from the gate's -- a bar wearing both would
+     be claiming the gate passed judgement and did not. */
+  const hok = api.flowOk(q);
+  let na = 0;
+  seen = 0;
+  for (let i = 0; i < q.drs1.length && seen < best.length; i++){
+    if (q.drs1[i] == null) continue;
+    seen++;
+    if (!hok[i]) na++;
+    if (hv[i] && !hok[i])
+      throw new Error(`第 ${i} 根：门槛没定义却判成了大流量`);
+  }
+  const naEdges = ctxOps.filter(o => o.op === "strokeRect" &&
+                                String(o.color).toLowerCase() === "#78909c");
+  if (naEdges.length !== na)
+    throw new Error(`门槛未成立 ${na} 根，中性描边 ${naEdges.length} 个——对不上`);
+  /* Without this the overlap check below is vacuous: a missing coordinate
+     makes every comparison NaN, every NaN comparison false, and the filter
+     returns empty however the page draws. */
+  if (!naEdges.every(o => Number.isFinite(o.x) && Number.isFinite(o.y)))
+    throw new Error("描边没有记录坐标，重叠检查会假通过");
+  const both = edges.filter(e => naEdges.some(
+    n => Math.abs(n.x - e.x) < 1e-9 && Math.abs(n.y - e.y) < 1e-9));
+  if (both.length)
+    throw new Error(`${both.length} 根柱子同时戴着两种描边`);
+  console.log(`ok   门槛未成立的 ${na} 根单独描边，和大流量的 ${edges.length} 根不重叠`);
 }
 
 console.log("\nFLOWMAG OK");

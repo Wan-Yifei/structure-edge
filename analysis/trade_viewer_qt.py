@@ -5592,6 +5592,15 @@ class TradeViewerQt(QMainWindow):
         xf = pd.Series(buy - sell) / scale
         gate = (xf.abs().rolling(DCVD_FLOW_WIN, min_periods=20)
                 .quantile(DCVD_FLOW_PCT).shift(1))
+        # `gate` has no value until the rolling median and the rolling
+        # quantile both have their 20 bars and the shift has landed -- about
+        # the first 40 minutes of a session, and longer on a thin one, since
+        # bars under DCVD_MIN_SIGNED do not count towards either window.
+        # Folding that into False told the panel and the badge "the flow is
+        # not large" when the truth is "the gate does not exist yet", and it
+        # did so in the same grey, at the open, which is when the tape is
+        # busiest. Keep the two apart.
+        self._dcvd_gate_ok = gate.notna().to_numpy()
         self._dcvd_gate = (xf.abs() >= gate).fillna(False).to_numpy()
 
         look = max(1, min(self._dcvd_lookback(), n))
@@ -5605,16 +5614,25 @@ class TradeViewerQt(QMainWindow):
         # which is what made this panel look like noise at a 1-bar window.
         drawn = np.isfinite(dcvd)
         gated = self._dcvd_gate
+        gate_ok = self._dcvd_gate_ok
+        # Three states, not two. A bar the gate never judged is drawn at the
+        # dim weight -- its height, the ratio, is real either way -- but
+        # carries a neutral outline, so "not judged" cannot be read as "judged
+        # and found small". The outline rather than a third alpha because a
+        # fainter bar reads as even less flow, which is the opposite of what
+        # is being said.
         for sign, col in ((1, _GREEN), (-1, _RED)):
             side = drawn & ((dcvd >= 0) if sign > 0 else (dcvd < 0))
-            for lit, alpha in ((True, _DCVD_LIT_ALPHA),
-                               (False, _DCVD_DIM_ALPHA)):
-                sel = side & (gated if lit else ~gated)
+            for sel, alpha, pen in (
+                    (side & gate_ok & gated, _DCVD_LIT_ALPHA, None),
+                    (side & gate_ok & ~gated, _DCVD_DIM_ALPHA, None),
+                    (side & ~gate_ok, _DCVD_DIM_ALPHA,
+                     pg.mkPen(_qc(DCVD_LIGHT_NONE, 190), width=1))):
                 if not sel.any():
                     continue
                 bars = pg.BarGraphItem(x=x[sel], height=dcvd[sel],
                                        width=0.78, brush=_qc(col, alpha),
-                                       pen=None)
+                                       pen=pen)
                 self._plot_dcvd.addItem(bars)
                 self._dcvd_items.append(bars)
 
@@ -5633,7 +5651,8 @@ class TradeViewerQt(QMainWindow):
             # last finite reading and the last gate flag separately would
             # pair a value with another bar's volume on any day with a
             # gap in the tape.
-            heavy = bool(self._dcvd_gate[last_i])
+            gate_ok = bool(self._dcvd_gate_ok[last_i])
+            heavy = gate_ok and bool(self._dcvd_gate[last_i])
             # Hue from the sign, brightness from the flow state. Taking
             # the hue from the same reading the number shows is what
             # keeps the badge from contradicting itself.
@@ -5647,7 +5666,12 @@ class TradeViewerQt(QMainWindow):
             # contradicted the sign; banning direction hues outright was
             # a step too far, since direction is exactly what the sign is.
             hue = _GREEN if last_v >= 0 else _RED
-            if heavy:
+            if not gate_ok:
+                # Not "thin volume" -- the gate has not been established on
+                # this session yet, so the badge has nothing to say about
+                # size. The reading itself stands, so the hue stays.
+                col, note = _qc(hue, DCVD_LIGHT_LEVEL_A), "  flow n/a"
+            elif heavy:
                 col, note = _qc(hue, DCVD_LIGHT_HEAVY_A), "  heavy flow"
             elif abs(last_v) >= DCVD_DECISION:
                 col, note = _qc(hue, DCVD_LIGHT_LEVEL_A), "  thin volume"
@@ -5842,6 +5866,7 @@ class TradeViewerQt(QMainWindow):
         self._dcvd_items.clear()
         self._dcvd_arr = None
         self._dcvd_gate = None
+        self._dcvd_gate_ok = None
 
     def _clear_adi_items(self) -> None:
         for item in self._adi_items:

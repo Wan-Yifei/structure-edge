@@ -255,6 +255,10 @@ const GAP_H = 14, AXIS_H = 16, DR_H = 220;
    12 of 17 entries were taken with the gate OFF by a trader who believed
    the rule they were following was "only enter on heavy flow". */
 const GATE_EDGE = "#ffc857";
+/* The gate had no value on this bar -- distinct from "it did and the bar
+   came up short". Same neutral the viewer's badge uses for "nothing to
+   say", so the two screens mean the same thing by the same colour. */
+const GATE_NA = "#78909c";
 /* |delta_r| quantiles by window, measured over 38,049 RTH minutes / 104
    sessions of SOXL (2026-05-19..10-16): [p75, p90, p99]. The panel is
    scaled from these, never from the question on screen -- +0.30 has to mean
@@ -271,18 +275,27 @@ const DR_DECISION = 0.4;
    trailing, so a bar never raises the hurdle it is asked to clear. */
 const FLOW_WIN = 60, FLOW_PCT = 0.80, FLOW_MIN = 20;
 
+/* Two arrays, not one. `_heavy` says the bar cleared the gate; `_heavyOk`
+   says the gate had a value to clear at all. A bar with too little signed
+   volume of its own, or with fewer than FLOW_MIN usable bars behind it, was
+   never judged -- and before this it came back `false`, identical to a bar
+   the gate looked at and found small. The same conflation lived in the
+   viewer. Mark it instead: the question bank has it on 3.7% of marks and
+   6.2-6.4% of `xs`, and it is not rare at all early in a thin session. */
 function flowGate(q){
   if (q._heavy) return q._heavy;
   const xs = q.xs || null;
   const n = (q.c || []).length;
   const out = new Array(n).fill(false);
-  if (!xs) return (q._heavy = out);
+  const ok = new Array(n).fill(false);
+  if (!xs) { q._heavyOk = ok; return (q._heavy = out); }
   for (let i = 0; i < n; i++){
     if (xs[i] == null) continue;
     const w = [];
     for (let j = Math.max(0, i - FLOW_WIN); j < i; j++)
       if (xs[j] != null) w.push(Math.abs(xs[j]));
     if (w.length < FLOW_MIN) continue;
+    ok[i] = true;
     w.sort((a, b) => a - b);
     /* Linear interpolation between ranks -- the same quantile pandas
        computes, so the page and the backtest agree bar for bar rather
@@ -291,8 +304,13 @@ function flowGate(q){
     const lo = Math.floor(pos), hi = Math.ceil(pos);
     out[i] = Math.abs(xs[i]) >= w[lo] + (w[hi] - w[lo]) * (pos - lo);
   }
+  q._heavyOk = ok;
   return (q._heavy = out);
 }
+/* `_heavyOk` is only filled by the pass above, so always go through this
+   rather than reading the field -- otherwise a cached `_heavy` returns
+   early and the companion is undefined. */
+function flowOk(q){ flowGate(q); return q._heavyOk; }
 const FWD = 30, CW = 1040;
 /* Both panels are taller than they were. The 272px order-flow strip that
    used to sit below took the room, and it was drawn on axes of its own --
@@ -898,7 +916,7 @@ function draw(q, reveal){
        and a 1px bar with a 1.4px stroke is just a stroke. */
     const BW = Math.max(4, (X(1) - X(0)) * 0.8);
     const d1 = q.drs1;
-    const hv = flowGate(q);
+    const hv = flowGate(q), hok = flowOk(q);
     const barBox = i => {
       const cl = Math.max(-p99*1.05, Math.min(p99*1.05, d1[i]));
       const y0 = DY(0), yy = DY(cl);
@@ -931,6 +949,18 @@ function draw(q, reveal){
         g.strokeRect(Math.round(bx) + .5, Math.round(by) + .5,
                      Math.round(bw) - 1, Math.max(2, Math.round(bh)) - 1);
       }
+      /* Bars the gate never judged, in neutral and dashed. The faded fill
+         above says "did not clear"; without this they say it too, which is
+         a claim the data does not support. Dashed rather than a third
+         opacity, since a fainter bar reads as even less flow. */
+      g.strokeStyle = GATE_NA; g.lineWidth = 1.2; g.setLineDash([2, 2]);
+      for (let i = 0; i < last; i++){
+        if (hok[i] || d1[i] == null) continue;
+        const [bx, by, bw, bh] = barBox(i);
+        g.strokeRect(Math.round(bx) + .5, Math.round(by) + .5,
+                     Math.round(bw) - 1, Math.max(2, Math.round(bh)) - 1);
+      }
+      g.setLineDash([]);
       g.lineWidth = 1;
     }
     const d5 = q.drs5;

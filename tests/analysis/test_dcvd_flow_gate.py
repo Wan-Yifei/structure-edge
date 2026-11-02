@@ -158,6 +158,77 @@ class TestTheBarsAreDrawnInTwoGroups:
         draw(viewer, [(0, 0)] * 40)
         assert not self._bars(viewer)
 
+    def test_the_warmup_is_drawn_apart_from_the_bars_it_rejected(
+            self, viewer):
+        """Three groups per sign, not two. Before this, a warmup bar and a
+        bar the gate rejected shared one dim group, which is the panel
+        saying "the flow is not large" about forty minutes in which it has
+        no opinion."""
+        flows = steady(120)
+        for i in (60, 80, 100):
+            flows[i] = (90_000, 2_000)
+        draw(viewer, flows)
+        pens = [i.opts.get("pen") for i in self._bars(viewer)]
+        assert sum(p is not None for p in pens) == 1, (
+            "the warmup bars are not drawn as their own group")
+
+
+class TestTheGateIsKnown:
+    """`_dcvd_gate` answers "did this bar clear the gate"; it cannot answer
+    "was there a gate". Folding the second question into False made the
+    opening of every session read as quiet flow, in the same grey the panel
+    uses for a bar it judged and rejected. `_dcvd_gate_ok` separates them.
+    """
+
+    def ok(self, v, flows):
+        draw(v, flows)
+        return np.asarray(v._dcvd_gate_ok, dtype=bool)
+
+    def test_it_is_published_as_a_boolean_per_bar(self, viewer):
+        o = self.ok(viewer, steady())
+        assert o.shape == (120,)
+        assert o.dtype == bool
+
+    def test_it_is_false_exactly_through_the_warmup(self, viewer):
+        """The same two chained windows as the gate itself, so the two
+        arrays have to turn on at the same bar: the first bar with a
+        threshold is the first bar that can clear one."""
+        flows = steady()
+        o = self.ok(viewer, flows)
+        g = np.asarray(viewer._dcvd_gate, dtype=bool)
+        assert not o[:20].any(), "a threshold existed before any history"
+        assert o[-20:].all(), "the threshold never arrived"
+        first = int(np.argmax(o))
+        assert 35 <= first <= 45, f"warmup was {first} bars"
+        assert o[first:].all(), "the threshold flickered"
+        assert first == int(np.argmax(g)), (
+            "the gate cleared on a bar that had no threshold")
+
+    def test_the_gate_never_clears_where_there_is_none(self, viewer):
+        """The implication that makes the pair safe to read together."""
+        flows = steady(120)
+        flows[2] = (90_000, 2_000)     # a burst inside the warmup
+        flows[100] = (90_000, 2_000)
+        o = self.ok(viewer, flows)
+        g = np.asarray(viewer._dcvd_gate, dtype=bool)
+        assert not (g & ~o).any()
+        assert g[100] and o[100], "the burst after warmup should clear"
+
+    def test_a_rejected_bar_and_a_warmup_bar_are_distinguishable(
+            self, viewer):
+        """The whole point. Both used to be `gate == False`.
+
+        A varying tape, not `steady`: on a tape flat to the share every
+        |x| ties the 80th percentile and a `>=` gate admits all of them,
+        so there would be no rejected bar to tell the warmup apart from.
+        """
+        flows = [(3000 + 220 * (i % 17), 2000) for i in range(120)]
+        o = self.ok(viewer, flows)
+        g = np.asarray(viewer._dcvd_gate, dtype=bool)
+        assert (~o).any(), "no bar lacked a threshold"
+        assert (o & ~g).any(), "no bar was judged and rejected"
+        assert (o & g).any(), "no bar cleared"
+
 
 class TestToolbarFold:
     """Six toolbar rows are about a fifth of the window, and none of it
