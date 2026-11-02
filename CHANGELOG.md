@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.82.4 - 列内的到达顺序被当成了成交量排序 (2026-11-02)
+
+审查冰山检测时掉出来的。`detect_icebergs` / `detect_spoofs` 把快照排进
+`(ts, bar_idx, volume)` 再 `entries.sort()`,而 live 路径
+(`liq_hm_window.py:1231`)给一列里**每一次推送**都盖上这一列的时间戳 ——
+前两项于是全部相同,排序**落到了 volume 上**。列内的到达顺序被换成了一条
+由小到大的斜坡。
+
+实证:真实顺序 1000→60→1000→60 连续四列,正确给 **7** 次补回,
+生产路径给 **3** 次。而那段代码的注释当时写的是「now sees every refresh the
+feed reports」—— 它看到的是按大小排过序的。
+
+加一个 `seq` 到达计数器。没有 `seq` 的快照(从库里回放的、测试构造的)时间戳
+本来就互不相同,行为不变 —— 这一点单独有测试钉着。
+
+两处过期引用一并改掉:
+
+- `orderflow_detect.py` 的 `GAP_SECS` 注释还把 `_MIN_WRITE_INTERVAL = 2.0s`
+  当现行事实,那个常量**已经被删了**;实测 US.SOXL 盘中 **6.6–6.9 条/秒**、
+  快照间隔中位 **4 毫秒**。5 秒地板现在挡的不是采集节流,是 feed 自己的停顿
+  (样本内最大 7.96 秒)。
+- CHANGELOG v0.8.0 说 `detect_spoofs` 「cross-references ticks.db to confirm
+  non-fill」—— 它从来没有,用的是价差穿越代理。
+
+**冰山检测本身没有修,因为它不是参数问题。** 同一次审查测到:默认参数下
+贴盘口档位的 **92%** 被标成冰山(两个交易日,124/135 和 85/95);把输入的
+时间顺序打乱重跑,标记数**不降反升**(真实 383 vs 置换 423.4,14/14 个窗口);
+深度缩量里 **83%** 是撤单不是成交;标记档位的「成交量 ÷ 最大显示量」中位 **0.14**,
+正好是冰山签名的反面。覆盖层默认本来就是关的,保持关闭。
+
+
 ## v0.82.3 - 「算不出来」被画成了「流量不够」 (2026-11-02)
 
 两处同一个形状的 bug,而且都落在开盘那一小时 —— 他最可能盯盘的时候。
@@ -6763,7 +6794,13 @@ direction filtering, and simultaneous bid/ask detection (36 total, all pass).
 
 ### New: Spoofing detection
 - `analysis/orderflow_detect.py::detect_spoofs()` — detects large orders that appear
-  then vanish without execution; cross-references `ticks.db` to confirm non-fill
+  then vanish without execution
+  <!-- 2026-11-02: this line used to end "cross-references `ticks.db` to confirm
+  non-fill". It never did. detect_spoofs reads the book only and uses a spread
+  proxy (_spread_moved_through) to guess whether the level was executed. Left
+  the entry itself alone -- it records what shipped -- but the claim had to go,
+  because the same audit found 78% of depth drops in this book are cancels, so
+  a detector that cannot tell a fill from a cancel is the whole question. -->
 - BID spoof → orange ▲ (pushing price up); ASK spoof → orange ▼ (pushing down)
 - Dotted orange duration line from order appearance to cancellation bar
 - Toolbar: `Spoof` checkbox + `Max.Dur:` spinbox (default 30 s)

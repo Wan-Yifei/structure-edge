@@ -76,6 +76,63 @@ class TestDetectIcebergs(unittest.TestCase):
     def test_empty_returns_empty(self):
         self.assertEqual(self._run([]), [])
 
+    # -- arrival order inside one column ----------------------------------
+    #
+    # The live path stamps every push inside a column with that column's
+    # timestamp, so ts alone cannot order them. The tuple the detector sorts
+    # used to be (ts, bar_idx, volume), and on a tie in the first two that
+    # sort fell through to VOLUME -- so whatever arrived in a column was
+    # replayed smallest-first, as a ramp. A level that only ever grew then
+    # looked like repeated depletion and refresh. `seq` is the caller's
+    # arrival counter and breaks the tie before volume can.
+
+    def _sawtooth(self, n_cols=4, with_seq=True):
+        """Four columns, each carrying 1000/60/1000/60 as it arrived.
+
+        Dropping `seq` reproduces the old behaviour exactly: every push in a
+        column shares that column's timestamp, so the sort falls through to
+        volume and each column is replayed as 60, 60, 1000, 1000.
+        """
+        snaps, seq = [], 0
+        for c in range(n_cols):
+            ts = T0 + timedelta(seconds=c * 5)
+            for v in (1000, 60, 1000, 60):
+                s = _snap(ts, 110.0, v)
+                if with_seq:
+                    s["seq"] = seq
+                snaps.append(s)
+                seq += 1
+        return snaps
+
+    def test_arrival_order_inside_a_column_is_kept(self):
+        """Eight troughs over four columns, so seven recoveries after the
+        first. Sorted by volume the troughs merge and only the three column
+        boundaries survive -- the count this used to report."""
+        kept = self._run(self._sawtooth(), min_refreshes=1)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0][3], 7)
+
+    def test_sorting_by_volume_undercounts(self):
+        """Pins the contrast, so a regression cannot pass quietly."""
+        no_seq = self._run(self._sawtooth(with_seq=False), min_refreshes=1)
+        self.assertEqual(no_seq[0][3], 3)
+        self.assertLess(no_seq[0][3], self._run(self._sawtooth(),
+                                                min_refreshes=1)[0][3])
+
+    def test_snapshots_without_seq_keep_their_old_ordering(self):
+        """Replay from the database and every existing caller pass no `seq`;
+        their timestamps are already distinct, so nothing may change."""
+        snaps = [
+            _snap(T0 + timedelta(seconds=0),  110.0, 1000),
+            _snap(T0 + timedelta(seconds=5),  110.0,   50),
+            _snap(T0 + timedelta(seconds=10), 110.0,  900),
+            _snap(T0 + timedelta(seconds=15), 110.0,   50),
+            _snap(T0 + timedelta(seconds=20), 110.0,  950),
+        ]
+        self.assertEqual(self._run(snaps, min_refreshes=2),
+                         self._run([dict(s, seq=i) for i, s in enumerate(snaps)],
+                                   min_refreshes=2))
+
     def test_no_refresh_not_flagged(self):
         # Steady volume — no drop+recover cycle
         snaps = [_snap(T0 + timedelta(seconds=i * 5), 110.0, 1000) for i in range(10)]

@@ -59,17 +59,20 @@ def detect_icebergs(
     """
     DROP_FRAC    = 0.25
     RECOVER_FRAC = 0.40
-    # Gap larger than this -> level vanished (segment resets). Floored at 5s:
-    # col_secs is purely the heatmap's display/column granularity (as low as
-    # 1s), but genuine order-book snapshots never arrive faster than the
-    # collector's own write throttle (order_book_collector.py's
-    # _MIN_WRITE_INTERVAL = 2.0s per code) -- if GAP_SECS were allowed to
-    # drop below that floor (col_secs=1 -> 1.5s), *every* consecutive
-    # genuine snapshot pair would exceed it, resetting the segment on every
-    # single push and permanently blocking detection (every segment stays
-    # length 1, never reaching min_refreshes*2+1). Reported as "iceberg
-    # detection stopped working entirely" after Col(s)'s default dropped
-    # from 30 to 1.
+    # Gap larger than this -> level vanished (segment resets). Floored at 5s,
+    # and the floor outlived its reason: it was set because the collector
+    # once throttled writes to one every 2.0s per code, so a 1.5s gap would
+    # have fired between every genuine pair and blocked detection outright
+    # (reported as "iceberg detection stopped working entirely" when Col(s)
+    # dropped from 30 to 1). That throttle is gone -- order_book_collector
+    # now writes every push that yields a complete book, and US.SOXL RTH
+    # measures 6.6-6.9 snapshots a second, median gap 4 ms. So the floor no
+    # longer guards anything; what it does now is let the FEED's own pauses
+    # reset a segment, and those reach 8s in a normal session. Left as it is
+    # because the detector it serves does not work either (it flags 92% of
+    # eligible levels and survives shuffling its input's time order) -- fix
+    # the criterion first, then come back and derive this from the measured
+    # snapshot interval rather than from a constant that no longer exists.
     GAP_SECS     = max(col_secs * 1.5, 5.0)
 
     # Group by (side, price_bin) — sides must not be mixed
@@ -83,7 +86,17 @@ def detect_icebergs(
         p_bin = int((s["price"] - price_min) / bin_size)
         if not (0 <= p_bin < N_PRICE):
             continue
-        groups[(s["side"], p_bin)].append((s["ts"], bar_idx, float(s["volume"])))
+        # (ts, seq, ...) and never (ts, volume, ...): the live path stamps
+        # every push inside a column with that column's timestamp, so ts
+        # alone does not order them and a plain sort on the old
+        # (ts, bar_idx, volume) tuple fell through to VOLUME -- turning the
+        # arrival order into an ascending ramp. A level that only ever grew,
+        # 60 -> 300 -> 700 -> 1000, then read as three refreshes. `seq` is
+        # the caller's own arrival counter; snapshots that carry no seq
+        # (replayed from the database, or built by a test) keep the old
+        # ordering because their timestamps are already distinct.
+        groups[(s["side"], p_bin)].append(
+            (s["ts"], s.get("seq", 0), bar_idx, float(s["volume"])))
 
     bid_bin = int((best_bid - price_min) / bin_size) if best_bid is not None else None
     ask_bin = int((best_ask - price_min) / bin_size) if best_ask is not None else None
@@ -118,8 +131,8 @@ def detect_icebergs(
         for seg_entries in segments:
             if len(seg_entries) < min_refreshes * 2 + 1:
                 continue
-            bar_idxs = [e[1] for e in seg_entries]
-            vols     = np.array([e[2] for e in seg_entries], dtype=np.float64)
+            bar_idxs = [e[2] for e in seg_entries]
+            vols     = np.array([e[3] for e in seg_entries], dtype=np.float64)
 
             running_peak = 0.0
             depleted     = False
@@ -232,7 +245,11 @@ def detect_spoofs(
         p_bin = int((s["price"] - price_min) / bin_size)
         if not (0 <= p_bin < N_PRICE):
             continue
-        groups[(s["side"], p_bin)].append((s["ts"], bar_idx, float(s["volume"])))
+        # (ts, seq, ...) -- see the note in detect_icebergs. Without seq a
+        # tie on ts fell through to volume, so inside one column the "order"
+        # this walk sees was smallest-first rather than first-arrived.
+        groups[(s["side"], p_bin)].append(
+            (s["ts"], s.get("seq", 0), bar_idx, float(s["volume"])))
 
     spoofs = []
     for (side, p_bin), entries in groups.items():
@@ -243,8 +260,8 @@ def detect_spoofs(
 
         i = 0
         while i < len(entries):
-            ts_i, bar_i, vol_i = entries[i]
-            prev_vol = entries[i - 1][2] if i > 0 else 0.0
+            ts_i, _seq_i, bar_i, vol_i = entries[i]
+            prev_vol = entries[i - 1][3] if i > 0 else 0.0
 
             # Order must appear suddenly (prev small) and be large
             if vol_i < min_vol or prev_vol >= min_vol * 0.5:
@@ -260,7 +277,7 @@ def detect_spoofs(
             disappear_ts  = None
             disappear_bar = None
             while j < len(entries):
-                ts_j, bar_j, vol_j = entries[j]
+                ts_j, _seq_j, bar_j, vol_j = entries[j]
                 if (ts_j - appear_ts).total_seconds() > max_duration_secs:
                     break
                 if vol_j < appear_vol * DISAPPEAR_FRAC:

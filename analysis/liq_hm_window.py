@@ -1225,13 +1225,18 @@ class LiqHmWindow(QWidget):
             col = len(self._col_ts) - 1
             self._mid_prices[-1] = self._paint_column(col, rows)
             # Every push is genuine book data, so it belongs in _raw_snaps --
-            # unlike the timer's fill column. Iceberg/spoof detection looks for
-            # volume refreshing at a price and now sees every refresh the feed
-            # reports, not one sample per collector write.
+            # unlike the timer's fill column. Each one carries a sequence
+            # number because they all share this column's timestamp: the
+            # detectors sort their entries, and on a tie that sort used to
+            # fall through to volume, which replaced the arrival order with
+            # an ascending ramp. This comment used to claim detection "now
+            # sees every refresh the feed reports" -- it saw them sorted by
+            # size instead.
             ts = self._col_ts[-1]
             for row in rows:
+                self._snap_seq += 1
                 self._raw_snaps.append({
-                    "ts": ts, "side": row["side"],
+                    "ts": ts, "seq": self._snap_seq, "side": row["side"],
                     "price": row["price"], "volume": row["volume"],
                 })
             self._latest_snap = rows
@@ -1278,6 +1283,10 @@ class LiqHmWindow(QWidget):
         self._ask_grid  = np.zeros((max_cols, n_price), dtype=np.float64)
         self._col_ts      = []
         self._raw_snaps   = []
+        # Arrival order inside a column. The column timestamp is shared by
+        # every push in it, so without this the detectors cannot tell which
+        # book came first and fall back to sorting by volume.
+        self._snap_seq    = 0
         self._mid_prices  = []
         self._latest_snap = []
         self._last_snap_ts = None
@@ -1562,6 +1571,7 @@ class LiqHmWindow(QWidget):
                 self._ask_grid   = np.zeros((max_cols, n_price), dtype=np.float64)
                 self._col_ts     = []
                 self._raw_snaps  = []
+                self._snap_seq   = 0
                 self._mid_prices = []
                 # _absorb_ticks feeds detect_aggressor_bubbles() with column
                 # indices relative to self._col_ts; wiping col_ts above
@@ -1646,8 +1656,10 @@ class LiqHmWindow(QWidget):
 
         if not is_fill:
             for row in snap:
+                self._snap_seq += 1
                 self._raw_snaps.append({
                     "ts":     col_ts,
+                    "seq":    self._snap_seq,
                     "side":   row["side"],
                     "price":  row["price"],
                     "volume": row["volume"],
@@ -2667,6 +2679,7 @@ class LiqHmWindow(QWidget):
         # here are a bucket apart, so the signal is not there to find, and
         # keeping the levels would cost ~145 dicts a column.
         self._raw_snaps = []
+        self._snap_seq = 0
         self._absorb_ticks = []
         self._clear_overlay_items()
 
