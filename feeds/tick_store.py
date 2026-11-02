@@ -50,6 +50,16 @@ CREATE TABLE IF NOT EXISTS ticks (
     volume    INTEGER NOT NULL,
     direction TEXT    NOT NULL,
     ttype     TEXT,
+    -- The feed's own per-tick counter. NOT part of the UNIQUE key on
+    -- purpose: including it would stop the de-duplication that protects
+    -- against a reconnect replaying a window. Its job is diagnostic --
+    -- a break in the numbering says the gap is upstream of this process,
+    -- and the offered-minus-inserted count that insert_ticks now returns
+    -- says how much the UNIQUE key itself dropped. Those two together are
+    -- what separates "the feed did not send it" from "we threw it away",
+    -- which is the question behind ticks.db holding only 55-96% of the
+    -- session volume the 1-minute klines report.
+    seq       INTEGER,
     UNIQUE(code, ts, price, volume)
 );
 CREATE INDEX IF NOT EXISTS idx_ticks_code_ts ON ticks (code, ts);
@@ -74,10 +84,10 @@ class TickStore:
         else:
             self._con = sqlite3.connect(str(self._path), check_same_thread=False)
             self._con.executescript(_SETUP_SQL)
-            self._ensure_ttype()
+            self._ensure_columns()
 
-    def _ensure_ttype(self) -> None:
-        """Add ttype to a database created before it existed.
+    def _ensure_columns(self) -> None:
+        """Add columns to a database created before they existed.
 
         ALTER TABLE ADD COLUMN is metadata-only in SQLite, so this is instant
         even on the 48M-row table. It needs the write lock, which the collector
@@ -87,16 +97,25 @@ class TickStore:
         """
         try:
             cols = {r[1] for r in self._con.execute("PRAGMA table_info(ticks)")}
-            if "ttype" not in cols:
-                self._con.execute("ALTER TABLE ticks ADD COLUMN ttype TEXT")
-                self._con.commit()
+            for name, decl in (("ttype", "TEXT"), ("seq", "INTEGER")):
+                if name not in cols:
+                    self._con.execute(f"ALTER TABLE ticks ADD COLUMN {name} {decl}")
+            self._con.commit()
         except Exception as exc:
-            print(f"[TickStore] could not add ttype: {exc}", flush=True)
+            print(f"[TickStore] could not add columns: {exc}", flush=True)
 
     # ── write ──────────────────────────────────────────────────────────────
 
     def insert_ticks(self, rows: Iterable[dict]) -> int:
-        """Insert tick dicts.  Silently skips duplicates.  Returns rows inserted."""
+        """Insert tick dicts, skipping duplicates. Returns rows ACTUALLY written.
+
+        It used to return len(data), so every caller counting inserts was
+        really counting offers -- the collector's session_count among them.
+        executemany's rowcount is the real figure under INSERT OR IGNORE
+        (verified: five rows with two duplicates gives 3), and the gap
+        between the two is the only direct measure of what the UNIQUE key
+        discards.
+        """
         data = [
             (
                 r["code"],
@@ -105,6 +124,7 @@ class TickStore:
                 int(r["volume"]),
                 str(r["direction"]).upper(),
                 (str(r["ttype"]) if r.get("ttype") else None),
+                (int(r["seq"]) if r.get("seq") is not None else None),
             )
             for r in rows
         ]
@@ -112,13 +132,13 @@ class TickStore:
             return 0
         # Columns named, not positional: a bare VALUES (?,?,?,?,?) silently
         # became wrong the moment mid_dir was added.
-        self._con.executemany(
+        cur = self._con.executemany(
             "INSERT OR IGNORE INTO ticks "
-            "(code, ts, price, volume, direction, ttype) "
-            "VALUES (?, ?, ?, ?, ?, ?)", data
+            "(code, ts, price, volume, direction, ttype, seq) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)", data
         )
         self._con.commit()
-        return len(data)
+        return cur.rowcount
 
     # ── read ───────────────────────────────────────────────────────────────
 

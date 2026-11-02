@@ -66,8 +66,20 @@ def _make_handler(store, state: dict):
                     # is what left the off-exchange work guessing venue from
                     # sub-penny prices when the feed states it outright.
                     "ttype":     row.get("type"),
+                    # The feed's own counter. Kept because a break in it
+                    # places a missing tick upstream of this process, which
+                    # is the half of the ticks.db coverage question that
+                    # cannot be answered from the table alone.
+                    "seq":       row.get("sequence"),
                 })
             n = store.insert_ticks(rows)
+            # insert_ticks returns what was WRITTEN; len(rows) is what was
+            # offered. Their difference is what the UNIQUE key dropped --
+            # the other half of that question, and previously invisible
+            # because this used to count offers and call them inserts.
+            state["session_offered"] = state.get("session_offered", 0) + len(rows)
+            state["session_dropped"] = (state.get("session_dropped", 0)
+                                        + len(rows) - n)
             if n:
                 state["last_tick_time"] = time.time()
                 state["session_count"]  = state.get("session_count", 0) + n

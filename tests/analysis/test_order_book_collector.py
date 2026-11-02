@@ -301,11 +301,20 @@ class TestRetentionSizing:
     next rate change is a one-line edit with a visible consequence.
     """
 
-    def test_soxl_keeps_a_full_day(self):
+    def test_soxl_keeps_five_trading_sessions(self):
+        """Raised from one day on 2026-11-02. A count of the table that day
+        found exactly one whole session in it (10-30, 274,388 rows) plus
+        fragments, and the book is the one feed here that only accumulates
+        FORWARD -- a session pruned before a question is asked cannot be
+        fetched back. Five sessions is 5 x 274,388 rows at the regular rate,
+        about 2.9 GB."""
         from analysis.order_book_collector import (
             _RETENTION_KEEP_OVERRIDE, _SNAPSHOTS_PER_SEC)
-        hours = _RETENTION_KEEP_OVERRIDE["US.SOXL"] / _SNAPSHOTS_PER_SEC / 3600
-        assert 23.5 <= hours <= 24.5, f"got {hours:.1f}h"
+        keep = _RETENTION_KEEP_OVERRIDE["US.SOXL"]
+        sessions = keep / 274_388
+        assert 4.5 <= sessions <= 5.5, f"got {sessions:.1f} sessions"
+        hours = keep / _SNAPSHOTS_PER_SEC / 3600
+        assert 61.0 <= hours <= 62.0, f"got {hours:.1f}h"
 
     def test_default_keeps_at_least_one_regular_session(self):
         from analysis.order_book_collector import (
