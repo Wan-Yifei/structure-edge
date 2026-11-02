@@ -90,7 +90,11 @@ gamma          = 5.0   # >1 suppresses midtones: only the densest bands stay
                        # bright. Lower it when deep thin levels black out.
 min_vol        = 0
 col_secs       = 1
-max_cols       = 240
+max_cols       = 720   # x col_secs = how far back the grid reaches, here 12
+                       # minutes. Measured on a 720x100 grid: ~10 ms a column
+                       # against a one-second budget, 1.1 MB. np.roll is not
+                       # the cost (0.65 ms) -- the RGBA render is. Changing
+                       # this clears the grid; col_secs does not.
 n_price        = 100
 ice_min_ref    = 3
 spoof_dur      = 30
