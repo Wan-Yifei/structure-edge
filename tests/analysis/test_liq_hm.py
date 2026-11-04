@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 
 from analysis.liq_hm_window import (
+    HIST_RANGES,
     _hot_rgba,
     _single_rgba,
     _calc_col_mid,
@@ -194,6 +195,40 @@ class TestCalcDepthLabel(unittest.TestCase):
         snap = _snap(("BID", 100.5, 500))   # no ask levels
         result = _calc_depth_label(snap, 100.5, 100.6, 100.9)
         self.assertEqual(result, "eat↑ 0")
+
+
+# ---------------------------------------------------------------------------
+# HIST_RANGES — the replay dropdown
+# ---------------------------------------------------------------------------
+
+class TestHistRanges(unittest.TestCase):
+    """The combo box is built by iterating this list and read back by index,
+    so the list's order is the widget's contract, not a presentation detail."""
+
+    def test_live_is_first(self):
+        """The reset path writes setCurrentIndex(0) to mean 'back to live',
+        so anything inserted ahead of Live silently changes what it does."""
+        self.assertEqual(HIST_RANGES[0], ("Live", 0))
+
+    def test_ranges_are_ascending_with_all_last(self):
+        secs = [s for _, s in HIST_RANGES[1:] if s is not None]
+        self.assertEqual(secs, sorted(secs))
+        self.assertIsNone(HIST_RANGES[-1][1])
+
+    def test_labels_are_unique(self):
+        labels = [lbl for lbl, _ in HIST_RANGES]
+        self.assertEqual(len(labels), len(set(labels)))
+
+    def test_every_label_matches_its_seconds(self):
+        """A label disagreeing with its value is the one mistake here that no
+        test of behaviour would catch: the window loads the right range and
+        wears the wrong name."""
+        unit = {"m": 60, "h": 3600, "d": 86400}
+        for label, secs in HIST_RANGES:
+            if secs in (0, None):
+                continue
+            self.assertEqual(int(label[:-1]) * unit[label[-1]], secs,
+                             f"{label} does not mean {secs}s")
 
 
 if __name__ == "__main__":

@@ -241,7 +241,13 @@ COL_SECS_DEF = 1     # seconds per column -- ORDER_BOOK is push-driven, not
 MAX_HIST_COLS = 4000
 
 # Preset ranges for the history replay, in seconds. None = everything retained.
-HIST_RANGES = [("Live", 0), ("30m", 1800), ("2h", 7200),
+# Index into this list IS the combo box's index -- _on_hist_range_changed
+# reads HIST_RANGES[idx] -- so "Live" has to stay first, and the rest stay in
+# ascending order because that is the order the dropdown shows.
+#
+# 1h is the longest range that still draws a column per second at the default
+# Col(s): 2h already has to coarsen to 2 s to stay under MAX_HIST_COLS.
+HIST_RANGES = [("Live", 0), ("30m", 1800), ("1h", 3600), ("2h", 7200),
                ("6h", 21600), ("1d", 86400), ("All", None)]
 
 MAX_COLS_DEF = 240   # columns kept in memory  (4 min at 1 s/col -- raise via
