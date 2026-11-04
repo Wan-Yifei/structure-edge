@@ -134,13 +134,37 @@ def _make_handler(store, state: dict):
 
             code = data.get("code", "")
             now  = time.time()
-            merged = merger.merge(code, data.get("Bid", []), data.get("Ask", []), now)
+
+            # The SDK reads svrRecvTimeBid/Ask (strings) and never touches
+            # the Timestamp variants beside them, which carry the same
+            # instant as a double -- no parsing, no timezone to guess. `ts`
+            # below is THIS machine's wall clock, and the tape carries the
+            # exchange's; the offset between them measured -0.5 to -1.35 s
+            # across three sessions, against a 1 s heatmap column. Storing
+            # the server's own clock for both feeds is what removes the need
+            # to calibrate that offset. Guarded: an older OpenD that does
+            # not send the field must cost the timestamp, not the session.
+            svr_bid = svr_ask = None
+            try:
+                s2c = rsp_pb.s2c
+                if s2c.HasField("svrRecvTimeBidTimestamp"):
+                    svr_bid = s2c.svrRecvTimeBidTimestamp
+                if s2c.HasField("svrRecvTimeAskTimestamp"):
+                    svr_ask = s2c.svrRecvTimeAskTimestamp
+            except Exception:
+                svr_bid = svr_ask = None
+
+            merged = merger.merge(code, data.get("Bid", []), data.get("Ask", []),
+                                  now, svr_bid=svr_bid, svr_ask=svr_ask)
             if merged is None:
                 return ret, data
             bids, asks = merged
+            cached_bid_svr, cached_ask_svr = merger.svr_times(code)
 
             ts = datetime.now(_ET).replace(tzinfo=None)
-            n  = store.insert_snapshot(code, ts, bids, asks)
+            n  = store.insert_snapshot(code, ts, bids, asks,
+                                       svr_bid_ts=cached_bid_svr,
+                                       svr_ask_ts=cached_ask_svr)
             if n:
                 state["last_update_time"] = now
                 state["session_count"]    = state.get("session_count", 0) + n

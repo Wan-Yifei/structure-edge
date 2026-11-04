@@ -111,36 +111,76 @@ class OrderBookMerger:
         self._cross_log_at[code] = now
         self._log.warning(msg, *args)
 
+    def svr_times(self, code: str) -> tuple[float | None, float | None]:
+        """Server receive time of the push each cached side came from.
+
+        Returned separately from merge() so that adding them cost no change
+        to its signature -- liq_hm_window.py consumes the same merger and
+        unpacks the two-tuple positionally.
+
+        Each value is whatever the caller last passed to merge() for a side
+        it actually updated, so the pair matches the sides merge() returned.
+        None means the caller did not supply one, or the feed reported zero,
+        which per Qot_GetOrderBook.proto is how a push says "this side is
+        unchanged" -- see the class docstring.
+        """
+        cache = self._cache.get(code)
+        if cache is None:
+            return None, None
+        return cache.get("bids_svr"), cache.get("asks_svr")
+
     def merge(self, code: str, bid_items, ask_items,
-              now: float) -> tuple[list[Level], list[Level]] | None:
+              now: float, svr_bid: float | None = None,
+              svr_ask: float | None = None,
+              ) -> tuple[list[Level], list[Level]] | None:
         """Fold one push into the cache; return the complete (bids, asks).
 
         `now` is the caller's clock (time.time()), passed in so the caller can
         keep one consistent timestamp across merge + persist + render.
+
+        `svr_bid` / `svr_ask` are the feed's OWN clock for this push, read
+        from svrRecvTimeBidTimestamp / svrRecvTimeAskTimestamp. Optional, so
+        a caller that does not have them (or an older one) behaves exactly as
+        before. They are cached per side on the same rule as the levels, and
+        read back with svr_times(). Why they are worth carrying: `now` is the
+        receiving machine's wall clock, which free-runs at -39 ms/h between
+        the occasions Windows corrects it, while the tape carries the
+        exchange's -- the two measured -0.5 to -1.35 s apart across three
+        sessions, more than a whole column of the heatmap's 1 s grid. These
+        stamps are taken on the quote server instead, so what separates them
+        from the tape is transport rather than clock error, and transport
+        measured constant. Constant, not zero: see
+        feeds.order_book_store.SERVER_LEAD_SECS for the lead that still has
+        to come off, and for what is and is not established about it.
 
         Returns None when this push yields nothing usable -- both sides empty,
         or a crossed book that cannot be attributed to one side. A None means
         "don't act on this push", never "the book is empty".
         """
         cache = self._cache.setdefault(
-            code, {"bids": [], "asks": [], "bids_ts": 0.0, "asks_ts": 0.0})
+            code, {"bids": [], "asks": [], "bids_ts": 0.0, "asks_ts": 0.0,
+                   "bids_svr": None, "asks_svr": None})
         new_bids = parse_side(bid_items)
         new_asks = parse_side(ask_items)
 
         if new_bids:
             cache["bids"], cache["bids_ts"] = new_bids, now
+            cache["bids_svr"] = svr_bid or None
         elif cache["bids"] and now - cache["bids_ts"] > self._stale_secs:
             self._log.warning(
                 "%s bid side stale for >%.0fs, dropping %d cached level(s)",
                 code, self._stale_secs, len(cache["bids"]))
             cache["bids"] = []
+            cache["bids_svr"] = None
         if new_asks:
             cache["asks"], cache["asks_ts"] = new_asks, now
+            cache["asks_svr"] = svr_ask or None
         elif cache["asks"] and now - cache["asks_ts"] > self._stale_secs:
             self._log.warning(
                 "%s ask side stale for >%.0fs, dropping %d cached level(s)",
                 code, self._stale_secs, len(cache["asks"]))
             cache["asks"] = []
+            cache["asks_svr"] = None
 
         bids, asks = cache["bids"], cache["asks"]
         if not bids and not asks:

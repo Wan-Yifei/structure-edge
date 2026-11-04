@@ -50,11 +50,28 @@ def _make_handler(store, state: dict):
             if ret != 0 or data is None or data.empty:
                 return ret, data
 
+            # Two of the feed's timestamps never reach `data`:
+            # TickerHandlerBase.on_recv_rsp builds its DataFrame from a
+            # col_list naming neither recvTime nor timestamp, so they are
+            # dropped one frame above this one. Read them off the protobuf
+            # instead -- same records, same order, since the DataFrame is
+            # built from exactly this list. Guarded because a malformed or
+            # future push must cost ticks, not the session.
+            svr = []
+            try:
+                for rec in rsp_pb.s2c.tickerList:
+                    svr.append((rec.recvTime, rec.timestamp))
+            except Exception:
+                svr = []
+            if len(svr) != len(data):
+                svr = []
+
             rows = []
-            for _, row in data.iterrows():
+            for i, (_, row) in enumerate(data.iterrows()):
                 direction = str(row.get("ticker_direction", "NEUTRAL")).upper()
                 if direction not in ("BUY", "SELL"):
                     direction = "NEUTRAL"
+                recv_ts, feed_ts = svr[i] if svr else (None, None)
                 rows.append({
                     "code":      row["code"],
                     "ts":        row["time"],
@@ -71,6 +88,23 @@ def _make_handler(store, state: dict):
                     # is the half of the ticks.db coverage question that
                     # cannot be answered from the table alone.
                     "seq":       row.get("sequence"),
+                    # `ts` above is the exchange time the feed reports as a
+                    # string; the order book is stamped with THIS machine's
+                    # datetime.now(). Those two ran -0.5 to -1.35 s apart
+                    # across the three sessions measured -- more than a whole
+                    # column of the heatmap's 1 s grid -- because the local
+                    # clock free-runs at -39 ms/h between the occasions
+                    # Windows corrects it.
+                    #
+                    # recv_ts does NOT close that gap: the proto calls it the
+                    # local receive time, and it moved WITH the Windows clock
+                    # step on 2026-11-03 while the book's server stamp moved
+                    # against it. The book's own svrRecvTime*Timestamp is
+                    # what closes it, against `ts` here, and even then a
+                    # constant transport lead remains -- see
+                    # feeds.order_book_store.SERVER_LEAD_SECS.
+                    "recv_ts":   recv_ts,
+                    "feed_ts":   feed_ts,
                 })
             n = store.insert_ticks(rows)
             # insert_ticks returns what was WRITTEN; len(rows) is what was

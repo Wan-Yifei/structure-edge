@@ -35,6 +35,7 @@ import pyqtgraph as pg
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from analysis import viewer_config as vcfg
+from feeds.order_book_store import SERVER_LEAD_SECS
 
 # ── palette (matches trade_viewer_qt) ──────────────────────────────────────────
 _BG   = "#0d1117"
@@ -179,6 +180,35 @@ _OPEND_PORT = 11111
 # closed", and re-subscribing on that would churn all night for no reason --
 # the DB fallback already covers that case.
 _PUSH_STALE_SECS = 90.0
+
+# Padding on both ends of a database range, to cover the two clocks a range
+# query straddles: latest_ts()/earliest_ts() answer in the frame the index is
+# built on (the stored local clock), while bucketed_snapshots() trims its
+# result in the aligned frame. The two differ by the local clock error, which
+# grows about 40 ms an hour and reached 1.6 s before the last correction. A
+# one-second bound used to be enough because the two frames were the same one;
+# without this pad the newest column silently stops being drawn once the
+# machine has drifted more than a second.
+_RANGE_CLOCK_PAD = timedelta(seconds=10)
+
+
+def _clock_correction(svr_bid: float | None, svr_ask: float | None,
+                      now: float) -> float:
+    """Seconds to add to this machine's clock to get the aligned one.
+
+    *svr_bid* / *svr_ask* are the merged book's two server stamps, *now* the
+    time.time() the push was handled at. The later of the two stamps wins, on
+    the same reasoning as feeds.order_book_store._newer_svr: a push that
+    refreshes one side leaves the other side's cached stamp standing.
+
+    Returns 0.0 when the push carried neither -- a feed that does not send
+    them leaves the old behaviour in place rather than being guessed at. A
+    zero stamp counts as absent; the proto uses it to mean "unchanged".
+    """
+    vals = [v for v in (svr_bid, svr_ask) if v]
+    if not vals:
+        return 0.0
+    return max(vals) - SERVER_LEAD_SECS - now
 
 # Spoof marker symbols — explicit QPainterPath so orientation is version-agnostic.
 # Qt painter Y increases downward: y=-0.5 is visually top, y=+0.5 is visually bottom.
@@ -335,8 +365,12 @@ class _WindowPrefillWorker(QThread):
                     start = newest - timedelta(
                         seconds=self._cols * self._bucket)
                     out = store.bucketed_snapshots(
-                        self._code, start,
-                        newest + timedelta(seconds=1), self._bucket)
+                        self._code, start - _RANGE_CLOCK_PAD,
+                        newest + _RANGE_CLOCK_PAD, self._bucket)
+                    # The pad can hand back more columns than the window
+                    # holds; the newest are the ones worth keeping, and
+                    # _push_column would roll the rest off anyway.
+                    out = out[-self._cols:]
         except Exception as exc:
             print(f"[liqhm] window prefill failed: {exc}", flush=True)
         self.done.emit(out)
@@ -351,7 +385,14 @@ class _PushBridge(QObject):
     runs on the GUI thread. This is what lets the heatmap repaint on the push
     itself instead of polling the database for it.
     """
-    snapshot = pyqtSignal(str, object, float)   # code, snap rows, push wall-clock
+    # code, snap rows, push wall-clock, clock correction in seconds.
+    #
+    # The correction is (aligned time - this machine's time) for this push, or
+    # 0.0 when the push carried no server stamp. The wall-clock stays raw
+    # because _PUSH_STALE_SECS compares it against time.time(); the correction
+    # travels beside it so the column this push paints is filed on the same
+    # clock as the database path's columns.
+    snapshot = pyqtSignal(str, object, float, float)
 
 
 # Keep-alive list for workers whose owner discarded them while still running.
@@ -607,6 +648,10 @@ class LiqHmWindow(QWidget):
         self._hist_bucket: int = 0
         self._push_ok: bool = False
         self._last_push_ts: float = 0.0   # time.time() of the last push
+        # Seconds to add to this machine's clock to get the aligned one. Set
+        # from each push that carries a server stamp; stays 0.0 on a feed that
+        # does not, which is the old behaviour.
+        self._clock_corr: float = 0.0
 
         # Rolling grid (index 0 = oldest visible column)
         self._bid_grid = np.zeros((MAX_COLS_DEF, N_PRICE), dtype=np.float64)
@@ -1142,16 +1187,36 @@ class LiqHmWindow(QWidget):
                         return ret, data
                     c = data.get("code", "")
                     now = time.time()
+                    # The SDK's unpacker drops these -- OrderBookQuery reads
+                    # only the string-valued svrRecvTime* fields, never the
+                    # doubles -- so they come off the protobuf directly, the
+                    # same way order_book_collector.py takes them.
+                    svr_bid = svr_ask = None
+                    try:
+                        s2c = rsp_pb.s2c
+                        if s2c.HasField("svrRecvTimeBidTimestamp"):
+                            svr_bid = s2c.svrRecvTimeBidTimestamp
+                        if s2c.HasField("svrRecvTimeAskTimestamp"):
+                            svr_ask = s2c.svrRecvTimeAskTimestamp
+                    except Exception:
+                        svr_bid = svr_ask = None
                     merged = merger.merge(c, data.get("Bid", []),
-                                          data.get("Ask", []), now)
+                                          data.get("Ask", []), now,
+                                          svr_bid=svr_bid, svr_ask=svr_ask)
                     if merged is None:
                         return ret, data
                     bids, asks = merged
+                    # Read back from the merger, not from the push: a push
+                    # that refreshed one side only leaves the other side's
+                    # cached stamp standing, and the book being painted is
+                    # the merged one.
+                    cb, ca = merger.svr_times(c)
+                    corr = _clock_correction(cb, ca, now)
                     # Shaped like the DB rows every other path here consumes,
                     # so _paint_column/_calc_col_mid need no special case.
                     rows = [{"side": "BID", "price": p, "volume": v} for p, v in bids]
                     rows += [{"side": "ASK", "price": p, "volume": v} for p, v in asks]
-                    bridge.snapshot.emit(c, rows, now)
+                    bridge.snapshot.emit(c, rows, now, corr)
                     return ret, data
 
             ctx = OpenQuoteContext(host=_OPEND_HOST, port=_OPEND_PORT)
@@ -1201,7 +1266,8 @@ class LiqHmWindow(QWidget):
         self._ob_sub_code = None
         self._push_ok = False
 
-    def _on_push(self, code: str, rows: list, now: float) -> None:
+    def _on_push(self, code: str, rows: list, now: float,
+                 corr: float = 0.0) -> None:
         """A merged ORDER_BOOK snapshot, on the GUI thread. Repaint and render.
 
         Repaints the rightmost column rather than appending one: the x axis
@@ -1219,6 +1285,14 @@ class LiqHmWindow(QWidget):
             return
         self._push_ok = True
         self._last_push_ts = now
+        if corr:
+            # Held rather than used once: the timer's fill columns have no
+            # push of their own to take a stamp from, and filing them on the
+            # raw local clock while the real ones carry the aligned time
+            # would put the two kinds of column on different clocks within
+            # the same grid. Replaced on every push, so it tracks the drift
+            # instead of being measured once at startup.
+            self._clock_corr = corr
         # Must run BEFORE deciding append-vs-repaint: a price-window rebuild in
         # here wipes _col_ts/_mid_prices/_raw_snaps (see _maybe_init_price_range),
         # so a column index taken beforehand can be past the end afterwards --
@@ -1657,7 +1731,13 @@ class LiqHmWindow(QWidget):
                 self._raw_snaps = [s for s in self._raw_snaps if s["ts"] >= cutoff]
 
         col    = len(self._col_ts)
-        col_ts = ts if ts is not None else datetime.now(_ET).replace(tzinfo=None)
+        # _clock_corr, not a bare now(): a column with no stamp of its own
+        # still has to land on the same clock as the ones that do, or the
+        # timer's fill columns and the feed's real ones drift apart inside
+        # one grid. See _on_push.
+        col_ts = ts if ts is not None else (
+            datetime.now(_ET).replace(tzinfo=None)
+            + timedelta(seconds=self._clock_corr))
         self._col_ts.append(col_ts)
         self._mid_prices.append(self._paint_column(col, snap))
 
@@ -2641,7 +2721,8 @@ class LiqHmWindow(QWidget):
                 bucket = max(self._col_secs_spin.value(),
                              int(span // MAX_HIST_COLS) + 1)
                 snaps = store.bucketed_snapshots(
-                    self._code, start, newest + timedelta(seconds=1), bucket)
+                    self._code, start - _RANGE_CLOCK_PAD,
+                    newest + _RANGE_CLOCK_PAD, bucket)
         except Exception as exc:
             self._set_hist_status(f"history query failed: {exc}")
             return

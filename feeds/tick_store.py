@@ -97,7 +97,8 @@ class TickStore:
         """
         try:
             cols = {r[1] for r in self._con.execute("PRAGMA table_info(ticks)")}
-            for name, decl in (("ttype", "TEXT"), ("seq", "INTEGER")):
+            for name, decl in (("ttype", "TEXT"), ("seq", "INTEGER"),
+                               ("recv_ts", "REAL"), ("feed_ts", "REAL")):
                 if name not in cols:
                     self._con.execute(f"ALTER TABLE ticks ADD COLUMN {name} {decl}")
             self._con.commit()
@@ -125,6 +126,26 @@ class TickStore:
                 str(r["direction"]).upper(),
                 (str(r["ttype"]) if r.get("ttype") else None),
                 (int(r["seq"]) if r.get("seq") is not None else None),
+                # Both discarded by the SDK before the collector ever saw
+                # them: get_rt_ticker and TickerHandlerBase build their
+                # DataFrame from a col_list that names neither.
+                #
+                # recv_ts is Ticker.recvTime, which the proto documents as
+                # the time THIS machine received the push -- not a server
+                # clock, despite the name, and not the one the order book's
+                # svrRecvTime*Timestamp carries. The two were measured on
+                # opposite sides of the local clock error: when Windows
+                # stepped the clock on 2026-11-03 03:54, recv_ts moved with
+                # it (+1.587) while the book's server stamp moved against it
+                # (-1.563). Its use is measuring local receive lag, not
+                # joining the two feeds.
+                #
+                # feed_ts is Ticker.timestamp, the trade's own time as a
+                # double rather than the string in `ts` -- measured identical
+                # to `ts` to the millisecond, so it carries no new
+                # information and is kept only as a cross-check.
+                (float(r["recv_ts"]) if r.get("recv_ts") else None),
+                (float(r["feed_ts"]) if r.get("feed_ts") else None),
             )
             for r in rows
         ]
@@ -134,8 +155,9 @@ class TickStore:
         # became wrong the moment mid_dir was added.
         cur = self._con.executemany(
             "INSERT OR IGNORE INTO ticks "
-            "(code, ts, price, volume, direction, ttype, seq) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)", data
+            "(code, ts, price, volume, direction, ttype, seq, "
+            "recv_ts, feed_ts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data
         )
         self._con.commit()
         return cur.rowcount
