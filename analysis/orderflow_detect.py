@@ -8,9 +8,404 @@ from __future__ import annotations
 
 import bisect as _bisect
 from collections import defaultdict
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 import numpy as np
+
+
+# ── Level-change attribution ───────────────────────────────────────────────
+#
+# Every detector below this point asks the same unasked question: when the
+# displayed volume at a price level falls, where did it go? The answer is
+# either that someone traded against it or that whoever posted it took it
+# back, and those mean opposite things. detect_icebergs never distinguished
+# them -- it read any drop-then-refresh as replenishment, which is why it
+# flags 92% of eligible levels and why shuffling its input's time order
+# RAISES the count (383 real against 423 shuffled over 14 windows).
+# detect_spoofs has the same hole and papers over it with a proxy
+# (_spread_moved_through) that only asks whether the quote moved.
+#
+# attribute_level_flow() answers it from the tape instead. For each pair of
+# consecutive books it matches trades to the level they hit and reports
+# THREE QUANTITIES, never a verdict:
+#
+#     traded     volume the tape executed at that level
+#     added      volume that appeared without a trade explaining it
+#     cancelled  volume that left without a trade explaining it
+#
+# from the identity  dv = added - cancelled - traded, which has one degree of
+# freedom too many: only (added - cancelled) is observable, so a level that
+# simultaneously gained and lost shows the net. That is the minimum
+# assumption available and it is stated rather than hidden.
+#
+# WHAT THIS IS GOOD FOR, AND WHAT IT IS NOT. An audit of the first version
+# established that the trade-to-level link is real: misalign the tape against
+# the book and the number of levels with any trade against them collapses
+# from 2414 to about 500. It also established three limits that are part of
+# the instrument and not of the market:
+#
+#   * `traded` is nearly unidentifiable in aggregate. Summed over a 20-minute
+#     window the unexplained term of the identity runs to 115M shares against
+#     a 5.5M-share tape, so at this snapshot resolution `traded` is a 0.9%
+#     correction. Per interval it is sound; as a window total it is noise.
+#
+#   * `added` and `cancelled` are TOTAL VARIATION, not flow. They sum a
+#     signed quantity in two sign buckets, so they grow with how often the
+#     book is sampled: thinning the same window by a stride of 32 takes
+#     (added+cancelled)/traded from 127 to 34. doc/ORDER_FLOW_GUIDE.md
+#     appendix A.2 already banned accumulating per-snapshot differences for
+#     exactly this reason, and this module repeated the mistake. Report
+#     monotone quantities instead -- peak_displayed, net_change, the tape as
+#     the denominator -- and never a per-episode sum of these two.
+#
+#   * The criterion `traded > max_displayed` DOES NOT WORK. Against a null
+#     that circularly shifts the tape (preserving every print's size,
+#     direction and clustering, destroying only the alignment to the book) it
+#     reached p >= 0.18 in all eight windows tested, and in two of them the
+#     null's median exceeded the real figure. Step 3 cannot be built on it.
+
+#: Trade prices that match no displayed level are EXCLUDED, never snapped to
+#: the nearest one. A sub-penny print at 24.1234 is off-exchange flow that
+#: never touched this book; rounding it onto 24.12 would credit a level with
+#: an execution that did not happen there, which is precisely the error that
+#: would manufacture iceberg evidence. 45.5% of this tape by volume is
+#: sub-penny, so the error would not be a rounding detail.
+_PRICE_DECIMALS = 4
+
+
+@dataclass
+class LevelEpisode:
+    """One appearance of one price level, with its flow split.
+
+    An episode ends when the level is cancelled out of the book, or when the
+    feed pauses long enough that the next book cannot be compared with this
+    one. Scrolling out of the reported depth does NOT end it: the orders are
+    still resting there, and closing the episode would hand the level a fresh
+    and smaller max_displayed every time price wandered past.
+
+    traded / added / cancelled are sums over the episode's intervals. Only
+    `traded` means what it says at that scale -- see the note above on why
+    the other two are total variation. For a size to threshold on, use
+    max_displayed and net_change, which do not move with the sampling rate.
+    """
+    side: str
+    price: float
+    t_first: datetime
+    t_last: datetime
+    n_books: int            # books in which the level was present
+    max_displayed: float
+    first_displayed: float
+    last_displayed: float
+    traded: float
+    traded_at_touch: float  # the part of `traded` that hit rank 0 of its side
+    added: float
+    cancelled: float
+    n_occluded: int         # intervals where the level was out of reported depth
+
+    @property
+    def net_change(self) -> float:
+        """Displayed size at the end less at the start. Sampling-rate free."""
+        return self.last_displayed - self.first_displayed
+
+
+@dataclass
+class FlowAudit:
+    """Where every share of tape volume went. The buckets partition it.
+
+    attributed is the only bucket the decomposition uses; the rest record
+    what had to be set aside and why, so the coverage is a number rather
+    than an assumption.
+    """
+    tick_vol_total: float = 0.0
+    attributed: float = 0.0
+    outside_books: float = 0.0   # before the first book or after the last
+    in_gap: float = 0.0          # inside an interval the feed paused through
+    neutral: float = 0.0         # the feed gave no side
+    off_grid: float = 0.0        # price matched no displayed level at all
+    wrong_side: float = 0.0      # matched only the side that cannot be hit
+    #: Not a bucket of the partition -- a subset of `neutral`, counted so the
+    #: caller can see the size of what it gave up. The feed leaves the
+    #: majority of this tape NEUTRAL and about 57% of that volume prints at
+    #: sub-penny prices, which only off-exchange price improvement produces;
+    #: those never touched this book and excluding them is exact. But 15.8%
+    #: of the whole tape is NEUTRAL volume sitting squarely ON a displayed
+    #: level -- the same order of magnitude as `attributed` itself -- and
+    #: doc/ORDER_FLOW_GUIDE.md appendix A.4 shows those prints carry real
+    #: direction. Excluding them is therefore a choice with a cost, not a
+    #: free simplification.
+    neutral_on_level: float = 0.0
+    #: Attributed volume by the level's depth rank in the reference book:
+    #: 0 is the touch (best bid / best ask), 1 the next level down, and so
+    #: on. Rank rather than a price offset so it does not depend on tick
+    #: size. Worth looking at before trusting any per-level total: 42.9% of
+    #: attributed volume names a level BEHIND the touch, and a single print
+    #: that large cannot have been filled by a level the quote never reached.
+    traded_by_rank: dict[int, float] = field(default_factory=dict)
+    n_books: int = 0
+    n_intervals: int = 0
+    n_gap_intervals: int = 0
+    #: Counted in level-intervals, not intervals: one book pair contributes
+    #: one for each level that was out of reported depth across it, so this
+    #: routinely exceeds n_intervals.
+    n_occluded_level_intervals: int = 0
+    interval_secs: list[float] = field(default_factory=list)
+
+    @property
+    def attributed_frac(self) -> float:
+        return self.attributed / self.tick_vol_total if self.tick_vol_total else 0.0
+
+    def balances(self, tol: float = 1e-6) -> bool:
+        """The buckets must add back up to the tape. A test, not a comment."""
+        total = (self.attributed + self.outside_books + self.in_gap
+                 + self.neutral + self.off_grid + self.wrong_side)
+        return abs(total - self.tick_vol_total) <= tol
+
+
+def attribute_level_flow(
+    books: list[tuple[datetime, list[dict]]],
+    ticks: list[dict],
+    book_lag_secs: float,
+    max_gap_secs: float = 5.0,
+) -> tuple[list[LevelEpisode], FlowAudit]:
+    """Split each level's displayed-volume changes into traded / added / cancelled.
+
+    Args:
+        books:         Chronological (ts, levels), ONE ENTRY PER STORED
+                       SNAPSHOT -- not a flat level list. Two snapshots can
+                       share a timestamp (see the ob_snapshots DDL note) and
+                       16% of stored rows do, so a caller reading the table
+                       must ORDER BY ts, rowid: this function sorts on the
+                       timestamp alone and relies on a stable sort to keep
+                       whatever order it was handed. Flattening same-stamped
+                       books together fuses two of them into one phantom.
+                       levels: {"side", "price", "volume"}.
+        ticks:         {"ts", "price", "volume", "direction"}; direction is
+                       'BUY', 'SELL' or 'NEUTRAL'.
+        book_lag_secs: Subtracted from every book timestamp before comparing
+                       it with a trade's. REQUIRED, AND THERE IS NO SENSIBLE
+                       DEFAULT, because it depends on where the caller got
+                       its books.
+
+                       Pass 0.0 for books read through OrderBookStore: those
+                       timestamps are already aligned against the tape.
+
+                       Pass a calibrated value for books carrying the raw
+                       `ts` column. That one is the receiving machine's
+                       clock, which free-runs at -39 ms/h and is stepped back
+                       into line every day or two, so the offset is neither
+                       small nor constant -- +0.5 s on 2026-10-30, -0.68 s on
+                       2026-11-02, -1.35 s by that night, against a median
+                       book interval of 0.016 s. Using one day's value on
+                       another tripled the share of prints naming a level
+                       that cannot have filled them. Rows written before
+                       2026-11-03 00:46 are only reachable this way; see
+                       feeds.order_book_store.SERVER_LEAD_SECS.
+        max_gap_secs:  Intervals longer than this are not decomposed. The feed
+                       pauses over 5 s between 147 and 204 times a session, and
+                       across such a pause trades are missed and the book has
+                       moved, so a drop cannot be attributed to anything.
+
+    Returns:
+        (episodes, audit). Episodes carry the three components; audit says
+        what fraction of the tape reached them, and at what depth.
+    """
+    audit = FlowAudit()
+    audit.tick_vol_total = float(sum(float(t["volume"]) for t in ticks))
+
+    books = sorted(books, key=lambda b: b[0])
+    audit.n_books = len(books)
+    if len(books) < 2:
+        audit.outside_books = audit.tick_vol_total
+        return [], audit
+
+    scale = 10 ** _PRICE_DECIMALS
+
+    def _key(p) -> int:
+        return int(round(float(p) * scale))
+
+    lag = timedelta(seconds=book_lag_secs)
+    bts = [b[0] - lag for b in books]
+
+    # Per book: level volumes, the visible price span of each side, and each
+    # level's depth rank from the touch. The span is what separates
+    # "cancelled" from "scrolled out of the window": the feed sends a fixed
+    # number of levels per side, so when price moves the far end falls off
+    # and a level that is still resting there stops being reported.
+    maps: list[dict[tuple[str, int], float]] = []
+    spans: list[dict[str, tuple[int, int] | None]] = []
+    ranks: list[dict[tuple[str, int], int]] = []
+    for _, levels in books:
+        m: dict[tuple[str, int], float] = {}
+        bid_k: list[int] = []
+        ask_k: list[int] = []
+        for lv in levels:
+            k = _key(lv["price"])
+            side = lv["side"]
+            m[(side, k)] = m.get((side, k), 0.0) + float(lv["volume"])
+            (bid_k if side == "BID" else ask_k).append(k)
+        maps.append(m)
+        spans.append({
+            "BID": (min(bid_k), max(bid_k)) if bid_k else None,
+            "ASK": (min(ask_k), max(ask_k)) if ask_k else None,
+        })
+        r: dict[tuple[str, int], int] = {}
+        for i, k in enumerate(sorted(set(bid_k), reverse=True)):
+            r[("BID", k)] = i
+        for i, k in enumerate(sorted(set(ask_k))):
+            r[("ASK", k)] = i
+        ranks.append(r)
+
+    n = len(books)
+    gap = [False] * n          # gap[k]: interval (k-1 -> k) is untrustworthy
+    for k in range(1, n):
+        secs = (bts[k] - bts[k - 1]).total_seconds()
+        audit.interval_secs.append(secs)
+        if secs > max_gap_secs:
+            gap[k] = True
+            audit.n_gap_intervals += 1
+    audit.n_intervals = n - 1
+
+    # ── Attribute each trade to the interval and level it hit ──────────────
+    # The reference book is the one BEFORE the trade: that is the liquidity
+    # that was standing there to be taken. Reading the book AFTER instead is
+    # the single heaviest error available here, because it is exactly what a
+    # mis-set book_lag_secs simulates.
+    traded: list[dict[tuple[str, int], float]] = [dict() for _ in range(n)]
+    touch: list[dict[tuple[str, int], float]] = [dict() for _ in range(n)]
+    for t in ticks:
+        vol = float(t["volume"])
+        k = _bisect.bisect_left(bts, t["ts"])     # bts[k-1] < ts <= bts[k]
+        if k <= 0 or k >= n:
+            audit.outside_books += vol
+            continue
+        if gap[k]:
+            audit.in_gap += vol
+            continue
+        pk = _key(t["price"])
+        ref = maps[k - 1]
+        direction = t.get("direction", "NEUTRAL")
+        if direction not in ("BUY", "SELL"):
+            audit.neutral += vol
+            if ("BID", pk) in ref or ("ASK", pk) in ref:
+                audit.neutral_on_level += vol
+            continue
+        # A seller lifts nobody: aggressive SELL volume hits resting BIDs,
+        # aggressive BUY volume hits resting ASKs.
+        side = "BID" if direction == "SELL" else "ASK"
+        other = "ASK" if side == "BID" else "BID"
+        if (side, pk) in ref:
+            traded[k][(side, pk)] = traded[k].get((side, pk), 0.0) + vol
+            rank = ranks[k - 1].get((side, pk), -1)
+            audit.traded_by_rank[rank] = audit.traded_by_rank.get(rank, 0.0) + vol
+            if rank == 0:
+                touch[k][(side, pk)] = touch[k].get((side, pk), 0.0) + vol
+            audit.attributed += vol
+        elif (other, pk) in ref:
+            # Either the book we hold is stale against this print, or the
+            # feed's own side label does not describe this book -- a
+            # wholesaler's BUY means the direction on its internal sheet.
+            # Measured elsewhere: only 50.6% of BUY volume prints at the ask
+            # or above. Either way the level it names cannot be the one it
+            # consumed, so it is set aside rather than forced onto a side.
+            audit.wrong_side += vol
+        else:
+            audit.off_grid += vol
+
+    # ── Walk the books, splitting each level's change ──────────────────────
+    episodes: list[LevelEpisode] = []
+    open_eps: dict[tuple[str, int], LevelEpisode] = {}
+
+    def _open(side: str, pk: int, k: int, vol: float) -> LevelEpisode:
+        ep = LevelEpisode(
+            side=side, price=pk / scale, t_first=books[k][0], t_last=books[k][0],
+            n_books=0, max_displayed=0.0, first_displayed=vol,
+            last_displayed=vol, traded=0.0, traded_at_touch=0.0, added=0.0,
+            cancelled=0.0, n_occluded=0,
+        )
+        open_eps[(side, pk)] = ep
+        return ep
+
+    def _close_all() -> None:
+        episodes.extend(open_eps.values())
+        open_eps.clear()
+
+    def _seen(ep: LevelEpisode, k: int, vol: float) -> None:
+        ep.t_last = books[k][0]
+        ep.n_books += 1
+        ep.max_displayed = max(ep.max_displayed, vol)
+        ep.last_displayed = vol
+
+    for (side, pk), vol in maps[0].items():
+        _seen(_open(side, pk, 0, vol), 0, vol)
+
+    def _occluded(side: str, pk: int, span: tuple[int, int] | None) -> bool:
+        """Is this price beyond the far end of what that side reports?"""
+        if span is None:
+            return True                      # the side went empty: tell nothing
+        lo, hi = span
+        return pk < lo if side == "BID" else pk > hi
+
+    for k in range(1, n):
+        if gap[k]:
+            # Nothing about this step can be read, so no episode survives it.
+            _close_all()
+            for (side, pk), vol in maps[k].items():
+                _seen(_open(side, pk, k, vol), k, vol)
+            continue
+
+        prev, cur = maps[k - 1], maps[k]
+        for key in set(prev) | set(cur) | set(traded[k]) | set(open_eps):
+            side, pk = key
+            v0 = prev.get(key, 0.0)
+            v1 = cur.get(key, 0.0)
+            tv = traded[k].get(key, 0.0)
+            tt = touch[k].get(key, 0.0)
+
+            ep = open_eps.get(key)
+            if ep is None:
+                if v1 == 0.0 and tv == 0.0:
+                    continue
+                ep = _open(side, pk, k, v1)
+
+            if v1 == 0.0 and _occluded(side, pk, spans[k][side]):
+                # Out of the reported window, not out of the book. Counting
+                # this as a cancellation would invent one every time price
+                # moved, and ENDING the episode here would hand the level a
+                # fresh, smaller max_displayed on the way back -- which is
+                # how 41% of the first version's flagged levels came to have
+                # three books or fewer behind them.
+                ep.traded += tv
+                ep.traded_at_touch += tt
+                ep.n_occluded += 1
+                audit.n_occluded_level_intervals += 1
+                continue
+
+            if v0 == 0.0 and v1 > 0.0 and _occluded(side, pk, spans[k - 1][side]):
+                # Scrolled back INTO view. It was resting there all along.
+                ep.traded += tv
+                ep.traded_at_touch += tt
+                ep.n_occluded += 1
+                audit.n_occluded_level_intervals += 1
+                _seen(ep, k, v1)
+                continue
+
+            net = (v1 - v0) + tv             # = added - cancelled
+            ep.traded          += tv
+            ep.traded_at_touch += tt
+            ep.added           += max(net, 0.0)
+            ep.cancelled       += max(-net, 0.0)
+
+            if v1 > 0.0:
+                _seen(ep, k, v1)
+            else:
+                ep.t_last = books[k][0]
+                ep.last_displayed = 0.0
+                episodes.append(ep)
+                open_eps.pop(key, None)
+
+    _close_all()
+    return episodes, audit
 
 
 def detect_icebergs(
