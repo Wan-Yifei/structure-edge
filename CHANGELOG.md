@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.87.2 - 切周期后自动归位不再被中途的重绘吃掉 (2026-11-05)
+
+### 症状
+
+切换时间周期后画面不回正，必须手动点 Home（⌂）才看得到图。
+
+### 原因
+
+自动归位每换一张新图触发一次，判据是 `chart_key`，而它**整个读自工具栏**：
+
+```python
+chart_key = (code, tf, date_str)
+```
+
+工具栏先动。选中 5m 的瞬间 combo 就变了，K 线还是旧的 1m——要等拉取回来。
+而 Live 模式下重绘定时器每一两秒重画一次：**那一次画的是旧柱子、带的是新
+周期**，于是把「5m 已归位」记了账。真正的 5m 数据到达时 key 一比相同，
+不归位。
+
+不是「位置偏一点」：`_reset_view` 顺手设的 `setLimits(xMax=n+5)` 用的也是
+旧根数，1m 390 根对 5m 78 根，图会整个落在视野外且**拖不回来**。
+
+### 改动
+
+key 改成**正在画的那批柱子的身份**，由 `_on_data_ready` 从拉取结果记下
+（worker 本来就回传 `code` / `tf` / `date_str` / `historical`）：
+
+```python
+self._klines_key = (code, tf, date_str, historical)
+chart_key = self._klines_key
+```
+
+中途那次重绘画的是旧柱子、带的就是旧 key，骗不到新数据那一次。
+换标的（`_code_edit` 同样是工具栏）是同一个毛病，一并修好。
+
+`historical` 在 key 里是审查带出来的：Historical 是多日回看、Live 是单
+日，标的/周期/日期三项可以完全相同而根数差几百，少了这一项，
+Historical → Live 这条路照样被吃。
+
+### 验证
+
+`tests/analysis/test_tf_switch_view_reset.py` 6 项，含两条反向的（普通重绘
+不许归位、实时多出一根不许归位，否则会跟手动缩放打架）；6 个变异全部被抓，
+无幸存，其中 N1 即是改回读工具栏；全量 1456 passed。
+
+### 已知未改
+
+`_trigger_fetch` 在已有拉取在跑时直接返回（只打一行 "Fetch in progress"），
+所以拉取途中切周期不会重新拉，combo 变了图没变。症状不同，未并入本次。
+
 ## v0.87.1 - 热力图价格带重建后从库里补回整窗，连泡泡一起 (2026-11-05)
 
 ### 症状

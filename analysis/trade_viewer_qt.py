@@ -2355,6 +2355,14 @@ class TradeViewerQt(QMainWindow):
         # Track which (code, tf) was last auto-ranged; prevents live-refresh
         # from resetting the user's manual pan/zoom on every tick.
         self._last_chart_key: tuple             = ("", "")
+        # What the bars currently in self._klines actually are, taken from
+        # the fetch that delivered them. The toolbar is NOT this: it changes
+        # the moment the user picks a timeframe, while the bars stay the old
+        # ones until the fetch lands, and a repaint in between (the redraw
+        # timer, every second or two in Live) would otherwise record the new
+        # timeframe as "already ranged" against the old bars -- spending the
+        # reset on them, and leaving the real chart off-screen until Home.
+        self._klines_key: tuple                 = ("", "")
 
         # Option Walls / Option Alerts: own OpenQuoteContext (avoids
         # concurrent-access uncertainty on self._ctx, which DataFetcher's
@@ -4093,6 +4101,16 @@ class TradeViewerQt(QMainWindow):
         xlo, xhi = self._plot_c.vb.viewRange()[0] if prev_n > 0 else (0, 0)
 
         self._klines      = result["klines"]
+        # Identity of the bars themselves, for the view-reset decision in
+        # _render. Taken from the fetch that produced them, never from the
+        # toolbar: the toolbar is already showing what the user asked for.
+        # historical is in the tuple because Live and Historical can agree on
+        # all three of the others and still be different charts: Historical
+        # loads a multi-day lookback, Live one session, so the bar count can
+        # change by hundreds while the key would not move at all.
+        self._klines_key  = (result.get("code", ""), result.get("tf", ""),
+                             result.get("date_str", ""),
+                             bool(result.get("historical")))
         self._live_kl_key = (
             None if result.get("historical")
             else (result.get("code", ""), result.get("tf", "")))
@@ -4512,9 +4530,18 @@ class TradeViewerQt(QMainWindow):
         # Set view range only when Code or TF changes (i.e. a genuinely new
         # chart).  Deferred via singleShot so profile / overlay drawing cannot
         # override the range we set here.
+        #
+        # Keyed on the bars being painted, not on the toolbar. The toolbar
+        # moves first: between the user picking a timeframe and the fetch
+        # landing, the redraw timer repaints the OLD bars, and keying on the
+        # toolbar banked the new timeframe against them -- so the paint that
+        # finally carried the new bars found its key already recorded and
+        # left the view where it was. The bar count also changes with the
+        # timeframe (1m 390 bars, 5m 78), so the stale range and the
+        # setLimits inside _reset_view could leave the chart entirely
+        # off-screen, and unreachable by scrolling, until Home was pressed.
         code = self._code_edit.text().strip()
-        date_str  = self._date_edit.text().strip()
-        chart_key = (code, tf, date_str)
+        chart_key = self._klines_key
         if chart_key != self._last_chart_key:
             self._last_chart_key = chart_key
             n_snap = n
