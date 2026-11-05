@@ -191,6 +191,13 @@ _PUSH_STALE_SECS = 90.0
 # machine has drifted more than a second.
 _RANGE_CLOCK_PAD = timedelta(seconds=10)
 
+# How long a price-band rebuild waits before refilling the window from the
+# database. Long enough that a burst of rebuilds costs one query -- the open
+# produced two inside four minutes on 2026-11-05 -- and short enough that the
+# panel is not visibly empty while it waits. The query itself measured 0.37 s
+# for an hour at a 1 s bucket.
+_REFILL_DEBOUNCE_MS = 600
+
 
 def _clock_correction(svr_bid: float | None, svr_ask: float | None,
                       now: float) -> float:
@@ -730,6 +737,15 @@ class LiqHmWindow(QWidget):
         layout.addWidget(self._legend_lbl)
         layout.addWidget(self._plot_widget)
 
+        # Set only while _on_bulk_ready sizes the band from the fill it was
+        # just handed, so that rebuild cannot ask for another fill.
+        self._in_bulk_fill = False
+        # Single-shot: a price-band rebuild asks for a database refill
+        # through this rather than directly, so a burst of rebuilds costs
+        # one query instead of one each. See _maybe_init_price_range.
+        self._refill_timer = QTimer(self)
+        self._refill_timer.setSingleShot(True)
+        self._refill_timer.timeout.connect(self._refill_after_rebuild)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_tick)
 
@@ -1153,14 +1169,9 @@ class LiqHmWindow(QWidget):
         if live and self._code:
             self._start_push(self._code)
             if self._needs_init:
-                if self._bulk_worker is not None and self._bulk_worker.isRunning():
-                    return   # prefill already in flight — _on_bulk_ready will clear _needs_init
-                # Fill every visible column from the DB, then start the timer
-                self._bulk_worker = _WindowPrefillWorker(
-                    self._code, self._max_cols_spin.value(),
-                    self._col_secs_spin.value())
-                self._bulk_worker.done.connect(self._on_bulk_ready)
-                self._bulk_worker.start()
+                # Fill every visible column from the DB; _on_bulk_ready
+                # starts the timer once it lands.
+                self._start_prefill()
             else:
                 self._timer.start(self._col_secs_spin.value() * 1000)
                 self._on_tick()
@@ -1363,6 +1374,11 @@ class LiqHmWindow(QWidget):
         self._needs_init = True
 
         self._timer.stop()
+        # A rebuild scheduled before this reset belongs to the grid that just
+        # went away. Left armed, it would fire into the new one and restart
+        # the column timer on top of whatever fill is in flight -- the state
+        # the stop in _maybe_init_price_range exists to avoid.
+        self._refill_timer.stop()
         self._push_ok = False
         max_cols = self._max_cols_spin.value()
         n_price  = self._n_price_spin.value()
@@ -1656,23 +1672,103 @@ class LiqHmWindow(QWidget):
                 max_cols = self._max_cols_spin.value()
                 self._bid_grid   = np.zeros((max_cols, n_price), dtype=np.float64)
                 self._ask_grid   = np.zeros((max_cols, n_price), dtype=np.float64)
-                self._col_ts     = []
-                self._raw_snaps  = []
-                self._snap_seq   = 0
-                self._mid_prices = []
-                # _absorb_ticks feeds detect_aggressor_bubbles() with column
-                # indices relative to self._col_ts; wiping col_ts above
-                # without also wiping this leaves stale (tick, old-col-index)
-                # entries whose index no longer means anything once columns
-                # renumber from 0 again. Worse, the bubble markers already
-                # drawn from those stale entries are never removed either
-                # (only _redraw_orderflow_markers()'s own clear-then-draw
-                # does that, and a rebuild doesn't call it) -- they just sit
-                # at their old data-coordinate position forever, reported as
-                # "aggressor bubbles stuck on screen, not moving/updating".
-                self._absorb_ticks = []
-                self._clear_overlay_items()
+                self._clear_columns()
                 self._update_legend()   # bin_size just changed on rebuild
+                # Everything the grid just lost is still in the collector's
+                # database. The live feed alone repaints it one column a
+                # second -- twelve minutes at the default window -- which is
+                # why restarting the window appeared to "fix" this while
+                # waiting did not: startup refills from the database and a
+                # rebuild did not. Ask for the same refill here.
+                #
+                # Debounced, because the open can rebuild repeatedly
+                # (2026-11-05 SOXL: too_wide at 09:31 as the band collapsed
+                # 7.36 -> 1.57, touch_outside at 09:34) and one query is
+                # enough for all of them.
+                #
+                # The column timer stops meanwhile so the fill columns it
+                # rolls are not thrown away by the refill 600 ms later. It is
+                # not what keeps the grid ordered: _on_push appends its own
+                # column as soon as the wipe empties _col_ts, several times a
+                # second. That column is newer than everything the refill
+                # then paints to the right of it, and what makes it harmless
+                # is _on_bulk_ready clearing the columns before it paints.
+                if (self._live and self._code
+                        and self._hist_secs is False
+                        and not self._in_bulk_fill):
+                    self._needs_init = True
+                    self._timer.stop()
+                    self._refill_timer.start(_REFILL_DEBOUNCE_MS)
+
+    def _clear_columns(self) -> None:
+        """Drop every painted column, keeping the current price band.
+
+        The band rebuild and the database refill both need this, and both
+        need it to clear the same set. _absorb_ticks is the one that is easy
+        to miss: it feeds detect_aggressor_bubbles() with (tick, column
+        index) pairs, and an index means nothing once columns renumber from
+        0. Worse, the bubble markers already drawn from stale entries are
+        never removed -- only _redraw_orderflow_markers' own clear-then-draw
+        does that -- so they sit at their old data coordinates forever,
+        reported as "aggressor bubbles stuck on screen, not updating".
+
+        Dropping the ticks has to drop the high-water mark with them. The
+        next _load_absorb_ticks() reads _absorb_last_ts to decide between a
+        full window query and an incremental one, so a surviving mark asks
+        only for ticks newer than it -- and the columns a refill then paints
+        are all OLDER than that, which is why the database fill arrived with
+        no bubbles on it. An in-flight worker carries its own mark, so it is
+        retired here too rather than being allowed to land on a cleared grid.
+        """
+        if self._absorb_worker is not None:
+            _retire_worker(self._absorb_worker)
+            self._absorb_worker = None
+        self._bid_grid[:]    = 0.0
+        self._ask_grid[:]    = 0.0
+        self._col_ts         = []
+        self._raw_snaps      = []
+        self._snap_seq       = 0
+        self._mid_prices     = []
+        self._absorb_ticks   = []
+        self._absorb_last_ts = None
+        self._clear_overlay_items()
+
+    def _start_prefill(self) -> bool:
+        """Fill every visible column from the collector's database.
+
+        False when one is already in flight: _on_bulk_ready clears
+        _needs_init, so a second worker would only repeat the query.
+
+        "In flight" is `_bulk_worker is not None`, not isRunning(). A worker
+        that has emitted its result is already stopped while its queued
+        callback waits on the GUI thread, so isRunning() would wave a second
+        one through -- and then the first callback runs, sets _bulk_worker to
+        None, and drops the last reference to a thread that IS running. Qt
+        aborts the process for that ("QThread: Destroyed while thread is
+        still running"). Both the callback and _reset_grid clear the slot, so
+        it cannot stay occupied.
+        """
+        if not self._code:
+            return False
+        if self._bulk_worker is not None:
+            return False
+        self._bulk_worker = _WindowPrefillWorker(
+            self._code, self._max_cols_spin.value(),
+            self._col_secs_spin.value())
+        self._bulk_worker.done.connect(self._on_bulk_ready)
+        self._bulk_worker.start()
+        return True
+
+    def _refill_after_rebuild(self) -> None:
+        """Debounce target for a price-band rebuild (see _maybe_init_price_range)."""
+        if not (self._live and self._code) or self._hist_secs is not False:
+            return
+        if self._needs_init and self._start_prefill():
+            return          # _on_bulk_ready restarts the column timer
+        # Nothing to fill, or a fill is already running: put the column timer
+        # back, because scheduling this stopped it.
+        if not self._timer.isActive():
+            self._timer.start(self._col_secs_spin.value() * 1000)
 
     def _paint_column(self, col: int, snap: list[dict]) -> float | None:
         """Write *snap* into grid column *col* and return that column's mid.
@@ -1776,7 +1872,18 @@ class LiqHmWindow(QWidget):
         # scale by -- this is the live view, about to continue from there.
         snapshots = [sn for sn in snapshots if sn]
         if snapshots:
-            self._maybe_init_price_range(snapshots[-1])
+            # _in_bulk_fill so the rebuild this may trigger does not schedule
+            # another fill on top of the one being delivered.
+            self._in_bulk_fill = True
+            try:
+                self._maybe_init_price_range(snapshots[-1])
+            finally:
+                self._in_bulk_fill = False
+            # The fill covers the whole window up to the newest stored
+            # snapshot, so it is authoritative. Anything the live feed
+            # appended while it was in flight is both redundant and newer
+            # than what is about to be painted to the right of it.
+            self._clear_columns()
         for snap in snapshots:
             self._push_column(snap, ts=snap[0]["ts"])
         if self._col_ts:
@@ -2874,6 +2981,9 @@ class LiqHmWindow(QWidget):
 
     def closeEvent(self, event) -> None:
         self._timer.stop()
+        # Otherwise a rebuild armed moments before the close starts a
+        # database worker against a window that is tearing down.
+        self._refill_timer.stop()
         self._stop_push()
         for w in (self._worker, self._bulk_worker, self._absorb_worker):
             if w is not None:
