@@ -2272,6 +2272,46 @@ def bar_start_keys(time_key, cm: int):
     return out.dt.to_pydatetime()
 
 
+# Fetchers that were let go while still running, held until their OS thread
+# actually exits. See _retire_fetcher.
+_PENDING_FETCHERS: list = []
+
+
+def _retire_fetcher(worker) -> None:
+    """Detach a fetcher whose result is no longer wanted.
+
+    Dropping the last Python reference to a QThread while it is still
+    running calls its C++ destructor on a live thread, and Qt aborts the
+    process for it ("QThread: Destroyed while thread is still running").
+    That is not a theoretical window here: this is called when a fetch is
+    abandoned mid-flight, which is precisely when the thread is alive.
+
+    So: disconnect every signal, so no stale callback reaches the window,
+    and if the thread has not finished, keep a reference until `finished`
+    says the OS thread is gone. analysis/liq_hm_window.py carries the same
+    helper for its own workers, for the same reason.
+    """
+    try:
+        worker.ready.disconnect()
+        worker.error.disconnect()
+        worker.finished.disconnect()
+    except Exception:
+        pass
+    try:
+        running = worker.isRunning()
+    except Exception:
+        running = False          # not a live QThread; nothing to hold
+    if not running:
+        return
+    _PENDING_FETCHERS.append(worker)
+
+    def _release() -> None:
+        if worker in _PENDING_FETCHERS:
+            _PENDING_FETCHERS.remove(worker)
+
+    worker.finished.connect(_release)
+
+
 class TradeViewerQt(QMainWindow):
     """PyQtGraph-based trade viewer window."""
 
@@ -2327,8 +2367,26 @@ class TradeViewerQt(QMainWindow):
         # immutable, so they are read once; the current day is always re-read.
         self._tick_day_cache: dict = {}
         self._fetcher:      DataFetcher | None  = None
+        # Whether a fetch is running, tracked separately from the thread's own
+        # isRunning(): Qt emits finished() before it clears that flag, so a
+        # slot reading it races the worker's teardown. This is set beside
+        # start() and cleared in the finished slot, where it is simply a fact
+        # already decided rather than a question asked of a dying thread.
+        self._fetch_inflight: bool              = False
+        # A user request that arrived while one was running. One bit, not a
+        # queue: several toolbar changes during a fetch mean one refetch,
+        # which reads the toolbar when it fires and so sees the settled state
+        # rather than replaying every intermediate one.
+        self._refetch_pending: bool             = False
+        self._closing: bool                     = False
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.timeout.connect(self._trigger_fetch)
+        # Not _trigger_fetch directly: a timer tick must never queue a
+        # refetch. If a fetch outruns the refresh interval, every tick would
+        # queue one and the next would start the instant the last finished --
+        # a permanent back-to-back loop against the history-kline rate limit.
+        # Dropping the tick is the backpressure that keeps it to one fetch
+        # per completion.
+        self._refresh_timer.timeout.connect(self._on_refresh_tick)
         self._redraw_timer = QTimer(self)
         self._redraw_timer.timeout.connect(self._on_redraw_tick)
         self._candle_mins   = 1
@@ -2795,7 +2853,7 @@ class TradeViewerQt(QMainWindow):
         for val, label in [("1d", "1D"), ("2d", "2D"), ("3d", "3D"), ("7d", "1W")]:
             rb = QRadioButton(label)
             rb.setChecked(val == vcfg.get("session", "range"))
-            rb.toggled.connect(self._on_range_changed)
+            rb.toggled.connect(self._on_range_radio_toggled)
             self._ind_checks[f"range_{val}"] = rb
             self._range_group.addButton(rb)
             tb_sess.addWidget(rb)
@@ -3677,14 +3735,8 @@ class TradeViewerQt(QMainWindow):
                 self._ctx = OpenQuoteContext(host=host, port=port)
             self._last_chart_key = ("", "")  # force view reset on next render
             # Discard any stuck DataFetcher from the previous session so the
-            # isRunning() guard in _trigger_fetch doesn't block new fetches.
-            if self._fetcher is not None:
-                try:
-                    self._fetcher.ready.disconnect()
-                    self._fetcher.error.disconnect()
-                except Exception:
-                    pass
-                self._fetcher = None
+            # in-flight guard in _trigger_fetch doesn't block new fetches.
+            self._abandon_fetcher()
             self._conn_btn.setText("Stop")
             self._conn_btn.setChecked(True)
             self._log(f"Connected to OpenD {host}:{port}")
@@ -3704,13 +3756,7 @@ class TradeViewerQt(QMainWindow):
                 if self._ctx:
                     self._ctx.close()
                     self._ctx = None
-            if self._fetcher is not None:
-                try:
-                    self._fetcher.ready.disconnect()
-                    self._fetcher.error.disconnect()
-                except Exception:
-                    pass
-                self._fetcher = None
+            self._abandon_fetcher()
             self._conn_btn.setText("Connect")
             self._log("Disconnected.")
 
@@ -3965,6 +4011,15 @@ class TradeViewerQt(QMainWindow):
     def _on_session_toggle(self) -> None:
         self._rebuild_session_profile()
 
+    def _on_range_radio_toggled(self, checked: bool) -> None:
+        """One click on the range radios emits twice: toggled(False) on the
+        button being left and toggled(True) on the one being taken. Both used
+        to run a refetch -- harmless while the second was dropped by the
+        in-flight guard, a redundant round trip now that it is queued.
+        """
+        if checked:
+            self._on_range_changed()
+
     def _on_range_changed(self) -> None:
         self._rebuild_session_profile()
         # A refetch, not just a redraw: CVD anchors on this window, and the
@@ -3999,8 +4054,16 @@ class TradeViewerQt(QMainWindow):
         if ctx is None:
             self._log("Not connected.")
             return
-        if self._fetcher and self._fetcher.isRunning():
-            self._log("Fetch in progress, please wait…")
+        if self._fetch_inflight:
+            # Queued rather than dropped. Dropping it meant the toolbar had
+            # moved and the chart had not, with nothing but a log line to say
+            # so -- and in Historical nothing else fetches (_stop_live stops
+            # the refresh timer), so the chart stayed on the old bars until
+            # the user acted again. The worst of it was Live -> Historical:
+            # _on_mode_changed stops the timer and then makes the request
+            # that gets dropped.
+            self._refetch_pending = True
+            self._log("Fetch in progress — queued, will refetch when it ends.")
             return
 
         tf           = self._tf_combo.currentText()
@@ -4063,7 +4126,12 @@ class TradeViewerQt(QMainWindow):
         self._fetcher = DataFetcher(ctx, params)
         self._fetcher.ready.connect(self._on_data_ready)
         self._fetcher.error.connect(self._log)
+        # finished, not ready: error is not terminal (DataFetcher.run emits it
+        # as a warning and carries on in several places) and ready is skipped
+        # on a fatal one, so neither fires exactly once per run. finished does.
+        self._fetcher.finished.connect(self._on_fetch_finished)
         self._fetcher.start()
+        self._fetch_inflight = True
 
         # Push real-time NBBO to the heatmap so its spread lines reflect the
         # true best bid/ask rather than values derived from ORDER_BOOK depth
@@ -4095,6 +4163,59 @@ class TradeViewerQt(QMainWindow):
                                                  refs[0], refs[1])
             except Exception:
                 pass
+
+    def _abandon_fetcher(self) -> None:
+        """Let go of a fetcher whose result is no longer wanted.
+
+        The flags are cleared here because nothing else will: the signals
+        that would have cleared them are the ones just dropped, and a
+        reconnect fetches immediately afterwards.
+
+        _retire_fetcher disconnects finished with the rest, but that is
+        defence in depth rather than what makes this safe. What makes it
+        safe is the identity check in _on_fetch_finished: once self._fetcher
+        is None, an abandoned thread's finished() is rejected there whether
+        or not it is still connected. (A mutation removing that one
+        disconnect survives the suite for exactly that reason, which is the
+        honest reading of it.)
+        """
+        if self._fetcher is not None:
+            _retire_fetcher(self._fetcher)
+            self._fetcher = None
+        self._fetch_inflight  = False
+        self._refetch_pending = False
+
+    def _on_refresh_tick(self) -> None:
+        """The Live refresh timer. Skips a tick rather than queueing one.
+
+        See the comment where this is connected: an automatic source must not
+        be able to queue work, or a fetch that outruns the interval turns into
+        an unbroken chain of them.
+        """
+        if self._fetch_inflight:
+            return
+        self._trigger_fetch()
+
+    def _on_fetch_finished(self) -> None:
+        """A fetch ended; run the one that was asked for while it ran."""
+        sender = self.sender()
+        if sender is not None and sender is not self._fetcher:
+            # An abandoned fetcher (a reconnect replaced it) or a superseded
+            # one. Its finished() says nothing about the fetch that is
+            # actually running, and acting on it would clear the flag for
+            # that one -- letting the retry start a second DataFetcher beside
+            # it, on one OpenQuoteContext, both writing _tick_live_state in
+            # place. That is the invariant the old guard enforced by refusing
+            # the request outright, and the only thing holding it up here.
+            return
+        self._fetch_inflight = False
+        if self._closing:
+            return
+        if self._refetch_pending:
+            # Cleared before the call, not after: the refetch may legitimately
+            # queue one of its own.
+            self._refetch_pending = False
+            self._trigger_fetch()
 
     def _on_data_ready(self, result: dict) -> None:
         prev_n = len(self._klines) if self._klines is not None else 0
@@ -6076,12 +6197,18 @@ class TradeViewerQt(QMainWindow):
         except ValueError:
             date_str = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
 
-        # Populate toolbar
+        # Populate toolbar. Date first: the combos fetch as a side effect of
+        # being set (currentTextChanged -> _on_tf_changed / _on_mode_changed,
+        # each ending in _trigger_fetch), so a date written afterwards meant
+        # the Historical fetch those triggered went out for the PREVIOUS
+        # date. The final _trigger_fetch below is the one that carries the
+        # right combination, and it used to be the one the in-flight guard
+        # dropped -- so the trade landed on the wrong bars.
         self._code_edit.setText(row.get("symbol", ""))
-        self._tf_combo.setCurrentText(tf)
-        self._mode_combo.setCurrentText("Historical")
         self._date_edit.setText(date_str)
         self._date_edit.setEnabled(True)
+        self._tf_combo.setCurrentText(tf)
+        self._mode_combo.setCurrentText("Historical")
 
         self._trade_record = {**row, "_source": source, "_config": config}
         self._log(
@@ -8001,6 +8128,13 @@ class TradeViewerQt(QMainWindow):
         if self._dom_window is not None:
             self._dom_window.close()
             self._dom_window = None
+
+        # Before anything else: a fetch still in flight will deliver its
+        # finished() after this window is closed, and a queued refetch fired
+        # from there would run against a torn-down widget (self._ctx is
+        # nulled below, so it would reach self._log -> a status bar whose C++
+        # object may already be gone).
+        self._closing = True
 
         # Stop the live refresh timer and unsubscribe tickers.
         self._stop_live()

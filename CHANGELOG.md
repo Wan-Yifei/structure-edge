@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.88.0 - 拉取途中发出的请求改为排队，不再丢弃 (2026-11-05)
+
+### 症状
+
+拉取进行中切周期/切模式/改日期，工具栏变了而图没变，只在日志里留一行
+"Fetch in progress, please wait…"。
+
+### 原因
+
+`_trigger_fetch` 撞上在跑的拉取就直接 return。**Live 下一个刷新周期内自己会
+补上**（`_refresh_timer` 定期重发），**Historical 下永远不补**——`_stop_live()`
+已经把那个定时器停了，图会一直停在旧数据上直到你再动一次。最容易踩中的
+路径是 Live → Historical：`_on_mode_changed` 先停定时器、再发那个被丢掉的
+请求。
+
+### 改动
+
+一个 bit，不是队列：撞上在跑就记 `_refetch_pending`，当前拉取 `finished`
+时补发一次。期间切了几次只补一次，**补发时重新读工具栏**，看到的是你最终
+停在哪，而不是回放每一步。
+
+挂 `finished` 而不是 `ready`：`DataFetcher.run` 多处把 `error` 当警告发完继续
+跑，致命时又跳过 `ready`，两者都不是每次恰好一次，只有 `finished` 是。
+
+三条安全条件，各有测试：
+
+1. **刷新定时器不许排队**（`_on_refresh_tick`，忙则跳过这一拍）。否则拉取
+   一旦超过刷新间隔，每一拍都排一次，上一次刚结束下一次立刻开始，变成贴着
+   历史 K 线限频的连续拉取。
+2. **非当前 fetcher 的 `finished` 必须忽略**（发送者身份检查）。否则它会把
+   正在跑的那次的 in-flight 标志清掉，补发再开第二个 `DataFetcher`——同一个
+   `OpenQuoteContext`、同时原地改写 `_tick_live_state`，正是这次保留下来的不
+   变量。
+3. **关窗要停掉补发**（`_closing`）。
+
+在飞判断改用 `_fetch_inflight`，不再用 `isRunning()`：Qt 是**先发 `finished`
+再清那个标志**的，槽里读它是在和 worker 的收尾竞争。
+
+### 顺带修掉的三个
+
+- **载入复盘交易会按错误日期拉取。** 设置 combo 本身就会触发拉取，而日期是
+  在 combo 之后才写的，于是它们触发的 Historical 拉取用的是**上一个**日期；
+  唯一拿对全套参数的那次，恰好是被在飞判断丢掉的那次。日期改到 combo 之前写。
+- **区间单选按钮一次点击发两次。** `toggled(False)` 先到，此时**没有任何一个
+  按钮是选中的**，`_get_range_val()` 退回默认 `"1d"`——所以跑掉的那次用的是
+  错区间，对的那次反而被丢。现在只响应 `checked=True`。
+- **放掉还在跑的 fetcher 会让 Qt abort 进程**（审查带出）。`_retire_fetcher`
+  比照 `liq_hm_window.py` 的做法：断开信号，线程没结束就持有引用到 `finished`
+  为止。这条在改动前就存在（两处 `self._fetcher = None`）。
+
+### 验证
+
+`tests/analysis/test_fetch_queue.py` 21 项；14 个变异 13 个被抓。
+
+唯一幸存的 P9（放弃 fetcher 时不断开 `finished`）是**设计上的等价变异**：
+`_fetcher` 置空后，`_on_fetch_finished` 的身份检查已经会拒掉它，那行断开只是
+纵深防御。代码注释里写明了这一点，没有假装它有测试覆盖。
+
+全量 1477 passed。
+
 ## v0.87.2 - 切周期后自动归位不再被中途的重绘吃掉 (2026-11-05)
 
 ### 症状
