@@ -404,6 +404,32 @@ def _query_ticks(code: str, start: datetime, end: datetime,
         return store.query_ticks(code, start, end, with_mid=with_offex)
 
 
+def top_n_levels(vols: np.ndarray, n: int) -> np.ndarray:
+    """Boolean mask over the *n* entries of *vols* with the most volume.
+
+    Used once per side of the tick profile, so the buy bars and the sell
+    bars are ranked against their own side rather than pooled -- on a
+    one-sided candle a pooled ranking spends every mark on the side that was
+    already obvious and says nothing about the other.
+
+    Levels with no volume are never marked. Without that, a candle with
+    fewer than n traded levels on a side would outline empty bars, which
+    reads as "nothing traded here" being called noteworthy.
+    """
+    mask = np.zeros(len(vols), dtype=bool)
+    if n <= 0:
+        return mask
+    nz = np.where(vols > 0)[0]
+    if len(nz):
+        # Stable sort so that equal volumes mark the lower index -- the
+        # lower price -- rather than whatever order the sort happened to
+        # leave them in, which would make the marks flicker between redraws
+        # of identical data.
+        order = nz[np.argsort(-vols[nz], kind="stable")]
+        mask[order[:n]] = True
+    return mask
+
+
 def _size_thresholds(rows) -> tuple[float, float]:
     """Adaptive S/M/L boundaries: the day's own p33 and p67 by volume.
 
@@ -2843,8 +2869,9 @@ class TradeViewerQt(QMainWindow):
             "with POC / VAH / VAL -- instead of the buy/sell order-flow split.\n"
             "Bars are linear here, not log-scaled, so bar length is proportional\n"
             "to volume the way a profile is meant to be read.\n"
-            "Takes precedence over Net. The S/M/L filters still apply; the Imb\n"
-            "highlight does not (it compares the two sides this mode merges).")
+            "Takes precedence over Net. The S/M/L filters still apply; the Top\n"
+            "highlight does not (it marks each side separately, and this mode\n"
+            "merges them).")
         cb_vp.stateChanged.connect(self._on_tick_size_toggle)
         self._ind_checks["tick_vp"] = cb_vp
         tb3.addWidget(cb_vp)
@@ -2859,19 +2886,24 @@ class TradeViewerQt(QMainWindow):
         tb3.addWidget(cb_net)
 
         tb3.addSeparator()
-        tb3.addWidget(_lbl("Imb:"))
-        self._tick_imb_ratio = QDoubleSpinBox()
-        self._tick_imb_ratio.setRange(1.5, 20.0)
-        self._tick_imb_ratio.setSingleStep(0.5)
-        self._tick_imb_ratio.setValue(vcfg.num("tick_imb_ratio"))
-        self._tick_imb_ratio.setDecimals(1)
-        self._tick_imb_ratio.setFixedWidth(52)
-        self._tick_imb_ratio.setToolTip(
-            "Tick profile: highlight price levels where the dominant side's\n"
-            "volume is at least this many times the opposite side's -- gold\n"
-            "outline on the bar, plus the price printed at its tip.")
-        self._tick_imb_ratio.valueChanged.connect(self._on_tick_size_toggle)
-        tb3.addWidget(self._tick_imb_ratio)
+        tb3.addWidget(_lbl("Top:"))
+        self._tick_top_n = QSpinBox()
+        self._tick_top_n.setRange(1, 10)
+        self._tick_top_n.setValue(int(vcfg.num("tick_top_n")))
+        self._tick_top_n.setFixedWidth(44)
+        self._tick_top_n.setToolTip(
+            "Tick profile: gold outline on the N price levels that traded the\n"
+            "most, PER SIDE -- N biggest buy levels and N biggest sell levels,\n"
+            "chosen independently, so both sides are always represented.\n"
+            "The price is printed above each marked row.\n\n"
+            "This replaced a ratio threshold that did not do what it said.\n"
+            "Only 8.4% of raw price levels carry both buy and sell volume, so\n"
+            "the ratio was almost always dividing by the 1-share floor: at the\n"
+            "default 3.0 about 89 levels a candle qualified, every candle hit\n"
+            "the display cap, and 72.7% of the time the three levels drawn\n"
+            "were simply the three largest bars. This says that outright.")
+        self._tick_top_n.valueChanged.connect(self._on_tick_size_toggle)
+        tb3.addWidget(self._tick_top_n)
 
         tb3.addSeparator()
 
@@ -6760,28 +6792,35 @@ class TradeViewerQt(QMainWindow):
         buy_col  = _RED   if red_up else _GREEN
         sell_col = _GREEN if red_up else _RED
 
-        # Imbalance highlight: price levels where the dominant side's volume
-        # is at least `ratio` times the opposite side's get a gold outline
-        # (instead of no pen) and the price printed above the bar -- makes
-        # the price levels worth noticing pop out of an otherwise dense,
-        # narrow panel without labelling every single level. Capped to the
-        # top 3 qualifying levels by dominant-side volume (not by ratio,
-        # which favours a tiny order with an extreme but visually
-        # insignificant ratio over a much longer bar that's "merely" very
-        # imbalanced) so a busy tick set can't crowd the narrow panel.
-        ratio_thresh = self._tick_imb_ratio.value()
-        dominant     = np.maximum(buys_arr, sells_arr)
-        minor        = np.minimum(buys_arr, sells_arr)
-        ratio        = dominant / np.maximum(minor, 1.0)
-        qualifies    = ratio >= ratio_thresh
-        buy_dom      = buys_arr >= sells_arr
-        pass_idx     = np.where(qualifies)[0]
-        if len(pass_idx) > 3:
-            pass_idx = pass_idx[np.argsort(-dominant[pass_idx])[:3]]
-        imbalanced = np.zeros(len(prices), dtype=bool)
-        imbalanced[pass_idx] = True
-        no_pen       = pg.mkPen(None)
-        hi_pen       = pg.mkPen(_GOLD, width=1.5)
+        # Heaviest-level highlight: the N price levels that traded the most,
+        # taken PER SIDE, get a gold outline (instead of no pen) and the
+        # price printed above the row. Per side rather than pooled, because
+        # a pooled top-N on a one-sided candle spends every mark on the side
+        # that was already obvious and says nothing about the other.
+        #
+        # This deliberately makes no claim about imbalance. It replaced a
+        # ratio threshold that could not support one: only 8.4% of raw price
+        # levels carry both buy and sell volume, so `dominant / max(minor, 1)`
+        # was almost always dividing by the 1-share floor rather than by a
+        # real opposing side. At the shipped default of 3.0 that passed about
+        # 89 levels a candle, every candle hit the three-level cap, and 72.7%
+        # of the time the three drawn were just the three largest bars. The
+        # control now says what the code was already doing.
+        #
+        # Ties and zeros: argsort would hand a mark to a level with no volume
+        # on that side at all on a quiet candle, which would outline an empty
+        # bar, so each side only ever marks levels it actually traded on.
+        top_n      = self._tick_top_n.value()
+        buy_mark   = top_n_levels(buys_arr,  top_n)
+        sell_mark  = top_n_levels(sells_arr, top_n)
+        # A level can win on both sides; it gets one label, coloured by
+        # whichever side put it there with more volume.
+        marked     = buy_mark | sell_mark
+        # Net mode draws one bar a row and so can only honour one side's
+        # mark; it replaces both of these so the label follows the outline.
+        label_buy  = None
+        no_pen     = pg.mkPen(None)
+        hi_pen     = pg.mkPen(_GOLD, width=1.5)
 
         if self._ind("tick_net"):
             # Single net (buy - sell) bar per price level: one-sided, colored
@@ -6791,7 +6830,17 @@ class TradeViewerQt(QMainWindow):
             net_x0    = np.where(net >= 0, zeros, -net_log)
             net_x1    = np.where(net >= 0, net_log, zeros)
             net_brush = [_qc(buy_col, 180) if d >= 0 else _qc(sell_col, 180) for d in net]
-            net_pens  = [hi_pen if imb else no_pen for imb in imbalanced]
+            # One bar per level here, and its sign says which side it stands
+            # for, so it takes that side's mark -- not either side's, which
+            # would outline a net-buy bar because the level was a top SELL.
+            net_pens  = [hi_pen if (buy_mark[i] if n >= 0 else sell_mark[i])
+                         else no_pen for i, n in enumerate(net)]
+            # The label has to follow the same rule, not the union: a level
+            # that tops the side its net sign does NOT name has no bar to
+            # outline here, so naming it anyway prints a price in the other
+            # side's colour with nothing beside it.
+            marked    = np.where(net >= 0, buy_mark, sell_mark)
+            label_buy = net >= 0
             net_bar = pg.BarGraphItem(
                 x0=net_x0, x1=net_x1,
                 y=prices, height=bin_h,
@@ -6799,10 +6848,8 @@ class TradeViewerQt(QMainWindow):
             )
             pw.addItem(net_bar)
         else:
-            buy_pens  = [hi_pen if (imb and dom) else no_pen
-                         for imb, dom in zip(imbalanced, buy_dom)]
-            sell_pens = [hi_pen if (imb and not dom) else no_pen
-                         for imb, dom in zip(imbalanced, buy_dom)]
+            buy_pens  = [hi_pen if m else no_pen for m in buy_mark]
+            sell_pens = [hi_pen if m else no_pen for m in sell_mark]
             buy_bar = pg.BarGraphItem(
                 x0=zeros, x1=buys_log,
                 y=prices, height=bin_h,
@@ -6823,9 +6870,14 @@ class TradeViewerQt(QMainWindow):
         # Above-center is stable regardless of bar width/row count.
         y_off = bin_h * 0.5 * 0.85
         for i, price in enumerate(prices):
-            if not imbalanced[i]:
+            if not marked[i]:
                 continue
-            dom_col = buy_col if buys_arr[i] >= sells_arr[i] else sell_col
+            if label_buy is not None:
+                dom_col = buy_col if label_buy[i] else sell_col
+            elif buy_mark[i] and sell_mark[i]:
+                dom_col = buy_col if buys_arr[i] >= sells_arr[i] else sell_col
+            else:
+                dom_col = buy_col if buy_mark[i] else sell_col
             label = pg.TextItem(
                 text=f"{price:.2f}", color=dom_col,
                 fill=pg.mkBrush(_qc(_BG_TIP, 130)), anchor=(0.5, 1.0),

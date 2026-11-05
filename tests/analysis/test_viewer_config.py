@@ -126,7 +126,7 @@ range = "7d"
 [numbers]
 ob_max_count = 9
 profile_bins = 77
-tick_imb_ratio = 6.5
+tick_top_n = 6
 """)
         from analysis.trade_viewer_qt import TradeViewerQt
         v = TradeViewerQt()
@@ -149,7 +149,7 @@ tick_imb_ratio = 6.5
 
             assert v._ob_max_count.value() == 9
             assert v._profile_bins_spin.value() == 77
-            assert v._tick_imb_ratio.value() == pytest.approx(6.5)
+            assert v._tick_top_n.value() == 6
         finally:
             v.close()
             qapp.processEvents()

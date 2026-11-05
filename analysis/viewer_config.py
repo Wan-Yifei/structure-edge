@@ -81,7 +81,7 @@ DEFAULTS: dict[str, dict] = {
         "profile_bins": 120,
         "poc_trail": 2,
         "poc_hysteresis_pct": 5,
-        "tick_imb_ratio": 3.0,
+        "tick_top_n": 3,
         "option_dte": 7,
         "option_wall_count": 4,
         "option_poll_secs": 15,
