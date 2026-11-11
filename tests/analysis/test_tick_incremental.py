@@ -21,6 +21,8 @@ sys.path.insert(0, str(ROOT))
 
 import analysis.trade_viewer_qt as tv  # noqa: E402
 
+from . import _tick_ref as ref  # noqa: E402
+
 CODE, TF, DAY = "US.SOXL", "1m", "2026-10-23"
 BASE = datetime(2026, 10, 23, 10, 0, 0)
 
@@ -32,15 +34,27 @@ def tick(sec, price=100.0, vol=100, direction="BUY"):
 
 @pytest.fixture
 def tape(monkeypatch):
-    """A growing tape plus a count of how many rows each read pulled."""
+    """A growing tape plus a count of how many rows each read pulled.
+
+    The seam moved. The loader asks for price bins now, not rows, because
+    the summing happens inside SQLite -- see test_tick_sql_agg.py, which is
+    where that change is checked. This stub keeps the tape as rows and
+    buckets them with the implementation that used to do it in the viewer,
+    so what these tests are about is untouched: which window gets re-read,
+    and that whole buckets are replaced rather than added to.
+    """
     store = {"rows": [], "reads": []}
 
-    def _q(code, start, end, with_offex):
+    def _q(code, start, end, with_offex, candle_mins, thresholds=None):
         got = [r for r in store["rows"] if start <= r["ts"] < end]
         store["reads"].append(len(got))
-        return got
+        if not got:
+            return None
+        tm, tl = thresholds if thresholds else ref.ref_thresholds(got)
+        return (ref.ref_bucket(got, candle_mins, tm, tl), (tm, tl),
+                max(r["ts"] for r in got))
 
-    monkeypatch.setattr(tv, "_query_ticks", _q)
+    monkeypatch.setattr(tv, "_query_tick_bins", _q)
     return store
 
 
@@ -76,6 +90,38 @@ class TestIncremental:
         inc = tv.load_day_live(CODE, DAY, TF, False, st)
         full = tv.load_day_live(CODE, DAY, TF, False, {})
         assert totals(inc) == totals(full)
+
+    def test_the_incremental_read_keeps_the_frozen_boundaries(self, tape):
+        """Totals cannot see this one, which is why it has its own test.
+
+        S/M/L is cut at the day's own p33/p67, taken at the last full load.
+        An incremental read that re-derives them from its own small window
+        stratifies the newest prints against each other instead of against
+        the day -- the buy/sell totals come out identical and the S/M/L
+        bars in the tick profile quietly mean something else from one
+        refresh to the next.
+
+        The tape is built so the two readings disagree loudly: thirty
+        small prints set the boundaries, then thirty prints two orders of
+        magnitude larger arrive. Under the day's boundaries every one of
+        them is large; under the re-read window's own they spread across
+        all three classes.
+        """
+        tape["rows"] = [tick(i * 10, vol=i + 1) for i in range(30)]
+        st = {}
+        tv.load_day_live(CODE, DAY, TF, False, st)
+
+        tape["rows"] += [tick(300 + i * 10, vol=100 + i) for i in range(30)]
+        got = tv.load_day_live(CODE, DAY, TF, False, st)
+
+        late = {bk: pd_ for bk, pd_ in got.items()
+                if bk >= BASE + timedelta(minutes=5)}
+        assert late, "the new prints never arrived"
+        big = sum(b["buy_l"] for pd_ in late.values() for b in pd_.values())
+        small = sum(b["buy_s"] + b["buy_m"]
+                    for pd_ in late.values() for b in pd_.values())
+        assert small == 0, "the newest prints were re-stratified"
+        assert big == sum(100 + i for i in range(30))
 
     def test_ticks_sharing_the_boundary_second_are_not_doubled(self, tape):
         """Three prints on the same second as the last one seen. A `ts >=`

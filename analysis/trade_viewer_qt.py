@@ -395,21 +395,6 @@ def _day_window(date_str: str) -> tuple[datetime, datetime]:
             dt.replace(hour=23, minute=59, second=59))
 
 
-def _query_ticks(code: str, start: datetime, end: datetime,
-                 with_offex: bool) -> list | None:
-    """Rows from ticks.db, or None when there is no database.
-
-    Split out so both the full and the incremental read go through one
-    place, and so tests can stand in for the store without a file.
-    """
-    db_path = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
-    if not db_path.exists():
-        return None
-    from feeds.tick_store import TickStore
-    with TickStore(db_path, read_only=True) as store:
-        return store.query_ticks(code, start, end, with_mid=with_offex)
-
-
 def top_n_levels(vols: np.ndarray, n: int) -> np.ndarray:
     """Boolean mask over the *n* entries of *vols* with the most volume.
 
@@ -436,20 +421,6 @@ def top_n_levels(vols: np.ndarray, n: int) -> np.ndarray:
     return mask
 
 
-def _size_thresholds(rows) -> tuple[float, float]:
-    """Adaptive S/M/L boundaries: the day's own p33 and p67 by volume.
-
-    Fewer than six ticks is not a distribution, and splitting one into
-    thirds would label two prints "large" on no evidence -- everything is
-    small until there is enough to say otherwise.
-    """
-    vols = np.array([r["volume"] for r in rows if r["volume"] > 0],
-                    dtype=float)
-    if len(vols) < 6:
-        return float("inf"), float("inf")
-    return float(np.percentile(vols, 33)), float(np.percentile(vols, 67))
-
-
 def _new_tick_bin() -> dict:
     return {
         "buy": 0, "sell": 0, "neutral": 0,
@@ -464,39 +435,250 @@ def _new_tick_bin() -> dict:
     }
 
 
-def _bucket_ticks(rows, candle_mins: int,
-                  thresh_m: float, thresh_l: float) -> dict:
-    """Aggregate rows into {bucket: {price: bin}} with GIVEN thresholds.
+# Column order of a price bin, read off the one definition of it so the SQL
+# below cannot drift from the dicts the rest of the viewer reads.
+_BIN_KEYS: tuple[str, ...] = tuple(_new_tick_bin())
 
-    The thresholds are a parameter rather than derived here so an
-    incremental read can keep using the ones the day was loaded with --
-    re-deriving them would mean re-stratifying rows that are no longer in
-    memory.
+# How the feed's `direction` maps onto the three totals. upper() is applied
+# once in the subquery, so these test the already-folded value.
+_DIR_SQL = {"buy":     "d = 'BUY'",
+            "sell":    "d = 'SELL'",
+            "neutral": "d NOT IN ('BUY', 'SELL')"}
+
+_SIZE_ORDER = ("s", "m", "l")
+
+
+def _bucket_sql(candle_mins: int) -> str:
+    """candle_start(ts, candle_mins) as SQL over the stored ISO string.
+
+    Yields 'YYYY-MM-DD HH:MM'. The three branches mirror
+    core.time_utils.candle_start; the tests check them against that
+    function itself rather than against a copy of its rules, so a change
+    there surfaces here instead of silently rebucketing the tape.
+
+    Character positions in 'YYYY-MM-DD HH:MM:SS[.ffffff]': 12-13 is the
+    hour, 15-16 the minute. SQLite's / is integer division on integers.
     """
-    def _size(v) -> str:
-        if v <= thresh_m:
-            return "s"
-        if v <= thresh_l:
-            return "m"
-        return "l"
+    if candle_mins >= 1440:
+        return "substr(ts, 1, 10) || ' 00:00'"
+    if candle_mins > 60:
+        mins = ("(CAST(substr(ts, 12, 2) AS INTEGER) * 60"
+                " + CAST(substr(ts, 15, 2) AS INTEGER))")
+        floored = f"(({mins} / {candle_mins}) * {candle_mins})"
+        return (f"substr(ts, 1, 11) || "
+                f"printf('%02d:%02d', {floored} / 60, {floored} % 60)")
+    if candle_mins == 1:
+        return "substr(ts, 1, 16)"
+    return ("substr(ts, 1, 14) || printf('%02d', "
+            f"(CAST(substr(ts, 15, 2) AS INTEGER) / {candle_mins})"
+            f" * {candle_mins})")
 
-    buckets: dict = defaultdict(lambda: defaultdict(_new_tick_bin))
-    for r in rows:
-        ts = (r["ts"] if isinstance(r["ts"], datetime)
-              else datetime.fromisoformat(str(r["ts"])))
-        bucket = candle_start(ts, candle_mins)
-        key = {"BUY": "buy", "SELL": "sell"}.get(
-            r["direction"].upper(), "neutral")
-        vol = r["volume"]
-        buckets[bucket][r["price"]][key] += vol
-        buckets[bucket][r["price"]][f"{key}_{_size(vol)}"] += vol
-        if key == "neutral":
-            md = r.get("mid_dir")
-            if md == "BUY":
-                buckets[bucket][r["price"]]["off_buy"] += vol
-            elif md == "SELL":
-                buckets[bucket][r["price"]]["off_sell"] += vol
-    return dict(buckets)
+
+def _agg_select() -> str:
+    """One SUM per column of _new_tick_bin(), in that dict's own order.
+
+    off_buy/off_sell come from the side file, so they are selected as
+    literal zeros and one zip() over _BIN_KEYS still fills a whole bin.
+    """
+    out = []
+    for k in _BIN_KEYS:
+        if k.startswith("off_"):
+            out.append("0")
+            continue
+        base, _, size = k.partition("_")
+        pred = _DIR_SQL[base]
+        if size:
+            pred += f" AND sz = {_SIZE_ORDER.index(size)}"
+        out.append(f"SUM(CASE WHEN {pred} THEN volume ELSE 0 END)")
+    return ", ".join(out)
+
+
+def _tick_db_path() -> pathlib.Path:
+    """Where the tape lives. One place, so a test can point it elsewhere."""
+    return pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
+
+
+def _ro(path: pathlib.Path) -> sqlite3.Connection:
+    """A reader that cannot take the write lock off the collector."""
+    con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    con.execute("PRAGMA busy_timeout = 30000")
+    return con
+
+
+def _sql_thresholds(con: sqlite3.Connection, code: str,
+                    s: str, e: str) -> tuple[float, float]:
+    """The window's p33/p67 by volume, without reading the column here.
+
+    Reproduces np.percentile(vols, [33, 67]) over the volumes above zero.
+    numpy's default 'linear' method interpolates between the two order
+    statistics around h = (n - 1) * q, which is exactly what the two-row
+    read below fetches.
+
+    Fewer than six ticks is not a distribution, and splitting one into
+    thirds would label two prints "large" on no evidence -- everything is
+    small until there is enough to say otherwise. Infinity binds as a REAL
+    and compares the way the old Python branch did.
+    """
+    n = con.execute(
+        "SELECT COUNT(*) FROM ticks WHERE code = ? AND ts >= ? AND ts < ?"
+        " AND volume > 0", [code, s, e]).fetchone()[0]
+    if n < 6:
+        return float("inf"), float("inf")
+    out = []
+    for q in (0.33, 0.67):
+        h  = (n - 1) * q
+        lo = int(np.floor(h))
+        rows = con.execute(
+            "SELECT volume FROM ticks WHERE code = ? AND ts >= ? AND ts < ?"
+            " AND volume > 0 ORDER BY volume LIMIT 2 OFFSET ?",
+            [code, s, e, lo]).fetchall()
+        v0 = float(rows[0][0])
+        v1 = float(rows[1][0]) if len(rows) > 1 else v0
+        # numpy's _lerp switches formula at the halfway point so that the
+        # result is exact at both ends. Using one of the two branches for
+        # the whole range is off by an ulp about 1.5% of the time, which is
+        # invisible in a day's volumes but makes an == in a test a matter
+        # of luck.
+        f = h - lo
+        out.append(v1 - (v1 - v0) * (1.0 - f) if f >= 0.5
+                   else v0 + f * (v1 - v0))
+    return out[0], out[1]
+
+
+def _add_offex(buckets: dict, seen: dict, mid_path: pathlib.Path,
+               code: str, s: str, e: str, bx: str) -> None:
+    """Fold the side file's inferred sides onto the bins already built.
+
+    A missing or half-rebuilt side file leaves off_buy/off_sell at the
+    zeros the main query selected, which is what the old path did too: the
+    feed's own tags still stand, so a load must not fail over this.
+
+    Hence `except Exception` and not `except sqlite3.Error`: anything
+    narrower escapes to load_local_ticks' own catch-all and loses the whole
+    day over a side file that is only ever an extra. TickStore.query_ticks
+    caught everything here too.
+    """
+    if not mid_path.exists():
+        return
+    try:
+        con = _ro(mid_path)
+        try:
+            rows = con.execute(
+                f"SELECT {bx} AS bk, price,"
+                " SUM(CASE WHEN mid_dir = 'BUY' THEN volume ELSE 0 END),"
+                " SUM(CASE WHEN mid_dir = 'SELL' THEN volume ELSE 0 END)"
+                " FROM tick_mid WHERE code = ? AND ts >= ? AND ts < ?"
+                " GROUP BY bk, price", [code, s, e]).fetchall()
+        finally:
+            con.close()
+    except Exception as exc:                            # noqa: BLE001
+        print(f"[ticks] mid-dir unavailable: {exc}", flush=True)
+        return
+    for bk_s, price, off_b, off_s in rows:
+        pd_ = buckets.get(seen.get(bk_s))
+        if pd_ is None:
+            continue
+        b = pd_.get(price)
+        if b is None:
+            continue
+        b["off_buy"]  = off_b
+        b["off_sell"] = off_s
+
+
+def _query_tick_bins(code: str, start: datetime, end: datetime,
+                     with_offex: bool, candle_mins: int,
+                     thresholds: tuple[float, float] | None = None):
+    """{bucket: {price: bin}} for [start, end), aggregated inside SQLite.
+
+    Returns (buckets, (thresh_m, thresh_l), last_ts), or None when there is
+    no database and when the window holds no tick.
+
+    This replaces reading every row into Python and bucketing them here.
+    The rows were the expensive part, not the buckets: one SOXL day is
+    1.33M of them, dicts, strings and datetimes built only to be summed and
+    thrown away -- and load_day_live re-reads the whole day about ten times
+    a session, so that peak kept coming back. The price bins handed out are
+    the ones the old path built, cell for cell, so nothing downstream knows
+    the difference. CHANGELOG v0.89.2 carries the measurements; they are
+    deliberately not repeated here, because two copies of a number drift.
+
+    `thresholds` freezes the S/M/L boundaries for an incremental read --
+    re-deriving them would mean re-stratifying rows that are no longer in
+    memory. Same contract the old bucketing had.
+
+    Off-exchange sides live in a separate file and are summed separately,
+    then added onto the (bucket, price) cells they belong to. Replacing a
+    per-row join with that needs TWO things to hold of the side file, and
+    neither is enforced here:
+
+      1. a signed print is NEUTRAL -- otherwise its volume would be counted
+         as off-exchange on a cell the old path would have left alone;
+      2. every side row has a print behind it -- an orphan lands on
+         whatever else shares its (bucket, price) and is counted twice. The
+         old path could not have one: it looked the sides up FROM the rows.
+
+    Both hold because scripts/classify_ticks.py signs NEUTRAL prints of the
+    tape it is reading and nothing else; the nail that keeps 1. true is
+    tests/scripts/test_classify_ticks.py::test_a_tagged_print_is_never_touched.
+    Checked against the real file over six code/day pairs: 1,920,270 side
+    rows, all NEUTRAL, no orphans.
+
+    ATTACHing the side file instead would put its lock in the path of every
+    tick read, which is why TickMidStore.load does not either.
+
+    One load takes three or four read transactions (the count, the two
+    order statistics, the aggregate, the last timestamp) where the old path
+    took one, so they can see different states of a tape being written. It
+    is accepted rather than fixed: the table only grows, and a last_ts that
+    ran ahead is healed by the next cycle's whole-bucket replace.
+    """
+    db_path = _tick_db_path()
+    if not db_path.exists():
+        return None
+    s, e = start.isoformat(sep=" "), end.isoformat(sep=" ")
+    bx = _bucket_sql(candle_mins)
+
+    con = _ro(db_path)
+    try:
+        if thresholds is None:
+            thresholds = _sql_thresholds(con, code, s, e)
+        tm, tl = thresholds
+        cur = con.execute(
+            f"SELECT bk, price, {_agg_select()} FROM ("
+            f" SELECT {bx} AS bk, price, volume, upper(direction) AS d,"
+            "  CASE WHEN volume <= :tm THEN 0"
+            "       WHEN volume <= :tl THEN 1 ELSE 2 END AS sz"
+            "  FROM ticks WHERE code = :code AND ts >= :s AND ts < :e)"
+            " GROUP BY bk, price",
+            {"tm": tm, "tl": tl, "code": code, "s": s, "e": e})
+
+        # Built off the cursor rather than fetchall(): holding all ~205,000
+        # result tuples beside the bins they become costs ~40 MB of peak for
+        # nothing, and peak is what this change is mostly about.
+        buckets: dict = {}
+        seen: dict[str, datetime] = {}   # ~1,400 of these, not ~205,000
+        for row in cur:
+            bk = seen.get(row[0])
+            if bk is None:
+                bk = seen[row[0]] = datetime.strptime(row[0],
+                                                      "%Y-%m-%d %H:%M")
+            buckets.setdefault(bk, {})[row[1]] = dict(zip(_BIN_KEYS, row[2:]))
+
+        if not buckets:
+            return None
+        # ORDER BY ... LIMIT 1 rather than MAX(ts): the index leads with
+        # (code, ts), so this touches one entry.
+        last = con.execute(
+            "SELECT ts FROM ticks WHERE code = ? AND ts >= ? AND ts < ?"
+            " ORDER BY ts DESC LIMIT 1", [code, s, e]).fetchone()
+    finally:
+        con.close()
+
+    if with_offex:
+        _add_offex(buckets, seen, db_path.parent / "tick_mid.db",
+                   code, s, e, bx)
+
+    return buckets, (tm, tl), datetime.fromisoformat(last[0])
 
 
 # Where the option-chain context connects. Named so the probe below and
@@ -537,6 +719,7 @@ def load_local_ticks(code: str, date_str: str, tf: str,
         buy / sell / neutral  — totals (used by heatmap)
         buy_s / buy_m / buy_l — size-stratified buy volume
         sell_s / sell_m / sell_l — size-stratified sell volume
+        off_buy / off_sell — the side file's reading of off-exchange flow
 
     S/M/L thresholds are computed from the day's volume distribution
     (p33 = small/medium boundary, p67 = medium/large boundary).
@@ -544,12 +727,14 @@ def load_local_ticks(code: str, date_str: str, tf: str,
     try:
         _, candle_mins = TIMEFRAME_MAP[tf]
         start, end = _day_window(date_str)
-        rows = _query_ticks(code, start, end, with_offex)
-        if not rows:
-            return None
-        tm, tl = _size_thresholds(rows)
-        return _bucket_ticks(rows, candle_mins, tm, tl)
-    except Exception:
+        got = _query_tick_bins(code, start, end, with_offex, candle_mins)
+        return got[0] if got else None
+    except Exception as exc:                            # noqa: BLE001
+        # Said out loud. Swallowed, this is a chart with no tick overlays
+        # at all and nothing anywhere to say why -- and the catch now
+        # covers the whole SQL path, not just a store that would not open.
+        print(f"[ticks] load failed for {code} {date_str} {tf}: "
+              f"{type(exc).__name__}: {exc}", flush=True)
         return None
 
 
@@ -584,24 +769,22 @@ def load_day_live(code: str, date_str: str, tf: str, with_offex: bool,
                  and len(state["buckets"]) >= _LIVE_RELOAD_GROWTH
                  * max(1, state.get("n_at_thresh", 1)))
         if state.get("key") != key or not state.get("buckets") or grown:
-            rows = _query_ticks(code, start, end, with_offex)
-            if not rows:
+            got = _query_tick_bins(code, start, end, with_offex, candle_mins)
+            if not got:
                 state.clear()
                 return None
-            tm, tl = _size_thresholds(rows)
-            buckets = _bucket_ticks(rows, candle_mins, tm, tl)
+            buckets, (tm, tl), last_ts = got
             state.clear()
             state.update(key=key, buckets=buckets, thresh=(tm, tl),
                          n_at_thresh=len(buckets),
-                         last_ts=_max_ts(rows), full_loads=1)
+                         last_ts=last_ts, full_loads=1)
             return buckets
 
-        last_ts = state["last_ts"]
-        re_from = candle_start(last_ts, candle_mins)
-        rows = _query_ticks(code, re_from, end, with_offex)
-        if rows:
-            tm, tl = state["thresh"]
-            fresh = _bucket_ticks(rows, candle_mins, tm, tl)
+        re_from = candle_start(state["last_ts"], candle_mins)
+        got = _query_tick_bins(code, re_from, end, with_offex, candle_mins,
+                               thresholds=state["thresh"])
+        if got:
+            fresh, _, last_ts = got
             # A new top-level dict: the one handed out last cycle may still
             # be referenced by whatever drew from it, and mutating that
             # under a consumer is the kind of bug that shows up as a chart
@@ -609,17 +792,11 @@ def load_day_live(code: str, date_str: str, tf: str, with_offex: bool,
             buckets = dict(state["buckets"])
             buckets.update(fresh)          # whole-bucket replace, never add
             state["buckets"] = buckets
-            state["last_ts"] = _max_ts(rows)
+            state["last_ts"] = last_ts
         return state["buckets"]
     except Exception:
         state.clear()
         return load_local_ticks(code, date_str, tf, with_offex=with_offex)
-
-
-def _max_ts(rows) -> datetime:
-    def _as_dt(v):
-        return v if isinstance(v, datetime) else datetime.fromisoformat(str(v))
-    return max(_as_dt(r["ts"]) for r in rows)
 
 
 def load_raw_ticks(code: str, date_str: str) -> list[dict]:
