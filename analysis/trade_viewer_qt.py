@@ -7701,6 +7701,36 @@ class TradeViewerQt(QMainWindow):
         line.setVisible(True)          # before setPos -- see _on_mouse_move
         line.setPos(pi.vb.mapSceneToView(pos).y())
 
+    @staticmethod
+    def _fit_tag_y(vb, y: float, above_px: float, below_px: float) -> float:
+        """Nearest price to y at which a pixel-sized tag still fits in view.
+
+        A ViewBox clips its children to its own rect, and a TextItem is
+        positioned in data units but drawn at a fixed pixel size, so a tag
+        within one line height of the top or bottom edge gets cut in half --
+        at every zoom, because the box does not shrink with the range. This
+        is what the view-span percentages elsewhere in this handler were
+        reaching for; a percentage of the span is not the height of the box,
+        and the two drift apart as the window is resized.
+
+        above_px / below_px are how far the block reaches over and under the
+        price it marks, which depends on the item's anchor: anchor y=1 is all
+        above, y=0 all below, y=0.5 half each.
+
+        Returns y untouched everywhere but the last few pixels at an edge, so
+        the tag sits on the crosshair line exactly as before and only steps
+        aside when it would otherwise be clipped. Either way the number it
+        prints is the cursor's own price -- only the box moves.
+
+        Call it AFTER setText: the height measured is the text's.
+        """
+        ylo, yhi = vb.viewRange()[1]
+        py       = vb.viewPixelSize()[1]      # data units per pixel, positive
+        above, below = above_px * py, below_px * py
+        if above + below >= yhi - ylo:
+            return y          # taller than the whole view: nothing fits
+        return min(max(y, ylo + below), yhi - above)
+
     def _on_mouse_move(self, pos) -> None:
         # pos is QPointF emitted directly by scene.sigMouseMoved
         in_candle = self._plot_c.sceneBoundingRect().contains(pos)
@@ -7784,12 +7814,16 @@ class TradeViewerQt(QMainWindow):
         y_span   = yhi - ylo
         label_x  = xlo + (xhi - xlo) * 0.01  # ~1% from left edge
 
-        # Price tag: left edge, vertically centered on cursor price
+        # Price tag: left edge, vertically centered on cursor price, nudged
+        # inward by _fit_tag_y at the very top and bottom of the view where it
+        # would otherwise be clipped in half.
         pair = self._pair_implied(y)
-        self._price_label.setPos(label_x, y)
         if pair is None:
             self._price_label.setAnchor((0.0, 0.5))   # centred on the line
             self._price_label.setText(f"{y:.2f}")
+            half = self._price_label.boundingRect().height() / 2.0
+            self._price_label.setPos(
+                label_x, self._fit_tag_y(self._plot_c.vb, y, half, half))
             self._pair_price_label.setVisible(False)
         else:
             base_code, pair_code, pair_px = pair
@@ -7798,9 +7832,18 @@ class TradeViewerQt(QMainWindow):
             self._price_label.setAnchor((0.0, 1.0))   # lifted above the line
             self._price_label.setText(
                 f"{_short_code(base_code)} {y:.2f}")
-            self._pair_price_label.setPos(label_x, y)
             self._pair_price_label.setText(
                 f"{_short_code(pair_code)} {pair_px:.2f}")
+            # One fit for the two of them. Fitting each on its own would, at
+            # the bottom edge, hold the gold tag still and walk the pair tag
+            # up through it -- they straddle the line as one block, so they
+            # move as one.
+            tag_y = self._fit_tag_y(
+                self._plot_c.vb, y,
+                self._price_label.boundingRect().height(),
+                self._pair_price_label.boundingRect().height())
+            self._price_label.setPos(label_x, tag_y)
+            self._pair_price_label.setPos(label_x, tag_y)
             self._pair_price_label.setVisible(True)
         self._price_label.setVisible(True)
 
@@ -7810,17 +7853,20 @@ class TradeViewerQt(QMainWindow):
             row = self._klines.iloc[idx]
             vol = int(row.get("volume", 0) or 0)
 
-            # OHLCV tooltip: anchor bottom-left → body floats ABOVE position.
-            # Clamp so the anchor is at most 2% below the view top (avoids going
-            # off-screen when cursor is near the very top of the chart).
-            tip_y = min(y + y_span * 0.14, yhi - y_span * 0.02)
-            self._ohlcv_label.setPos(label_x, tip_y)
+            # OHLCV tooltip: anchor bottom-left → body floats ABOVE position,
+            # about a seventh of the view over the cursor. Set before placed:
+            # the fit needs this bar's text. It used to reserve 2% of the view
+            # span against the top edge for a box that is four lines (~60 px)
+            # tall -- 9 px on a 451 px chart, so most of it was cut off anyway.
             self._ohlcv_label.setText(
                 f"{str(row['time_key'])[:16]}\n"
                 f"O {row['open']:.2f}  H {row['high']:.2f}\n"
                 f"L {row['low']:.2f}  C {row['close']:.2f}\n"
                 f"Vol {vol:,}"
             )
+            self._ohlcv_label.setPos(label_x, self._fit_tag_y(
+                self._plot_c.vb, y + y_span * 0.14,
+                self._ohlcv_label.boundingRect().height(), 0.0))
             self._ohlcv_label.setVisible(True)
 
             if idx != self._last_hover_idx:
