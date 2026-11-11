@@ -84,7 +84,7 @@ from strategy.option.gex import (
 from ta.volume import AccDistIndexIndicator
 from moomoo import (
     OpenQuoteContext, SubType, KLType, AuType, Session,
-    TickerHandlerBase, StockQuoteHandlerBase, RET_OK,
+    TickerHandlerBase, StockQuoteHandlerBase, CurKlineHandlerBase, RET_OK,
 )
 
 # ── PyQtGraph global config ───────────────────────────────────────────────────
@@ -1723,6 +1723,149 @@ def _merge_klines(base, fresh):
     return out.sort_values("time_key").reset_index(drop=True)
 
 
+_PUSH_COLS = ("open", "high", "low", "close", "volume")
+
+
+def _norm_time_key(s: str) -> str:
+    """Match the fetcher's K_DAY normalisation.
+
+    A 1d bar arrives on the push stream as a bare "YYYY-MM-DD" while the
+    fetched frame carries "YYYY-MM-DD 00:00:00" (the tf == "1d" branch in
+    DataFetcher.run). Without this they never compare equal, so on 1d the fold
+    silently did nothing -- and at a day boundary the bare key sorted ABOVE
+    the normalised one, appending a row that skipped a normalisation every
+    downstream [:16] slice and strptime is written against.
+    """
+    return s + " 00:00:00" if len(s) == 10 else s
+
+
+def _push_values(row) -> dict:
+    """OHLCV from a pushed bar, as floats. Raises on anything uncoercible.
+
+    Volume is float, not int. Both the push and the history fetch read
+    moomoo's hpVolume, a protobuf double (CurKlinePush.unpack_rsp and
+    RequestHistoryKlineQuery.unpack_rsp agree on that), and nothing in
+    DataFetcher casts the column down, so the live frame's volume is float64.
+    An int() here would silently truncate rather than protect anything.
+
+    Non-finite values are refused along with uncoercible ones: float("nan")
+    does NOT raise, so without this a NaN price or volume would fold straight
+    into the frame and every reader downstream would have to cope with it.
+    """
+    out = {}
+    for c in _PUSH_COLS:
+        v = row.get(c)
+        if v is None:
+            continue
+        v = float(v)
+        if not np.isfinite(v):
+            raise ValueError(f"non-finite {c}")
+        out[c] = v
+    return out
+
+
+def _fold_pushed_bar(df, row) -> tuple:
+    """Fold one pushed K-line into a live frame. Returns (frame, appended).
+
+    Which of two observations of the SAME bar is the later one is decided by
+    volume, not by either side's clock: within one bar volume only grows, so
+    the larger figure was taken later. That is what keeps a Refresh landing
+    mid-bar from rolling the forming candle backwards to the snapshot the
+    fetch took a second or two earlier.
+
+    Only the newest bar and a brand-new one are considered. A push for a bar
+    older than the frame's last is dropped: the stream concerns the bar being
+    formed, and a genuine late correction to an older bar is picked up by the
+    next full fetch through _merge_klines anyway. That keeps this O(1) on a
+    frame of several thousand bars, at roughly one call a second.
+
+    Never mutates `df`. The fetcher thread holds the same frame as its top-up
+    cache while this runs on the GUI thread, so an in-place edit here would be
+    a cross-thread write to a frame being read; a changed frame comes back as
+    a copy and is rebound instead.
+    """
+    if df is None or len(df) == 0 or not row:
+        return df, False
+    tk = _norm_time_key(str(row.get("time_key", "")))
+    if not tk:
+        return df, False
+    last = str(df["time_key"].iloc[-1])
+
+    if tk == last:
+        # Every coercion is inside the guard, not just the comparison. These
+        # run in a QTimer slot, and an exception escaping a PyQt6 slot aborts
+        # the process -- a malformed push must cost a dropped bar, not the
+        # viewer.
+        try:
+            vol_new = float(row.get("volume", 0) or 0)
+            vol_old = float(df["volume"].iloc[-1] or 0)
+            if vol_new < vol_old:
+                return df, False      # an earlier observation of this bar
+            vals = _push_values(row)
+        except (TypeError, ValueError, OverflowError):
+            return df, False
+        out = df.copy()
+        for c, v in vals.items():
+            if c in out.columns:
+                # By position, not by label: a duplicate index label would
+                # write every row that carries it.
+                out.iloc[-1, out.columns.get_loc(c)] = v
+        return out, False
+
+    if tk > last:
+        try:
+            vals = _push_values(row)
+        except (TypeError, ValueError, OverflowError):
+            return df, False
+        # Start from the bar before it. Every non-OHLCV column is inherited --
+        # including turnover and last_close, which the push does in fact
+        # carry; only OHLCV is taken from the push. Filling them with None
+        # instead would turn a numeric column into object and change the
+        # frame's schema under everything that reads it. Nothing reads those
+        # columns today, and the next fetch overwrites the row through
+        # _merge_klines within one cycle, so the stale values cost nothing --
+        # which is exactly why filling them with None would have gone
+        # unnoticed.
+        new = df.iloc[-1].to_dict()
+        new.update({c: v for c, v in vals.items() if c in df.columns})
+        new["time_key"] = tk
+        return (pd.concat([df, pd.DataFrame([new], columns=df.columns)],
+                          ignore_index=True), True)
+
+    return df, False                  # older than the frame's last bar
+
+
+class _KlinePushHandler(CurKlineHandlerBase):
+    """Hands OpenD's pushed bars to a viewer.
+
+    At module level, not nested inside _start_live, so a test can drive the
+    real thing. The nested first version went unexercised -- every test called
+    _ingest_kline directly -- and the one line that could only be checked here
+    was wrong: CurKlineHandlerBase.on_recv_rsp returns a DATAFRAME, built from
+    its own col_list, not the list of dicts that CurKlinePush.unpack_rsp hands
+    it. `if not data` on a DataFrame raises, OpenD's push thread catches and
+    logs it, and the net effect was the old behaviour plus a traceback roughly
+    once a second.
+
+    So the payload is converted explicitly rather than assumed, and the
+    viewer's half of the contract stays a list of dicts.
+    """
+
+    def __init__(self, viewer, code: str):
+        super().__init__()
+        self._viewer = viewer
+        self._code   = code
+
+    def on_recv_rsp(self, rsp_pb):
+        ret, data = super().on_recv_rsp(rsp_pb)
+        if ret != RET_OK or data is None:
+            return ret, data
+        rows = data.to_dict("records") if hasattr(data, "to_dict") else list(data)
+        if rows:
+            self._viewer._ingest_kline(rows, self._code)
+        return ret, data
+
+
 class DataFetcher(QThread):
     """Fetches klines + ticks + SMC signals in a background thread."""
 
@@ -2333,6 +2476,15 @@ class TradeViewerQt(QMainWindow):
         # what stops a frame being topped up with another symbol's or another
         # timeframe's bars after a switch.
         self._live_kl_key:  tuple | None        = None
+        # Pushed K-lines waiting to be folded in, {time_key: row}. Written on
+        # the subscription's callback thread, drained on the GUI thread -- see
+        # _ingest_kline. Keyed so that several pushes for the same forming bar
+        # between two repaints collapse to the one that is current.
+        self._pending_kl:   dict                = {}
+        # (key, row) of the last pushed bar actually folded in, re-applied
+        # after a fetch lands so the forming candle does not jump back to the
+        # fetch's older snapshot of it.
+        self._last_kl_push: tuple | None        = None
         self._warmup:       pd.DataFrame | None = None
         self._ticks:        dict | None         = None
         # So the "OpenD not listening" line is logged on transitions
@@ -3805,6 +3957,15 @@ class TradeViewerQt(QMainWindow):
 
             self._ctx.set_handler(_TickHandler())
             self._ctx.set_handler(_QuoteHandler())
+            # The K-line SubType above was already being subscribed (moomoo
+            # requires it before request_history_kline returns intraday bars),
+            # but nothing consumed it, so OpenD's bar stream was decoded by the
+            # SDK and dropped. Measured on US.SOXL: a push a median 0.81s apart,
+            # 95 of 98 of them the forming bar moving rather than a closed one.
+            # It costs no quota and no round trip -- the subscription is
+            # already paid for.
+            if kl_sub is not None:
+                self._ctx.set_handler(_KlinePushHandler(self, code))
             self._live_code = code
             interval = self._refresh_spin.value() * 1000
             self._refresh_timer.start(interval)
@@ -3828,6 +3989,11 @@ class TradeViewerQt(QMainWindow):
             pass
         self._live_code = ""
         self._live_kl_sub = None
+        # Nothing will drain these once the redraw timer is stopped, and on the
+        # next Live start they would belong to whatever was showing before.
+        with self._tick_lock:
+            self._pending_kl = {}
+        self._last_kl_push = None
 
     # ── Toolbar callbacks ─────────────────────────────────────────────────────
 
@@ -3910,13 +4076,141 @@ class TradeViewerQt(QMainWindow):
                 self._last_tick_price = price
             self._tick_seq += 1
 
+    def _ingest_kline(self, rows, code: str) -> None:
+        """Stage pushed K-line bars for the GUI thread to fold in.
+
+        Runs on the subscription's callback thread, and deliberately does NOT
+        touch self._klines. The GUI thread renders from that frame for ~200ms
+        at a stretch and the fetcher thread reads it as its top-up cache;
+        neither can hold a lock for that long, so a write from here would race
+        both. All this does is drop rows in a staging dict under _tick_lock
+        and bump _tick_seq -- _on_redraw_tick drains it on the GUI thread.
+
+        _tick_seq is bumped only when something was actually staged, so a push
+        that is filtered out here does not buy a repaint. Its meaning is
+        unchanged: the one thing telling the redraw timer there is new data to
+        paint, whether it came from the tape or from the bar stream.
+
+        The code check is a cheap early-out, not the authority: _live_kl_key
+        is written on the GUI thread WITHOUT this lock, so the lock buys
+        nothing for that field. What makes it safe is that rebinding an
+        attribute is a single STORE_ATTR -- a reader sees the old tuple or the
+        new one, never a torn one -- and that _drain_pushed_klines re-checks
+        every row against the current binding on the GUI thread.
+
+        Takes a list of dicts. The handler converts explicitly rather than
+        passing the SDK's payload through: CurKlineHandlerBase hands back a
+        DataFrame, and iterating one here yields column NAMES.
+        """
+        if not rows:
+            return
+        with self._tick_lock:
+            key = self._live_kl_key
+            if key is None or key[0] != code:
+                return
+            staged = False
+            for r in rows:
+                tk = str(r.get("time_key", ""))
+                if not tk:
+                    continue
+                self._pending_kl[tk] = r
+                staged = True
+            if staged:
+                self._tick_seq += 1
+
+    def _drain_pushed_klines(self) -> tuple:
+        """Fold staged pushed bars into _klines. Returns (changed, appended).
+
+        GUI thread only: this is where _klines is rebound, and where
+        _live_kl_key -- also written on this thread -- is authoritative. A
+        push staged just before a symbol or timeframe switch is dropped here
+        rather than landing in the wrong chart's frame.
+        """
+        with self._tick_lock:
+            staged = self._pending_kl
+            self._pending_kl = {}
+        if not staged or self._klines is None or self._live_kl_key is None:
+            return False, False
+        if self._mode_combo.currentText() != "Live":
+            return False, False
+
+        code, tf = self._live_kl_key
+        want = str(TIMEFRAME_MAP.get(tf, (None, 0))[0])
+        changed = appended = False
+        for tk in sorted(staged):                   # oldest first
+            row = staged[tk]
+            if str(row.get("code", code)) != code:
+                continue
+            if str(row.get("k_type", want)) != want:
+                continue                            # a push for the old tf
+            df, grew = _fold_pushed_bar(self._klines, row)
+            if df is not self._klines:
+                self._klines = df
+                changed  = True
+                appended = appended or grew
+                self._last_kl_push = (self._live_kl_key, row)
+        return changed, appended
+
+    def _follow_right_edge(self, prev_n: int, xlo: float, xhi: float) -> None:
+        """Keep the newest candle in view after the frame grew.
+
+        Called from both places a bar can appear: a fetch landing in
+        _on_data_ready, and now a bar arriving on the push stream. prev_n and
+        the X range are the ones read BEFORE the frame grew.
+
+        Only in Live, and only when the view was already parked at the right
+        edge -- panning left to read history is a deliberate act and must not
+        be undone by the next bar.
+        """
+        if self._mode_combo.currentText() != "Live" or self._klines is None:
+            return
+        new_n = len(self._klines)
+        if not new_n > prev_n > 0:
+            return
+        # _reset_view() only sets pan/zoom limits (xMax/maxXRange) on a
+        # genuine code/tf change; without this, the limits set at the
+        # last reset stay frozen while new_n keeps growing, and once
+        # enough bars accumulate the stale xMax clamps setXRange below,
+        # silently cutting off the newest candle(s) until Home is pressed.
+        self._plot_c.vb.setLimits(xMax=new_n + 5, maxXRange=new_n + 10)
+        if xhi >= prev_n - 2:
+            visible = xhi - xlo
+            # Candle bodies are drawn i±0.35 wide, so the last body's
+            # right edge sits at new_n - 0.65. Leave a full bar of margin
+            # past that (matching _reset_view's buffer) so it never clips
+            # at padding=0.
+            new_xhi = new_n + 0.5
+            self._plot_c.setXRange(new_xhi - visible, new_xhi, padding=0)
+            # Price (and volume) Y-range was only set once by _reset_view()
+            # at load time and never revisited -- as price drifts away from
+            # that frozen band the candles walk above/below the visible
+            # window over time. Only re-fit while we're also re-centering
+            # X (i.e. the user hasn't panned away to review history) so
+            # this doesn't fight a deliberate manual vertical zoom.
+            self._autorange_price_subplots(new_xhi - visible, new_xhi)
+        # CVD / A-D Line Y-range was only set once by _reset_view() at
+        # load time and never revisited -- refresh it to the current
+        # visible window on every live tick so it doesn't go stale (see
+        # _autorange_cumulative_subplots).
+        xlo2, xhi2 = self._plot_c.vb.viewRange()[0]
+        self._autorange_cumulative_subplots(xlo2, xhi2)
+
     def _on_redraw_tick(self) -> None:
         """Repaint from data already in hand, if any of it is new."""
         if self._klines is None:
             return
-        if self._tick_seq == self._drawn_tick_seq:
-            return            # no prints since the last paint
+        prev_n   = len(self._klines)
+        xlo, xhi = self._plot_c.vb.viewRange()[0]
+        changed, appended = self._drain_pushed_klines()
+        if not changed and self._tick_seq == self._drawn_tick_seq:
+            return            # nothing new since the last paint
         self._redraw()
+        if appended:
+            # A bar arrived from the stream rather than from a fetch, so the
+            # follow-the-right-edge step that _on_data_ready does has to
+            # happen here too -- without it the newest candle walks off the
+            # right edge, and the stale xMax limit clips it.
+            self._follow_right_edge(prev_n, xlo, xhi)
 
     def _redraw(self) -> None:
         """Repaint without fetching anything.
@@ -4235,6 +4529,25 @@ class TradeViewerQt(QMainWindow):
         self._live_kl_key = (
             None if result.get("historical")
             else (result.get("code", ""), result.get("tf", "")))
+        # A fetch snapshots the forming bar a second or two before it lands,
+        # while the push stream has kept moving. Re-apply the last pushed bar
+        # so the live candle does not visibly step backwards once a cycle;
+        # _fold_pushed_bar drops it on volume if the fetch is in fact newer.
+        if (self._last_kl_push is not None
+                and self._live_kl_key is not None
+                and self._last_kl_push[0] == self._live_kl_key):
+            self._klines, _ = _fold_pushed_bar(self._klines,
+                                               self._last_kl_push[1])
+            # Let it go once its bar is no longer the one being formed.
+            # Held past that, a downward volume correction from the exchange
+            # would be overwritten by this pin on every fetch cycle, and
+            # nothing would clear it while the stream is quiet.
+            held = _norm_time_key(str(self._last_kl_push[1].get("time_key", "")))
+            if (self._klines is None or len(self._klines) == 0
+                    or held != str(self._klines["time_key"].iloc[-1])):
+                self._last_kl_push = None
+        else:
+            self._last_kl_push = None
         self._ticks       = result["ticks"]
         self._db_ticks    = result["ticks"]
         for key, day in (result.get("new_tick_days") or {}).items():
@@ -4249,38 +4562,7 @@ class TradeViewerQt(QMainWindow):
         self._fvg_gaps    = result["fvg_gaps"]
         self._ob_blocks   = result["ob_blocks"]
         self._render(self._klines, self._db_ticks)
-
-        # In Live mode, auto-scroll right when new bars arrive and the view
-        # was already at the right edge (user hasn't manually panned left).
-        new_n = len(self._klines)
-        if self._mode_combo.currentText() == "Live" and new_n > prev_n > 0:
-            # _reset_view() only sets pan/zoom limits (xMax/maxXRange) on a
-            # genuine code/tf change; without this, the limits set at the
-            # last reset stay frozen while new_n keeps growing, and once
-            # enough bars accumulate the stale xMax clamps setXRange below,
-            # silently cutting off the newest candle(s) until Home is pressed.
-            self._plot_c.vb.setLimits(xMax=new_n + 5, maxXRange=new_n + 10)
-            if xhi >= prev_n - 2:
-                visible = xhi - xlo
-                # Candle bodies are drawn i±0.35 wide, so the last body's
-                # right edge sits at new_n - 0.65. Leave a full bar of margin
-                # past that (matching _reset_view's buffer) so it never clips
-                # at padding=0.
-                new_xhi = new_n + 0.5
-                self._plot_c.setXRange(new_xhi - visible, new_xhi, padding=0)
-                # Price (and volume) Y-range was only set once by _reset_view()
-                # at load time and never revisited -- as price drifts away from
-                # that frozen band the candles walk above/below the visible
-                # window over time. Only re-fit while we're also re-centering
-                # X (i.e. the user hasn't panned away to review history) so
-                # this doesn't fight a deliberate manual vertical zoom.
-                self._autorange_price_subplots(new_xhi - visible, new_xhi)
-            # CVD / A-D Line Y-range was only set once by _reset_view() at
-            # load time and never revisited -- refresh it to the current
-            # visible window on every live tick so it doesn't go stale (see
-            # _autorange_cumulative_subplots).
-            xlo2, xhi2 = self._plot_c.vb.viewRange()[0]
-            self._autorange_cumulative_subplots(xlo2, xhi2)
+        self._follow_right_edge(prev_n, xlo, xhi)
         # Keep DOM window in sync with active code, mode, and timeframe
         if self._dom_window is not None:
             code = self._code_edit.text().strip()

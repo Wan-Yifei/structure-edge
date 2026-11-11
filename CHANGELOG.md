@@ -1,5 +1,88 @@
 # Changelog
 
+## v0.89.0 - 接上实时 K 线推送，主图不再等 15 秒 (2026-11-11)
+
+### 背景
+
+viewer 一直在订阅 K 线 SubType（`SubType.K_1M` 等）——moomoo 要求订阅后
+`request_history_kline` 才返回分钟线。但**从来没有注册 `CurKlineHandlerBase`**，
+所以 OpenD 推来的 bar 被 SDK 解包后直接丢掉，蜡烛只能等 15 秒一次的轮询。
+
+实测这条推送（US.SOXL，夜盘，120 秒）：
+
+```
+pushes            : 98
+gap between pushes: min 0.19s  median 0.81s  p90 2.70s  max 5.62s
+正在形成的那根在更新: 95 / 98   (volume 每次都涨，close 变了 71 次)
+新 bar 诞生        : 3        (到达时 V=0、C=前收)
+```
+
+重绘定时器本来就跑在 0.5 s，一次重绘占 GUI 线程 226–258 ms。**在实测的那个夜盘
+窗口里，消费这条推送不增加 CPU**——那些帧本来就在画，只是画的是 15 秒前的蜡烛。
+
+机制（也就是这句话的适用边界）：那 98 次推送里**没有一次是「无变化推送」**，95 次
+volume 在涨、3 次新 bar，所以 `_tick_seq` 本来就被逐笔顶着跑，重绘帧确实本来就在
+画。而 `changed` 是按对象身份判的——**一次等量推送同样会 `df.copy()` → `changed=True`
+→ 强制一次 226–258 ms 的重绘**。样本里这种推送是 0 次，所以结论成立，但它依赖
+「有量在走」这个体制。RTH 没有留出样本。
+
+### 改动
+
+| | |
+|---|---|
+| `_KlinePushHandler` | 模块级，不嵌在 `_start_live` 里，这样测试能驱动真货 |
+| `_ingest_kline(rows, code)` | SDK 回调线程。只往 `_pending_kl` 暂存、bump `_tick_seq` |
+| `_drain_pushed_klines()` | GUI 线程排干并合并，返回 `(changed, appended)` |
+| `_fold_pushed_bar(df, row)` | 模块级纯函数，**承诺永不原地改入参** |
+| `_follow_right_edge(...)` | 从 `_on_data_ready` 原样抽出，推送和拉取来的新 bar 共用 |
+
+**线程**：回调线程绝不碰 `self._klines`——GUI 线程要拿着它渲染约 200 ms，fetcher
+线程同时把它当 top-up 缓存读。暂存 → GUI 排干 → 重绑定，修改全在一个线程上。
+
+**谁更新**：同一根 bar 拉取和推送都可能给一份，**用 volume 定先后**（一根 bar 内
+volume 只增不减，量大的是更晚的观测），不信任任何一方的时间戳。这挡住了"每轮
+Refresh 落地时正在形成的蜡烛往回跳"。
+
+### 审查中发现并修掉的（全部由 analyzer 独立复核）
+
+1. **致命：handler 第一行就抛异常，推送一次都进不来。**
+   `CurKlineHandlerBase.on_recv_rsp` 返回的是 **DataFrame**（SDK 用自己的
+   `col_list` 建的），不是 `CurKlinePush.unpack_rsp` 给它的 list。原来写的
+   `if not data` 对 DataFrame 必抛 `ValueError`，而 OpenD 的推送线程会接住并
+   记日志——净效果 = 改动前的行为 + 每秒约一条带 traceback 的 warning。
+   现在显式 `to_dict("records")`，并补了驱动真 handler 的测试。
+2. **`_fold_pushed_bar` 的强转会让进程 abort。** 原来 try 只包了 volume 的比较，
+   没包写入；append 分支根本没守卫。这些跑在 QTimer 槽里，**槽里漏出异常
+   = 进程 abort**。现在两个分支的强转都在守卫内，并且拒绝非有限值
+   （`float("nan")` 不抛，不拦就会把 NaN 折进帧里）。
+3. **1d 周期上折叠完全失效。** fetcher 把 K_DAY 的 time_key 归一成
+   `"YYYY-MM-DD 00:00:00"`，推送给的是裸日期，两者永不相等；跨日时裸日期字典序
+   反而更大，会 append 一行下游没人能解析的 time_key。新增 `_norm_time_key`。
+4. **`int(volume)` 保护的东西不存在，而且会截断。** 推送和拉取两条路都取
+   `hpVolume`（protobuf double），DataFetcher 全程没有 `astype("int64")`，
+   所以生产帧的 volume 是 **float64**。去掉 `int()`，测试 fixture 也改成 float。
+5. **`_last_kl_push` 会把一次向下修正永久钉住。** 它每次 fetch 落地都重贴一遍，
+   没有生命终点；若某根 bar 的 volume 被交易所下修，钉住的推送会在每个
+   Refresh 周期盖掉修正值。现在那根 bar 不再是帧的最后一根时就释放。
+6. 加固：按位置写（`iloc`）而非按标签；append 时缺列从上一根继承而非填 `None`
+   （后者会把数值列翻成 object，改掉帧的 schema）。
+
+### 测试
+
+`tests/analysis/test_kline_push.py`（78 项）。变异测试 **38 个，零存活**。
+
+第一轮变异 4 个存活、第二轮 2 个存活，**全部是测试的毛病不是代码的毛病**：断言
+`140.0 == 140` 等于没断言；`setCurrentText` 会触发槽进而清掉暂存，守卫在不在都过；
+`_follow_right_edge` 的守卫只被间接驱动；以及**没有任何测试驱动 `_start_live` 的
+注册**——删掉 `set_handler` 那行全绿，正是本次致命 bug 的同一形状。都补了。
+
+### 遗留
+
+- 0.81 s 这个速率只有一个夜盘窗口，**没有 RTH 的留出**。它决定"不增加 CPU"
+  这句话的适用范围。
+- `_draw_cvd` 每帧重算整天价位（77 ms）和成交量画刷每帧重建（35 ms）两处浪费
+  未修，见下一步。
+
 ## v0.88.1 - 十字线价格标签不再被上下边缘切掉 (2026-11-09)
 
 ### 症状
