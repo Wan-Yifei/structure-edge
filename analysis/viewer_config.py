@@ -107,7 +107,7 @@ DEFAULTS: dict[str, dict] = {
         "simb_levels": 3,
         "simb_ratio": 3.0,
         "simb_depth": 10,
-        "absorb_min_vol": 500,
+        "absorb_min_vol": 6000,
     },
 }
 

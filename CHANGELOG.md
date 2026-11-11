@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.89.3 - 热力图吸收气泡的默认 MinΔ 提到 6000 (2026-11-11)
+
+默认阈值 `absorb_min_vol` 从 **500 提到 6000**，两处同步：
+
+- `config/viewer_qt.toml` 的 `[liq]`（实际读的那份）
+- `analysis/viewer_config.py` 的 `_DEFAULTS`（TOML 缺键时的兜底）
+
+只改默认值，气泡的检测和绘制代码一行未动。滑块范围仍是 10–100,000，
+手调随时生效；没有 QSettings 之类的持久化，TOML 是唯一来源，
+所以每次开窗都从 6000 起。
+
+**这个阈值是按列算的**（`liq_hm_window.py` 自己的提示：「MinΔ is per column,
+so raise it for wide buckets」）。默认 `col_secs = 1` 时它是**每秒**净 delta 的
+门槛，6000 在一秒列宽下相当严，气泡数量会明显少于在 10s/30s 列宽下的同一数值。
+这条是提醒，不是缺陷。
+
+没有测量支撑「6000 比 500 更准」——`project_absorption_inverted` 记的结论仍然成立：
+吸收标记单独看没有边缘。这次只是把默认档位调到他要的位置。
+
 ## v0.89.2 - 逐笔分桶搬进 SQLite，一天的峰值从 925 MB 降到 148 MB (2026-11-11)
 
 ### 先撤回 v0.89.1 里两个错的数
