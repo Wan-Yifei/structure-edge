@@ -139,6 +139,12 @@ def _alpha_brush(hex_: str, alpha: int):
 _DELTA_UP_BRUSH = _alpha_brush(_UP, 180)
 _DELTA_DN_BRUSH = _alpha_brush(_DOWN, 180)
 
+# Volume bars, same reasoning on a bigger list: one brush per bar meant 4321
+# mkBrush calls a frame. Named by colour rather than by side, because "Red Up"
+# is a checkbox -- which colour means bull is not fixed at import time.
+_VOL_GREEN_BRUSH = _alpha_brush(_GREEN, 100)
+_VOL_RED_BRUSH   = _alpha_brush(_RED, 100)
+
 # Screen pixels per bar below which the delta labels are hidden. They are
 # Monospace 8pt and run to about five characters ("+1.2M"), so under this
 # they overlap into a smear. At a 1600px wide plot this shows them from
@@ -1802,6 +1808,36 @@ def _fold_pushed_bar(df, row) -> tuple:
             if vol_new < vol_old:
                 return df, False      # an earlier observation of this bar
             vals = _push_values(row)
+            # A push that says nothing new costs nothing. Without this, an
+            # unchanged bar still copies the frame and still reports a change,
+            # and the redraw tick turns that into a full repaint -- once per
+            # push, for nothing. The quieter the tape, the worse that gets,
+            # which is exactly backwards: the window this was measured in had
+            # no such pushes because something traded in every one of them.
+            #
+            # Inside the guard, not after it: the frame's own last row can
+            # hold a None in an object column, and float() of that raises
+            # TypeError out of a Qt slot, which aborts the process.
+            #
+            # That trades one failure for another, deliberately. If the
+            # frame's last row ever IS uncoercible, this drops the push that
+            # would have overwritten the bad value -- and since the bad value
+            # stays last, it drops every push after it too. No production
+            # path produces such a frame (the fetcher's OHLCV columns are
+            # float64 and the append branch below preserves dtypes), and a
+            # dropped bar beats a dead window, but it is a silent stall
+            # rather than a crash and should be recognised as one.
+            #
+            # Exact float equality is the right test here. A false "differs"
+            # just falls back to the old behaviour, and a false "same" needs
+            # all five values bit-identical -- and those five are the only
+            # ones this writes, so nothing is lost either way. In the common
+            # quiet-tape case both sides came from the same _push_values call
+            # on an earlier push, so they are bit-identical by construction.
+            last_row = df.iloc[-1]
+            if all(c not in df.columns or float(last_row[c]) == v
+                   for c, v in vals.items()):
+                return df, False
         except (TypeError, ValueError, OverflowError):
             return df, False
         out = df.copy()
@@ -2453,6 +2489,17 @@ def _retire_fetcher(worker) -> None:
             _PENDING_FETCHERS.remove(worker)
 
     worker.finished.connect(_release)
+    # The thread can finish between isRunning() above and connect() here, in
+    # which case `finished` has already been emitted and _release will never
+    # run -- leaving this worker in the list for the life of the process,
+    # holding its whole klines frame and tick dict with it. Asking once more
+    # after connecting closes that window: either the signal fires or this
+    # does, and _release is idempotent.
+    try:
+        if worker.isFinished():
+            _release()
+    except Exception:
+        pass
 
 
 class TradeViewerQt(QMainWindow):
@@ -3461,6 +3508,10 @@ class TradeViewerQt(QMainWindow):
         # The dirty set for the render in progress, and the per-bar flow
         # totals carried between renders. See _dirty_bars / _bar_flow.
         self._frame_dirty: set | None = None
+        # Counts frames, so _bar_flow's cache can tell "the frame
+        # right before this one" from "some frame in between went by
+        # without me". See _begin_frame.
+        self._frame_seq: int = 0
         self._flow_cache: dict | None = None
         # bucket key -> (bucket dict, its arrays); see _bucket_arrays.
         # (kind, item, y) for every label the profile panel pins to an
@@ -4083,13 +4134,17 @@ class TradeViewerQt(QMainWindow):
         touch self._klines. The GUI thread renders from that frame for ~200ms
         at a stretch and the fetcher thread reads it as its top-up cache;
         neither can hold a lock for that long, so a write from here would race
-        both. All this does is drop rows in a staging dict under _tick_lock
-        and bump _tick_seq -- _on_redraw_tick drains it on the GUI thread.
+        both. All this does is drop rows in a staging dict under _tick_lock --
+        _on_redraw_tick drains it on the GUI thread.
 
-        _tick_seq is bumped only when something was actually staged, so a push
-        that is filtered out here does not buy a repaint. Its meaning is
-        unchanged: the one thing telling the redraw timer there is new data to
-        paint, whether it came from the tape or from the bar stream.
+        It deliberately does NOT bump _tick_seq. That counter means "the tape
+        moved", and the tape is always worth repainting; a pushed bar is only
+        worth repainting if it actually says something new, which cannot be
+        known until _fold_pushed_bar compares it on the GUI thread. Bumping
+        here made _on_redraw_tick's `not changed` test unreachable for pushes
+        and cost a full repaint per push: measured, ten pushes that said
+        nothing produced ten repaints and 1143 ms. The drain's `changed` is
+        what speaks for this path.
 
         The code check is a cheap early-out, not the authority: _live_kl_key
         is written on the GUI thread WITHOUT this lock, so the lock buys
@@ -4108,15 +4163,11 @@ class TradeViewerQt(QMainWindow):
             key = self._live_kl_key
             if key is None or key[0] != code:
                 return
-            staged = False
             for r in rows:
                 tk = str(r.get("time_key", ""))
                 if not tk:
                     continue
                 self._pending_kl[tk] = r
-                staged = True
-            if staged:
-                self._tick_seq += 1
 
     def _drain_pushed_klines(self) -> tuple:
         """Fold staged pushed bars into _klines. Returns (changed, appended).
@@ -4733,8 +4784,8 @@ class TradeViewerQt(QMainWindow):
         show_ema    = self._ind("ema")
         show_avwap  = self._ind("avwap")
         red_up      = self._ind("red_up")
-        bull_col    = _RED   if red_up else _GREEN
-        bear_col    = _GREEN if red_up else _RED
+        # (no bull/bear colour locals here any more: the one consumer was the
+        # volume block, which now picks between two module-level brushes)
 
         # Compose live + historical ticks. ticks.db is kept fresh by an
         # external collector process subscribed to the same feed, so once a
@@ -4766,7 +4817,7 @@ class TradeViewerQt(QMainWindow):
         # _bar_flow needs it whether the heatmap is on or not; _dirty_bars
         # records the frame it is given, so a second call would report
         # nothing changed.
-        self._frame_dirty = self._dirty_bars(klines, buckets, cm)
+        self._frame_dirty = self._begin_frame(klines, buckets, cm)
 
         # Candlesticks. The dirty set is what lets the item keep the
         # chunks it already baked; see CandlestickItem._ensure_pictures.
@@ -4775,7 +4826,7 @@ class TradeViewerQt(QMainWindow):
         # nothing it was not going to cost anyway.
         bar_delta = None
         if show_hm and buckets:
-            _b, _s, _ = self._bar_flow(klines, buckets, cm)
+            _b, _s, *_ = self._bar_flow(klines, buckets, cm)
             bar_delta = _b - _s
         self._candle_item.set_data(klines, buckets if show_hm else None, cm,
                                    show_heatmap=show_hm, red_up=red_up,
@@ -4793,23 +4844,33 @@ class TradeViewerQt(QMainWindow):
         if show_ob:
             self._pin_ob_legend()
 
-        # Volume bars
-        x      = np.arange(n)
-        vols   = klines["volume"].fillna(0).values.astype(float)
-        opens  = klines["open"].values.astype(float)
-        closes = klines["close"].values.astype(float)
-        vol_colors = [
-            pg.mkBrush(_qc(bull_col, 100)) if c >= o
-            else pg.mkBrush(_qc(bear_col, 100))
-            for o, c in zip(opens, closes)
-        ]
-        self._vol_item.setOpts(
-            x=x, height=vols, width=0.7,
-            brushes=vol_colors,
-        )
-        # Volume MA curve — rolling mean, NaN for the warm-up period
-        vol_ma = pd.Series(vols).rolling(_VOL_MA, min_periods=1).mean().values
-        self._vol_ma_item.setData(x=x, y=vol_ma.astype(float))
+        # Volume bars. Skipped entirely when the subplot is hidden -- it had
+        # no guard at all, and `vol` is OFF by default, so the default chart
+        # spent ~50ms a frame drawing a subplot nobody could see.
+        # _on_indicator_toggle calls _redraw(), so switching it on repaints
+        # through here and fills it in.
+        if self._ind("vol"):
+            x      = np.arange(n)
+            vols   = klines["volume"].fillna(0).values.astype(float)
+            opens  = klines["open"].values.astype(float)
+            closes = klines["close"].values.astype(float)
+            # Two brushes, built once at import, not 4321 mkBrush calls a
+            # frame (~32ms of the above). BarGraphItem takes an existing
+            # QBrush by reference and only ever reads it, so every bar of a
+            # side can share one. Named by COLOUR, not by bull/bear: "Red Up"
+            # is a checkbox, so which colour means which side changes while
+            # the process runs.
+            bull_b = _VOL_RED_BRUSH if red_up else _VOL_GREEN_BRUSH
+            bear_b = _VOL_GREEN_BRUSH if red_up else _VOL_RED_BRUSH
+            self._vol_item.setOpts(
+                x=x, height=vols, width=0.7,
+                brushes=[bull_b if c >= o else bear_b
+                         for o, c in zip(opens, closes)],
+            )
+            # Volume MA curve — rolling mean, NaN for the warm-up period
+            vol_ma = pd.Series(vols).rolling(
+                _VOL_MA, min_periods=1).mean().values
+            self._vol_ma_item.setData(x=x, y=vol_ma.astype(float))
 
         # BOS / CHoCH
         self._clear_bos_items()
@@ -5112,6 +5173,20 @@ class TradeViewerQt(QMainWindow):
         self._remember_frame(klines, buckets, cm, key)
         return dirty
 
+    def _begin_frame(self, klines: pd.DataFrame, buckets: dict | None,
+                     cm: int):
+        """_dirty_bars, plus the frame counter _bar_flow's cache rides on.
+
+        The dirty set describes ONE frame and is consumed by whoever asks for
+        it during that frame. If a frame goes by without _bar_flow being
+        called -- every overlay that wants it switched off -- that frame's
+        changes are never folded into _flow_cache, and the next frame's dirty
+        set does not mention them again, so they are lost silently. Counting
+        frames lets _bar_flow notice the gap and recompute instead.
+        """
+        self._frame_seq += 1
+        return self._dirty_bars(klines, buckets, cm)
+
     def _remember_frame(self, klines: pd.DataFrame, buckets: dict | None,
                         cm: int, key: tuple) -> None:
         n = len(klines)
@@ -5131,30 +5206,60 @@ class TradeViewerQt(QMainWindow):
         }
 
     def _bar_flow(self, klines: pd.DataFrame, buckets: dict, cm: int):
-        """Per-bar classified buy and sell volume, plus the trading day.
+        """Per-bar classified flow: buy, sell, trading day, and off-exchange.
 
-        Three overlays want this and all three used to compute it from
-        scratch every frame: 1440 buckets, every price level in each,
-        three times over. Here it is computed once and kept, and only
-        the bars in self._frame_dirty are redone -- one bar, usually.
+        Several overlays want this and all of them used to compute it from
+        scratch every frame: 1440 buckets, every price level in each, several
+        times over. Here it is computed once and kept, and only the bars in
+        self._frame_dirty are redone -- one bar, usually.
 
-        Returns (buy, sell, day) where day[i] is the trading day of bar
-        i's bucket, or None for a bar whose stamp did not parse.
+        off_buy/off_sell ride along in the same pass rather than in a loop of
+        their own in _draw_cvd. They live in the same per-price dict as
+        buy/sell, so the walk is already happening and two more accumulators
+        cost ~0.01ms on the incremental path; the loop they replace cost
+        59-109ms a frame depending on the day's price-level count, and ran
+        even with the off-exchange line switched off.
+
+        What makes caching them sound is _dirty_bars comparing the IDENTITY
+        of each bar's price dict, not just OHLC -- so any bucket that was
+        replaced marks its bar dirty, and off_* is in the replaced dict. The
+        loaders only ever swap whole buckets, never mutate one already handed
+        out. (buy/sell have always relied on this; off_* inherits it exactly.)
+
+        .get on off_buy/off_sell is load-bearing: live buckets come from
+        _live_ticks, whose factory has only buy/sell/neutral, so a plain
+        subscript raises KeyError on the Live render path. buy/sell can
+        subscript because both factories carry those three.
+
+        Returns (buy, sell, day, off_buy, off_sell); day[i] is the trading day
+        of bar i's bucket, or None for a bar whose stamp did not parse.
         """
         n = len(klines)
         anchor = str(klines["time_key"].iloc[0]) if n else ""
         cache = self._flow_cache if self._frame_dirty is not None else None
+        # cache["seq"] == _frame_seq is a second call within this same frame;
+        # == _frame_seq - 1 is the previous frame, which is what _frame_dirty
+        # describes. Anything older means a frame went by without this being
+        # called -- every overlay that wants it switched off -- and that
+        # frame's dirty set is gone, so the cache cannot be trusted.
         if (cache and cache["cm"] == cm and cache["anchor"] == anchor
-                and n >= cache["n"]):
+                and n >= cache["n"]
+                and cache.get("seq", -1) >= self._frame_seq - 1):
             buy = np.zeros(n, dtype=float)
             sell = np.zeros(n, dtype=float)
+            off_b = np.zeros(n, dtype=float)
+            off_s = np.zeros(n, dtype=float)
             buy[:cache["n"]] = cache["buy"]
             sell[:cache["n"]] = cache["sell"]
+            off_b[:cache["n"]] = cache["off_buy"]
+            off_s[:cache["n"]] = cache["off_sell"]
             day = cache["day"] + [None] * (n - cache["n"])
             todo = [i for i in self._frame_dirty if i < n]
         else:
             buy = np.zeros(n, dtype=float)
             sell = np.zeros(n, dtype=float)
+            off_b = np.zeros(n, dtype=float)
+            off_s = np.zeros(n, dtype=float)
             day = [None] * n
             todo = range(n)
 
@@ -5162,24 +5267,30 @@ class TradeViewerQt(QMainWindow):
         for i in todo:
             bk = keys[i]
             if bk is pd.NaT:
-                buy[i] = sell[i] = 0.0
+                buy[i] = sell[i] = off_b[i] = off_s[i] = 0.0
                 day[i] = None
                 continue
             day[i] = _trading_day_of_bucket(bk)
             pd_ = buckets.get(bk)
             if not pd_:
-                buy[i] = sell[i] = 0.0
+                buy[i] = sell[i] = off_b[i] = off_s[i] = 0.0
                 continue
-            b = s_ = 0.0
+            b = s_ = ob = os_ = 0.0
             for counts in pd_.values():
                 b += counts["buy"]
                 s_ += counts["sell"]
+                ob += counts.get("off_buy", 0)
+                os_ += counts.get("off_sell", 0)
             buy[i] = b
             sell[i] = s_
+            off_b[i] = ob
+            off_s[i] = os_
 
         self._flow_cache = {"cm": cm, "anchor": anchor, "n": n,
-                            "buy": buy, "sell": sell, "day": day}
-        return buy, sell, day
+                            "buy": buy, "sell": sell, "day": day,
+                            "off_buy": off_b, "off_sell": off_s,
+                            "seq": self._frame_seq}
+        return buy, sell, day, off_b, off_s
 
     def _clear_delta_items(self) -> None:
         # Hide, do not remove: the pool exists so that a redraw costs no
@@ -5200,7 +5311,7 @@ class TradeViewerQt(QMainWindow):
 
     def _draw_delta(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
         lows = klines["low"].to_numpy(float)
-        buy, sell, _ = self._bar_flow(klines, buckets, cm)
+        buy, sell, *_ = self._bar_flow(klines, buckets, cm)
         # Blank the cull's view of the pool before touching it. Adding
         # and moving items can make the view auto-range, which fires
         # sigRangeChanged mid-loop; a cull running then would read the
@@ -5785,7 +5896,7 @@ class TradeViewerQt(QMainWindow):
         session that never actually paused.
         """
         n = len(klines)
-        buy, sell, day = self._bar_flow(klines, buckets, cm)
+        buy, sell, day, off_buy, off_sell = self._bar_flow(klines, buckets, cm)
         delta = buy - sell
 
         # Block index per trading day, counted BACK from the newest one so the
@@ -5842,24 +5953,19 @@ class TradeViewerQt(QMainWindow):
         # negative sign -- off-exchange buying leads the next minute's return
         # at -0.177. Uninformed flow, which is what makes a divergence with the
         # exchange side worth seeing.
-        off_delta = np.zeros(n, dtype=float)
-        # Which bars actually carry classified off-exchange prints. A bar can
-        # net to zero with real data in it, so "off_delta == 0" is a different
-        # question and cannot stand in for this.
-        off_seen = np.zeros(n, dtype=bool)
-        have_off = False
-        for i, bk in enumerate(self._bucket_keys(klines, cm)):
-            if bk is pd.NaT:
-                continue
-            pd_ = buckets.get(bk)
-            if not pd_:
-                continue
-            ob = sum(pd_[p].get("off_buy", 0) for p in pd_)
-            os_ = sum(pd_[p].get("off_sell", 0) for p in pd_)
-            if ob or os_:
-                have_off = True
-                off_seen[i] = True
-            off_delta[i] = ob - os_
+        #
+        # off_seen is which bars actually carry classified off-exchange
+        # prints. A bar can net to zero with real data in it, so
+        # "off_delta == 0" is a different question and cannot stand in for it.
+        #
+        # Both arrays come from _bar_flow's single cached pass. This used to
+        # be a loop of its own here, re-summing every price level of every
+        # bucket on every frame -- and it ran before the `self._ind("offex")`
+        # test below, so switching the line off saved only the drawing, never
+        # the 59-109ms of arithmetic behind it.
+        off_seen = (off_buy != 0) | (off_sell != 0)
+        have_off = bool(off_seen.any())
+        off_delta = off_buy - off_sell
 
         self._offex_arr = None
         if have_off and self._ind("offex"):
@@ -6030,7 +6136,7 @@ class TradeViewerQt(QMainWindow):
         as a gap is the honest picture.
         """
         n = len(klines)
-        buy, sell, _ = self._bar_flow(klines, buckets, cm)
+        buy, sell, *_ = self._bar_flow(klines, buckets, cm)
 
         csum_d = np.concatenate([[0.0], np.cumsum(buy - sell)])
         csum_t = np.concatenate([[0.0], np.cumsum(buy + sell)])
@@ -6276,7 +6382,7 @@ class TradeViewerQt(QMainWindow):
         bear = np.zeros(n, dtype=bool)
         if n < 25:
             return bull, bear
-        buy, sell, day = self._bar_flow(klines, buckets, cm)
+        buy, sell, day, *_ = self._bar_flow(klines, buckets, cm)
         h = klines["high"].to_numpy(float)
         l = klines["low"].to_numpy(float)
         c = klines["close"].to_numpy(float)

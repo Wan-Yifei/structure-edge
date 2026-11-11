@@ -183,12 +183,54 @@ class TestVolumeDecidesWhichObservationIsLater:
                                                close=99.0, volume=500))
         assert df is base, "a stale push overwrote a fresher bar"
 
-    def test_an_equal_volume_still_applies(self):
-        """A tie is the same instant seen twice; taking the push is harmless
-        and keeps the common no-trade-since case from needing a special path."""
+    def test_an_equal_volume_with_a_different_price_still_applies(self):
+        """A tie is the same instant seen twice. Volume alone does not veto,
+        so a disagreeing price is still taken."""
         df, _ = tv._fold_pushed_bar(frame(), push("2026-11-11 09:32:00",
-                                                  close=61.0, volume=1002))
+                                                  close=61.0, volume=1002.0))
         assert df["close"].iloc[-1] == pytest.approx(61.0)
+
+
+class TestAPushThatSaysNothingCostsNothing:
+    """The redraw tick turns "the frame changed" into a full 226-258ms
+    repaint. An unchanged bar must not report a change, or a quiet tape --
+    where every push repeats the same figures -- burns a repaint per push.
+    The night-session window this was measured in had none of those, because
+    something traded in every single push."""
+
+    @staticmethod
+    def _same_as_last(df):
+        r = df.iloc[-1]
+        return push(str(r["time_key"]), close=float(r["close"]),
+                    volume=float(r["volume"]), open=float(r["open"]),
+                    high=float(r["high"]), low=float(r["low"]))
+
+    def test_an_identical_bar_is_not_a_change(self):
+        base = frame()
+        df, grew = tv._fold_pushed_bar(base, self._same_as_last(base))
+        assert df is base, "an unchanged push copied the frame"
+        assert grew is False
+
+    def test_a_moved_close_is_still_a_change(self):
+        base = frame()
+        row = self._same_as_last(base)
+        row["close"] = 61.75
+        df, _ = tv._fold_pushed_bar(base, row)
+        assert df is not base
+
+    def test_a_grown_volume_is_still_a_change(self):
+        base = frame()
+        row = self._same_as_last(base)
+        row["volume"] = float(base["volume"].iloc[-1]) + 1.0
+        df, _ = tv._fold_pushed_bar(base, row)
+        assert df is not base
+
+    def test_the_redraw_tick_does_not_repaint_for_one(self, live, painted):
+        live._ingest_kline([self._same_as_last(live._klines)], "US.SOXL")
+        live._drawn_tick_seq = live._tick_seq
+        live._on_redraw_tick()
+        assert painted["render"] == 0, \
+            "a push with no news forced a full repaint"
 
     def test_a_non_numeric_volume_is_not_an_error(self):
         base = frame()
@@ -301,6 +343,29 @@ class TestAMalformedPushCannotKillTheApp:
         assert grew is False
         pd.testing.assert_frame_equal(base, frame())
 
+    def test_an_uncoercible_value_in_THE_FRAME_does_not_escape(self):
+        """The no-op comparison reads the frame's own last row, so a bad
+        value there can throw just as a bad value in the push can. It sits
+        inside the guard for that reason. No production path builds such a
+        frame -- the fetcher's OHLCV columns are float64 and the append
+        branch preserves dtypes -- but "unreachable" is what the guard is
+        for, and an escape here ends the process."""
+        base = frame()
+        base["close"] = base["close"].astype(object)
+        base.iloc[-1, base.columns.get_loc("close")] = None
+        r = base.iloc[-1]
+
+        # open/high/low have to MATCH, or all() short-circuits on the first
+        # difference and the bad close is never read -- which is how the
+        # first version of this test passed while proving nothing.
+        df, grew = tv._fold_pushed_bar(
+            base, push("2026-11-11 09:32:00", close=61.75, volume=5000.0,
+                       open=float(r["open"]), high=float(r["high"]),
+                       low=float(r["low"])))
+
+        assert grew is False
+        assert df is base, "the push was applied over an unreadable frame"
+
     @pytest.mark.parametrize("field,bad", [
         ("volume", float("nan")), ("volume", "N/A"),
         ("close", "N/A"), ("open", object()),
@@ -360,14 +425,22 @@ class TestIngest:
         assert len(live._pending_kl) == 1
         assert live._pending_kl["2026-11-11 09:32:00"]["volume"] == 300
 
-    def test_it_bumps_the_paint_sequence(self, live):
-        live._ingest_kline([push("2026-11-11 09:32:00")], "US.SOXL")
-        assert live._tick_seq == 1
+    def test_it_does_not_bump_the_paint_sequence(self, live):
+        """_tick_seq means "the tape moved", and the tape is always worth
+        repainting. A pushed bar is only worth repainting if it says
+        something new, which is not known until _fold_pushed_bar compares it
+        on the GUI thread -- so this path speaks through the drain's
+        `changed` instead.
 
-    def test_a_filtered_push_buys_no_repaint(self, live):
-        """Bumping unconditionally would repaint for a push we then drop."""
-        live._ingest_kline([push("2026-11-11 09:32:00")], "US.QQQ")
+        Bumping here made _on_redraw_tick's `not changed` test unreachable
+        for pushes: measured, ten pushes that said nothing produced ten full
+        repaints and 1143 ms of work."""
+        live._ingest_kline([push("2026-11-11 09:32:00")], "US.SOXL")
         assert live._tick_seq == 0
+        assert live._pending_kl, "it must still have staged the bar"
+
+    def test_a_filtered_push_stages_nothing(self, live):
+        live._ingest_kline([push("2026-11-11 09:32:00")], "US.QQQ")
         assert live._pending_kl == {}
 
     def test_an_empty_payload(self, live):
@@ -468,9 +541,35 @@ class TestDrain:
 class TestTheRedrawTick:
 
     def test_a_pushed_bar_causes_a_repaint(self, live, painted):
+        """With _tick_seq untouched by the push path, `changed` from the
+        drain is the only thing that can order this repaint."""
         live._ingest_kline([push("2026-11-11 09:32:00", close=61.75)],
                            "US.SOXL")
         live._drawn_tick_seq = live._tick_seq      # no NEW ticks, only a bar
+        live._on_redraw_tick()
+        assert painted["render"] == 1
+
+    def test_ten_pushes_that_say_nothing_cost_no_repaints(self, live,
+                                                          painted):
+        """The measured regression, end to end: ten of these used to produce
+        ten full repaints because the stage bumped _tick_seq."""
+        for _ in range(10):
+            r = live._klines.iloc[-1]
+            live._ingest_kline(
+                [push(str(r["time_key"]), close=float(r["close"]),
+                      volume=float(r["volume"]), open=float(r["open"]),
+                      high=float(r["high"]), low=float(r["low"]))],
+                "US.SOXL")
+            live._on_redraw_tick()
+        assert painted["render"] == 0
+
+    def test_a_trade_on_its_own_still_repaints(self, live, painted):
+        """The other half of the _tick_seq change. The bar stream stopped
+        bumping that counter; the tape must not. Nothing else here would
+        notice if someone deleted _ingest_ticks' bump as well."""
+        live._ingest_ticks(
+            pd.DataFrame([{"time": "2026-11-11 09:32:30", "price": 54.3,
+                           "volume": 100, "ticker_direction": "BUY"}]), 1)
         live._on_redraw_tick()
         assert painted["render"] == 1
 

@@ -48,9 +48,16 @@ class _Stub(QObject):
     def __init__(self, running: bool = False):
         super().__init__()
         self._running = running
+        # isRunning() and isFinished() are asked at different moments, and
+        # the gap between them is a real window -- see
+        # test_a_thread_that_ends_mid_retire_is_not_held_forever.
+        self._finished = not running
 
     def isRunning(self) -> bool:
         return self._running
+
+    def isFinished(self) -> bool:
+        return self._finished
 
 
 @pytest.fixture(scope="module")
@@ -238,6 +245,39 @@ class TestAbandoningAFetcher:
         viewer._fetcher = worker
         viewer._abandon_fetcher()
         assert worker not in tv._PENDING_FETCHERS
+
+    def test_a_thread_that_ends_mid_retire_is_not_held_forever(self, viewer):
+        """isRunning() says yes, then the thread ends before finished can be
+        connected -- so that signal has already been emitted and the release
+        it was supposed to trigger never comes. The worker would sit in the
+        list for the life of the process, holding its whole klines frame and
+        tick dict with it. Asking isFinished() once more after connecting
+        closes the window."""
+        worker = _Stub(running=True)
+        worker._finished = True            # isFinished() -> True
+        viewer._fetcher = worker
+        try:
+            viewer._abandon_fetcher()
+            assert worker not in tv._PENDING_FETCHERS, \
+                "an already-finished worker was pinned forever"
+            worker.finished.emit()         # the late signal must be harmless
+            assert worker not in tv._PENDING_FETCHERS
+        finally:
+            if worker in tv._PENDING_FETCHERS:
+                tv._PENDING_FETCHERS.remove(worker)
+
+    def test_a_thread_that_is_genuinely_running_is_still_held(self, viewer):
+        """The other direction: releasing unconditionally would undo the
+        whole point and let Qt abort the process."""
+        worker = _Stub(running=True)
+        worker._finished = False
+        viewer._fetcher = worker
+        try:
+            viewer._abandon_fetcher()
+            assert worker in tv._PENDING_FETCHERS
+        finally:
+            if worker in tv._PENDING_FETCHERS:
+                tv._PENDING_FETCHERS.remove(worker)
 
 
 class TestTheRangeRadios:
