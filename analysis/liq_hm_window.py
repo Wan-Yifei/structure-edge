@@ -2270,8 +2270,18 @@ class LiqHmWindow(QWidget):
         if not simbs:
             return
 
-        _BID_COL = (178, 255,  89)   # Lime A200 — high contrast vs teal heatmap
-        _ASK_COL = (255,  64, 129)   # Pink A200 — high contrast vs red-orange heatmap
+        # Measured as OKLab dE x100 against each side's own heatmap band at
+        # its brightest (alpha 180), which is where a stacked imbalance is
+        # most likely to sit: lime on teal scores 37.4. Pink A200 scored only
+        # 15.7 on the ask band -- same red family, close lightness -- so the
+        # bearish bar was less than half as visible as the bullish one.
+        # Pink 100 keeps pink meaning bearish but separates by LIGHTNESS
+        # instead of hue: 29.5 against the band, 26.2 from the lime bar.
+        # White (43.1) is the price path, the crosshair and the wall labels;
+        # yellow (39.7) separates well but sits 11.5 from lime, and bull vs
+        # bear is the one pair that must never be confusable.
+        _BID_COL = (178, 255,  89)   # Lime A200 — dE 37.4 vs the teal band
+        _ASK_COL = (248, 187, 208)   # Pink 100  — dE 29.5 vs the red band
 
         bid_xs: list[float] = []
         bid_ys: list[float] = []
@@ -2791,7 +2801,7 @@ class LiqHmWindow(QWidget):
         if self._simb_cb.isChecked():
             parts.append(
                 f'&nbsp;&nbsp;<font color="#b2ff59">| Bullish imbalance</font>'
-                f'&nbsp;&nbsp;<font color="#ff4081">| Bearish imbalance</font>'
+                f'&nbsp;&nbsp;<font color="#f8bbd0">| Bearish imbalance</font>'
             )
 
         if self._absorb_cb.isChecked():

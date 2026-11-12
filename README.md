@@ -175,7 +175,7 @@ uv run analysis/trade_viewer_qt.py --code US.SNDK --tf 5m --mode Historical --da
   - `Gamma` 滑条：调整颜色对比度（> 1 突出密集区，< 1 显示弱信号）
   - `Price` 开关：白色折线标注分时 mid-price 路径（(bid+ask)/2 per column）
   - 悬停标注：价格标签实时显示吃穿到光标所需委托量（`eat↑ N` / `eat↓ N` / `[spread]`）
-  - **Stacked Imbalance**：蓝色竖条 = 多档 bid 持续碾压 ask（看涨）；橙色竖条反之（看跌）
+  - **Stacked Imbalance**：浅绿竖条 = 多档 bid 持续碾压 ask（看涨）；浅粉竖条反之（看跌）
   - **Absorption Bubbles**：金色气泡 = 主买被吸收（看跌信号）；紫色气泡 = 主卖被吸收（看涨信号）；气泡大小编码吸收量；悬停显示方向与 Δvol
   - 冰山 / Spoof 检测覆盖层；盘口最优买卖价虚线；历史模式下随主图十字线同步纵轴
 
