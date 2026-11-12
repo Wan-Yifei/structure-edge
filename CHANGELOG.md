@@ -1,5 +1,82 @@
 # Changelog
 
+## v0.89.7 - 逐笔面板的重绘搬到定时器上，顺手修掉 DCVD 的 UnboundLocalError (2026-11-12)
+
+报告是「鼠标在主图移动时经常出现卡顿」。**卡的是横扫，不是垂直移动**，而且是周期性的——
+默认 9.97 像素一根 bar，每跨一根就重建一次右侧逐笔面板。
+
+### 先否掉的几个猜测
+
+- **不是「鼠标事件没限频」。** pyqtgraph 自己就有 `'mouseRateLimit': 100`
+  (`__init__.py:41`)，scene 在 emit 之前就丢事件，仓库里没有覆盖它。实测连发 10 个
+  鼠标事件，handler 只跑 1 次。加 `SignalProxy` 只会把 100 降到 60，再给十字线
+  加一层延迟。`trade_viewer_qt.py` 那条注释里的 *on every mouse-move event* 本来就
+  不准确（scene 先丢过一遍），顺手改掉了。
+- **不是两条 profile 同步线。** 横扫时 y 不变，而 `InfiniteLine.setPos` 第 252 行
+  `if self.p != newPos:` 才动——实测 y 不变时两条线合计 **2.3 µs**，不触发任何重绘。
+- **不是 DOM/热力图同步块没被 bar 守卫保护。** 实测只值 10 µs，而且
+  `DomWindow.pin_timestamp` 的相等检查在 `_refresh()` 之前，同 bar 根本不查库。
+
+### 实际做的
+
+`_draw_tick_profile` 单次 **5.16 ms**（order-flow，med；net 5.30、vp 5.39）。scene 把
+被接受的鼠标事件间隔撑到 ≥10 ms，而 ~1000 px/s 的横扫在这段时间里走过的距离超过
+一根 bar 的 9.97 px —— 所以几乎每个事件都跨 bar。事件率的天花板就是上面那条
+`mouseRateLimit=100`，所以改动前的绘制率是 **63–100 次/秒**，合成台架上对应
+**GUI 线程 33–52% 的时间在画这个面板**。
+
+改成单发定时器：handler 只把目标 bar 存进 `_pending_profile_idx`，
+`_PROFILE_COALESCE_MS = 16`（一个 60 Hz 帧）后由 `_on_profile_timer` 画。
+**62 次/秒只是名义上限**：真实节奏是「16 ms + 5.16 ms 阻塞绘制 + 等下一个被接受的事件」，
+合成台架实测 **32–44 次/秒，GUI 占用降到 16–23%**。
+
+**绘制代码一行没动** —— 面板里五处 `clear()`、图元复用、brush/brushes 的陈旧状态问题
+全部回避掉了，现有测试一个都没红。
+
+三条性质是这个改动安全的前提，各自都有测试，因为各自的失败模式都比原来的卡顿更糟：
+
+1. **定时器不得在运行中重新装填。** `QTimer.start()` 对已激活的定时器会重置倒计时，
+   连续移动时重新装填等于**永远不触发**，面板会停更到手停下为止。
+2. **后续移动要跟「已排队的 bar」比，不只是跟屏幕上那根比。** 扫出去再扫回来时，
+   屏幕上那根仍等于 `_last_hover_idx`，不这样比的话过期的排队值会赢，面板停在
+   光标已经离开的 bar 上。
+3. **空队列触发必须什么都不画，触发后必须清空队列**，否则下一次触发会重画光标
+   早就离开的那一根。
+
+### 顺带修掉的崩溃
+
+`_on_indicator_toggle` 里 `code` 只在 KD、CVD、A/D 三个分支里赋值，却被第四个
+（DCVD）分支使用，三个都关、DCVD 开着时抛 `UnboundLocalError`。出厂配置
+（`config/viewer_qt.toml`：`kd=false, cvd=true, adi=false, dcvd=true`）**只要取消勾选 CVD
+就踩中**，不用先关三个。
+
+异常从 Qt 槽里逃出去，但 `import pyqtgraph` 换掉了 `sys.excepthook`，所以进程不死，
+只打一条 traceback。抛出点在 `self._plot_dcvd.setTitle(...)`：**它之前** KD/MAVOL/CVD/A-D
+四行的可见性已经切完了，失效的是 DCVD 行本身、heatmap/OB 两个 legend、
+`_ob_max_count`/`_fvg_min_pct` 的 enable 和收尾的 `_redraw()`。把那次读取提到函数开头。
+
+### 测试
+
+新增 `tests/analysis/test_hover_coalesce.py`，18 个，驱动真实控件（离屏）。
+
+7 个预设变异点全部被杀：定时器重启式装填、只跟屏幕上那根比、不清队列、
+定时器改成重复触发、handler 恢复同步绘制、间隔拉到 100 ms、`code` 挪回 KD 分支内。
+
+复核时又找到**两个存活的**，各补了一个测试：① 把 `timeout.connect` 那行删掉——面板
+永远不更新，原来 16 个测试全绿，因为每个测试都是手工调 `_on_profile_timer` 的；
+② 真实绘制不再写 `_last_hover_idx`——唯一依赖它的测试自己把这个值喂了进去。
+这不是穷尽的，只是这 9 个点有覆盖。
+
+全仓 **1755 → 1773**。
+
+### 还没做的
+
+图元复用（`clear()`+新建 → `setOpts`）实测能把单次 draw 再压 **61%**（5.16 → 2.00 ms），
+但它要同时改掉面板上**五处** `clear()`，漏一处就是面板永久空白；还要处理
+`brush`↔`brushes` 的陈旧状态（会在 paint 期间抛 `IndexError`）、`_draw_tick_vp` 的
+提前返回会从「空白」变成「显示上一根 K 线的数据」，以及三个现有测试文件。
+先看这一版的体感再决定。
+
 ## v0.89.6 - gamma 出厂值改回 5.0，并把钉死这个选择的三个测试改掉 (2026-11-11)
 
 v0.89.4 把 gamma 从 5.0 改到 1.0，理由是「每翻一倍等亮度」。在屏幕上两种都看过之后，

@@ -102,6 +102,11 @@ from moomoo import (
 # consistent with "worse the longer the heatmap window ran."
 pg.setConfigOptions(antialias=True)
 
+# How long the tick-profile redraw waits for the cursor to settle. 16 ms is one
+# 60 Hz frame: long enough to collapse a 125 Hz mouse stream to one draw per
+# frame, short enough that the panel is not visibly behind the crosshair.
+_PROFILE_COALESCE_MS = 16
+
 # ── Colour palette (matches trade_viewer.py) ──────────────────────────────────
 
 _BG       = "#1a1a2e"
@@ -3847,6 +3852,24 @@ class TradeViewerQt(QMainWindow):
         # order-size filter toggle without waiting for the next mouse move).
         self._last_hover_idx: int | None = None
 
+        # Redrawing the tick panel costs about 5 ms a bar crossing. The scene
+        # spaces accepted mouse moves >= 10 ms apart (pyqtgraph mouseRateLimit
+        # = 100), and a sweep at ~1000 px/s covers more than the default
+        # 9.97 px/bar in that time -- so nearly every event crossed a bar, the
+        # draw ran 63-100 times a second, and it took a third to a half of the
+        # GUI thread. The target bar is stashed here and drawn on a timer
+        # instead. 16 ms is a nominal ceiling of 62/s; with the blocking draw
+        # and the event spacing on top, the measured rate is 32-44/s.
+        #
+        # The timer is NOT restarted while it is already running. QTimer.start()
+        # on an active timer resets its countdown, so re-arming on every move
+        # would mean it never fires during continuous motion and the panel
+        # would freeze until the hand stopped -- the opposite of the fix.
+        self._pending_profile_idx: int | None = None
+        self._profile_timer = QTimer(self)
+        self._profile_timer.setSingleShot(True)
+        self._profile_timer.timeout.connect(self._on_profile_timer)
+
         # Profile panels: a horizontal line that follows the main chart's price
         # while the cursor is over the chart, and the panel's own cursor once it
         # is over the panel -- see _on_profile_hover.
@@ -3912,8 +3935,11 @@ class TradeViewerQt(QMainWindow):
         self._ohlcv_label.setVisible(False)
         self._plot_c.addItem(self._ohlcv_label, ignoreBounds=True)
 
-        # Mouse tracking — direct connection (no SignalProxy buffer) for instant
-        # crosshair and tooltip response on every mouse-move event.
+        # Mouse tracking — direct connection (no SignalProxy buffer) so the
+        # crosshair and tooltip are instant. "Every mouse-move event" would be
+        # wrong: the scene already drops moves above mouseRateLimit (100 Hz).
+        # The tick panel is the one expensive consumer and coalesces itself --
+        # see _PROFILE_COALESCE_MS.
         self._chart_widget.scene().sigMouseMoved.connect(self._on_mouse_move)
 
         splitter.addWidget(self._chart_widget)
@@ -4470,10 +4496,15 @@ class TradeViewerQt(QMainWindow):
             layout.setRowMaximumHeight(row, 0)
 
     def _on_indicator_toggle(self) -> None:
+        # Read once for all four subplot titles. It used to be read inside the
+        # KD, CVD and A/D branches and then used by the DCVD branch, so turning
+        # those three off while DCVD was on raised UnboundLocalError -- out of
+        # a Qt slot, which aborted the rest of the toggle: the DCVD row never
+        # became visible and the trailing _redraw() never ran.
+        code = self._code_edit.text().strip()
         # Toggle KD subplot row visibility
         show_kd = self._ind("kd")
         if show_kd:
-            code = self._code_edit.text().strip()
             self._plot_kd.setTitle(f"{code}  KD", color=_FG, size="8pt")
         self._set_subplot_row_visible(self._plot_kd, 2, show_kd)
         # Toggle Vol (MAVOL) subplot visibility
@@ -4484,7 +4515,6 @@ class TradeViewerQt(QMainWindow):
         # Toggle CVD subplot visibility
         show_cvd = self._ind("cvd")
         if show_cvd:
-            code = self._code_edit.text().strip()
             self._plot_cvd.setTitle(f"{code}  CVD", color=_FG, size="8pt")
         self._set_subplot_row_visible(self._plot_cvd, 3, show_cvd)
         if not show_cvd:
@@ -4492,7 +4522,6 @@ class TradeViewerQt(QMainWindow):
         # Toggle A/D Line subplot visibility
         show_adi = self._ind("adi")
         if show_adi:
-            code = self._code_edit.text().strip()
             self._plot_adi.setTitle(f"{code}  A/D", color=_FG, size="8pt")
         self._set_subplot_row_visible(self._plot_adi, 4, show_adi)
         show_dcvd = self._ind("dcvd")
@@ -7711,6 +7740,18 @@ class TradeViewerQt(QMainWindow):
 
         self._fit_profile_y(pw, prices, bin_h, y_lo, y_hi)
 
+    def _on_profile_timer(self) -> None:
+        """Draw whichever bar the cursor reached while the timer was running.
+
+        Nothing re-arms the timer here. The draw blocks the GUI thread, so no
+        mouse event can land during it, and afterwards the timer is inactive --
+        the next move starts it again. Re-arming unconditionally would keep a
+        timer alive forever after the cursor stopped.
+        """
+        idx, self._pending_profile_idx = self._pending_profile_idx, None
+        if idx is not None:
+            self._show_tick_profile(idx)
+
     def _show_tick_profile(self, candle_idx: int) -> None:
         if self._range_region is not None:
             return
@@ -8434,8 +8475,17 @@ class TradeViewerQt(QMainWindow):
                 self._ohlcv_label.boundingRect().height(), 0.0))
             self._ohlcv_label.setVisible(True)
 
-            if idx != self._last_hover_idx:
-                self._show_tick_profile(idx)
+            # Compare against the bar already queued, not only the one on
+            # screen: sweeping to bar 5 and back to bar 4 leaves 4 == the
+            # displayed index, and without this the queued 5 would win and the
+            # panel would settle on a bar the cursor had left.
+            target = (self._pending_profile_idx
+                      if self._pending_profile_idx is not None
+                      else self._last_hover_idx)
+            if idx != target:
+                self._pending_profile_idx = idx
+                if not self._profile_timer.isActive():
+                    self._profile_timer.start(_PROFILE_COALESCE_MS)
 
             # DOM / Liq HM crosshair sync (historical mode only)
             if self._dom_window is not None or self._liq_hm_window is not None:
@@ -8749,6 +8799,9 @@ class TradeViewerQt(QMainWindow):
 
         # Stop the live refresh timer and unsubscribe tickers.
         self._stop_live()
+
+        # A pending tick-profile redraw has nothing left to draw into.
+        self._profile_timer.stop()
 
         # Stop the option-chain poll timer and its context/fetcher, mirroring
         # the main ctx/fetcher teardown below (own connection, own thread).
