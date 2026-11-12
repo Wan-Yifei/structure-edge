@@ -86,15 +86,20 @@ wall           = true
 imbalance      = true
 absorb         = true
 
-gamma          = 1.0   # 1.0 is what keeps the log scale honest: every
-                       # doubling of size buys the same brightness step
-                       # (measured 12.7 of 180 alpha, flat from 100 shares to
-                       # 3,000). The old 5.0 ran 4.3 at the bottom against
-                       # 45.9 at the top -- a 10x bias toward the largest
-                       # orders -- and on the worst 12-minute window left 19%
-                       # of nonzero cells at alpha <= 4, i.e. invisible.
-                       # Measured on the fixed grid; before _paint_column
-                       # started accumulating, 5.0 looked far worse than that.
+gamma          = 5.0   # A display preference, chosen on the screen after
+                       # viewing both. What it costs, measured on the fixed
+                       # grid: 1.0 is log-linear, every doubling of size
+                       # buying the same 12.7 of 180 alpha at any magnitude,
+                       # while 5.0 runs 4.3 at the bottom against 45.9 at the
+                       # top -- about a 10x bias toward the largest orders,
+                       # and on the worst 12-minute window it leaves 19% of
+                       # nonzero cells at alpha <= 4, i.e. invisible. The
+                       # trade is deliberate: it buys a darker, higher
+                       # contrast picture where only the heavy levels glow.
+                       # Note this is not only cosmetic -- _draw_wall_labels
+                       # gates candidates on brightness AFTER gamma, so the
+                       # setting changes which walls get labelled (not how
+                       # many: that is capped at 4 a side).
                        # >1 suppresses midtones; <1 lifts them.
 min_vol        = 0
 col_secs       = 1

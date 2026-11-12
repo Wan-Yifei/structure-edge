@@ -96,7 +96,7 @@ DEFAULTS: dict[str, dict] = {
         "wall": True,
         "imbalance": True,
         "absorb": True,
-        "gamma": 1.0,
+        "gamma": 5.0,
         "min_vol": 0,
         "col_secs": 1,
         "max_cols": 240,
