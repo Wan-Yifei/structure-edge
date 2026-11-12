@@ -1778,6 +1778,17 @@ class LiqHmWindow(QWidget):
         rightmost column correct: without it, a price level that has since
         left the book would keep its last volume painted there forever.
 
+        Levels are ADDED into their bin, not assigned. A bin is wider than a
+        tick: the price span is at least +/-1% of mid divided by n_price,
+        which on SOXL measures about 2.76 cents against a 1-cent tick, so most
+        nonzero bins hold two or three price levels. Assigning let whichever
+        level was written last win. Measured over 23 RTH days: 90% of nonzero
+        bins held more than one level, the grid showed 39% of the shares
+        actually resting in the band, and the rank correlation between what
+        was displayed and what was there was 0.61 -- an ordering error, not a
+        scale factor a normalizer could absorb. The clear above is what keeps
+        += from accumulating repeated pushes into the same live column.
+
         Also refreshes _best_bid/_best_ask, each held over when this snapshot
         has no levels on that side (a merged snapshot can legitimately be
         one-sided -- see feeds.order_book_merge).
@@ -1792,9 +1803,9 @@ class LiqHmWindow(QWidget):
             if not (0 <= p_bin < self._bid_grid.shape[1]):
                 continue
             if row["side"] == "BID":
-                self._bid_grid[col, p_bin] = row["volume"]
+                self._bid_grid[col, p_bin] += row["volume"]
             else:
-                self._ask_grid[col, p_bin] = row["volume"]
+                self._ask_grid[col, p_bin] += row["volume"]
 
         bid_prices = [r["price"] for r in snap if r["side"] == "BID"]
         ask_prices = [r["price"] for r in snap if r["side"] == "ASK"]
@@ -2125,7 +2136,29 @@ class LiqHmWindow(QWidget):
                 n_price,
                 min_levels=self._simb_levels_spin.value(),
                 imbalance_ratio=self._simb_ratio_spin.value(),
-                min_vol=float(min_vol),
+                # Deliberately NOT min_vol. That spinbox is the heatmap's
+                # display filter, and feeding it here corrupts the detector in
+                # two different ways, neither visible from the control.
+                # Below the threshold a level is DROPPED from the list, so
+                # every rank beneath it shifts up and rank k stops meaning
+                # "k levels from the touch" on both sides at once -- which is
+                # the entire premise of pairing by rank. A moderate filter
+                # therefore pushes the trigger rate DOWN while quietly
+                # changing what is being compared.
+                # Then, once a side holds fewer than max_depth levels, the
+                # zero-fill applies: a missing rank is 0 volume, an infinite
+                # ratio, fully imbalanced -- and the rate jumps far ABOVE
+                # baseline, nearly all of it division by zero.
+                # Two runs, both SOXL RTH at a 5s stride, 7 days and 1 day:
+                #   MinVol    0     500    1000   2000   3000
+                #   7 days  16.8%   5.2%    4.5%  37.2%     --
+                #   1 day    4.5%   1.7%    0.4%   2.1%  43.1%
+                # The shape is the same and the breakpoint is not: where a
+                # side runs short depends on how deep the book is that day.
+                # That is the point -- the control is non-monotonic and its
+                # turning point moves, so no user could predict it.
+                # Every level participates here at its real size.
+                min_vol=0.0,
                 max_depth=self._simb_depth_spin.value(),
             )
             self._draw_simb_markers(simbs)
@@ -2231,7 +2264,8 @@ class LiqHmWindow(QWidget):
 
         Lime = bullish (BID dominates); pink = bearish (ASK dominates).
         Each bar spans [price_lo, price_hi] at the snapshot's column.
-        Opacity encodes mean_ratio strength (capped at 5×).
+        mean_ratio is returned by the detector but not drawn -- every bar is
+        painted at the same opacity.
         """
         if not simbs:
             return

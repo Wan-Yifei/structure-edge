@@ -86,8 +86,16 @@ wall           = true
 imbalance      = true
 absorb         = true
 
-gamma          = 5.0   # >1 suppresses midtones: only the densest bands stay
-                       # bright. Lower it when deep thin levels black out.
+gamma          = 1.0   # 1.0 is what keeps the log scale honest: every
+                       # doubling of size buys the same brightness step
+                       # (measured 12.7 of 180 alpha, flat from 100 shares to
+                       # 3,000). The old 5.0 ran 4.3 at the bottom against
+                       # 45.9 at the top -- a 10x bias toward the largest
+                       # orders -- and on the worst 12-minute window left 19%
+                       # of nonzero cells at alpha <= 4, i.e. invisible.
+                       # Measured on the fixed grid; before _paint_column
+                       # started accumulating, 5.0 looked far worse than that.
+                       # >1 suppresses midtones; <1 lifts them.
 min_vol        = 0
 col_secs       = 1
 max_cols       = 720   # x col_secs = how far back the grid reaches, here 12

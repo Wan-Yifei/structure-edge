@@ -825,9 +825,12 @@ def detect_stacked_imbalance(
     ignored because deep-book orders are far from the current price and do not
     reflect near-term market pressure.
 
-    Missing levels on either side within max_depth are treated as 0 volume
-    rather than truncating the rank list — an unpaired level registers as an
-    infinite ratio and counts as fully imbalanced.
+    A side holding fewer than max_depth levels has its missing ranks treated
+    as 0 volume rather than truncating the rank list — an unpaired level
+    registers as an infinite ratio and counts as fully imbalanced.  This is
+    about a side being short overall: a level removed by min_vol is dropped
+    from the list, not zeroed, so the ranks below it shift up by one.  The two
+    behave nothing alike, and only the first one divides by zero.
 
     Each snapshot is evaluated independently; persistence across snapshots is
     a viewer-layer concern.
