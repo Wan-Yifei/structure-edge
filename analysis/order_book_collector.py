@@ -347,7 +347,7 @@ def main(argv=None):
         _lock = single_instance.acquire("order_book_collector", wait_s=8.0)
     except single_instance.AlreadyRunning as exc:
         log.error("%s", exc)
-        sys.exit(2)
+        sys.exit(single_instance.EXIT_ALREADY_RUNNING)
 
     if args.codes:
         codes           = args.codes

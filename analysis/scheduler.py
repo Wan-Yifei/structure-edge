@@ -19,11 +19,93 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, time, timedelta, timezone
 import threading
+import time as time_mod
 
 import os
 
 import pystray
 from PIL import Image, ImageDraw
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from core import single_instance            # noqa: E402
+
+
+# ── Keeping collectors from outliving us ──────────────────────────────────
+#
+# A scheduler that is killed -- or that hangs and gets killed -- used to
+# leave its collectors running. They keep the single-instance lock, so the
+# next scheduler cannot start its own, and nobody is reading their output
+# any more. That is where tonight's restart loop began.
+#
+# A job object with KILL_ON_JOB_CLOSE dies with the process that made it,
+# and takes everything assigned to it along. Measured on a real three-level
+# tree (scheduler -> uv trampoline -> collector): killing the top with
+# taskkill /F left nothing behind.
+#
+# How long a collector must survive for the start to count as successful.
+# Under this it never got past startup -- relaunching immediately only
+# repeats whatever killed it, which is the shape the refusal loop had.
+_COLLECTOR_MIN_LIFE_S = 30
+
+# Pure ctypes: pywin32 is not a dependency here and should not become one
+# for twenty lines.
+_JOB = None
+
+
+def _kill_with_me(pid: int) -> None:
+    """Assign `pid` to a job that closes when this process exits."""
+    if os.name != "nt":
+        return
+    global _JOB
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    try:
+        if _JOB is None:
+            k32.CreateJobObjectW.restype = wintypes.HANDLE
+            _JOB = k32.CreateJobObjectW(None, None)
+            if not _JOB:
+                _JOB = None
+                return
+
+            class _LIMITS(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                            ("PerJobUserTimeLimit", ctypes.c_int64),
+                            ("LimitFlags", wintypes.DWORD),
+                            ("MinimumWorkingSetSize", ctypes.c_size_t),
+                            ("MaximumWorkingSetSize", ctypes.c_size_t),
+                            ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+                            ("PriorityClass", wintypes.DWORD),
+                            ("SchedulingClass", wintypes.DWORD)]
+
+            class _EXT(ctypes.Structure):
+                _fields_ = [("BasicLimitInformation", _LIMITS),
+                            ("IoInfo", ctypes.c_byte * 48),
+                            ("ProcessMemoryLimit", ctypes.c_size_t),
+                            ("JobMemoryLimit", ctypes.c_size_t),
+                            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                            ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+            info = _EXT()
+            info.BasicLimitInformation.LimitFlags = 0x2000   # KILL_ON_JOB_CLOSE
+            k32.SetInformationJobObject(
+                _JOB, 9, ctypes.byref(info), ctypes.sizeof(info))
+
+        k32.OpenProcess.restype = wintypes.HANDLE
+        h = k32.OpenProcess(0x0200 | 0x1000, False, pid)  # SET_QUOTA | SET_INFO
+        if not h:
+            return
+        try:
+            k32.AssignProcessToJobObject(_JOB, h)
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        # Never let process bookkeeping stop a collector from starting: the
+        # worst case without it is the orphan this exists to prevent, and
+        # the next scheduler reports that clearly now.
+        pass
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 CONFIG_PATH = pathlib.Path(__file__).parent.parent / "config" / "schedule.json"
@@ -481,6 +563,8 @@ class SchedulerApp(tk.Tk):
         self._proc:    subprocess.Popen | None = None
         self._ob_proc: subprocess.Popen | None = None
         self._tray:    pystray.Icon | None = None
+        # When each collector was last started, for _died_young.
+        self._launched_at: dict[str, float] = {}
         self._last_backup_minute: tuple | None = None
         self._last_classify_minute: tuple | None = None
         self._classify_proc: subprocess.Popen | None = None
@@ -962,6 +1046,88 @@ class SchedulerApp(tk.Tk):
                         self._kill_collector()
             setattr(self, f"_prev_{name}", st)
 
+    def _collector_backoff_ok(self, key: str) -> bool:
+        """True when enough ticks have passed to try `key` again.
+
+        _tick runs about once a second and used to drive restarts directly,
+        which is what let a refusal become a process every eight seconds
+        with nothing slowing it down. Each failed attempt now doubles the
+        wait, up to five minutes.
+        """
+        waits = getattr(self, "_relaunch_wait", None)
+        if waits is None:
+            waits = self._relaunch_wait = {}
+        due = waits.get(key, 0)
+        if due > 0:
+            waits[key] = due - 1
+            return False
+        return True
+
+    def _died_young(self, key: str) -> bool:
+        """True when this collector did not survive its own startup.
+
+        A process that ran for an hour and then died is a crash worth
+        restarting at once. One that dies every time, seconds in, is a loop:
+        relaunching it on the next tick just runs the same failure again,
+        one process a second, which is what the refusal case did until it
+        was given a backoff. The two look different in the log and are the
+        same thing on the machine.
+        """
+        started = self._launched_at.get(key)
+        if started is None:
+            return False
+        return (time_mod.monotonic() - started) < _COLLECTOR_MIN_LIFE_S
+
+    def _collector_failed(self, key: str, label: str, name: str,
+                          reason: str) -> None:
+        """Note a failed start and say why, once per escalation.
+
+        `reason` is "refused" or "died_young", taken from the exit code. It
+        is passed in rather than worked out here: asking who holds the lock
+        answers a different question, and a collector that crash-loops while
+        some unrelated process holds the lock would be told it had been
+        refused, which is the one thing it was not.
+        """
+        waits = getattr(self, "_relaunch_wait", None)
+        if waits is None:
+            waits = self._relaunch_wait = {}
+        tries = getattr(self, "_relaunch_tries", None)
+        if tries is None:
+            tries = self._relaunch_tries = {}
+        tries[key] = tries.get(key, 0) + 1
+        waits[key] = min(8 * 2 ** (tries[key] - 1), 300)
+
+        if reason == "refused":
+            pid = None
+            try:
+                pid = single_instance.holder(name)
+            except Exception:                               # noqa: BLE001
+                pass
+            where = f"PID {pid}" if pid else "another process"
+            self._log(
+                f"{label} refused to start: {where} already holds the "
+                f"{name} lock. It is NOT one of mine -- a scheduler only "
+                f"tracks what it started, and this lock outlived the one "
+                f"that took it. Stop that process and the next attempt "
+                f"will take."
+            )
+        else:
+            self._log(
+                f"{label} did not survive {_COLLECTOR_MIN_LIFE_S}s of "
+                f"startup. Restarting at once would only repeat it, so the "
+                f"next attempt is held off -- why it died is in the "
+                f"[collector] lines above."
+            )
+        self._log(f"{label}: waiting {waits[key]}s before trying again "
+                  f"(attempt {tries[key]})")
+
+    def _collector_started(self, key: str) -> None:
+        """A start that worked clears the escalation."""
+        for attr in ("_relaunch_wait", "_relaunch_tries"):
+            d = getattr(self, attr, None)
+            if d:
+                d.pop(key, None)
+
     def _watchdog_collectors(self, et: datetime) -> None:
         """Restart any collector that exited unexpectedly while a session is active."""
         any_active = any(
@@ -970,11 +1136,42 @@ class SchedulerApp(tk.Tk):
         )
         if not any_active:
             return
+        # Nothing running and a wait outstanding: this is the retry the
+        # backoff exists for. Without it a refusal or a startup crash meant
+        # that collector was gone for the rest of the session -- clearing
+        # the process that held the lock would not bring it back.
+        tries = getattr(self, "_relaunch_tries", None) or {}
+        if ("tick" in tries and self._proc is None
+                and self._collector_backoff_ok("tick")):
+            self._launch_tick()
+        if ("ob" in tries and self._ob_proc is None
+                and self.cfg.get("order_book_enabled", True)
+                and self._collector_backoff_ok("ob")):
+            self._launch_ob()
+
         if self._proc is not None and self._proc.poll() is not None:
-            self._log("Tick collector exited unexpectedly — restarting")
-            self._proc = None
-            self._launch_collector()
+            # Exit code first: EXIT_ALREADY_RUNNING means another copy holds
+            # the lock, and relaunching only earns another refusal. Measured:
+            # the uv trampoline that Popen actually holds passes the child's
+            # code through unchanged, so this is readable from here.
+            if self._proc.returncode == single_instance.EXIT_ALREADY_RUNNING:
+                self._proc = None
+                self._collector_failed("tick", "Tick collector",
+                                       "tick_collector", "refused")
+            elif self._died_young("tick"):
+                self._proc = None
+                self._collector_failed("tick", "Tick collector",
+                                       "tick_collector", "died_young")
+            else:
+                self._log("Tick collector exited unexpectedly — restarting")
+                self._proc = None
+                if self._collector_backoff_ok("tick"):
+                    self._launch_tick()
         elif self._proc is not None:
+            # Still up past the point where a refusal or a startup crash
+            # would have shown: this start worked, so forget the escalation.
+            if not self._died_young("tick"):
+                self._collector_started("tick")
             # Process alive but moomoo connection may be dead — check ticks.db
             self._tick_stale_ticks = getattr(self, "_tick_stale_ticks", 0) + 1
             if self._tick_stale_ticks % 15 == 0:   # check every ~15 scheduler ticks
@@ -986,13 +1183,27 @@ class SchedulerApp(tk.Tk):
                     self._proc.terminate()
                     self._proc = None
                     self._tick_stale_ticks = 0
-                    self._launch_collector()
+                    self._launch_tick()
         if self.cfg.get("order_book_enabled", True):
             if self._ob_proc is not None and self._ob_proc.poll() is not None:
-                self._log("OB collector exited unexpectedly — restarting")
-                self._ob_proc = None
-                self._launch_collector()
+                if (self._ob_proc.returncode
+                        == single_instance.EXIT_ALREADY_RUNNING):
+                    self._ob_proc = None
+                    self._collector_failed("ob", "OB collector",
+                                           "order_book_collector", "refused")
+                elif self._died_young("ob"):
+                    self._ob_proc = None
+                    self._collector_failed(
+                        "ob", "OB collector", "order_book_collector",
+                        "died_young")
+                else:
+                    self._log("OB collector exited unexpectedly — restarting")
+                    self._ob_proc = None
+                    if self._collector_backoff_ok("ob"):
+                        self._launch_ob()
             elif self._ob_proc is not None:
+                if not self._died_young("ob"):
+                    self._collector_started("ob")
                 # Process is alive but may have a dead moomoo connection — check
                 # the DB for recent writes.  If no new row for >15 min, force-restart.
                 self._ob_stale_ticks = getattr(self, "_ob_stale_ticks", 0) + 1
@@ -1005,7 +1216,7 @@ class SchedulerApp(tk.Tk):
                         self._ob_proc.terminate()
                         self._ob_proc = None
                         self._ob_stale_ticks = 0
-                        self._launch_collector()
+                        self._launch_ob()
 
     def _ob_db_stale_minutes(self) -> float | None:
         """Return minutes since the last OB DB write, or None if DB unreachable."""
@@ -1041,43 +1252,75 @@ class SchedulerApp(tk.Tk):
 
     # ── Collector subprocess ──────────────────────────────────────────────────
 
-    def _launch_collector(self):
-        """Start tick_collector.py (and optionally order_book_collector.py) as subprocesses."""
+    def _launch_tick(self):
+        """Start tick_collector.py, unless one of ours is already running."""
+        if self._proc is not None and self._proc.poll() is None:
+            return
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         timeout = int(self.timeout_var.get())
+        collector = pathlib.Path(__file__).parent / "tick_collector.py"
+        cmd = [sys.executable, str(collector),
+               "--config", str(CONFIG_PATH), "--timeout", str(timeout)]
+        try:
+            self._proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, env=env,
+            )
+        except Exception as exc:
+            # Counted as a failure rather than left silent. self._proc stays
+            # None here, and the watchdog's "is not None" guard would then
+            # never look at it again: one failed start used to mean no
+            # collector for the rest of the session.
+            self._log(f"Failed to start tick collector: {exc}")
+            self._collector_failed("tick", "Tick collector", "tick_collector",
+                                   "died_young")
+            return
+        _kill_with_me(self._proc.pid)
+        # NOT _collector_started here. Popen returning means the process
+        # spawned, not that it lived: a collector refused by the lock takes
+        # about eight seconds to find that out and exit. Clearing the
+        # escalation on a spawn made every round "attempt 1" and the backoff
+        # never grew -- a slower loop is still a loop.
+        self._launched_at["tick"] = time_mod.monotonic()
+        self._log(f"Collector PID {self._proc.pid} started  "
+                  f"(no-data warn: {timeout} min)")
+        threading.Thread(target=self._tail_proc, daemon=True).start()
 
-        # Tick collector
-        if self._proc is None or self._proc.poll() is not None:
-            collector = pathlib.Path(__file__).parent / "tick_collector.py"
-            cmd = [sys.executable, str(collector),
-                   "--config", str(CONFIG_PATH), "--timeout", str(timeout)]
-            try:
-                self._proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, env=env,
-                )
-                self._log(f"Collector PID {self._proc.pid} started  (no-data warn: {timeout} min)")
-                threading.Thread(target=self._tail_proc, daemon=True).start()
-            except Exception as exc:
-                self._log(f"Failed to start tick collector: {exc}")
+    def _launch_ob(self):
+        """Start order_book_collector.py, unless one of ours is running."""
+        if not self.cfg.get("order_book_enabled", True):
+            return
+        if self._ob_proc is not None and self._ob_proc.poll() is None:
+            return
+        ob = pathlib.Path(__file__).parent / "order_book_collector.py"
+        if not ob.exists():
+            return
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        cmd_ob = [sys.executable, str(ob), "--config", str(CONFIG_PATH)]
+        try:
+            self._ob_proc = subprocess.Popen(
+                cmd_ob, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, env=env,
+            )
+        except Exception as exc:
+            self._log(f"Failed to start OB collector: {exc}")
+            self._collector_failed("ob", "OB collector",
+                                   "order_book_collector", "died_young")
+            return
+        _kill_with_me(self._ob_proc.pid)
+        # NOT _collector_started here. Popen returning means the process
+        # spawned, not that it lived: a collector refused by the lock takes
+        # about eight seconds to find that out and exit. Clearing the
+        # escalation on a spawn made every round "attempt 1" and the backoff
+        # never grew -- a slower loop is still a loop.
+        self._launched_at["ob"] = time_mod.monotonic()
+        self._log(f"OB collector PID {self._ob_proc.pid} started")
+        threading.Thread(target=self._tail_ob_proc, daemon=True).start()
 
-        # Order book collector (optional)
-        if self.cfg.get("order_book_enabled", True):
-            if self._ob_proc is None or self._ob_proc.poll() is not None:
-                ob = pathlib.Path(__file__).parent / "order_book_collector.py"
-                if ob.exists():
-                    cmd_ob = [sys.executable, str(ob), "--config", str(CONFIG_PATH)]
-                    try:
-                        self._ob_proc = subprocess.Popen(
-                            cmd_ob, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1, env=env,
-                        )
-                        self._log(f"OB collector PID {self._ob_proc.pid} started")
-                        threading.Thread(
-                            target=self._tail_ob_proc, daemon=True
-                        ).start()
-                    except Exception as exc:
-                        self._log(f"Failed to start OB collector: {exc}")
+    def _launch_collector(self):
+        """Start both collectors. Kept for the callers that want both."""
+        self._launch_tick()
+        self._launch_ob()
 
     def _kill_collector(self):
         for attr, label in [("_proc", "Collector"), ("_ob_proc", "OB collector")]:
