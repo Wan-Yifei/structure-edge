@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.time_utils import candle_start
+from analysis.qt_widgets import fit_all_spins
 
 # ── Colour palette ────────────────────────────────────────────────────────────
 _BG       = "#1a1a2e"
@@ -169,6 +170,10 @@ class DomWindow(QWidget):
 
         self._build_ui()
         self._apply_style()
+        # After the stylesheet: its border and padding are part of what the
+        # arrows need. Two of these three boxes could not show their own
+        # maximum before this -- measured at one pixel short.
+        fit_all_spins(self)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
@@ -220,7 +225,6 @@ class DomWindow(QWidget):
         self._pass_spin.setSingleStep(0.5)
         self._pass_spin.setValue(3.0)
         self._pass_spin.setDecimals(1)
-        self._pass_spin.setFixedWidth(60)
         self._pass_spin.setToolTip(
             "Passive threshold multiplier.\n"
             "Resting order must be ≥ avg_tick_vol × Pass to qualify as a wall.")
@@ -234,7 +238,6 @@ class DomWindow(QWidget):
         self._act_spin.setSingleStep(0.5)
         self._act_spin.setValue(1.0)
         self._act_spin.setDecimals(1)
-        self._act_spin.setFixedWidth(60)
         self._act_spin.setToolTip(
             "Active threshold multiplier.\n"
             "Cumulative aggressive volume must be ≥ avg_tick_vol × Act.")
@@ -247,7 +250,6 @@ class DomWindow(QWidget):
         self._hit_spin.setRange(1, 99)
         self._hit_spin.setValue(30)
         self._hit_spin.setSuffix("%")
-        self._hit_spin.setFixedWidth(62)
         self._hit_spin.setToolTip(
             "Hit ratio threshold.\n"
             "Aggressive volume / passive volume must exceed this percentage.")
@@ -338,13 +340,36 @@ class DomWindow(QWidget):
         root.addWidget(self._status_lbl)
 
     def _apply_style(self) -> None:
+        # DomWindow, not QWidget: the catch-all matched every widget in
+        # the tree, QCheckBox among them, and on the Windows 11 style that
+        # background is painted over the indicator the style has already
+        # drawn. Measured on the ticked Absorb box: 244 ink pixels in the
+        # indicator with this rule, 2 with the catch-all -- the whole filled
+        # square gone, only the tick left.
+        #
+        # This window IS a QWidget, so there was no wider class to narrow
+        # to. Naming the class works because PyQt puts the Python class name
+        # in the meta-object, and a QSS type selector also matches derived
+        # classes, so a subclass would still be covered.
+        #
+        # THE COST: this is tied to the spelling of the class name. Rename
+        # DomWindow and the rule stops matching, the window goes light, and
+        # nothing raises -- the test that guards it reads the stylesheet
+        # text, not the rendered window.
+        #
+        # The popup rule comes with it. The catch-all was also the only
+        # thing colouring the combo's drop-down list; on its own the list
+        # comes up white on black.
         self.setStyleSheet(f"""
-            QWidget           {{ background: {_BG}; color: {_FG}; }}
+            DomWindow         {{ background: {_BG}; color: {_FG}; }}
             QLabel            {{ background: transparent; color: {_FG}; }}
             QCheckBox         {{ color: {_FG}; spacing: 4px; }}
             QComboBox, QSpinBox, QDoubleSpinBox {{
                 background: {_BG_BAR}; color: {_FG};
                 border: 1px solid {_GREY}; padding: 2px 4px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {_BG_BAR}; color: {_FG};
             }}
         """)
 

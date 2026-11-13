@@ -62,6 +62,7 @@ from backtest.engine import _find_exit
 from db.sim_trades import SimTradesDB
 from core.time_utils import session_for_timestamp
 from strategy.session_vp.reversal import compute_rsi
+from analysis.qt_widgets import fit_all_spins
 from analysis.trade_viewer_qt import (
     CandlestickItem, FvgItem, ObItem, ChandelierParamsDialog,
     _compute_profile_bins, _compute_poc_vah_val,
@@ -431,7 +432,6 @@ class ReplayTrainerWindow(QMainWindow):
         self._fvg_min_pct.setValue(1.00)
         self._fvg_min_pct.setDecimals(2)
         self._fvg_min_pct.setSuffix("%")
-        self._fvg_min_pct.setFixedWidth(72)
         self._fvg_min_pct.setToolTip("FVG minimum gap size (% of price)")
         self._fvg_min_pct.valueChanged.connect(self._render)
         tb3.addWidget(self._fvg_min_pct)
@@ -443,7 +443,6 @@ class ReplayTrainerWindow(QMainWindow):
         self._ob_max_count = QSpinBox()
         self._ob_max_count.setRange(1, 20)
         self._ob_max_count.setValue(4)
-        self._ob_max_count.setFixedWidth(50)
         self._ob_max_count.setToolTip("Max number of recent OBs to display")
         self._ob_max_count.valueChanged.connect(self._render)
         tb3.addWidget(self._ob_max_count)
@@ -491,7 +490,6 @@ class ReplayTrainerWindow(QMainWindow):
         self._rsi_period_spin = QSpinBox()
         self._rsi_period_spin.setRange(2, 100)
         self._rsi_period_spin.setValue(6)   # matches the RSI period used elsewhere for IVB (session_vp)
-        self._rsi_period_spin.setFixedWidth(50)
         self._rsi_period_spin.setToolTip("RSI period (bars)")
         self._rsi_period_spin.valueChanged.connect(self._render)
         tb3.addWidget(self._rsi_period_spin)
@@ -854,6 +852,11 @@ class ReplayTrainerWindow(QMainWindow):
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("Ready")
+
+        # Same Windows 11 arrow layout, same three boxes pinned too narrow.
+        # No stylesheet on this window, so this can run as soon as they
+        # exist.
+        fit_all_spins(self)
 
     # ── data loading ──────────────────────────────────────────────────────────
 

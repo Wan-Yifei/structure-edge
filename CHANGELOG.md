@@ -1,5 +1,106 @@
 # Changelog
 
+## v0.89.10 - 剩下三个窗口的 spinbox；DOM 的 catch-all 选择器没有 QDialog 可以退让 (2026-11-13)
+
+v0.89.8 修了主窗口，v0.89.9 修了热力图。这一轮是 `dom_window` / `multi_vp_window` /
+`replay_trainer`，Win11 的同一个 bug 在它们身上的最后一块。
+
+### DOM：类名选择器
+
+它和主窗口一样带 `QWidget {{ background }}` catch-all，**但它自己就是 `QWidget`** ——
+没有 `QDialog` 可以退让。改成按类名选：
+
+```
+QWidget           {{ background: ... }}   ->   DomWindow         {{ background: ... }}
+```
+
+可行是因为 PyQt 把 Python 类名放进 meta-object（实测 `className() == 'DomWindow'`）。
+两条实测要记住：
+
+- **QSS 类型选择器匹配派生类**，所以子类不会失色（造了个 `SubDom(DomWindow)` 验过）。
+- **它和类名的拼写绑死。** 改类名 / 加别名 → 规则静默不再匹配，窗口掉回浅色
+  `#f3f3f3`，而且守它的测试读的是样式表文本、不是渲染结果，不会报警。
+
+改动是必要的，不是猜的。勾上 Absorb 之后量指示器：
+
+| | 指示器 ink | 平均亮度 |
+|---|---|---|
+| 类名选择器 | **244** | 99.0 |
+| 旧 catch-all | **2** | 29.2 |
+
+整个实心方块没了，只剩一个勾。
+
+**整窗 A/B 对照**（同一个窗口换两张样式表、整窗渲染作差）：378400 px 里只有 **241 px**
+不同，bbox 正好是那个 16×16 的指示器；差异处 **没有一个像素比旧版更亮**；22 个可见控件
+里 21 个两张表完全一致。**没有任何子容器因此变浅。**
+
+和主窗口同一个坑：catch-all 也是唯一给下拉列表上色的规则，去掉后变 `#ffffff` 底
+`#000000` 字，所以 `QComboBox QAbstractItemView` 要一起补上。
+
+`_depth_combo` 的 `setFixedWidth(60)` 没动 —— 实测箭头右沿 59 < 60，最宽条目余量 22px。
+
+### multi_vp / replay_trainer：只有宽度
+
+两个窗口都没有样式表，所以只是 `fit_all_spins`。
+
+**replay_trainer 被钉死的是 11 个框，不是我原先说的 3 个。** `fit_all_spins(self)` 作用于
+窗口里全部 spinbox，右侧下单面板那 7 个从「随布局拉伸」变成「钉死且更窄」：
+
+```
+_starting_capital_spin 156 -> 137 (-19)    _fvg_min_pct     72 ->  93 (+21)
+_shares_spin           156 -> 104 (-52)    _ob_max_count    50 ->  74 (+24)
+_risk_pct_spin         156 -> 105 (-51)    _rsi_period_spin 50 ->  80 (+30)
+_limit_price_spin      156 -> 131 (-25)    _rr_spin         92 ->  89  (-3)
+_sl_spin / _tp_spin    156 -> 131 (-25)    _speed_spin      95 ->  92  (-3)
+```
+
+11 个全部渲染核对过，没有一个丢字，`up.x` 全为正，`room` 一律 = 10。
+
+**multi_vp 补了一条宽度地板。** fit 把它那条 docked 工具栏从 661px 撑到 725px，而它
+**原来没有地板** —— docked 工具栏低于自身宽度时 Qt 会把尾部的 ↻ 和状态标签折进溢出菜单，
+看着像控件没了。门槛是这次改动抬高的，所以地板也这次补。主窗口和热力图本来就有。
+
+DOM 不需要：它的行在 QVBoxLayout 里，靠 `minimumSizeHint = 727`（改动前 629）挡着，
+窗口 `resize(860, 440)` 余 133px。replay 的最宽行 1254，比改动前的 1257 还小 3px。
+
+### 复核拦下的两处
+
+**一、`sibling` fixture 的 docstring 写的理由是假的。** 我写「构造 replay_trainer 需要
+磁盘上的回放数据」—— **不需要**。真正的障碍是它的 `__init__` 以**写模式**打开
+`db/sim_trades.duckdb`，`monkeypatch` 指到临时文件就能构造。和上一轮「只在并排布局下
+咬人」同一类：写进代码就会被后人当事实的假理由。改掉之后 replay 也进了 fixture。
+
+**二、这一轮唯一的新手法零防御。** 把类名选择器改回 `QWidget` catch-all，新加的 10 条
+断言**全绿** —— 而它的失效形态（勾选框只剩一个勾）正是花了一整轮去修的那个。补了
+`test_the_other_windows_have_none_either`，把「没有规则用 QWidget 选择器画背景」
+参数化到三个窗口上。
+
+另外两处措辞：注释原来警告「子类会怎样」（子类实测没事），改成警告**改类名会静默失效**；
+`test_any_combo_popup_stays_readable` 原来要求「必须深色」，对**没有样式表**的
+replay_trainer 不成立（它的下拉本来就是系统原生白底），拆成「对比度」和
+「有样式表才要求深色」两条。
+
+### 测试
+
+`tests/analysis/test_spin_fit.py` 28 -> 42 个（36 passed + 6 skipped，skip 的是
+无样式表窗口上那两条与样式表有关的）。变异 **6 点 6 中，零存活**：类名选择器回退、
+去掉下拉规则、三个窗口各自 fit 空转、multi_vp 丢掉新地板。
+
+全仓 **1801 -> 1809 passed**。两个平台（offscreen + `QT_QPA_PLATFORM=windows`）都绿。
+
+### 还不知道的
+
+- **tooltip。** `QTipLabel` 是 QLabel 子类，而 DOM 的样式表里 `QLabel {{ background:
+  transparent; color: ... }}` 够得着它 —— 旧的 catch-all 提供背景色，这次删掉的正是
+  那一半，理论上可能浅底浅字。v0.89.8 对主窗口做的是**同样的结构**，所以这不是这一轮
+  引入的。前一轮审计实测过主窗口的真 `QTipLabel`：Qt6 给它挂了哨兵样式表，父窗口的
+  QSS 进不去，两种选择器下逐像素一致。但 DOM 的 `QLabel` 规则和主窗口的不同（多了
+  `background: transparent`），**没有单独验过**，需要真实上屏才能测。
+- 所有像素数绑在这台机器的 96 DPI / Segoe UI 9pt 上。`SPIN_TEXT_GAP = 10` 是精确下界，
+  replay 的 11 个框 `room` 恰好全是 10，没有富余。
+- `tests/analysis/test_multi_vp_window.py` 不设 `QT_QPA_PLATFORM` 那个旧账还在
+  （见 v0.89.9），这一轮没让它更坏：没有新增 `show()`、没有新增窗口。
+
 ## v0.89.9 - 热力图窗口的 12 个数字框也被 Win11 画坏了；修的过程里量错了三次 (2026-11-12)
 
 v0.89.8 只修了主窗口。热力图窗口是**独立顶层窗口**（`LiqHmWindow(QWidget)`，建的时候

@@ -26,6 +26,8 @@ from datetime import timedelta
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
+
+from analysis.qt_widgets import fit_all_spins
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel, QMainWindow,
@@ -83,7 +85,6 @@ class MultiVPWindow(QMainWindow):
         self._days = QSpinBox()
         self._days.setRange(2, 30)
         self._days.setValue(6)
-        self._days.setFixedWidth(52)
         self._days.setToolTip("How many trading sessions to look back")
         self._days.valueChanged.connect(lambda *_: self.reload())
         tb.addWidget(self._days)
@@ -94,7 +95,6 @@ class MultiVPWindow(QMainWindow):
         self._bins.setRange(20, 300)
         self._bins.setValue(80)
         self._bins.setSingleStep(10)
-        self._bins.setFixedWidth(60)
         self._bins.setToolTip(
             "Price bins per session. Too many and a day's profile breaks\n"
             "into spikes; too few and one wide bin swallows the value-area\n"
@@ -108,7 +108,6 @@ class MultiVPWindow(QMainWindow):
         self._va.setRange(50, 95)
         self._va.setValue(70)
         self._va.setSingleStep(5)
-        self._va.setFixedWidth(52)
         self._va.setToolTip("Share of volume the value area covers; 70 is the standard")
         self._va.valueChanged.connect(lambda *_: self.reload())
         tb.addWidget(self._va)
@@ -168,6 +167,20 @@ class MultiVPWindow(QMainWindow):
 
         self._status = QLabel("  ")
         tb.addWidget(self._status)
+
+        # The toolbar is complete: size the spin boxes to the style rather
+        # than to the pixel counts that were here, which the Windows 11
+        # arrow layout outgrew. No stylesheet on this window, so there is
+        # nothing to wait for.
+        fit_all_spins(self)
+
+        # Fitting widened the row from 661 px to 725, and this toolbar is
+        # docked, so below its own width Qt folds the trailing controls --
+        # the refresh button and the status label -- into an overflow menu
+        # and they read as missing. There was no floor here before; the
+        # threshold it has to clear is one this change raised, so it gets
+        # one now, the same as the trade viewer and the heatmap.
+        self.setMinimumWidth(tb.sizeHint().width() + 16)
 
         self._plot = pg.PlotWidget()
         self._plot.setBackground(_BG)

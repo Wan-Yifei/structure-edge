@@ -123,6 +123,29 @@ def _widest_text(spin):
                key=fm.horizontalAdvance)
 
 
+def _catch_all_rules(sheet):
+    """Selectors in `sheet` that paint a background over every widget.
+
+    A bare QWidget in the selector list matches the whole tree, indicators
+    included, and on the Windows 11 style that background goes on top of the
+    one the style already drew. Naming a window's own class is the way out
+    for a window that IS a QWidget -- but note that ties the rule to the
+    Python class name: rename the class and this rule silently stops
+    matching, and nothing here would notice.
+    """
+    import re
+
+    offenders = []
+    for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", sheet):
+        sel = selector.strip()
+        if sel.startswith("/*"):
+            continue
+        parts = [p.strip() for p in sel.split(",")]
+        if "QWidget" in parts and "background" in body:
+            offenders.append(sel)
+    return offenders
+
+
 def _lum(c):
     """Perceived luminance, 0..255. Only ever compared, never asserted raw."""
     return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
@@ -301,6 +324,111 @@ def heatmap(qapp):
     yield w
     w.close()
     qapp.processEvents()
+
+
+@pytest.fixture(scope="module", params=["dom", "multi_vp", "replay"])
+def sibling(request, qapp, tmp_path_factory):
+    """The other three windows that carry spin boxes of their own.
+
+    The replay trainer needs no replay data to build -- an earlier version of
+    this docstring said it did, which was a guess, and the guess would have
+    kept the window out of here for good. What it does need is a WRITABLE
+    sim-trades database: its __init__ opens the real db/sim_trades.duckdb for
+    writing. Pointed at a temporary file it constructs like the others.
+    """
+    if request.param == "dom":
+        from analysis.dom_window import DomWindow
+
+        w = DomWindow(code="US.SOXL", live=False)
+    elif request.param == "multi_vp":
+        from analysis.multi_vp_window import MultiVPWindow
+
+        w = MultiVPWindow()
+    else:
+        from db.sim_trades import SimTradesDB
+
+        from analysis import replay_trainer as rt
+
+        tmp = tmp_path_factory.mktemp("replay") / "sim_trades.duckdb"
+        original = rt.SimTradesDB
+        rt.SimTradesDB = lambda *a, **k: SimTradesDB(db_path=tmp)
+        try:
+            w = rt.ReplayTrainerWindow()
+        finally:
+            rt.SimTradesDB = original
+    w.show()
+    for _ in range(20):
+        qapp.processEvents()
+    yield w
+    w.close()
+    qapp.processEvents()
+
+
+class TestTheOtherWindowsToo:
+    """DOM and multi-VP had the same pinned widths, and DOM had the same
+    catch-all selector -- except that DomWindow IS a QWidget, so there was
+    nothing to narrow the selector to. It names its own class instead, which
+    works because PyQt puts the Python class name in the meta-object."""
+
+    def test_it_has_spin_boxes(self, sibling):
+        assert _spins(sibling), f"{type(sibling).__name__} has none"
+
+    def test_no_arrow_starts_left_of_the_box(self, sibling):
+        bad = [(sp.width(), _rects(sp)[0].x(), _rects(sp)[1].x())
+               for sp in _spins(sibling)
+               if _rects(sp)[0].x() < 0 or _rects(sp)[1].x() < 0]
+        assert not bad, f"arrows painted over the digits: {bad}"
+
+    def test_the_edit_area_has_room_for_it(self, sibling):
+        assert not _cramped(_spins(sibling)), (
+            f"widest value does not fit the edit area: "
+            f"{_cramped(_spins(sibling))}")
+
+    def test_all_are_pinned(self, sibling):
+        loose = [type(sp).__name__ for sp in _spins(sibling)
+                 if not (0 < sp.minimumWidth() == sp.maximumWidth())]
+        assert not loose, f"not sized by fit_spin: {loose}"
+
+    def test_any_combo_popup_stays_readable(self, sibling):
+        """DOM's catch-all was also the only rule colouring its drop-down;
+        narrowing it brought the list up dark-on-dark, unreadable."""
+        bad = []
+        for cb in sibling.findChildren(QComboBox):
+            pal = cb.view().palette()
+            base, text = pal.base().color(), pal.text().color()
+            if abs(_lum(base) - _lum(text)) < 60:
+                bad.append((base.name(), text.name()))
+        assert not bad, f"combo popup text does not contrast: {bad}"
+
+    def test_the_multi_vp_floor_covers_its_toolbar(self, sibling):
+        """Named rather than parametrised, because only this window's
+        threshold moved: fitting widened its one docked toolbar from 661 px
+        to 725, and a docked toolbar below its own width folds the trailing
+        controls into an overflow menu, where they read as missing. The DOM
+        window lays its row out in a QVBoxLayout and is held by
+        minimumSizeHint instead; the replay trainer's widest row did not
+        grow, so neither gets a floor here."""
+        from analysis.multi_vp_window import MultiVPWindow
+
+        if not isinstance(sibling, MultiVPWindow):
+            pytest.skip("only multi-VP had its threshold raised")
+        bars = sibling.findChildren(QToolBar)
+        assert bars, "no toolbar to measure"
+        widest = max(b.sizeHint().width() for b in bars)
+        assert sibling.minimumWidth() >= widest, (
+            f"minimum width {sibling.minimumWidth()} is under the toolbar's "
+            f"{widest}: its trailing controls can fold into the chevron")
+
+    def test_a_dark_window_keeps_a_dark_popup(self, sibling):
+        """Only where there is a dark stylesheet to keep: the replay trainer
+        sets none at all, so its popups are natively light and always were.
+        Asserting darkness there would be asserting a change nobody made."""
+        if not sibling.styleSheet():
+            pytest.skip(f"{type(sibling).__name__} has no stylesheet")
+        light = [cb.view().palette().base().color().name()
+                 for cb in sibling.findChildren(QComboBox)
+                 if _lum(cb.view().palette().base().color()) > 110]
+        assert not light, f"popup is light on a dark window: {light}"
 
 
 class TestTheHeatmapToolbarToo:
@@ -511,19 +639,24 @@ class TestNoSelectorPaintsOverEveryWidget:
     itself. A rule is suspect when a bare QWidget appears in its selector
     list and its body sets a background."""
 
-    def test_the_stylesheet_has_no_catch_all_background(self, viewer):
-        import re
-
+    def test_the_viewer_has_no_catch_all_background(self, viewer):
         sheet = viewer.styleSheet()
         assert sheet, "the viewer has no stylesheet; this test is stale"
-        offenders = []
-        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", sheet):
-            sel = selector.strip()
-            if sel.startswith("/*"):
-                continue
-            parts = [p.strip() for p in sel.split(",")]
-            if "QWidget" in parts and "background" in body:
-                offenders.append(sel)
+        offenders = _catch_all_rules(sheet)
         assert not offenders, (
             f"these rules paint a background over every widget, including "
             f"the radio and check indicators: {offenders}")
+
+    def test_the_other_windows_have_none_either(self, sibling):
+        """The DOM window carried the same rule. It could not be narrowed the
+        same way -- DomWindow IS a QWidget -- so it names its own class
+        instead, and without this assertion that change had nothing holding
+        it: mutation-checked, putting the catch-all back left every other
+        assertion in this file green."""
+        sheet = sibling.styleSheet()
+        if not sheet:
+            pytest.skip(f"{type(sibling).__name__} has no stylesheet")
+        offenders = _catch_all_rules(sheet)
+        assert not offenders, (
+            f"{type(sibling).__name__} paints a background over every widget "
+            f"in its tree: {offenders}")
