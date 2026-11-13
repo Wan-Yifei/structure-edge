@@ -53,7 +53,8 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import (
-    Qt, QThread, QTimer, pyqtSignal, QRectF, QPointF, QMetaObject, Q_ARG,
+    Qt, QThread, QTimer, pyqtSignal, QRect, QRectF, QPointF, QMetaObject,
+    Q_ARG,
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPicture, QPen, QBrush, QFont, QIcon, QPixmap,
@@ -64,7 +65,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QToolBar, QLabel, QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox,
     QPushButton, QCheckBox, QButtonGroup, QRadioButton, QSizePolicy,
     QFrame, QStatusBar, QMessageBox, QDialog, QDialogButtonBox, QFormLayout,
-    QSystemTrayIcon,
+    QSystemTrayIcon, QAbstractSpinBox, QStyle, QStyleOptionSpinBox,
 )
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -106,6 +107,86 @@ pg.setConfigOptions(antialias=True)
 # 60 Hz frame: long enough to collapse a 125 Hz mouse stream to one draw per
 # frame, short enough that the panel is not visibly behind the crosshair.
 _PROFILE_COALESCE_MS = 16
+
+# Space between the widest value a spin box can show and its arrows. Measured:
+# at 0 the digits and the triangles touch and the number stops being readable
+# at a glance.
+_SPIN_TEXT_GAP = 6
+
+# The width used to ask the style where its sub-controls go. Any value wide
+# enough that none of them degenerate works; the answer is a difference, so
+# the number itself does not reach the result.
+_SPIN_PROBE_W = 400
+
+
+def _fit_spin(spin: QAbstractSpinBox, gap: int = _SPIN_TEXT_GAP) -> None:
+    """Widen a spin box until its own widest value clears the arrows.
+
+    These were hardcoded pixel widths until Windows 11, where every one of
+    them broke at once: the Windows 11 style puts the two arrow buttons SIDE
+    BY SIDE (two 24 px buttons) where earlier styles stacked them in one
+    16 px column, taking the chrome from about 28 px to 58. Worse, it then
+    returns a NEGATIVE x for SC_SpinBoxUp when the box is too narrow, so the
+    arrows are painted on top of the digits rather than beside them -- which
+    is why the toolbar read as a row of garbled boxes rather than as text cut
+    off at an edge.
+
+    Qt will not answer this directly. sizeHint and sizeFromContents both
+    over-report (86 px of chrome against 58 measured by sweeping the width
+    and looking at the pixels), while SC_SpinBoxEditField under-reports: it
+    subtracts only ONE of the two side-by-side buttons. So take the edit
+    field's answer and add back the button it forgot, which is detectable
+    because side-by-side buttons have different x.
+
+    Checked against a width sweep on all three styles this machine offers:
+    58 px on windows11 (58 measured), 27 on windowsvista (28) and 24 on
+    Fusion (26). The one- and two-pixel shortfalls sit inside `gap`.
+
+    Call this AFTER the stylesheet is applied. Not because the box comes
+    out too narrow otherwise -- measured, it comes out 18 px too WIDE (100
+    against 82 for a plain QSpinBox, 103 against 88 for a double): the
+    stylesheet's own border and padding replace a larger native frame. Run
+    early and the fourteen boxes gain about 250 px between them, which is
+    what would push the widest toolbar row past the window's minimum width
+    and start collapsing controls into the overflow chevron.
+    """
+    spin.ensurePolished()
+
+    opt = QStyleOptionSpinBox()
+    opt.initFrom(spin)
+    opt.frame = spin.hasFrame()
+    opt.buttonSymbols = spin.buttonSymbols()
+    opt.subControls = (QStyle.SubControl.SC_SpinBoxUp
+                       | QStyle.SubControl.SC_SpinBoxDown
+                       | QStyle.SubControl.SC_SpinBoxFrame
+                       | QStyle.SubControl.SC_SpinBoxEditField)
+    opt.rect = QRect(0, 0, _SPIN_PROBE_W, spin.sizeHint().height())
+
+    style, cc = spin.style(), QStyle.ComplexControl.CC_SpinBox
+    up = style.subControlRect(cc, opt, QStyle.SubControl.SC_SpinBoxUp, spin)
+    down = style.subControlRect(cc, opt, QStyle.SubControl.SC_SpinBoxDown, spin)
+    edit = style.subControlRect(cc, opt,
+                                QStyle.SubControl.SC_SpinBoxEditField, spin)
+
+    chrome = _SPIN_PROBE_W - edit.width()
+    if up.x() != down.x():
+        chrome += down.width()
+
+    # The widest string the box can ever display, not the value it holds now:
+    # a box sized to "1" clips the moment the user spins it to "300".
+    texts = []
+    for value in (spin.minimum(), spin.maximum()):
+        try:
+            texts.append(spin.textFromValue(value))
+        except (AttributeError, TypeError):
+            texts.append(str(value))
+    # By rendered width, not by character count: with a prefix, a suffix or
+    # a proportional font the longer string is not always the wider one.
+    fm = spin.fontMetrics()
+    text_w = max(fm.horizontalAdvance(f"{spin.prefix()}{t}{spin.suffix()}")
+                 for t in texts)
+
+    spin.setFixedWidth(text_w + chrome + gap)
 
 # ── Colour palette (matches trade_viewer.py) ──────────────────────────────────
 
@@ -2839,13 +2920,30 @@ class TradeViewerQt(QMainWindow):
             self._log(f"viewer_qt.toml: {_msg}")
 
         # Apply dark theme
+        # QWidget here matched EVERY widget, QRadioButton and QCheckBox
+        # among them, and on the Windows 11 style that background is painted
+        # over the indicator the style has already drawn: the checked radio
+        # showed nothing at all (so Range looked dead), and the checked box
+        # lost its fill and kept only the tick. QMainWindow + QDialog covers
+        # the same windows -- children inherit the palette either way --
+        # without claiming the indicators.
         self.setStyleSheet(f"""
-            QMainWindow, QWidget {{ background: {_BG}; color: {_FG}; }}
+            QMainWindow, QDialog {{ background: {_BG}; color: {_FG}; }}
             QToolBar {{ background: {_BG_BAR}; border: none; spacing: 4px; }}
             QLabel {{ color: {_FG}; }}
-            QComboBox, QLineEdit, QSpinBox {{
+            QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox {{
                 background: {_BG_BAR}; color: {_FG};
                 border: 1px solid {_GREY}; padding: 2px 4px;
+            }}
+            /* The popup list is a separate top-level widget and neither of
+               the rules above reaches it. It used to inherit from the
+               QWidget catch-all; without that it comes up with the dark
+               QComboBox background and the style's own near-black text --
+               measured at a luminance gap of 26, against 183 before. */
+            QComboBox QAbstractItemView {{
+                background: {_BG_BAR}; color: {_FG};
+                selection-background-color: {_BG_TIP};
+                selection-color: {_FG};
             }}
             QPushButton {{
                 background: {_BG_BAR}; color: {_FG};
@@ -2856,6 +2954,19 @@ class TradeViewerQt(QMainWindow):
             QCheckBox {{ color: {_FG}; spacing: 4px; }}
             QRadioButton {{ color: {_FG}; spacing: 4px; }}
         """)
+
+        # Only now, with the stylesheet applied: its border and padding are
+        # part of what the arrows need, and a box measured before polish
+        # comes out 10 px short. findChildren rather than a list built while
+        # the toolbars are assembled, so a spin box added later is covered
+        # without anyone remembering to register it.
+        for _spin in self.findChildren(QAbstractSpinBox):
+            _fit_spin(_spin)
+
+        # Only now do the rows have their final width: both the stylesheet
+        # and _fit_spin change it, and the floor is what keeps the chevron
+        # out of reach.
+        self._set_toolbar_width_floor()
 
         # An indicator that starts checked never emits stateChanged, so the
         # handler that acts on it never runs: the Options boxes were ticked
@@ -2963,7 +3074,6 @@ class TradeViewerQt(QMainWindow):
         # connect, on a code/timeframe switch, and whenever a gap is detected.
         self._refresh_spin.setRange(1, 300)
         self._refresh_spin.setValue(getattr(args, "refresh", 15) or 15)
-        self._refresh_spin.setFixedWidth(55)
         self._refresh_spin.valueChanged.connect(self._on_refresh_changed)
         tb1.addWidget(self._refresh_spin)
 
@@ -2978,7 +3088,6 @@ class TradeViewerQt(QMainWindow):
         self._redraw_spin.setSingleStep(0.5)
         self._redraw_spin.setDecimals(1)
         self._redraw_spin.setValue(vcfg.num("redraw_secs"))
-        self._redraw_spin.setFixedWidth(60)
         self._redraw_spin.setToolTip(
             "How often the chart repaints from ticks already received. "
             "Costs no API calls; skipped when no new prints arrived.")
@@ -3026,7 +3135,6 @@ class TradeViewerQt(QMainWindow):
                 self._fvg_min_pct.setValue(vcfg.num("fvg_min_pct"))
                 self._fvg_min_pct.setDecimals(2)
                 self._fvg_min_pct.setSuffix("%")
-                self._fvg_min_pct.setFixedWidth(72)
                 self._fvg_min_pct.setEnabled(vcfg.flag(key))
                 self._fvg_min_pct.setToolTip("FVG minimum gap size (% of price)")
                 self._fvg_min_pct.valueChanged.connect(self._trigger_fetch)
@@ -3035,7 +3143,6 @@ class TradeViewerQt(QMainWindow):
                 self._ob_max_count = QSpinBox()
                 self._ob_max_count.setRange(1, 20)
                 self._ob_max_count.setValue(vcfg.num("ob_max_count"))
-                self._ob_max_count.setFixedWidth(50)
                 # follow the checkbox: _on_indicator_toggle only corrects
                 # this on the next toggle, so a default-on OB would sit
                 # drawn with its quota spinbox greyed out until touched.
@@ -3084,7 +3191,6 @@ class TradeViewerQt(QMainWindow):
                 self._dcvd_spin = QSpinBox()
                 self._dcvd_spin.setRange(1, 30)
                 self._dcvd_spin.setValue(vcfg.num("dcvd_lookback"))
-                self._dcvd_spin.setFixedWidth(48)
                 self._dcvd_spin.setToolTip(
                     "DCVD lookback, in bars (the coloured bars).\n"
                     f"The {DCVD_CONTEXT}-bar line behind them is context "
@@ -3158,7 +3264,6 @@ class TradeViewerQt(QMainWindow):
                 self._avwap_sigma_spin = QSpinBox()
                 self._avwap_sigma_spin.setRange(0, 3)
                 self._avwap_sigma_spin.setValue(vcfg.num("avwap_sigma"))
-                self._avwap_sigma_spin.setFixedWidth(36)
                 self._avwap_sigma_spin.setToolTip(
                     "Number of volume-weighted standard-deviation bands to draw\n"
                     "around the AVWAP (0 = none). Each band k is AVWAP +-k*stddev,\n"
@@ -3244,7 +3349,6 @@ class TradeViewerQt(QMainWindow):
         self._profile_bins_spin = QSpinBox()
         self._profile_bins_spin.setRange(20, 300)
         self._profile_bins_spin.setValue(vcfg.num("profile_bins"))
-        self._profile_bins_spin.setFixedWidth(48)
         self._profile_bins_spin.setToolTip(
             "Number of price bins in the session volume profile (right panel) --\n"
             "higher = thinner bars, finer price resolution.")
@@ -3255,7 +3359,6 @@ class TradeViewerQt(QMainWindow):
         self._poc_trail_spin = QSpinBox()
         self._poc_trail_spin.setRange(1, 6)
         self._poc_trail_spin.setValue(vcfg.num("poc_trail"))
-        self._poc_trail_spin.setFixedWidth(40)
         self._poc_trail_spin.setToolTip(
             "How many POCs to mark in the session profile, newest first.\n"
             "POC1 is the current one, POC2 the level it moved off, and so on,\n"
@@ -3271,7 +3374,6 @@ class TradeViewerQt(QMainWindow):
         self._poc_hyst_spin.setRange(0, 50)
         self._poc_hyst_spin.setValue(vcfg.num("poc_hysteresis_pct"))
         self._poc_hyst_spin.setSuffix("%")
-        self._poc_hyst_spin.setFixedWidth(56)
         self._poc_hyst_spin.setToolTip(
             "POC switch hysteresis. A rival volume cluster has to hold this\n"
             "much more volume than the one the POC currently sits in before\n"
@@ -3337,7 +3439,6 @@ class TradeViewerQt(QMainWindow):
         self._tick_top_n = QSpinBox()
         self._tick_top_n.setRange(1, 10)
         self._tick_top_n.setValue(int(vcfg.num("tick_top_n")))
-        self._tick_top_n.setFixedWidth(44)
         self._tick_top_n.setToolTip(
             "Tick profile: gold outline on the N price levels that traded the\n"
             "most, PER SIDE -- N biggest buy levels and N biggest sell levels,\n"
@@ -3443,7 +3544,6 @@ class TradeViewerQt(QMainWindow):
         self._option_dte_spin = QSpinBox()
         self._option_dte_spin.setRange(0, 30)
         self._option_dte_spin.setValue(vcfg.num("option_dte"))
-        self._option_dte_spin.setFixedWidth(40)
         self._option_dte_spin.setToolTip("Max days-to-expiry for the option chain polled")
         tb_opt.addWidget(self._option_dte_spin)
 
@@ -3461,7 +3561,6 @@ class TradeViewerQt(QMainWindow):
         self._option_wall_count_spin.setRange(1, 10)
         self._option_wall_count_spin.setValue(vcfg.num("option_wall_count"))
         # 4 per side reads the GEX structure, not just its peak
-        self._option_wall_count_spin.setFixedWidth(36)
         self._option_wall_count_spin.setToolTip(
             "Number of Call Wall / Put Wall lines to draw per side, strongest\n"
             "GEX first (1 = just the single strongest wall each side, matching\n"
@@ -3474,7 +3573,6 @@ class TradeViewerQt(QMainWindow):
         self._option_interval_spin = QSpinBox()
         self._option_interval_spin.setRange(5, 300)
         self._option_interval_spin.setValue(vcfg.num("option_poll_secs"))
-        self._option_interval_spin.setFixedWidth(45)
         self._option_interval_spin.setToolTip(
             "Seconds between option-chain polls -- drives both Option Walls\n"
             "refresh and Option Alerts detection latency.")
@@ -3486,7 +3584,6 @@ class TradeViewerQt(QMainWindow):
         self._option_threshold_spin = QSpinBox()
         self._option_threshold_spin.setRange(1, 100_000)
         self._option_threshold_spin.setValue(vcfg.num("option_threshold"))
-        self._option_threshold_spin.setFixedWidth(65)
         self._option_threshold_spin.setToolTip(
             "Option Alerts: minimum single-contract volume increase between\n"
             "two polls to fire an alert (contracts, not dollars).")
@@ -3539,9 +3636,10 @@ class TradeViewerQt(QMainWindow):
         # trades -- the chart is what is being read.
         self._toolbar_rows = toolbar_rows
 
-        widest = max((tb.sizeHint().width() for tb in toolbar_rows), default=0)
-        if widest:
-            self.setMinimumWidth(widest + 16)
+        # The floor itself is set after the spin boxes are fitted, in
+        # __init__ -- measured here it would describe a layout that never
+        # reaches the screen.
+        self._set_toolbar_width_floor()
 
     # ── Central widget: chart + profiles ─────────────────────────────────────
 
@@ -4561,6 +4659,25 @@ class TradeViewerQt(QMainWindow):
 
     def _on_session_toggle(self) -> None:
         self._rebuild_session_profile()
+
+    def _set_toolbar_width_floor(self) -> None:
+        """Keep the window at least as wide as its widest toolbar row.
+
+        QToolBar's overflow chevron does engage on this Qt version (checked:
+        it appears at 1270 px and not at 1277), but collapsing a row moves
+        trailing controls into a popup, which reads as the controls having
+        gone missing. Flooring the width keeps that state unreachable.
+
+        Called twice: once while the rows are built, so the window has a
+        sane minimum before it is shown, and again after the spin boxes are
+        fitted, which is the only measurement that matches what is drawn.
+        """
+        rows = getattr(self, "_toolbar_rows", None)
+        if not rows:
+            return
+        widest = max((tb.sizeHint().width() for tb in rows), default=0)
+        if widest:
+            self.setMinimumWidth(widest + 16)
 
     def _on_range_radio_toggled(self, checked: bool) -> None:
         """One click on the range radios emits twice: toggled(False) on the
