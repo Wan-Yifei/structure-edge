@@ -53,8 +53,7 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import (
-    Qt, QThread, QTimer, pyqtSignal, QRect, QRectF, QPointF, QMetaObject,
-    Q_ARG,
+    Qt, QThread, QTimer, pyqtSignal, QRectF, QPointF, QMetaObject, Q_ARG,
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPicture, QPen, QBrush, QFont, QIcon, QPixmap,
@@ -65,12 +64,13 @@ from PyQt6.QtWidgets import (
     QSplitter, QToolBar, QLabel, QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox,
     QPushButton, QCheckBox, QButtonGroup, QRadioButton, QSizePolicy,
     QFrame, QStatusBar, QMessageBox, QDialog, QDialogButtonBox, QFormLayout,
-    QSystemTrayIcon, QAbstractSpinBox, QStyle, QStyleOptionSpinBox,
+    QSystemTrayIcon, QAbstractSpinBox,
 )
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from analysis import viewer_config as vcfg
+from analysis.qt_widgets import fit_all_spins
 from core.time_utils import candle_start
 from feeds.fetcher import fetch_klines
 from strategy.smc.market_structure import detect_bos_choch
@@ -108,85 +108,6 @@ pg.setConfigOptions(antialias=True)
 # frame, short enough that the panel is not visibly behind the crosshair.
 _PROFILE_COALESCE_MS = 16
 
-# Space between the widest value a spin box can show and its arrows. Measured:
-# at 0 the digits and the triangles touch and the number stops being readable
-# at a glance.
-_SPIN_TEXT_GAP = 6
-
-# The width used to ask the style where its sub-controls go. Any value wide
-# enough that none of them degenerate works; the answer is a difference, so
-# the number itself does not reach the result.
-_SPIN_PROBE_W = 400
-
-
-def _fit_spin(spin: QAbstractSpinBox, gap: int = _SPIN_TEXT_GAP) -> None:
-    """Widen a spin box until its own widest value clears the arrows.
-
-    These were hardcoded pixel widths until Windows 11, where every one of
-    them broke at once: the Windows 11 style puts the two arrow buttons SIDE
-    BY SIDE (two 24 px buttons) where earlier styles stacked them in one
-    16 px column, taking the chrome from about 28 px to 58. Worse, it then
-    returns a NEGATIVE x for SC_SpinBoxUp when the box is too narrow, so the
-    arrows are painted on top of the digits rather than beside them -- which
-    is why the toolbar read as a row of garbled boxes rather than as text cut
-    off at an edge.
-
-    Qt will not answer this directly. sizeHint and sizeFromContents both
-    over-report (86 px of chrome against 58 measured by sweeping the width
-    and looking at the pixels), while SC_SpinBoxEditField under-reports: it
-    subtracts only ONE of the two side-by-side buttons. So take the edit
-    field's answer and add back the button it forgot, which is detectable
-    because side-by-side buttons have different x.
-
-    Checked against a width sweep on all three styles this machine offers:
-    58 px on windows11 (58 measured), 27 on windowsvista (28) and 24 on
-    Fusion (26). The one- and two-pixel shortfalls sit inside `gap`.
-
-    Call this AFTER the stylesheet is applied. Not because the box comes
-    out too narrow otherwise -- measured, it comes out 18 px too WIDE (100
-    against 82 for a plain QSpinBox, 103 against 88 for a double): the
-    stylesheet's own border and padding replace a larger native frame. Run
-    early and the fourteen boxes gain about 250 px between them, which is
-    what would push the widest toolbar row past the window's minimum width
-    and start collapsing controls into the overflow chevron.
-    """
-    spin.ensurePolished()
-
-    opt = QStyleOptionSpinBox()
-    opt.initFrom(spin)
-    opt.frame = spin.hasFrame()
-    opt.buttonSymbols = spin.buttonSymbols()
-    opt.subControls = (QStyle.SubControl.SC_SpinBoxUp
-                       | QStyle.SubControl.SC_SpinBoxDown
-                       | QStyle.SubControl.SC_SpinBoxFrame
-                       | QStyle.SubControl.SC_SpinBoxEditField)
-    opt.rect = QRect(0, 0, _SPIN_PROBE_W, spin.sizeHint().height())
-
-    style, cc = spin.style(), QStyle.ComplexControl.CC_SpinBox
-    up = style.subControlRect(cc, opt, QStyle.SubControl.SC_SpinBoxUp, spin)
-    down = style.subControlRect(cc, opt, QStyle.SubControl.SC_SpinBoxDown, spin)
-    edit = style.subControlRect(cc, opt,
-                                QStyle.SubControl.SC_SpinBoxEditField, spin)
-
-    chrome = _SPIN_PROBE_W - edit.width()
-    if up.x() != down.x():
-        chrome += down.width()
-
-    # The widest string the box can ever display, not the value it holds now:
-    # a box sized to "1" clips the moment the user spins it to "300".
-    texts = []
-    for value in (spin.minimum(), spin.maximum()):
-        try:
-            texts.append(spin.textFromValue(value))
-        except (AttributeError, TypeError):
-            texts.append(str(value))
-    # By rendered width, not by character count: with a prefix, a suffix or
-    # a proportional font the longer string is not always the wider one.
-    fm = spin.fontMetrics()
-    text_w = max(fm.horizontalAdvance(f"{spin.prefix()}{t}{spin.suffix()}")
-                 for t in texts)
-
-    spin.setFixedWidth(text_w + chrome + gap)
 
 # ── Colour palette (matches trade_viewer.py) ──────────────────────────────────
 
@@ -2960,11 +2881,10 @@ class TradeViewerQt(QMainWindow):
         # comes out 10 px short. findChildren rather than a list built while
         # the toolbars are assembled, so a spin box added later is covered
         # without anyone remembering to register it.
-        for _spin in self.findChildren(QAbstractSpinBox):
-            _fit_spin(_spin)
+        fit_all_spins(self)
 
         # Only now do the rows have their final width: both the stylesheet
-        # and _fit_spin change it, and the floor is what keeps the chevron
+        # and fit_spin change it, and the floor is what keeps the chevron
         # out of reach.
         self._set_toolbar_width_floor()
 

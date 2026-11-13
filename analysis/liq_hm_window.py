@@ -35,6 +35,7 @@ import pyqtgraph as pg
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from analysis import viewer_config as vcfg
+from analysis.qt_widgets import fit_all_spins
 from feeds.order_book_store import SERVER_LEAD_SECS
 
 # ── palette (matches trade_viewer_qt) ──────────────────────────────────────────
@@ -775,7 +776,6 @@ class LiqHmWindow(QWidget):
         self._gamma_spin.setSingleStep(0.1)
         self._gamma_spin.setDecimals(1)
         self._gamma_spin.setValue(vcfg.liq("gamma"))
-        self._gamma_spin.setFixedWidth(52)
         self._gamma_spin.setToolTip(
             "Colour gamma correction.\n"
             ">1: suppresses sparse zones — only the densest orders stay bright.\n"
@@ -796,7 +796,6 @@ class LiqHmWindow(QWidget):
         self._min_vol_spin.setRange(0, 1_000_000)
         self._min_vol_spin.setSingleStep(100)
         self._min_vol_spin.setValue(vcfg.liq("min_vol"))
-        self._min_vol_spin.setFixedWidth(75)
         self._min_vol_spin.setToolTip(
             "Minimum volume to include in heatmap and detection.\n"
             "Spoof detection: 0 = auto (median of latest snapshot levels)"
@@ -810,7 +809,6 @@ class LiqHmWindow(QWidget):
         self._col_secs_spin.setRange(1, 300)
         self._col_secs_spin.setSingleStep(1)
         self._col_secs_spin.setValue(vcfg.liq("col_secs"))
-        self._col_secs_spin.setFixedWidth(55)
         self._col_secs_spin.setToolTip(
             "Seconds per column.\n"
             "With the ORDER_BOOK push feed up this is purely the time-axis\n"
@@ -827,7 +825,6 @@ class LiqHmWindow(QWidget):
         self._max_cols_spin.setRange(60, 1440)
         self._max_cols_spin.setSingleStep(60)
         self._max_cols_spin.setValue(vcfg.liq("max_cols"))
-        self._max_cols_spin.setFixedWidth(60)
         self._max_cols_spin.setToolTip("Number of columns kept in memory")
         self._max_cols_spin.valueChanged.connect(self._on_max_cols_changed)
         row1.addWidget(self._max_cols_spin)
@@ -853,7 +850,6 @@ class LiqHmWindow(QWidget):
         self._n_price_spin.setRange(20, 500)
         self._n_price_spin.setSingleStep(20)
         self._n_price_spin.setValue(vcfg.liq("n_price"))
-        self._n_price_spin.setFixedWidth(55)
         self._n_price_spin.setToolTip(
             "Price-axis resolution: number of bands the current price span is\n"
             "divided into. Higher = finer bands (each one covers less price\n"
@@ -894,7 +890,6 @@ class LiqHmWindow(QWidget):
         self._ice_min_ref_spin.setRange(1, 50)
         self._ice_min_ref_spin.setSingleStep(1)
         self._ice_min_ref_spin.setValue(vcfg.liq("ice_min_ref"))
-        self._ice_min_ref_spin.setFixedWidth(50)
         self._ice_min_ref_spin.setToolTip("Minimum refreshes to classify as iceberg")
         self._ice_min_ref_spin.valueChanged.connect(self._on_controls_changed)
         row2.addWidget(self._ice_min_ref_spin)
@@ -914,7 +909,6 @@ class LiqHmWindow(QWidget):
         self._spoof_dur_spin.setRange(3, 300)
         self._spoof_dur_spin.setSingleStep(5)
         self._spoof_dur_spin.setValue(vcfg.liq("spoof_dur"))
-        self._spoof_dur_spin.setFixedWidth(50)
         self._spoof_dur_spin.setToolTip("Max seconds a large order can live before being flagged")
         self._spoof_dur_spin.valueChanged.connect(self._on_controls_changed)
         row2.addWidget(self._spoof_dur_spin)
@@ -935,7 +929,6 @@ class LiqHmWindow(QWidget):
         self._wall_n_spin = QSpinBox()
         self._wall_n_spin.setRange(1, 10)
         self._wall_n_spin.setValue(vcfg.liq("wall_n"))
-        self._wall_n_spin.setFixedWidth(42)
         self._wall_n_spin.setToolTip(
             "How many walls to label on EACH side -- bid and ask are counted\n"
             "separately, so N=3 labels up to 3 + 3.\n\n"
@@ -965,7 +958,6 @@ class LiqHmWindow(QWidget):
         self._simb_levels_spin.setRange(2, 10)
         self._simb_levels_spin.setSingleStep(1)
         self._simb_levels_spin.setValue(vcfg.liq("simb_levels"))
-        self._simb_levels_spin.setFixedWidth(45)
         self._simb_levels_spin.setToolTip("Minimum consecutive imbalanced depth levels")
         self._simb_levels_spin.valueChanged.connect(self._on_controls_changed)
         row2.addWidget(self._simb_levels_spin)
@@ -976,7 +968,6 @@ class LiqHmWindow(QWidget):
         self._simb_ratio_spin.setSingleStep(0.5)
         self._simb_ratio_spin.setValue(vcfg.liq("simb_ratio"))
         self._simb_ratio_spin.setDecimals(1)
-        self._simb_ratio_spin.setFixedWidth(52)
         self._simb_ratio_spin.setToolTip("bid/ask (or ask/bid) volume ratio threshold per level")
         self._simb_ratio_spin.valueChanged.connect(self._on_controls_changed)
         row2.addWidget(self._simb_ratio_spin)
@@ -986,7 +977,6 @@ class LiqHmWindow(QWidget):
         self._simb_depth_spin.setRange(3, 50)
         self._simb_depth_spin.setSingleStep(1)
         self._simb_depth_spin.setValue(vcfg.liq("simb_depth"))
-        self._simb_depth_spin.setFixedWidth(45)
         self._simb_depth_spin.setToolTip(
             "Max depth ranks to analyse (top-of-book only).\n"
             "Deep orders far from the spread are noise — keep this at 5–15.")
@@ -1010,7 +1000,6 @@ class LiqHmWindow(QWidget):
         self._absorb_min_vol_spin.setRange(10, 100_000)
         self._absorb_min_vol_spin.setSingleStep(10)
         self._absorb_min_vol_spin.setValue(vcfg.liq("absorb_min_vol"))
-        self._absorb_min_vol_spin.setFixedWidth(70)
         self._absorb_min_vol_spin.setToolTip(
             "Minimum |buy_vol − sell_vol| per column to show a bubble.")
         self._absorb_min_vol_spin.valueChanged.connect(self._on_absorb_changed)
@@ -1023,6 +1012,25 @@ class LiqHmWindow(QWidget):
         tb_lay.setSpacing(0)
         tb_lay.addWidget(row1)
         tb_lay.addWidget(row2)
+
+        # Before the floor is taken: Windows 11 lays a spin box's two arrow
+        # buttons out side by side rather than stacked, which needs about
+        # 58 px of chrome against the 28 px the pinned widths here assumed --
+        # every box in both rows was painting its arrows over its digits.
+        # The widths are computed from the style now, so the floor below has
+        # to be measured after them or it describes a layout that never
+        # reaches the screen. This window has no stylesheet of its own, so
+        # there is nothing else to wait for.
+        #
+        # Rooted at _toolbar rather than at self: the rows have only just
+        # become children of it, and _toolbar itself is not a child of the
+        # window until the layout below is built. Rooted at self this finds
+        # no spin boxes and silently does nothing -- which still looked
+        # right, because without the hardcoded widths Qt's own sizeHint
+        # takes over and it over-reports the chrome by 28 px. The assert is
+        # here because that failure mode is invisible on screen.
+        fitted = fit_all_spins(self._toolbar)
+        assert fitted, "no spin boxes found to fit -- wrong root?"
 
         # row1/row2 are QToolBar instances used purely as a convenient
         # addWidget()/addSeparator() container here -- they were never docked
