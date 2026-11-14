@@ -108,3 +108,64 @@ class TestLoadCachedNeverBuilds:
         full.to_parquet(delta_bars._cache_path("US.X"))
         assert delta_bars.load_cached("US.X", "2026-09-01",
                                       "2026-09-05") is None
+
+
+class TestLoadBarEnd:
+    """These bars are keyed by the minute's START, a kline's time_key by its END.
+
+    Eleven of the twelve call sites that joined the two did it raw and so read
+    one minute of the future on the one field they were studying. The miss is
+    invisible -- the frame comes back full, it just answers early -- so this
+    pins the stamp the helper hands back rather than any caller's behaviour.
+    """
+
+    def test_a_row_moves_to_the_stamp_of_the_bar_it_describes(self, monkeypatch):
+        """Flow of 10:00-10:01 belongs on the kline stamped 10:01."""
+        src = _frame("2026-10-13 10:00", 5)
+        src["buy"] = [10.0, 20.0, 30.0, 40.0, 50.0]
+        monkeypatch.setattr(delta_bars, "load", lambda *a, **kw: src)
+        got = delta_bars.load_bar_end("US.X", "2026-10-13 10:00",
+                                      "2026-10-13 10:05")
+        assert list(got.index) == list(src.index + pd.Timedelta(minutes=1))
+        assert got.loc[pd.Timestamp("2026-10-13 10:01"), "buy"] == 10.0
+        assert got.loc[pd.Timestamp("2026-10-13 10:05"), "buy"] == 50.0
+
+    def test_it_asks_for_a_minute_before_the_range(self, monkeypatch):
+        """Otherwise the bar ENDING at `start` is shifted out of the result."""
+        seen = {}
+
+        def fake(code, start, end, refresh=False):
+            seen["start"] = pd.Timestamp(start)
+            return _frame(start, 3)
+
+        monkeypatch.setattr(delta_bars, "load", fake)
+        delta_bars.load_bar_end("US.X", "2026-10-13 10:00", "2026-10-13 10:05")
+        assert seen["start"] == pd.Timestamp("2026-10-13 09:59")
+
+    def test_an_empty_frame_comes_back_untouched(self, monkeypatch):
+        monkeypatch.setattr(delta_bars, "load", lambda *a, **kw: _frame("2026-10-13", 0))
+        assert not len(delta_bars.load_bar_end("US.X", "2026-10-13", "2026-10-14"))
+
+    def test_the_source_frame_is_not_mutated(self, monkeypatch):
+        """Callers share the cached frame; shifting it in place poisons them."""
+        src = _frame("2026-10-13 10:00", 3)
+        before = list(src.index)
+        monkeypatch.setattr(delta_bars, "load", lambda *a, **kw: src)
+        delta_bars.load_bar_end("US.X", "2026-10-13 10:00", "2026-10-13 10:03")
+        assert list(src.index) == before
+
+    def test_the_cached_path_shifts_the_same_way(self, cache):
+        """The non-blocking reader needs it too, or it becomes the one place
+        the shift has to be remembered by hand."""
+        full = _frame("2026-10-13 09:00", 120)
+        full["buy"] = range(120)
+        delta_bars._cache_path("US.X").parent.mkdir(parents=True, exist_ok=True)
+        full.to_parquet(delta_bars._cache_path("US.X"))
+        got = delta_bars.load_cached_bar_end("US.X", "2026-10-13 10:00",
+                                             "2026-10-13 10:05")
+        assert got.loc[pd.Timestamp("2026-10-13 10:01"), "buy"] == \
+            full.loc[pd.Timestamp("2026-10-13 10:00"), "buy"]
+
+    def test_the_cached_path_still_says_none_when_empty(self, cache):
+        assert delta_bars.load_cached_bar_end("US.X", "2026-10-13",
+                                              "2026-10-14") is None

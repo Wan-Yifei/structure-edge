@@ -1,15 +1,21 @@
 """Absorption markers: drawn to be watched, never to be traded.
 
-The condition is backtest/absorption.py's, pre-registered there and
-measured out of sample over 60 sessions -- where TRADING it lost
-(-0.361 R long, -0.566 R short). So the thing these tests guard is not
-"does it predict" but "does it mark the same event the study defined,
-and does the UI still say not to act on it".
+The condition is backtest/absorption.py's, pre-registered there. What
+these tests guard is not "does it predict" but "does it mark the same
+event the study defined, and does the UI still say not to act on it".
 
-The constants test is the important one: the tooltip quotes the study's
-numbers, so the viewer must be applying the study's gate. Retuning one
-without the other would leave the panel citing an experiment it no
-longer runs.
+RETRACTED 2026-11-14: the study's out-of-sample figures, on both sides
+of the mark, came from a run that joined klines (stamped at a bar's END)
+to delta_bars (stamped at its START) with no shift -- every bar scored on
+the NEXT minute's flow. The tooltip assertion used to REQUIRE those
+numbers on screen ("the tooltip quotes the study's numbers, so the viewer
+must be applying the study's gate"), which turned a provenance check into
+a rule keeping a withdrawn figure in front of the user. It is inverted
+below: the tooltip must refuse to be an entry, and must not quote them.
+
+The gate-constants test still does the real work -- the viewer must apply
+the same gate absorption.py defines -- and it does that by comparing
+constants, not prose.
 """
 import pathlib
 import sys
@@ -96,7 +102,14 @@ def viewer(qapp):
 
 class TestItMarksTheStudysEvent:
     def test_the_constants_are_the_studys(self):
-        """The tooltip quotes numbers measured under these settings."""
+        """Code against code -- the only thing that proves the panel is
+        running the study's gate.
+
+        This used to be justified as "the tooltip quotes numbers measured
+        under these settings", which is a weaker claim and is no longer even
+        true: the tooltip quotes no numbers now. The constants below are what
+        the guard was always resting on.
+        """
         from analysis import trade_viewer_qt as v
         from backtest import absorption as study
         from backtest.delta_atr_matrix import MIN_SIGNED
@@ -236,6 +249,8 @@ class TestTheViewerDrawsAndClears:
     def test_the_tooltip_refuses_to_be_an_entry(self, viewer):
         tip = viewer._ind_checks["absorb"].toolTip()
         assert "NOT AN ENTRY" in tip
-        assert "-0.361" in tip and "-0.566" in tip, \
-            "the measured loss is not stated"
-        assert "+0.352" in tip, "the alternative that does pay is not stated"
+        assert "2026-11-14" in tip, \
+            "the retraction is not dated, so the reader cannot place it"
+        for n in ("-0.361", "-0.566", "+0.352", "+0.285"):
+            assert n not in tip, \
+                f"{n} was withdrawn 2026-11-14; the panel must not state it"

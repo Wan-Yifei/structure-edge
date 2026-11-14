@@ -877,11 +877,18 @@ RANGE_DAYS = {"1d": 1, "2d": 2, "3d": 3, "7d": 5}
 # DCVD_SCALE below in this same file, whose 1-bar p99 of 0.93 leaves no room
 # for 14.7% of readings above 0.9.
 #
-# The window is 1 because that is the one that predicts. Over 60 walk-forward
-# out-of-sample sessions, entering on |DCVD| >= 0.4 and risking 1 ATR for 1.5
-# returns +0.207 R a trade long and +0.247 short, against -0.101 and -0.062
-# for entering on every minute. The 5-bar version of the same rule is worth
-# nothing: averaging over five minutes removes the imbalance it is measuring.
+# The window is 1. The reason used to be "because that is the one that
+# predicts", on a walk-forward result of +0.207 R a trade long and +0.247
+# short for |DCVD| >= 0.4 against -0.101 and -0.062 for every minute --
+# RETRACTED 2026-11-14, that study joined klines (stamped at a bar's END) to
+# delta_bars (stamped at its START) without a shift and so read the next
+# minute. Re-run aligned, the same rule is -0.105 R and its paired gain over
+# unconditional entry crosses zero.
+#
+# 1 stays anyway, for the reason the old note gave second: averaging over
+# five minutes removes the imbalance being measured, so the 5-bar version
+# answers a different question rather than a smoother version of this one.
+# That part is a statement about the quantity, not a measured edge.
 DCVD_LOOKBACK = 1
 
 # Signed volume a bar needs before its DCVD means anything. Below it a single
@@ -899,15 +906,21 @@ DCVD_MIN_SIGNED = 300.0
 #
 # DCVD is a RATIO and says nothing about size: a 500-share bar and a
 # 50,000-share bar both read 0.5 when two thirds of them is buying. The
-# gate is the missing dimension, and over 60 walk-forward sessions the two
-# together scored +0.351 a trade against +0.112 for DCVD alone. Encoded as
+# gate is the missing dimension. (The 2x2 that used to be quoted here --
+# the two together against DCVD alone over 60 walk-forward sessions --
+# is RETRACTED 2026-11-14: that study read the next minute's flow on every
+# bar. The DIMENSION is still missing, which is a statement about the
+# quantity; what it was worth is no longer established.) Encoded as
 # opacity rather than a second panel: colour already carries the sign and
 # height the ratio, so opacity is the free channel, and the pair reads as
 # "the solid ones are the bars with real size behind them".
 #
 # POST-HOC. That 2x2 was found by looking, not registered in advance, so
 # this is drawn to watch and to gather forward evidence -- not yet to act
-# on. The pre-registered part is the +/-0.4 line.
+# on. The pre-registered part is the +/-0.4 line -- registered in the sense
+# of being written down before the test set was read, but CHOSEN from
+# PRE=[0, 0.2, 0.4], so it is in-sample with respect to its own threshold.
+# (It is now only a reference line anyway; see DCVD_DECISION below.)
 DCVD_FLOW_WIN = 60
 DCVD_FLOW_PCT = 0.80
 _DCVD_DIM_ALPHA = 70      # bars that did not clear the gate
@@ -915,9 +928,11 @@ _DCVD_LIT_ALPHA = 215     # bars that did
 
 # Absorption: |x| >= G and the price move |A| standard deviations away
 # from what that flow should have delivered. Pre-registered in
-# backtest/absorption.py and measured out of sample over 60 sessions --
-# where TRADING it lost (-0.361 R long, -0.566 R short, against an
-# unconditional -0.101/-0.072). It is drawn because seeing that heavy
+# backtest/absorption.py -- but its out-of-sample figures, on both sides of
+# the mark, are RETRACTED 2026-11-14: absorption.py joined klines (bar END)
+# to delta_bars (bar START) with no shift, so every bar was scored on the
+# NEXT minute's flow. Nothing about what the mark is worth, in either
+# direction, survives that. It is drawn because seeing that heavy
 # selling is being eaten is worth knowing while watching the tape; it is
 # not drawn because it is an entry. The window and the gate are DCVD's
 # own constants above, since it is literally the same gate.
@@ -929,11 +944,26 @@ ABS_ATR_N = 14            # the study's ATR14, the unit A is measured in
 # It is deliberately not the decision value -- see the note on the window.
 DCVD_CONTEXT = 5
 
-# The threshold the backtest validated, drawn on both sides: the long and
-# short rules are symmetric, their lift over their own baselines measured at
-# +0.308 and +0.309 across reward ratios from 1:1 to 1:2.
+# A reference line, drawn on both sides. It used to say "the threshold the
+# backtest validated", with a measured lift over baseline on each side --
+# RETRACTED 2026-11-14, that lift came from the one-minute forward leak
+# described below, and the paired gain over unconditional entry crosses zero
+# once aligned. 0.4 is kept so this panel and the drill's agree on where the
+# line sits; it is not a validated level.
 DCVD_DECISION = 0.4
 
+# RETRACTED 2026-11-14 -- the measurement this whole rule rests on was
+# produced through a one-minute forward leak, and the behaviour below is
+# UNCHANGED only because switching the light back is a trading decision,
+# not a documentation fix. The study joined klines (stamped at a bar's
+# END) to delta_bars (stamped at its START) without shifting, so every
+# bar carried the NEXT minute's flow. Re-measured after the fix, in the
+# same caliber over 125 sessions: unconditional +0.181 R -> -0.044,
+# the 0.4 level +0.309 -> -0.054, the flow gate +0.419 -> -0.056. The
+# three are no longer separable, so "the gate measures better than the
+# level" has no evidence left. See doc/ORDER_FLOW_GUIDE.md appendix B.
+# This file's own delta is fine -- it goes through bar_start_keys().
+#
 # The light reads the newest bar, and what it reads changed.
 #
 # It used to be the LEVEL alone: >= 0.4 green, 0..0.4 amber, below zero
@@ -3115,26 +3145,28 @@ class TradeViewerQt(QMainWindow):
                     "DCVD lookback, in bars (the coloured bars).\n"
                     f"The {DCVD_CONTEXT}-bar line behind them is context "
                     "only.\n\n"
-                    "Over 60 walk-forward out-of-sample sessions, entering "
-                    "on\n"
-                    f"|DCVD| >= {DCVD_DECISION} at a 1-bar window returned "
-                    "+0.207 R long\n"
-                    "and +0.247 R short, risking 1 ATR to make 1.5. The same"
-                    "\nrule on a 5-bar window is worth nothing: averaging "
-                    "over\nfive minutes removes the imbalance it measures.\n\n"
+                    "NO EDGE IS CLAIMED HERE ANY MORE. The R figures this "
+                    "tooltip\nused to quote were withdrawn on 2026-11-14: "
+                    "the study behind\nthem joined klines (stamped at a "
+                    "bar's END) to the flow data\n(stamped at its START) "
+                    "without shifting, so every bar was\nscored on the NEXT "
+                    "minute's flow. Re-run aligned, neither the\n"
+                    f"{DCVD_DECISION} level nor the flow gate beats entering "
+                    "on every minute.\nWhat is drawn is still a real reading "
+                    "of the tape -- what was\nnot established is that acting "
+                    "on it pays.\n\n"
+                    "The 1-bar window is kept because a 5-bar one averages "
+                    "the\nimbalance away, which is a property of the "
+                    "quantity rather\nthan a measured result.\n\n"
                     "The y-axis follows the window (measured p99), so "
                     "changing it\nneither squashes the bars nor clips their "
                     "peaks.\n\n"
-                    "BRIGHT vs DIM is a second rule, and the stronger one. "
-                    "A bar\nis bright when this minute's signed volume "
-                    f"cleared the flow\ngate: |x| in the top "
+                    "BRIGHT vs DIM is a second, independent reading. A bar "
+                    "is\nbright when this minute's signed volume cleared the "
+                    f"flow\ngate: |x| in the top "
                     f"{100 - int(DCVD_FLOW_PCT * 100)}% of its own trailing "
                     f"{DCVD_FLOW_WIN} bars,\nwhere x = (buy-sell) / median("
-                    "buy+sell). Over the same 60\nout-of-sample sessions, "
-                    "following a bright bar's own sign\nreturned +0.352 R "
-                    "short on heavy selling and +0.285 R long on\nheavy "
-                    "buying -- against +0.207/+0.247 for the height rule "
-                    "above.\n\n"
+                    "buy+sell).\n\n"
                     "Height and brightness answer different questions: the "
                     "height\nis the imbalance RATIO, the brightness is "
                     "whether the volume\nbehind it was large for this stock "
@@ -3154,12 +3186,16 @@ class TradeViewerQt(QMainWindow):
                     "Gold triangle below the bar = heavy SELLING that did "
                     "not push\nprice down. Purple above = heavy BUYING that "
                     "did not lift it.\n\n"
-                    "THIS IS NOT AN ENTRY. Measured over 60 walk-forward "
-                    "out-of-\nsample sessions, trading these marks lost "
-                    "-0.361 R long and\n-0.566 R short, against an "
-                    "unconditional -0.101/-0.072. At the\nsame gate, going "
-                    "WITH the flow earned +0.352/+0.285. The mark\nis here "
-                    "to show you what the tape is doing, not what to do.\n\n"
+                    "THIS IS NOT AN ENTRY -- and as of 2026-11-14 that is "
+                    "the only\npart of the old note left standing. The R "
+                    "figures that used to\nbe here, on both sides of the "
+                    "mark, came from a study that\njoined klines (stamped "
+                    "at a bar's END) to the flow data\n(stamped at its "
+                    "START) without shifting, so every bar was\nscored on "
+                    "the NEXT minute's flow. Nothing about what these\n"
+                    "marks are worth, in either direction, is established "
+                    "now.\nThe mark is here to show you what the tape is "
+                    "doing.\n\n"
                     "Calibrated on 1-minute RTH bars; on other timeframes "
                     "the\nthreshold has not been measured.\n\n"
                     "RTH only, and the gate is read off the SAME TIME OF "

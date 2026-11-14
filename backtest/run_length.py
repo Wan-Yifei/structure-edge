@@ -6,8 +6,19 @@ The observation: several red DCVD bars, then a green one, looks like the
 start of a reversal. That description contains two separate things, and
 only one of them is new:
 
-  the flip   delta_r crossing from negative to positive. Already measured:
-             dr1 >= 0.4 is worth +0.207 R a trade long, +0.247 short.
+  the flip   delta_r crossing from negative to positive. RETRACTED
+             2026-11-14: the "+0.207 R long, +0.247 short" that used to sit
+             here came from a run where klines (stamped at a bar's END) were
+             joined to delta_bars (stamped at its START) with no shift, so
+             each bar read the NEXT minute's flow. Re-run after the fix, the
+             same rule is -0.105 R [-0.149,-0.064]. The PREMISE of this study
+             is therefore gone -- but its own finding is not: the sign
+             sequence is first-order Markov and the run length carries
+             nothing beyond the previous bar, and those conditional
+             probabilities agree to two decimals under either alignment,
+             largest difference 0.003 (old .536/.573/.589/.573/.636/.590,
+             new .536/.574/.590/.570/.637/.591), because they are delta
+             against delta and both sides move together.
   the run    how many consecutive negative bars preceded it. This is the
              only part that is not already in hand, so it is the only
              thing this study asks about.
@@ -69,7 +80,7 @@ def build():
     k = fetch_klines(CODE, "1m", START, END)
     k["t"] = pd.to_datetime(k.time_key)
     k = k.sort_values("t").drop_duplicates("t").set_index("t")
-    dl = delta_bars.load(CODE, START, END)
+    dl = delta_bars.load_bar_end(CODE, START, END)
     k = k.join(dl[["buy", "sell"]], how="left")
     k[["buy", "sell"]] = k[["buy", "sell"]].fillna(0.0)
 

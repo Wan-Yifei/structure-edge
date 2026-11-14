@@ -5,9 +5,43 @@ trader says enter or pass, sets a stop and a target, and the forward path
 settles it. Scoring is in R and only in R, because on the events this module
 selects the structural label carries no information: measured over
 2026-05-19 to 10-12 on SOXL, a deep decline reached +2 ATR 33.3% of the time
-and a shallow pullback 33.0%, intervals overlapping. What does separate is
-delta_r -- 44.8% when the decision minute's 1m reading is >= 0 against 25.3%
-when it is negative.
+and a shallow pullback 33.0%, intervals overlapping.
+
+RETRACTED 2026-11-14 -- the sentence that used to follow read "What does
+separate is delta_r -- 44.8% when the decision minute's 1m reading is >= 0
+against 25.3% when it is negative." That split was an artefact of `load_range`
+joining klines (stamped at the bar's END) to delta_bars (stamped at its
+START) without a shift, so every question's delta_r was the NEXT minute's.
+The join is fixed; re-measured on the same questions with the same `lab`, only
+the minute the reading comes from changed:
+
+                  old join        fixed
+    CONFIRM=0     +16.7pp   ->    -5.8pp      (40.4/23.7  ->  26.2/32.0)
+    CONFIRM=1     +13.4pp   ->    +0.2pp      (40.0/26.6  ->  33.3/33.1)
+    15m, c1        +1.8pp   ->    -1.6pp
+
+The mechanism is plain once seen: a question marks a local low, and that bar
+is itself selling into the drop. The minute that leaked in is the bounce. So
+"delta_r >= 0 wins more often" was close to a restatement of "the next bar
+bounced" -- on c0 the count of questions with delta_r >= 0 falls from 406 to
+211 once the leak is removed.
+
+So neither the structural label nor delta_r separates measurably on this
+population -- which is a failure to detect, not a demonstration that both are
+zero. The -5.8pp is not evidence of a reverse effect either: the intervals
+overlap and that arm is down to n=211.
+
+REGENERATED the same day, so the files in the tree are now on the fixed
+join. Before that the stored dr1 reproduced exactly under the UNSHIFTED one
+(968/968 on c0, 963/963 on c1), which is how the bank was identified as old.
+
+Two things to carry forward from that run. `--keep` defaults to 600 and the
+trim drops WHOLE SESSIONS from the oldest end, so the full-range command
+needs `--keep 1200` to match `config/schedule.json`'s nightly append -- at
+the default it would have deleted ~50 sessions and orphaned the answers in
+`drill_records.json`. And the `ab` field is gone: it had no generator, it
+was written in by a one-off migration that is no longer in the tree, and it
+was computed under the old join. See CHANGELOG v0.92.0.
 
 CONFIRM is why this module exists rather than another script. Deciding on the
 low bar itself is not a decision anyone makes: you cannot know a bar is the
@@ -18,17 +52,20 @@ generated and measured separately rather than mixed.
 
 Each question carries what the trader actually watches:
   delta_r at 1, 5 and 15 minutes, all trailing windows ending at the decision
-  bar, so none of them reads a minute that has not happened;
+  bar, so none of them reads a minute that has not happened -- a claim this
+  file made while `load_range` was quietly breaking it, which is why the join
+  is now pinned by a test rather than by this sentence;
   RSI(6) on 1m and 5m;
   the session's volume profile as it could have been drawn at that moment;
   a structural reading -- swings, trend, retracement, support tests;
   and, for the sessions `feeds/book_ladder.py` has archived, the resting book
   over the preceding 30 minutes as a price-by-time grid.
 
-The figures above are CONFIRM=0 and do not carry over: at CONFIRM=1 the 1m
-delta_r split narrows to 41.5/28.4 and the 15m split disappears entirely
-(35.6/34.1). `--confirm` writes the setting into each question id so the two
-sets never mix, and the page loads the rates belonging to the set in play.
+The structural figures above are CONFIRM=0 and do not carry over; the old
+CONFIRM=1 delta_r numbers (1m 41.5/28.4, 15m 35.6/34.1) are retracted with
+the rest and replaced by the table above. `--confirm` writes the setting into
+each question id so the two sets never mix, and the page loads the rates
+belonging to the set in play.
 """
 
 from __future__ import annotations
@@ -212,10 +249,21 @@ def flow_mag_series(buy, sell, lo, hi):
 
     delta_r is a ratio and says nothing about size: a quiet bar and a
     heavy one can share it. The viewer gates on this magnitude instead
-    -- |x| in the top fifth of its trailing 60 -- and over 60
-    out-of-sample sessions that gate was worth more than the 0.4 line
-    on the ratio (+0.363 R a trade against +0.264). The drill could not
+    -- |x| in the top fifth of its trailing 60 -- and the drill could not
     show it at all, which is what this adds.
+
+    RETRACTED 2026-11-14 -- the claim that used to be here, that the gate
+    "was worth more than the 0.4 line on the ratio (+0.363 R a trade
+    against +0.264)", came from a study that joined klines (stamped at a
+    bar's END) to delta_bars (stamped at its START) with no shift, so every
+    bar was scored on the NEXT minute's flow. Aligned, the two are
+    indistinguishable and neither beats entering unconditionally. See
+    doc/ORDER_FLOW_GUIDE.md appendix B.
+
+    Note also that x is not a third quantity: x == dr1 * (flow magnitude)
+    exactly, so gating on it folds direction and size into one number.
+    Split apart and tested on all RTH minutes, the interaction between the
+    two crosses zero -- size neither amplifies nor suppresses the ratio.
 
         x_i = (buy - sell)_i / median(buy + sell over the previous 60)
 
@@ -261,7 +309,18 @@ def _profile(upto):
 
 
 def load_range(code: str, start: str, end: str) -> pd.DataFrame:
-    """1m klines joined to the aggressor split, fetched once for the range."""
+    """1m klines joined to the aggressor split, fetched once for the range.
+
+    The flow comes from `delta_bars.load_bar_end`, not `load`: these bars are
+    keyed by the minute's START and a kline's `time_key` is its END, so the
+    raw join hands every bar the NEXT minute's flow. That docstring carries
+    the measurement.
+
+    The frame stays on bar-END stamps, which is what the rest of this module
+    reads -- `build_day`'s RTH window (`hh > 9.5` and `hh <= 16.0`) and
+    `bubbles()` (`tk.ts <= t_end`). Fixing the join by moving the kline back
+    a minute instead would have shifted the session window with it.
+    """
     from feeds import delta_bars
     from feeds.fetcher import fetch_klines
 
@@ -270,7 +329,7 @@ def load_range(code: str, start: str, end: str) -> pd.DataFrame:
         return pd.DataFrame()
     k["t"] = pd.to_datetime(k.time_key)
     k = k.sort_values("t").drop_duplicates("t").set_index("t")
-    dl = delta_bars.load(code, start, end)
+    dl = delta_bars.load_bar_end(code, start, end)
     cols = ["buy", "sell", "neutral"]
     if dl is None or dl.empty:
         full = k.assign(**{c: 0.0 for c in cols})
@@ -383,6 +442,17 @@ def bubbles(tk, t_end, lo: float, hi: float) -> list:
     Returns [col, price, net, side], side +1 buying and -1 selling. The price
     is the column's last print, which always exists; the viewer uses the
     book's mid, which only exists for the days the ladder archive covers.
+
+    "Last print" is NOT WELL DEFINED, 2026-11-14. `day_ticks` orders by `ts`
+    alone and SOXL prints many trades inside one millisecond, so the final
+    row of a column is whatever the sort happens to put there. Measured: at
+    2026-11-10 12:49:59.910 three prints share the stamp, at 53.14 and
+    53.1299, and the same question came out 53.14 on one generation and
+    53.13 on the next with the tick set unchanged. `net` is a sum and so is
+    immune; only this price moves, by a cent. Two runs in a row agree, so it
+    is not noise on every call -- it is a tie nothing breaks. A fix means a
+    second sort key, which would move the price on every question once, so
+    it is not folded into a regeneration done for another reason.
     """
     if tk is None or len(tk) == 0:
         return []

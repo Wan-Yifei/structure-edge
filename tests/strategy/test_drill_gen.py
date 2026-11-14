@@ -512,3 +512,64 @@ class TestPinchKind:
     def test_the_kind_is_off_when_not_asked_for(self):
         got = self._rows(("deep", "shallow"))
         assert not any(r["kind"] == "夹角" for r in got)
+
+
+class TestTheFlowBelongsToTheBarItIsOn:
+    """A kline is stamped with the END of its minute, delta_bars with the START.
+
+    Joined as they come, the bar stamped 10:01 -- covering 10:00-10:01 --
+    received the flow of 10:01-10:02: one minute of the future, on the one
+    field the drill exists to train. Measured, that moved dr1's reading on
+    the next five minutes from -1.95 bps to +32.30, sign included.
+
+    The whole suite passed with that join in place, so these drive the real
+    load_range with both sources stubbed rather than checking an offset
+    somewhere downstream.
+    """
+
+    MINS = pd.date_range("2026-06-01 09:31", periods=5, freq="1min")
+    BUY = [100, 200, 300, 400, 500]
+
+    def _joined(self, monkeypatch, drop=None):
+        import feeds.delta_bars as db
+        import feeds.fetcher as ft
+        from strategy import drill_gen
+
+        k = pd.DataFrame({
+            "time_key": self.MINS.strftime("%Y-%m-%d %H:%M:%S"),
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1,
+        })
+        # Indexed on the bar START, a minute earlier, and tagged so whichever
+        # row it lands on names itself.
+        dl = pd.DataFrame(
+            {"buy": self.BUY, "sell": [1, 2, 3, 4, 5], "neutral": [0] * 5},
+            index=self.MINS - pd.Timedelta(minutes=1))
+        if drop is not None:
+            dl = dl.drop(dl.index[drop])
+        monkeypatch.setattr(ft, "fetch_klines", lambda *a, **kw: k)
+        monkeypatch.setattr(db, "load", lambda *a, **kw: dl)
+        return drill_gen.load_range("US.SOXL", "2026-06-01", "2026-06-01")
+
+    def test_every_bar_carries_the_flow_of_its_own_minute(self, monkeypatch):
+        got = self._joined(monkeypatch)
+        for i, want in enumerate(self.BUY):
+            t = self.MINS[i]
+            assert got.loc[t, "buy"] == want, (
+                f"bar stamped {t:%H:%M} covers {t - pd.Timedelta(minutes=1):%H:%M}"
+                f"-{t:%H:%M} and must carry that minute's flow")
+
+    def test_a_bar_with_no_flow_row_gets_zero_not_a_neighbours(self, monkeypatch):
+        """The failing join filled this bar from the minute after it."""
+        got = self._joined(monkeypatch, drop=2)
+        assert got.loc[self.MINS[2], "buy"] == 0.0
+        assert got.loc[self.MINS[1], "buy"] == self.BUY[1]
+        assert got.loc[self.MINS[3], "buy"] == self.BUY[3]
+
+    def test_the_frame_stays_on_bar_end_stamps(self, monkeypatch):
+        """build_day's RTH window and bubbles() both read bar-END stamps.
+
+        Fixing the join by shifting the KLINE back a minute would have moved
+        the index instead, silently shifting the session window with it.
+        """
+        got = self._joined(monkeypatch)
+        assert list(got.index) == list(self.MINS)

@@ -470,11 +470,20 @@ class TestCheckedAtStartupActuallyActs:
 
 
 class TestTheBrightnessIsExplained:
-    """The lit/dim split encodes the stronger of the panel's two rules --
-    the flow gate, +0.352 R against the height rule's +0.207 -- and
-    nothing on screen said so. The numbers in that sentence have to
-    track the constants, or the panel documents a gate it does not
-    apply."""
+    """The lit/dim split encodes a rule, and nothing on screen said which.
+
+    The parameters still have to track the constants, or the panel
+    documents a gate it does not apply.
+
+    What changed 2026-11-14: this class used to also demand the tooltip
+    quote the gate's measured return (+0.352 / +0.285 against the height
+    rule's +0.207). Those came from a study that joined klines (stamped at
+    a bar's END) to delta_bars (stamped at its START) without shifting, so
+    every bar was scored on the NEXT minute's flow; re-run aligned, neither
+    rule beats entering on every minute. A test that REQUIRES a withdrawn
+    number is a test that keeps it on screen, so the assertion is inverted:
+    the tooltip must say the claim was withdrawn, and must not quote it.
+    """
 
     def test_the_tooltip_names_the_gate_it_actually_uses(self, viewer):
         from analysis.trade_viewer_qt import DCVD_FLOW_PCT, DCVD_FLOW_WIN
@@ -482,8 +491,30 @@ class TestTheBrightnessIsExplained:
         assert f"{DCVD_FLOW_WIN} bars" in tip, "the window is not named"
         assert f"top {100 - int(DCVD_FLOW_PCT * 100)}%" in tip, \
             "the percentile is not named, or does not match the constant"
-        assert "+0.352" in tip and "+0.285" in tip, \
-            "the gate rule's measured return is not stated"
+
+    def test_no_panel_anywhere_quotes_a_withdrawn_figure(self, viewer):
+        """Scope is the whole window, not one widget.
+
+        The first version of this checked `_dcvd_spin` alone and passed
+        while four of these same numbers sat in the absorb checkbox's
+        tooltip, one toolbar along -- a per-widget guard on a figure that
+        lives in several places is false comfort.
+        """
+        from PyQt6.QtWidgets import QWidget
+        withdrawn = ("+0.352", "+0.285", "+0.207", "+0.247", "+0.351",
+                     "+0.112", "+0.308", "+0.309", "+0.363", "+0.264",
+                     "-0.361", "-0.566")
+        bad = [(type(w).__name__, n)
+               for w in viewer.findChildren(QWidget)
+               for n in withdrawn if n in w.toolTip()]
+        assert not bad, f"withdrawn figures still on screen: {bad}"
+
+    def test_the_tooltip_says_the_edge_was_withdrawn(self, viewer):
+        """Silently dropping the numbers would read as "no claim was ever
+        made", and the next person would re-derive the old one."""
+        tip = viewer._dcvd_spin.toolTip()
+        assert "2026-11-14" in tip, "the retraction is not dated"
+        assert "NO EDGE IS CLAIMED" in tip
 
     def test_it_says_the_two_rules_are_different(self, viewer):
         """Height is a ratio, brightness is a magnitude. Reading one as

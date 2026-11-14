@@ -126,6 +126,41 @@ def load(code: str, start: datetime | str, end: datetime | str,
     return df.loc[start:end]
 
 
+def load_bar_end(code: str, start: datetime | str, end: datetime | str,
+                 refresh: bool = False) -> pd.DataFrame:
+    """`load`, re-indexed onto the stamps a kline uses.
+
+    These bars are keyed by `tick_time.floor("min")` -- the minute's START --
+    while a moomoo kline's `time_key` is its END. Joining the two as they come
+    hands the bar stamped 10:01, which covers 10:00-10:01, the flow of
+    10:01-10:02: a minute that has not happened yet at the decision point.
+
+    Use this for anything joined to klines. Fourteen places did that join by
+    hand; twelve were missing the shift and two had it. All fourteen now go
+    through this or `load_cached_bar_end`, so there is no longer a second way
+    to write it. The misses were
+    invisible -- the result is a full frame that simply reads the future,
+    which makes a study look unusually good rather than broken. On the drill
+    question bank the shift moved `dr1 >= 0`'s hit rate from +16.7pp over
+    base to -5.8pp, and in the walk-forward caliber it moved the flow gate
+    from +0.419 R a trade to -0.056 R.
+
+    `start` is widened by a minute first so the bar ENDING at `start` is in
+    the result instead of being lost to the shift. A row or two past `end` can
+    come back, which a left join against klines drops anyway.
+
+    Measured on 74,607 minutes, kline volume against tick volume: lag 0
+    correlates 0.7055, lag 1 (this shift) 0.8975, lag 2 0.7186.
+    """
+    df = load(code, pd.Timestamp(start) - pd.Timedelta(minutes=1), end,
+              refresh=refresh)
+    if df is None or not len(df):
+        return df
+    out = df.copy()
+    out.index = out.index + pd.Timedelta(minutes=1)
+    return out
+
+
 def load_cached(code: str, start: datetime | str,
                 end: datetime | str) -> pd.DataFrame | None:
     """Whatever the cache already holds for this range, or None.
@@ -159,6 +194,27 @@ def load_cached(code: str, start: datetime | str,
         return None
     out = df.loc[start:end]
     return out if len(out) else None
+
+
+def load_cached_bar_end(code: str, start: datetime | str,
+                        end: datetime | str) -> pd.DataFrame | None:
+    """`load_cached`, re-indexed onto the stamps a kline uses.
+
+    Same reason `load_bar_end` exists: these bars are keyed by the minute's
+    START and a kline's `time_key` is its END, so a raw join reads the next
+    minute. This exists so the non-blocking path cannot be the one place
+    where the shift has to be remembered by hand -- which is what
+    `analysis/outputs/_gen_1m.py` and `_gen_5m.py` were doing, correctly but
+    on their own.
+
+    Returns None exactly where `load_cached` does.
+    """
+    df = load_cached(code, pd.Timestamp(start) - pd.Timedelta(minutes=1), end)
+    if df is None or not len(df):
+        return None
+    out = df.copy()
+    out.index = out.index + pd.Timedelta(minutes=1)
+    return out
 
 
 def coverage(df: pd.DataFrame) -> pd.DataFrame:

@@ -9,6 +9,15 @@ that silently, and both are tested here rather than trusted:
   rewriting      re-running a day after the selection or features change
                  would quietly restate history to agree with the new code.
 
+The file WAS migrated once, on 2026-11-14, by a one-off out-of-band script:
+the five flow columns had been computed from a join that read the next
+minute's order flow. Only those five changed; day/tm/low/close/atr/lab were
+verified byte-identical and the event set could not move, since the one
+flow-dependent filter (MIN_SIGNED) sits ~180x below the median signed minute.
+`append_day` was NOT what did it and must never be -- the guard below stays
+absolute, and the exception lives in strategy/bottom_holdout.py's docstring
+and CHANGELOG v0.92.0, not in a loosened test.
+
 The selection and label rules are copied from the study and are checked here
 too, because a holdout scored by different rules than the sample is not
 comparable with it -- which is the whole point of keeping one.
@@ -33,7 +42,7 @@ def frame(rows):
 def event(day="2026-10-13", tm="10:00", lab=1, delta_r=0.2):
     return {"day": day, "tm": tm, "low": 100.0, "close": 100.5, "atr": 1.0,
             "lab": lab, "delta_r": delta_r, "flip": 0.0, "sell_drop": 1.0,
-            "signed": 5000.0, "neutral": 4000.0}
+            "signed": 5000.0, "neutral": 4000.0, "feat_ver": bh.FEAT_VER}
 
 
 class TestTheBoundary:

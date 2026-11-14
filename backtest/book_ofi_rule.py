@@ -73,7 +73,7 @@ def trade_minutes(days: list[str]) -> pd.DataFrame:
     k = fetch_klines(CODE, "1m", lo, hi)
     k["t"] = pd.to_datetime(k.time_key)
     k = k.sort_values("t").drop_duplicates("t").set_index("t")
-    dl = delta_bars.load(CODE, lo, hi)
+    dl = delta_bars.load_bar_end(CODE, lo, hi)
     k = k.join(dl[["buy", "sell"]], how="left")
     k[["buy", "sell"]] = k[["buy", "sell"]].fillna(0.0)
 

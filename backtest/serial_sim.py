@@ -4,8 +4,18 @@ Every number so far is per OPPORTUNITY: each minute is scored as if it
 could be taken, and the two sides together fire on 36% of minutes while
 each trade holds up to 30 bars. Those overlap almost completely. An
 account holds one position, so most of those signals arrive while it is
-already busy and are simply never taken -- "+0.247 R a trade" describes
-the average quality of an opportunity, not a return.
+already busy and are simply never taken -- a per-opportunity figure
+describes the average quality of an opportunity, not a return.
+
+RETRACTED 2026-11-14 -- this module's own published result ("2687 trades,
+44.8 a day, +0.258 R [+0.203,+0.312]", CHANGELOG v0.44.0) was produced while
+klines (stamped at a bar's END) were joined to delta_bars (stamped at its
+START) with no shift, so every bar read the NEXT minute's flow. Re-run after
+the fix: 2826 trades, 47.1 a day, -0.085 R [-0.128,-0.038], and max drawdown
+goes from 21.1 R to 262.2 R. The point the module makes -- that per-
+opportunity scoring is not a return -- stands; the numbers do not. What
+survives unchanged: median hold 3-4 bars, 0% reaching the 30-bar timeout,
+and the fill assumption being worth about 0.01 R.
 
 This walks the sessions in order and takes a signal only when flat. It is
 the one test expected to make the numbers WORSE, and it is the only one
@@ -54,7 +64,7 @@ def build():
     k = fetch_klines(CODE, "1m", START, END)
     k["t"] = pd.to_datetime(k.time_key)
     k = k.sort_values("t").drop_duplicates("t").set_index("t")
-    dl = delta_bars.load(CODE, START, END)
+    dl = delta_bars.load_bar_end(CODE, START, END)
     k = k.join(dl[["buy", "sell"]], how="left")
     k[["buy", "sell"]] = k[["buy", "sell"]].fillna(0.0)
 
@@ -215,8 +225,16 @@ def main():
             if m.sum():
                 print(f"  {nm}：{int(m.sum())} 笔，胜率 "
                       f"{100*(rr[m] > 0).mean():.1f}%，每笔 {rr[m].mean():+.3f} R")
+        # The per-opportunity numbers this used to print (+0.207 long /
+        # +0.247 short) are RETRACTED 2026-11-14: they came from a run where
+        # klines (stamped at a bar's END) were joined to delta_bars (stamped
+        # at its START) without a shift, so every bar carried the NEXT
+        # minute's flow. Printing a stale constant beside a freshly computed
+        # column is how a withdrawn number gets copied forward as fact, so
+        # the comparison is computed here or not shown at all.
         print("\n  对照：按机会计价（每分钟独立评估）"
-              "多头 +0.207 / 空头 +0.247 R")
+              "—— 旧的 +0.207 / +0.247 已撤回（对齐前视），"
+              "需要对照请重跑 delta_atr_matrix.py")
         print("  差额就是「同一时刻只能持一个仓位」的代价。")
 
         # Costs beyond the spread. At forty-odd trades a day the fee

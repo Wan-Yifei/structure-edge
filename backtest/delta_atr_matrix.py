@@ -167,7 +167,7 @@ def build() -> pd.DataFrame:
     k = fetch_klines(CODE, "1m", START, END)
     k["t"] = pd.to_datetime(k.time_key)
     k = k.sort_values("t").drop_duplicates("t").set_index("t")
-    dl = delta_bars.load(CODE, START, END)
+    dl = delta_bars.load_bar_end(CODE, START, END)
     k = k.join(dl[["buy", "sell"]], how="left")
     k[["buy", "sell"]] = k[["buy", "sell"]].fillna(0.0)
 

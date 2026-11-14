@@ -7,17 +7,44 @@ session's events and their features, appends them, and reports NOTHING about
 outcomes. Checking as you go is how a clean holdout stops being one.
 
 Sizing, so the wait is not a surprise. Separating 46% from 33% at the usual
-thresholds needs about 174 events a side; at 6.25 events a session with
-roughly a third carrying delta_r >= 0, that is near 80 sessions. Four months,
-not an afternoon. The first two sessions (2026-10-13, 2026-10-14) gave 15
-events between them and settle nothing -- the positive side ran 2/4 against
-the study's 46%, with a 95% interval of [7%, 93%].
+thresholds needs about 174 events a side; at 6.75 events a session with
+**17%** carrying delta_r >= 0, that is near **150 sessions**. The old figure
+here said "roughly a third" and "near 80 sessions" -- that third was computed
+off the leaked delta_r (see the migration note below); corrected, the positive
+side is 27 of 162. Stopping at 80 sessions would mean reading this holdout at
+half the power it was sized for, and it would arrive wearing the words "we
+waited long enough".
 
 APPEND ONLY, and a day already written is never rebuilt. A later change to
 the selection or the features would otherwise rewrite history to agree with
 whatever the code does now, which is the same silent rewrite `feeds/depth_bars`
 and `feeds/book_ladder` exist to prevent. Changing the rules means starting a
 new file, not refreshing this one.
+
+ONE DOCUMENTED EXCEPTION, 2026-11-14. The five flow columns (delta_r, flip,
+sell_drop, signed, neutral) were recomputed in place by a one-off out-of-band
+script, because the join that produced them read the NEXT minute's order flow
+-- klines are stamped at a bar's END, `delta_bars` at its START, and nothing
+shifted between them. What did NOT change: `day, tm, low, close, atr, lab`,
+not one byte, verified key by key. The event set could not change either --
+the only flow-dependent filter is MIN_SIGNED >= 300, and the median signed
+minute is ~180x that, so it is inert. Both files were copied to
+`backup/*.pre_barend_20261114.parquet` first -- a SUBDIRECTORY, so that a
+`read_parquet(dir)` on the cache folder cannot ever pick them up as extra
+rows; nothing was destroyed. The refill was
+keyed on (day, tm) rather than rebuilt, because `build_day` re-fetches klines
+and today's bars are not byte-identical to the day's -- a rebuild was measured
+moving 3 of 162 events by 1-4 minutes, which is precisely the rewrite this
+file forbids. `append_day` was not involved and must never do this.
+`feat_ver` marks the caliber from here on: 1 = the old join, 2 = corrected.
+It cannot document the past -- every row now reads 2.
+
+THIS HOLDOUT IS NO LONGER FULLY BLIND. On 2026-11-14, to size how bad the
+leak was, the first 24 sessions were scored once. The numbers are in CHANGELOG
+v0.92.0 and are deliberately not repeated here, so that reading this file does
+not hand them to you. When the holdout is finally read for real, report TWO
+rows: all sessions, and sessions after 2026-11-14. The second is still blind
+and grows every day.
 
 Selection and labelling are copied from the study unchanged:
   at a low      the bar's low is the lowest of the last 30 bars, itself
@@ -52,8 +79,15 @@ UP_ATR, DN_ATR = 2.0, 1.0
 FWD, GAP, BEFORE, AFTER = 30, 15, 45, 35
 MIN_SIGNED, MIN_BARS_IN = 300.0, 25
 
+# The caliber the flow columns were computed under. 1 is the join that read
+# the next minute (every row written before 2026-11-14); 2 is the corrected
+# one. Carried on the row rather than inferred from the date, so a file whose
+# provenance is forgotten can still say what it holds. Bump it whenever a flow
+# column's definition changes -- that is the point of it being an integer.
+FEAT_VER = 2
+
 COLUMNS = ["day", "tm", "low", "close", "atr", "lab",
-           "delta_r", "flip", "sell_drop", "signed", "neutral"]
+           "delta_r", "flip", "sell_drop", "signed", "neutral", "feat_ver"]
 
 
 def _cache_path(code: str) -> pathlib.Path:
@@ -91,8 +125,12 @@ def build_day(code: str, day: date | str) -> pd.DataFrame:
     k["t"] = pd.to_datetime(k.time_key)
     k = k.sort_values("t").drop_duplicates("t").set_index("t")
 
-    dl = delta_bars.load(code, lo, hi)
-    cov = delta_bars.coverage(dl)
+    dl = delta_bars.load_bar_end(code, lo, hi)
+    # Coverage counts tick-minutes, so it reads the UNSHIFTED stamps: on a
+    # bar-END frame the 23:59 bar lands on the next day and gets counted
+    # against the wrong session. The gate is `bars >= 300`, so one bar never
+    # flips it -- but the quantity should mean what its name says.
+    cov = delta_bars.coverage(delta_bars.load(code, lo, hi))
     if d0.date() not in set(cov[cov.bars >= 300].index):
         return pd.DataFrame(columns=COLUMNS)
     full = k.join(dl[["buy", "sell", "neutral", "n"]], how="left")
@@ -151,6 +189,7 @@ def build_day(code: str, day: date | str) -> pd.DataFrame:
                     - (buy[i - 1] - sell[i - 1]) / prev,
             "sell_drop": sell[i] / max(sell[i - 1], 1.0),
             "signed": float(dirv), "neutral": float(neu[i]),
+            "feat_ver": FEAT_VER,
         })
     return pd.DataFrame(out, columns=COLUMNS)
 

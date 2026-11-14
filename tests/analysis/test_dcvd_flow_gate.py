@@ -3,8 +3,15 @@
 DCVD is a RATIO and says nothing about size: a 500-share bar and a
 50,000-share bar both read 0.5 when two thirds of them is buying. The gate
 is that missing dimension -- signed volume measured against the bar's own
-recent normal -- and over 60 walk-forward sessions the two together scored
-+0.351 a trade against +0.112 for DCVD alone.
+recent normal.
+
+RETRACTED 2026-11-14: what the two together were worth over 60 walk-forward
+sessions came from a run that joined klines (stamped at a bar's END) to
+delta_bars (stamped at its START) with no shift, so every bar was scored on
+the NEXT minute's flow. The missing DIMENSION is still missing -- that is a
+statement about the quantity -- but nothing is established about what adding
+it pays. These tests never depended on that; they pin arithmetic and
+drawing, which is why they go on standing.
 
 It is encoded as opacity because colour already carries the sign and height
 the ratio, leaving opacity the free channel. These tests pin the arithmetic
@@ -343,12 +350,15 @@ class TestTheLight:
     def test_the_gate_shows_as_brightness_not_as_another_hue(self, viewer):
         """Green moved off the level and onto the gate, but as opacity.
 
-        Over the study's 60 out-of-sample sessions the gate returned
-        +0.363 R a trade against +0.264 for the level, and the two
-        disagree precisely here: 0.4 on thin volume (+0.186) and heavy
-        volume that never reached 0.4 (+0.300). So the fixtures ARE
-        those two disagreements, not merely two different numbers --
-        and the pair must differ in alpha while sharing a hue.
+        The fixtures are the two cases where the level and the gate
+        DISAGREE -- 0.4 on thin volume, and heavy volume that never
+        reached 0.4 -- rather than merely two different numbers, because
+        those are the bars whose drawing the choice actually changes.
+        The pair must differ in alpha while sharing a hue.
+
+        The measured returns that used to justify the swap are retracted
+        (2026-11-14, one-minute forward leak); the drawing requirement is
+        not, since it only says the two states must be distinguishable.
         """
         from analysis.trade_viewer_qt import DCVD_LIGHT_NONE
         base = steady(40, buy=3000, sell=2000)
