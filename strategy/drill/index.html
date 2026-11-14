@@ -264,10 +264,17 @@ const GATE_NA = "#78909c";
    scaled from these, never from the question on screen -- +0.30 has to mean
    the same thing everywhere, which is the entire point of a ratio. */
 const DR_SCALE = {1: [0.517, 0.700, 0.93], 5: [0.316, 0.448, 0.68]};
-/* The level the backtest validated: over 60 walk-forward out-of-sample
-   sessions, |dr1| >= 0.4 risking 1 ATR for 1.5 returned +0.207 R a trade
-   long and +0.247 short, against -0.101 and -0.062 for entering on every
-   minute. Marked on both sides because the two came out symmetric. */
+/* RETRACTED 2026-11-14. This used to read "the level the backtest
+   validated", on +0.207 R a trade long and +0.247 short for |dr1| >= 0.4
+   against -0.101 and -0.062 for every minute. That study joined klines
+   (stamped at a bar's END) to the flow data (stamped at its START) without
+   shifting, so every bar was scored on the NEXT minute's flow. Re-run
+   aligned, the same rule is -0.105 R and its paired gain over unconditional
+   entry crosses zero -- see doc/ORDER_FLOW_GUIDE.md appendix B.
+
+   0.4 is kept only as a drawn reference line, so the panel's scale and the
+   viewer's agree. It is not a validated level, and nothing should treat
+   crossing it as a reason. */
 const DR_DECISION = 0.4;
 /* The flow gate, identical to the viewer's: is this bar's signed volume
    large for this stock right now? |x| in the top fifth of its own
@@ -588,10 +595,19 @@ function draw(q, reveal){
      readable underneath -- the mark is a note about the bar, not a
      replacement for it.
 
-     Measured, and reported next to the drawing rather than hidden: over
-     112 sessions these fire on 1.86% of bars, and what follows them runs
-     AGAINST the name. Drawn because they land on places worth looking at,
-     not because the direction is tradeable. */
+     NOT PRODUCED SINCE 2026-11-14, so this block now draws nothing. `ab`
+     never had a generator: it was written into the bank once, on 10-27, by
+     a one-off migration script that is no longer in the tree, which fed
+     `_abs_day(h, l, c, buy, sell)` from the join that read the NEXT
+     minute's flow. So the marks it left were a minute off, they stopped at
+     10-26 and covered none of the 14 sessions after it, and no rebuild can
+     reproduce them. The bank was regenerated without the field rather than
+     carry a leaked overlay on a teaching chart.
+
+     Bringing it back means moving `_abs_day` into `build_day` so it is
+     computed from the fixed `buy`/`sell` like every other field -- a
+     separate change. Worth knowing first that the marker measured no
+     directional edge on its own even before the leak was found. */
   if (q.ab){
     const [absUp, absDn] = q.ab;
     const tri = (xx, yy, dir, col) => {
@@ -1499,6 +1515,26 @@ function ruleLight(q, m){
      the bar after measured the same; having no turn behind it at all did
      not.
 
+     RETRACTED 2026-11-14 -- this applies to EVERY figure in this comment
+     block, including the +0.363 / +0.238 and the 58-at-44.8% / 77-at-29.9%
+     in the paragraph after the next one. (Note while retracting them: the
+     0.4 level's arm is quoted as +0.238 here and +0.264 in appendix B and
+     in trade_viewer_qt.py. Three numbers for one quantity means they came
+     from different runs, which nobody reconciled at the time.)
+
+     Both sides of the comparison below were
+     measured through a one-minute forward leak -- klines stamped at a
+     bar's END joined to delta_bars stamped at its START with no shift,
+     so every reading was the NEXT minute's flow. The all-minutes side
+     came from the backtest modules, the bank side from the dr fields
+     stored in questions_c*.js, which reproduce exactly under the old
+     join (968/968 on c0). So "inside this population the flip carries
+     what the gate does not" is UNVERIFIED, not disproved. The light is
+     unchanged, which is the conservative outcome: the action taken at
+     the time was to keep the existing rule, so nothing was adopted on
+     contaminated evidence. It cannot be re-measured until the banks are
+     regenerated. See doc/ORDER_FLOW_GUIDE.md appendix B.
+
      The flow gate is NOT part of this, and the attempt is worth
      recording. Over 60 out-of-sample sessions of every RTH minute the
      gate beats this rule (+0.363 R a trade against +0.238), so the
@@ -1814,12 +1850,19 @@ function report(){
           ? "✓ 够了" : "✗ 还不够"}`],
     ["放过的题里本可盈利的", passed.length
       ? `${missed} / ${passed.length}　（按 1 ATR 止损 / 2R 算）` : "—"],
-    /* delta_r is the one feature that survived every control (42.8% vs
-       25.3% on the measured set). If the entries already line up with it,
-       the instinct is doing its job and the indicator adds nothing; if they
-       do not, the two may be independent and worth combining. Either way
-       the comparison has to be against the rate in the whole pool, not
-       against 50%. */
+    /* RETRACTED 2026-11-14: "delta_r is the one feature that survived every
+       control (42.8% vs 25.3%)" was measured on a bank whose dr1 carried the
+       NEXT minute's flow -- klines stamped at a bar's END joined to
+       delta_bars stamped at its START with no shift. Re-measured on the same
+       questions with the join fixed, the split does not separate measurably:
+       c0 goes from +16.7pp over base to -5.8pp, c1 from +13.4pp to +0.2pp.
+       See doc/ORDER_FLOW_GUIDE.md appendix B.
+
+       This panel reads q.dr1, so until the banks are regenerated it is wrong
+       twice over -- the wrong minute, on top of reading the setup bar rather
+       than the entry bar (see the waiting-cost note). The comparison below
+       still has to be against the whole pool rather than 50%; that part is
+       arithmetic, not a finding. */
     ...(() => {
       const hasDr = (a) => a.q.dr1 != null;
       const entDr = ent.filter(hasDr), allDr = A.filter(hasDr);

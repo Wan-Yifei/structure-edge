@@ -193,6 +193,7 @@ const api = new Function(
          "         cellOf, nextByDeficit, noFlow, stopAuto," +
          "         waitOne, markOf, entryOf, WAIT_MAX, FWD, flowGate, flowOk," +
          "         FLOW_WIN, FLOW_PCT, FLOW_MIN, DR_DECISION," +
+         "         context, getPA: () => PA, setPA: (v) => { PA = v; }," +
          "         getStep0: () => step0," +
          "         getStep: () => step, getQS: () => QS, syncOut, draw, reset, setStopAtPrice, stopFromStructure, grabStop};")();
 
@@ -252,9 +253,59 @@ for (const [label, token] of need) {
   console.log(`${ok ? "ok  " : "MISS"} ${label}`);
   if (!ok) throw new Error(`verdict missing: ${label}`);
 }
-const sep = v.includes("并没有分开");
-console.log(`${sep ? "ok  " : "MISS"} 结构三档未分开的说明`);
-if (!sep) throw new Error("expected the 'not separated' note for these rates");
+/* The "三档并没有分开" note, driven BOTH ways.
+
+   This used to read `v.includes("并没有分开")` against whatever rates
+   happened to be on disk -- an assertion about the DATA wearing the shape
+   of an assertion about the code. It passed while 看涨 - 看跌 sat under
+   0.05 and broke on its own on 2026-11-13, when a nightly append grew c1
+   from 914 questions to 1021 and the gap moved to +0.0534. Nothing about
+   the page had changed. Measured either way, the note is correct; the test
+   was simply pinning one of the two answers.
+
+   What the page actually owes us is the SWITCH: the note when the three
+   readings are not ordered, no note when they are. So both states are fed
+   in. */
+const realPA = api.getPA();
+const spread = (gap) => ({
+  ...realPA,
+  "看涨": [300, 0.33 + gap / 2, 0.28, 0.38],
+  "中性": [300, 0.33, 0.28, 0.38],
+  "看跌": [300, 0.33 - gap / 2, 0.28, 0.38],
+});
+try {
+  api.setPA(spread(0.02));                  // under the 0.05 line
+  const flat = api.context(cur);
+  if (!flat.includes("并没有分开"))
+    throw new Error("no note although 看涨 and 看跌 are 2pp apart");
+  api.setPA(spread(0.20));                  // well over it
+  const wide = api.context(cur);
+  if (wide.includes("并没有分开"))
+    throw new Error("note still shown although the three are 20pp apart");
+  /* 2pp and 20pp pin that the switch EXISTS. These two pin WHERE it is:
+     the page's line is `> 0.05`, so 4.9pp must still say "not separated"
+     and 5.1pp must not. Without them the threshold could drift to 0.02 or
+     0.10 and both tests above would stay green. */
+  api.setPA(spread(0.049));
+  if (!api.context(cur).includes("并没有分开"))
+    throw new Error("4.9pp 就不提示了——门槛跑到 0.05 以下了");
+  api.setPA(spread(0.051));
+  if (api.context(cur).includes("并没有分开"))
+    throw new Error("5.1pp 还在提示——门槛跑到 0.05 以上了");
+  console.log("ok   结构三档的分开/未分开提示，两种都驱动过，门槛钉在 5.0pp");
+} finally {
+  api.setPA(realPA);
+}
+
+/* And then report, without asserting, where the live set actually sits --
+   a number worth seeing when it moves, not a thing to fail on. */
+{
+  const u = api.getPA()["看涨"], d = api.getPA()["看跌"];
+  if (u && d)
+    console.log(`     （本套题实测 看涨 ${(100*u[1]).toFixed(1)}% − ` +
+                `看跌 ${(100*d[1]).toFixed(1)}% = ` +
+                `${(100*(u[1]-d[1])).toFixed(1)}pp，门槛 5.0pp）`);
+}
 
 console.log("\nSMOKE OK");
 
@@ -2057,99 +2108,89 @@ console.log("\nFLOWMAG OK");
 
 
 /* ---- absorption on the drill chart ---------------------------------- *
- * The viewer's marks, on the same bars, from the `ab` the banks now
- * carry. ▲ gold under the bar is 空头吸收 -- the SELLING was absorbed,
- * so it is the bullish one; ▼ purple above is 多头吸收.               */
+ * The drawing code in index.html is still there; the `ab` field that fed
+ * it is NOT. It was never generated -- a one-off migration wrote it into
+ * the banks on 2026-10-27, from the join that read the next minute's
+ * flow, and it stopped at 10-26. The 2026-11-14 regeneration dropped it
+ * rather than carry a leaked overlay on a teaching chart.
+ *
+ * So this section used to begin `if (!withAb.length) throw` -- an
+ * assertion about what the BANK happens to contain, which is the same
+ * mistake as the rates note above and the three viewer tests retired the
+ * same day. Everything it actually checked is about the DRAWING: three
+ * points not four, nothing past the decision bar, a colour per side,
+ * hollow not filled. All of that is still true of the code and is still
+ * worth pinning, so the marks are planted here instead of looked up.
+ * If `ab` is ever computed properly inside build_day, this keeps working
+ * unchanged.                                                           */
 {
   const UPC = "#ffa005", DNC = "#ab47bc";
   const all = api.getQS();
-  const withAb = all.filter(q => q.ab && (q.ab[0].length || q.ab[1].length));
-  if (!withAb.length) throw new Error("题库里一道带 ab 的题都没有");
-  console.log(`ok   题库带吸收标记：${withAb.length}/${all.length} 道`);
-
-  /* A question whose marks sit BEFORE the decision bar, so they are on
-     screen the moment it is asked. */
-  /* Unanswered: an answered one renders with reveal on, and then the
-     playback legitimately draws the marks in the future it has walked
-     to. The claim here is about what is on screen while the question
-     is still being asked. */
-  const idx = all.findIndex(q =>
-    q.ab && !api.isAnswered(q.id)
-    && [...q.ab[0], ...q.ab[1]].some(i => i <= api.markOf(q)));
-  if (idx < 0) throw new Error("没有一道未作答的题在决策根之前有吸收标记");
+  const idx = all.findIndex(q => !api.isAnswered(q.id)
+                                 && q.c.length > q.mark + 20 && q.mark > 10);
+  if (idx < 0) throw new Error("找不到一道未作答、前后都有余量的题");
   const q = all[idx];
-  ctxOps.length = 0;
-  api.goto1(idx + 1);
-
-  /* By colour, not by point count: a mark drawn past `last` reads an
-     undefined price, strokes a NaN path, and the recorder stores it with
-     n: 0. Keying on n === 3 skipped precisely the strokes that prove a
-     leak. Nothing else on this chart uses these two colours. */
-  const tri = ctxOps.filter(o => o.op === "stroke" &&
-                            (o.color === UPC || o.color === DNC));
-  if (tri.some(o => o.n !== 3))
-    throw new Error("吸收标记不是三点路径——画的不是三角形");
-  const dm = api.markOf(q);
-  const want = [...q.ab[0], ...q.ab[1]].filter(i => i <= dm).length;
-  if (tri.length !== want)
-    throw new Error(`画了 ${tri.length} 个三角，决策根之前应有 ${want} 个`);
-  console.log(`ok   吸收上图：决策根前 ${want} 个标记全部画出`);
-
-  /* The correctness one, on a question chosen to make it bite: marks on
-     BOTH sides of the decision bar. Guarded by "if there are any", as it
-     was first written, it ran on a question that had none and asserted
-     nothing. */
-  const fi = all.findIndex(x => {
-    if (!x.ab || api.isAnswered(x.id)) return false;
-    const m = api.markOf(x), a = [...x.ab[0], ...x.ab[1]];
-    return a.some(i => i <= m) && a.some(i => i > m);
-  });
-  if (fi < 0)
-    throw new Error("题库里没有一道题在决策根两侧都有吸收标记——这条没法验");
-  {
-    const qf = all[fi], mf = api.markOf(qf);
-    const a = [...qf.ab[0], ...qf.ab[1]];
-    const before = a.filter(i => i <= mf).length;
-    const after = a.filter(i => i > mf).length;
+  const m = q.mark;
+  /* Two ▲ and one ▼ before the decision bar, one ▼ after it. Strictly
+     before and strictly after: a mark ON the decision bar sits exactly on
+     the draw's `i < last` boundary, and the counts below should argue
+     about the leak, not about that boundary. */
+  const planted = [[m - 5, m - 2], [m - 3, m + 4]];
+  const had = q.ab;
+  try {
+    q.ab = planted;
     ctxOps.length = 0;
-    api.goto1(fi + 1);
-    const t = ctxOps.filter(o => o.op === "stroke" &&
-                            (o.color === UPC || o.color === DNC));
-    if (t.length !== before)
-      throw new Error(`决策根前 ${before} 个，却画了 ${t.length} 个` +
-                      `（未揭晓的那 ${after} 个泄出来了）`);
-    console.log(`ok   未揭晓的 ${after} 个标记没有画出来（前 ${before} 个照画）`);
-  }
+    api.goto1(idx + 1);
 
-  /* Colour follows the side, and it is the viewer's pair -- a drill that
-     marked both sides the same colour would be showing where to look but
-     not which way the flow was eaten. */
-  const q2i = all.findIndex(x =>
-    x.ab && !api.isAnswered(x.id)
-    && x.ab[0].some(i => i <= api.markOf(x))
-    && x.ab[1].some(i => i <= api.markOf(x)));
-  if (q2i >= 0){
+    /* By colour, not by point count: a mark drawn past `last` reads an
+       undefined price, strokes a NaN path, and the recorder stores it with
+       n: 0. Keying on n === 3 skipped precisely the strokes that prove a
+       leak. Nothing else on this chart uses these two colours. */
+    const tri = ctxOps.filter(o => o.op === "stroke" &&
+                              (o.color === UPC || o.color === DNC));
+    if (tri.some(o => o.n !== 3))
+      throw new Error("吸收标记不是三点路径——画的不是三角形");
+    if (tri.length !== 3)
+      throw new Error(`决策根前种了 3 个标记，却画了 ${tri.length} 个` +
+                      `（决策根之后那个泄出来了？）`);
+    console.log("ok   吸收上图：决策根前 3 个画出，之后 1 个没有泄露");
+
+    const up = tri.filter(o => o.color === UPC).length;
+    const dn = tri.filter(o => o.color === DNC).length;
+    if (up !== 2 || dn !== 1)
+      throw new Error(`两种吸收没有分色：▲${up}（应 2） ▼${dn}（应 1）`);
+    console.log("ok   两种吸收分色：▲空头吸收 2 个，▼多头吸收 1 个");
+
+    /* Hollow. A filled triangle hides the bar it is annotating, and the
+       bar is the thing being practised. */
+    const filled = ctxOps.filter(o => o.op === "fill" &&
+                                 (o.color === UPC || o.color === DNC));
+    if (filled.length)
+      throw new Error("吸收三角是实心的，会盖住它要标注的那根");
+    console.log("ok   吸收三角是空心的，不盖住 K 线");
+
+    /* And the other half of the switch: no field, nothing drawn. That is
+       the state the banks are actually in since 2026-11-14. */
+    delete q.ab;
     ctxOps.length = 0;
-    api.goto1(q2i + 1);
-    const t = ctxOps.filter(o => o.op === "stroke" &&
-                            (o.color === UPC || o.color === DNC));
-    const up = t.filter(o => o.color === UPC).length;
-    const dn = t.filter(o => o.color === DNC).length;
-    if (!up || !dn)
-      throw new Error(`两种吸收没有分色：▲${up} ▼${dn}`);
-    console.log(`ok   两种吸收分色：▲空头吸收 ${up} 个，▼多头吸收 ${dn} 个`);
-  }
-
-  /* Hollow. A filled triangle hides the bar it is annotating, and the
-     bar is the thing being practised. */
-  const filled = ctxOps.filter(o => o.op === "fill" &&
+    api.goto1(idx + 1);
+    /* "Nothing was drawn in these two colours" has to be distinguished from
+       "nothing was drawn at all" -- a redraw that silently did not happen
+       would satisfy the next line without the page ever being asked. */
+    if (!ctxOps.length)
+      throw new Error("重画根本没发生，下面那条检查是空的");
+    const none = ctxOps.filter(o => (o.op === "stroke" || o.op === "fill") &&
                                (o.color === UPC || o.color === DNC));
-  if (filled.length)
-    throw new Error("吸收三角是实心的，会盖住它要标注的那根");
-  console.log("ok   吸收三角是空心的，不盖住 K 线");
+    if (none.length)
+      throw new Error(`没有 ab 字段却画了 ${none.length} 个吸收标记`);
+    console.log("ok   没有 ab 字段时一个标记都不画（题库现在就是这个状态）");
+  } finally {
+    if (had === undefined) delete q.ab; else q.ab = had;
+  }
 }
 
 console.log("\nABSORB OK");
+
 
 
 /* ---- the sliders must not rewind the chart -------------------------- *
@@ -2298,9 +2339,24 @@ console.log("\nRESET OK");
  * model underneath -- every record on file is written in them -- so these
  * check the conversion, not a new storage format.
  *
- * Measured on the c1 pool, taking every green: a stop under the recent
+ * RETRACTED 2026-11-14, pending a re-measurement. What stood here was
+ * "measured on the c1 pool, taking every green: a stop under the recent
  * swing paid +0.417 R a trade in the chronological holdout against +0.100
- * for a fixed 2.37 ATR, paired by session +0.317 R [+0.173, +0.463]. */
+ * for a fixed 2.37 ATR, paired by session +0.317 R [+0.173, +0.463]".
+ * It is tempting to say the comparison is immune: two stop rules on the
+ * SAME trades, so a relabelled pool should not matter. It is not immune.
+ * Green was decided by a dr1 that read the NEXT MINUTE, so the pool is a
+ * set of trades selected on what price did in the minute right after
+ * entry -- which is the very thing a stop comparison turns on. A trade
+ * whose next minute is heavy buying is systematically less likely to take
+ * out a tight structural stop first, so the leak plausibly lifts the
+ * structural arm SPECIFICALLY rather than swapping one pool for another.
+ * A paired interval is a within-pool statistic and is valid conditional on
+ * the pool; a pool chosen by its own future is not a sample of any rule
+ * anyone can execute. On the fixed join the c1 green set is a different
+ * 125 questions, not those 113. The stop rule may well survive; nobody has
+ * measured it since. Nothing below depends on
+ * these numbers: the checks are about the conversion. */
 {
   const stop = els["s-stop"], tgt = els["s-tgt"];
   const rr = els["s-rr"], lock = els["s-rrlock"];
@@ -2348,17 +2404,87 @@ console.log("\nRESET OK");
     throw new Error(`解锁后目标仍被拖动：${t0} → ${tgt.value}`);
   console.log("ok   解锁：目标是独立的 ATR 距离，拖止损不动它");
 
-  // The structural placement the measurement liked.
+  /* The structural placement the measurement liked -- AND the clamp the
+     slider's own bounds put on it.
+
+     This used to recompute `min(low over 10 bars) - 0.10 ATR` and demand
+     the stop land there within 0.02 ATR. Two things were wrong with that.
+     The tolerance was tighter than the slider's own `step` (0.05 ATR), and
+     more importantly it ignored the clamp that the very next block of this
+     file documents as deliberate: `min="0.25"`, so a structural stop closer
+     than a quarter ATR cannot be represented and is widened to 0.25.
+
+     It passed for a year because the question this block happens to land on
+     is picked by the shuffle, and most questions sit inside the range. On
+     2026-11-14 the bank was regenerated, `noFlow()` filters on `drs1`, the
+     usable set shifted by a few questions and the shuffle handed over
+     2026-08-13_1149_深回落_c1 -- whose 10-bar low is 0.115 ATR under the
+     entry. Nothing about the page had changed.
+
+     Both branches are driven below, so neither can rot: the formula on a
+     question inside the range, the clamp on one outside it. */
   lock.checked = true;
-  api.stopFromStructure();
-  const want = Math.min(...q.l.slice(Math.max(0, m - 9), m + 1))
-             - 0.10 * q.atr;
-  const got = api.levels(q, +stop.value, +tgt.value, m).stop;
-  if (Math.abs(got - want) > 0.02 * q.atr)
-    throw new Error(`按结构放应在 ${want.toFixed(2)}，实得 ${got.toFixed(2)}`);
-  if (got >= Math.min(...q.l.slice(Math.max(0, m - 9), m + 1)))
-    throw new Error("结构止损没有落在近 10 根最低点下方");
-  console.log("ok   按结构放：落在近 10 根最低点下方 0.1 ATR");
+  const SMIN = +(html.match(/id="s-stop"[^>]*min="([\d.]+)"/) || [])[1];
+  const SMAX = +(html.match(/id="s-stop"[^>]*max="([\d.]+)"/) || [])[1];
+  if (!(SMIN > 0) || !(SMAX > SMIN))
+    throw new Error("没能从 index.html 读出止损滑块的上下界");
+  /* How far below the entry the structural stop wants to be, in ATR. */
+  const structDist = (x, mm) =>
+    (api.entryOf(x, mm) - (Math.min(...x.l.slice(Math.max(0, mm - 9), mm + 1))
+                           - 0.10 * x.atr)) / x.atr;
+
+  const checkStruct = (i) => {
+    api.goto1(i + 1);
+    const x = api.getQS()[api.getIdx()];
+    const mm = api.markOf(x);
+    api.choose("enter");
+    lock.checked = true;
+    api.stopFromStructure();
+    const d = structDist(x, mm);
+    const clamped = Math.min(SMAX, Math.max(SMIN, d));
+    const want = api.entryOf(x, mm) - clamped * x.atr;
+    const got = api.levels(x, +stop.value, +tgt.value, mm).stop;
+    /* Half a slider step, which is the most rounding can cost. */
+    if (Math.abs(got - want) > 0.5 * 0.05 * x.atr + 1e-9)
+      throw new Error(`${x.id}：结构止损应在 ${want.toFixed(2)}，` +
+                      `实得 ${got.toFixed(2)}（想要 ${d.toFixed(3)} ATR，` +
+                      `夹断后 ${clamped.toFixed(3)}）`);
+    if (got >= Math.min(...x.l.slice(Math.max(0, mm - 9), mm + 1)))
+      throw new Error(`${x.id}：结构止损没有落在近 10 根最低点下方`);
+    return { d, clamped };
+  };
+
+  const pool = all.map((x, i) => i).filter(i => !api.isAnswered(all[i].id));
+  const inside = pool.find(i => {
+    const x = all[i], mm = x.mark;
+    const d = structDist(x, mm);
+    return d > SMIN * 1.2 && d < SMAX * 0.8;
+  });
+  const outside = pool.find(i => structDist(all[i], all[i].mark) < SMIN);
+  if (inside === undefined)
+    throw new Error("题库里没有一道结构止损落在滑块范围内——这条没法验");
+  {
+    const r = checkStruct(inside);
+    console.log(`ok   按结构放：落在近 10 根最低点下方 0.1 ATR` +
+                `（${all[inside].id}，${r.d.toFixed(2)} ATR，未夹断）`);
+  }
+  if (outside === undefined) {
+    console.log("     （题库里没有结构止损近于 " + SMIN +
+                " ATR 的题，夹断这一支这次没驱动到）");
+  } else {
+    const r = checkStruct(outside);
+    /* Read the SLIDER, not the arithmetic. `r.clamped` is
+       Math.max(SMIN, d) over the very d the `outside` filter screened on,
+       so `r.clamped === SMIN` is true by construction and the assertion
+       that used to stand here could never fire -- it was testing that
+       Math.max works. What is actually in question is whether the page
+       put the slider on its floor. */
+    if (+stop.value !== SMIN)
+      throw new Error(`本该夹到滑块下界 ${SMIN}，滑块停在 ${stop.value}`);
+    console.log(`ok   结构止损太近时夹到滑块下界 ${SMIN} ATR` +
+                `（${all[outside].id}，想要 ${r.d.toFixed(3)} ATR）`);
+  }
+  api.goto1(fresh + 1);
 
   // Out of range prices clamp instead of writing a record that cannot be
   // represented -- the slider's own bounds are the record's bounds.
