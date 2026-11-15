@@ -16,6 +16,16 @@ Both programs draw windows, so this has to run inside a logged-in desktop
 session. A scheduled task set to "run whether user is logged on or not"
 puts them in session 0 where neither can show a window.
 
+What it starts is started with no console of its own, which is not a
+detail. A child started the ordinary way on Windows inherits this process's
+console, and an attached child keeps that console window alive after the
+launcher exits and dies with it when somebody closes it. Both halves were
+seen on 2026-11-15: a black window left on the desktop, and the scheduler
+gone the moment it was closed -- while OpenD, a GUI-subsystem process that
+never attaches, carried on. Measured both ways on this machine: attached,
+the window outlives the launcher and the close kills the child; with
+CREATE_NO_WINDOW, the window closes on its own and the child survives.
+
     uv run python scripts/start_stack.py           # start what is missing
     uv run python scripts/start_stack.py --check   # report, change nothing
 """
@@ -35,6 +45,24 @@ OPEND = (pathlib.Path.home() / "AppData" / "Roaming" / "moomoo_OpenD"
          / "moomoo_OpenD.exe")
 OPEND_XML = OPEND.parent / "OpenD.xml"
 LOG = ROOT / "logs" / "analysis" / "start_stack.log"
+# Where the scheduler's console output goes. It keeps its own log at
+# logs/analysis/scheduler.log; this catches what never reaches it -- an
+# import error or a traceback on the way up, which is exactly the output
+# worth having and exactly what a child with no console would drop.
+SCHED_OUT = ROOT / "logs" / "analysis" / "scheduler_stdout.log"
+
+# CREATE_NO_WINDOW, not DETACHED_PROCESS. Both keep the child off this
+# process's console, which is what stops a window close from reaching it --
+# but DETACHED_PROCESS, measured on this machine on 2026-11-15, gives a
+# console-subsystem child a console of its OWN, and when the launcher's
+# console is visible (which under the logon task it is) that new one is
+# visible too. It would have traded the window for an identical window that
+# lives as long as the scheduler. CREATE_NO_WINDOW gives it a console with
+# no window at all. CREATE_NEW_PROCESS_GROUP so a Ctrl-C does not travel.
+NO_CONSOLE = 0
+if sys.platform == "win32":
+    NO_CONSOLE = (subprocess.CREATE_NO_WINDOW
+                | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 # How long to wait for OpenD's API to answer. Generous: the port opens only
 # after login, and a person typing a password is the slow part.
@@ -51,6 +79,32 @@ def say(msg: str) -> None:
             fh.write(line + "\n")
     except OSError:
         pass
+
+
+def spawn(cmd: list[str], cwd: pathlib.Path,
+          out: pathlib.Path | None = None) -> None:
+    """Start a process that has to outlive this launcher and its console.
+
+    No console, its own process group, no inherited handles: closing the
+    launcher's window neither keeps it open nor takes the child down with
+    it. A child with no console has nowhere to write, hence *out*.
+    """
+    sink = subprocess.DEVNULL
+    opened = False
+    if out is not None:
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            sink = out.open("a", encoding="utf-8", errors="replace")
+            opened = True
+        except OSError as exc:                              # noqa: BLE001
+            say(f"could not open {out.name} ({exc}); its output is dropped")
+    try:
+        subprocess.Popen(cmd, cwd=str(cwd), creationflags=NO_CONSOLE,
+                         stdin=subprocess.DEVNULL, stdout=sink, stderr=sink,
+                         close_fds=True)
+    finally:
+        if opened:
+            sink.close()
 
 
 def api_endpoint() -> tuple[str, int]:
@@ -135,7 +189,7 @@ def main() -> int:
             say(f"OpenD not found at {OPEND}")
             return 2
         say("starting OpenD")
-        subprocess.Popen([str(OPEND)], cwd=str(OPEND.parent))
+        spawn([str(OPEND)], cwd=OPEND.parent)
     elif not up:
         say("OpenD is running but its API is closed -- it is most likely "
             "still on the login screen")
@@ -165,7 +219,7 @@ def main() -> int:
         say(f"scheduler already running (pid {sched}); leaving it alone")
         return 0
     say("starting the scheduler")
-    subprocess.Popen([sys.executable, "main.py", "scheduler"], cwd=str(ROOT))
+    spawn([sys.executable, "main.py", "scheduler"], cwd=ROOT, out=SCHED_OUT)
     for _ in range(30):
         time.sleep(1.0)
         pid = scheduler_pid()

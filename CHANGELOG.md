@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.92.1 - 开机自启留下一个黑窗口，关掉它 scheduler 就没了 (2026-11-15)
+
+v0.90.0 把 `start_stack.py` 挂到登录上之后，重启确实不用人记得了，但留下一个
+黑色终端窗口赖在桌面上；关掉它，scheduler 跟着一起没。从桌面快捷方式起就没有
+这个问题 —— 那条路径走的是 `launch_scheduler.vbs`，窗口样式 0。
+
+### 一个原因，两个症状
+
+`subprocess.Popen` 在 Windows 上默认让子进程**继承父进程的控制台**。这一次继承
+同时产生两件事：
+
+- 只要还有进程挂在那个控制台上，窗口就关不掉 —— 所以计划任务跑完了窗口还在；
+- 关掉那个窗口会给**所有挂在上面的进程**发 CTRL_CLOSE_EVENT —— 所以 scheduler
+  死了。
+
+OpenD 活下来不是因为做对了什么，是因为它是 GUI 子系统程序，根本不往控制台上挂。
+今天 12:53 自启日志写着 `scheduler up (pid 18800)`，而现在跑着的是 pid 3276 ——
+从快捷方式重新起的那个。两个症状在这台机器上都复现了：
+
+| | 窗口在启动器退出后还在 | 关掉窗口后子进程还活着 |
+|---|---|---|
+| 继承（改之前） | 是 | 否 |
+| `CREATE_NO_WINDOW`（改之后） | 否 | 是 |
+
+### 第一版修法是错的，差点就提交了
+
+先用的是 `DETACHED_PROCESS`——教科书答案，也确实让子进程脱离了父控制台。
+但在这台机器上实测：**控制台子系统的子进程会因此拿到一个自己的控制台**，而且
+父控制台可见时它也可见。第一次测出 `visible=False` 是因为测试里的父窗口是隐藏
+的 —— 换成可见的父窗口再测，`child hwnd=197592 visible=True`。那等于把一个黑
+窗口换成另一个黑窗口，而且新那个活得和 scheduler 一样久。
+
+`CREATE_NO_WINDOW` 在同样的可见父窗口下量出 `child hwnd=0`：根本没有控制台窗口。
+这条弯路钉在 `test_detached_process_is_not_what_gets_used` 里 —— 它是唯一一条
+「换回去会让症状看起来像修好了」的改法。
+
+### 另外
+
+脱离控制台的子进程没地方写 stdout。scheduler 自己的日志照旧在
+`logs/analysis/scheduler.log`，但**起不来时的 traceback 不走那条路**，所以
+新开 `logs/analysis/scheduler_stdout.log` 接着。日志路径写不进去时只打一行、
+照常启动 —— 起东西是正事，日志是方便。
+
+### 验收
+
+`tests/scripts/test_start_stack.py` 从 15 条到 23 条。变异 5/5 全抓到：
+拿掉 flags、继承 stdout/stderr、不关文件句柄、把输出扔 DEVNULL、换回
+`DETACHED_PROCESS`。全量 1866 通过。
+
+计划任务**不用重新注册** —— 它跑的就是仓库里这个脚本，下次登录自动生效。
+
 ## v0.92.0 - K 线和订单流错开了一分钟，而那一分钟在前瞻窗口里面 (2026-11-14)
 
 `feeds/delta_bars.py:69` 按 `tick时间.floor("min")` 建索引 —— 那是**分钟的开始**。

@@ -16,6 +16,7 @@ from the log afterwards.
 import importlib.util
 import pathlib
 import socket
+import subprocess
 import sys
 import types
 
@@ -42,7 +43,31 @@ ss = _load()
 def _quiet(monkeypatch, tmp_path):
     """Keep the test out of the real log file."""
     monkeypatch.setattr(ss, "LOG", tmp_path / "start_stack.log")
+    monkeypatch.setattr(ss, "SCHED_OUT", tmp_path / "scheduler_stdout.log")
     monkeypatch.setattr(ss, "POLL_S", 0.0)
+
+
+def _drive(monkeypatch, *, api_answers, opend=1234, sched=None):
+    """Run main() with the world stubbed, recording every spawn.
+
+    The real `spawn` still runs -- only `Popen` itself is replaced -- so the
+    creation flags under test are the ones the launcher actually passes.
+    """
+    started, kwargs = [], []
+
+    def fake_popen(cmd, **k):
+        started.append(cmd)
+        kwargs.append(k)
+        return types.SimpleNamespace(pid=1)
+
+    monkeypatch.setattr(ss, "api_endpoint", lambda: ("127.0.0.1", 11111))
+    monkeypatch.setattr(ss, "api_up", lambda h, p: api_answers)
+    monkeypatch.setattr(ss, "running", lambda frag: opend)
+    monkeypatch.setattr(ss, "scheduler_pid", lambda: sched)
+    monkeypatch.setattr(ss.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ss.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sys, "argv", ["start_stack.py", "--wait", "0"])
+    return ss.main(), started, kwargs
 
 
 class TestReadinessIsAPortNotAProcess:
@@ -70,17 +95,8 @@ class TestReadinessIsAPortNotAProcess:
 class TestItRefusesRatherThanStartAHalfStack:
 
     def _run(self, monkeypatch, *, api_answers, opend=1234, sched=None):
-        started = []
-        monkeypatch.setattr(ss, "api_endpoint", lambda: ("127.0.0.1", 11111))
-        monkeypatch.setattr(ss, "api_up", lambda h, p: api_answers)
-        monkeypatch.setattr(ss, "running", lambda frag: opend)
-        monkeypatch.setattr(ss, "scheduler_pid", lambda: sched)
-        monkeypatch.setattr(ss.subprocess, "Popen",
-                            lambda cmd, **k: started.append(cmd) or
-                            types.SimpleNamespace(pid=1))
-        monkeypatch.setattr(ss.time, "sleep", lambda s: None)
-        monkeypatch.setattr(sys, "argv", ["start_stack.py", "--wait", "0"])
-        rc = ss.main()
+        rc, started, _ = _drive(monkeypatch, api_answers=api_answers,
+                                opend=opend, sched=sched)
         return rc, started
 
     def test_a_silent_api_means_no_scheduler(self, monkeypatch):
@@ -195,3 +211,101 @@ class TestItLooksPastTheTrampoline:
         ])
         monkeypatch.setitem(sys.modules, "psutil", fake)
         assert ss.scheduler_pid() == 24544
+
+
+class TestWhatItStartsOutlivesIt:
+    """The launcher's console must not be the scheduler's console.
+
+    A child started the ordinary way on Windows inherits it, and that one
+    inheritance does two things at once: the console window cannot close
+    while the child is attached, so the logon task leaves a black window on
+    the desktop; and closing that window sends CTRL_CLOSE_EVENT to
+    everything attached, which is how the scheduler died at 12:53 on
+    2026-11-15 while OpenD -- GUI subsystem, never attached -- kept running.
+    Collection stops and nothing says so.
+
+    What is pinned here is the handover, not the flag: no console, no
+    inherited stream, and a place for the output to land.
+    """
+
+    def _spawned(self, monkeypatch):
+        _, started, kwargs = _drive(monkeypatch, api_answers=True,
+                                    sched=None)
+        assert len(started) == 1, started
+        return kwargs[0]
+
+    @pytest.mark.skipif(sys.platform != "win32",
+                        reason="console inheritance is a Windows problem")
+    def test_the_scheduler_gets_no_console_window(self, monkeypatch):
+        flags = self._spawned(monkeypatch)["creationflags"]
+        assert flags & subprocess.CREATE_NO_WINDOW, (
+            "the scheduler inherits the launcher's console: closing that "
+            "window kills it, and until then the window cannot close")
+
+    @pytest.mark.skipif(sys.platform != "win32",
+                        reason="console inheritance is a Windows problem")
+    def test_detached_process_is_not_what_gets_used(self, monkeypatch):
+        """DETACHED_PROCESS also keeps the child off this console, and it
+        was the first fix tried. Measured 2026-11-15: it gives a
+        console-subsystem child a console of its OWN, visible whenever the
+        launcher's is -- under the logon task, always. That trades the
+        window for an identical one that lives as long as the scheduler.
+        If this ever flips back, the symptom returns looking fixed."""
+        flags = self._spawned(monkeypatch)["creationflags"]
+        assert not (flags & subprocess.DETACHED_PROCESS), (
+            "DETACHED_PROCESS opens a second black window instead of none")
+
+    @pytest.mark.skipif(sys.platform != "win32",
+                        reason="console inheritance is a Windows problem")
+    def test_ctrl_c_in_that_window_does_not_travel(self, monkeypatch):
+        flags = self._spawned(monkeypatch)["creationflags"]
+        assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+
+    @pytest.mark.skipif(sys.platform != "win32",
+                        reason="console inheritance is a Windows problem")
+    def test_opend_gets_the_same_treatment(self, monkeypatch, tmp_path):
+        """It survived on 2026-11-15 only because it draws its own window.
+        That is a property of OpenD, not a decision made here."""
+        exe = tmp_path / "moomoo_OpenD.exe"
+        exe.write_bytes(b"")
+        monkeypatch.setattr(ss, "OPEND", exe)
+        _, started, kwargs = _drive(monkeypatch, api_answers=True,
+                                    opend=None, sched=1)
+        assert started == [[str(exe)]], (
+            "OpenD was not started, so nothing below was checked")
+        assert kwargs[0]["creationflags"] & subprocess.CREATE_NO_WINDOW
+
+    def test_no_stream_is_inherited(self, monkeypatch):
+        """With no console of its own, an inherited stdin blocks on first
+        read and an inherited stdout writes into a window that is gone."""
+        k = self._spawned(monkeypatch)
+        assert k["stdin"] is subprocess.DEVNULL
+        for name in ("stdout", "stderr"):
+            assert k[name] is not None, (
+                f"{name} is inherited; detached, it writes nowhere")
+
+    def test_its_output_lands_somewhere(self, monkeypatch, tmp_path):
+        """Detaching drops a traceback on the way up unless it is caught,
+        and a scheduler that dies during import is the case worth seeing."""
+        k = self._spawned(monkeypatch)
+        assert k["stdout"] is k["stderr"], "one file, interleaved in order"
+        assert k["stdout"] is not subprocess.DEVNULL, (
+            "the scheduler's console output is discarded")
+
+    def test_the_file_handle_is_not_left_open(self, monkeypatch, tmp_path):
+        """The launcher exits immediately after; a dangling handle would
+        keep the log locked against the rotation that trims it."""
+        k = self._spawned(monkeypatch)
+        assert k["stdout"].closed, "spawn leaked its log handle"
+
+    def test_an_unwritable_log_still_starts_the_scheduler(
+            self, monkeypatch, capsys):
+        """Starting is the job; the log is a convenience. Losing the
+        output must not cost a session of tape."""
+        monkeypatch.setattr(ss, "SCHED_OUT",
+                            pathlib.Path("Z:/nope/deeper/sched.log"))
+        _, started, kwargs = _drive(monkeypatch, api_answers=True,
+                                    sched=None)
+        assert len(started) == 1, "a bad log path stopped the scheduler"
+        assert kwargs[0]["stdout"] is subprocess.DEVNULL
+        assert "dropped" in capsys.readouterr().out

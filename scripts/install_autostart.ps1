@@ -20,7 +20,11 @@
 
     The console window is deliberately left visible. If OpenD is waiting for
     its password, the window says so; hiding it would turn a five-minute
-    wait into a silent failure.
+    wait into a silent failure. It closes by itself once start_stack exits
+    -- which it only does because start_stack hands its children no console
+    (see the comment on NO_CONSOLE there). Until 2026-11-15 it did not: the
+    scheduler was attached to that window, so the window stayed, and
+    closing it killed the scheduler.
 
     Nothing here touches OpenD credentials.
 
