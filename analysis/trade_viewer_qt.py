@@ -118,6 +118,10 @@ _FG       = "#e0e0e0"
 _GREEN    = "#26a69a"
 _RED      = "#ef5350"
 _GREY     = "#546e7a"
+# A lighter grey, for the outline of controls that are OFF. _GREY is dark
+# enough against _BG_BAR that an unchecked box reads as empty space -- the
+# toolbar looked like it had nothing but ticked options on it.
+_GREY_HI  = "#7d9aa8"
 _GRID     = "#263238"
 _GOLD     = "#ffa726"
 _CROSS    = "#b0bec5"
@@ -2904,6 +2908,31 @@ class TradeViewerQt(QMainWindow):
             QPushButton:checked {{ background: {_BG_TIP}; border-color: {_GOLD}; }}
             QCheckBox {{ color: {_FG}; spacing: 4px; }}
             QRadioButton {{ color: {_FG}; spacing: 4px; }}
+            /* ONLY the unchecked state is styled, and that restriction is
+               the whole trick. The Windows 11 style draws an unchecked box
+               with a border barely lighter than this toolbar, so an option
+               that is off reads as blank space. But a ::indicator rule
+               without a state makes the style sheet take over the
+               sub-control in EVERY state, and the checked box then loses
+               its native tick and comes back as a plain filled square --
+               rendered and looked at, not guessed. Naming :unchecked
+               leaves the checked indicator entirely to the native style.
+               The disabled rule is here because :unchecked catches
+               :unchecked:disabled too, and a disabled control that looks
+               enabled is worse than a dim one. */
+            QCheckBox::indicator:unchecked,
+            QRadioButton::indicator:unchecked {{
+                width: 13px; height: 13px;
+                border: 1px solid {_GREY_HI}; background: {_BG};
+            }}
+            QCheckBox::indicator:unchecked {{ border-radius: 3px; }}
+            QRadioButton::indicator:unchecked {{ border-radius: 7px; }}
+            QCheckBox::indicator:unchecked:hover,
+            QRadioButton::indicator:unchecked:hover {{ border-color: {_FG}; }}
+            QCheckBox::indicator:unchecked:disabled,
+            QRadioButton::indicator:unchecked:disabled {{
+                border-color: {_GRID}; background: {_BG};
+            }}
         """)
 
         # Only now, with the stylesheet applied: its border and padding are

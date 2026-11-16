@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.93.1 - 关着的选项在工具栏上看不见 (2026-11-15)
+
+Windows 11 原生样式画的未选中复选框，边框亮度和工具栏背景几乎一样，于是
+「关着的选项」读起来就是一块空白——整条栏看上去只剩勾上的那些。
+
+### 修法上有个坑，先撞了一次
+
+给 `::indicator` 写**无状态**的样式会让 Qt 接管这个子控件在**所有状态**下的绘制，
+**选中态的原生对勾随之消失**，变成一个纯蓝方块。这一条是渲染出来看到的，不是推的。
+
+所以规则**只写 `:unchecked`**，选中态完全交还原生样式：
+
+```
+QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked {
+    width: 13px; height: 13px; border: 1px solid #7d9aa8; background: #1a1a2e;
+}
+QCheckBox::indicator:unchecked    { border-radius: 3px; }
+QRadioButton::indicator:unchecked { border-radius: 7px; }
+...:hover    { border-color: #e0e0e0; }
+...:disabled { border-color: #263238; }
+```
+
+新常量 `_GREY_HI = "#7d9aa8"`，比 `_GREY` 亮一档，专给「关着的控件」描边。
+
+**`disabled` 那条是必须的**：`:unchecked` 会连 `:unchecked:disabled` 一起命中，
+不单独压暗的话，**禁用的控件会看起来是可用的**——那比暗更糟。
+
+**单选钮一起修**（Range 那排 1D/2D/3D/1W 是同一个毛病）。
+
+### 验证方式
+
+**Qt 对无效 QSS 是静默忽略的**：选择器写错不报错、不警告，只是什么都不变。
+所以「我改了样式表」不构成「它生效了」的证据。验证是把**文件里实际的那段文本**
+抽出来（不是另抄一份）、用模块自己的颜色常量格式化、在真实的 `windows11` 样式下
+离屏渲染成图再看——`widget.grab()` 不需要显示窗口，所以不会往桌面上弹东西。
+
+### 范围
+
+`analysis/trade_viewer_qt.py`（主工具栏）与 `analysis/dom_window.py`（同一行样式、
+同一个毛病，是从那条工具栏打开的窗口）。`liq_hm_window` / `multi_vp_window` /
+`replay_trainer` 没有自己的样式表，未改。
+
+**需重启 viewer 生效**（样式表在 `__init__` 里应用）。全量 1866 通过。
+
 ## v0.93.0 - 开盘区间突破:三套规则、两个标的、两个方法陷阱 (2026-11-15)
 
 `backtest/orb.py` 与 `backtest/orb_zarattini.py` 入库,研究笔记在 `doc/orb_research.md`。

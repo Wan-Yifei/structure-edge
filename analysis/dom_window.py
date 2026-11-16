@@ -364,6 +364,20 @@ class DomWindow(QWidget):
             DomWindow         {{ background: {_BG}; color: {_FG}; }}
             QLabel            {{ background: transparent; color: {_FG}; }}
             QCheckBox         {{ color: {_FG}; spacing: 4px; }}
+            /* Same fix as the main viewer's toolbar: the Windows 11 style
+               draws an unchecked box with a border barely lighter than
+               this background, so an option that is off reads as blank
+               space. ONLY :unchecked is named -- a stateless ::indicator
+               rule makes the style sheet take over the sub-control in
+               every state and the checked box loses its native tick. */
+            QCheckBox::indicator:unchecked {{
+                width: 13px; height: 13px; border-radius: 3px;
+                border: 1px solid #7d9aa8; background: {_BG};
+            }}
+            QCheckBox::indicator:unchecked:hover {{ border-color: {_FG}; }}
+            QCheckBox::indicator:unchecked:disabled {{
+                border-color: #263238; background: {_BG};
+            }}
             QComboBox, QSpinBox, QDoubleSpinBox {{
                 background: {_BG_BAR}; color: {_FG};
                 border: 1px solid {_GREY}; padding: 2px 4px;
