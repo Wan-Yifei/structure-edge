@@ -30,6 +30,8 @@ Use this when modifying strategy logic to ensure all downstream files are update
 | `backtest/export_csv_from_db.py` | Reconstruct per-stock CSVs from DuckDB (use when HPC CSVs are lost) |
 | `backtest/merge_db.py` | Merge a secondary DuckDB into the master DB |
 | `backtest/post_backtest.sh` | Chains report → audit → fvg_inspect after every run |
+| `backtest/orb.py` | Opening-range breakout, 1:1 barrier, long only. Analysis tool: no DB, no trade IDs, no algo tag. Findings in `doc/orb_research.md` |
+| `backtest/orb_zarattini.py` | Replication of Zarattini & Aziz (SSRN 4416622) 5-minute ORB. Same footing — analysis only |
 
 ---
 
