@@ -209,6 +209,63 @@ class TestTheArrowsAreInsideTheBox:
         assert not bad, f"arrows clipped by the box: {bad}"
 
 
+def _swallowed(spins):
+    """Boxes whose line edit is sitting on top of an arrow button.
+
+    The buttons are drawn by the style, but the QLineEdit is a real child
+    widget stacked above them, so wherever the two rects overlap the clicks
+    go to the line edit and the button is decoration. Measured on windows11
+    with a stylesheet, the edit ran 21 of the up button's 24 px, which left
+    a 3 px strip and made every up arrow in every toolbar look painted on
+    while the down arrows -- past the edit's right edge -- kept working.
+
+    The assertion is a relation (the text must stop before the buttons
+    begin), not a pixel count, so it holds at any DPI and under any style.
+
+    It reads the STYLE's edit rect rather than the live QLineEdit, which is
+    the opposite of what _cramped does above, and deliberately: the style
+    rect is what Qt will hand the line edit, and it is computed from the
+    box's own fitted width, so it is defined before the window has ever
+    been laid out. The live child geometry is not -- a box in a window
+    that was never shown still carries a default rect, and the first
+    version of this check read one at x=622 inside a 90 px box.
+    """
+    bad, seen = [], 0
+    for sp in spins:
+        if sp.lineEdit() is None:
+            continue
+        seen += 1
+        up, down, edit = _rects(sp)
+        first = min(up.x(), down.x())
+        if edit.right() > first:
+            bad.append((type(sp).__name__, sp.width(),
+                        edit.right(), first, edit.right() - first))
+    assert seen == len(spins), (
+        f"only {seen} of {len(spins)} boxes had a line edit to measure; "
+        f"a silent skip here would let this check pass on nothing")
+    return bad
+
+
+class TestTheArrowsCanActuallyBeClicked:
+    """Where the style PAINTS a button and where a click LANDS are two
+    different questions, and only the second one is what a user feels.
+
+    PLATFORM NOTE, in the spirit of the ones at the top of this file: this
+    defect comes from the stylesheet path of the Windows 11 style, so under
+    the offscreen platform (Fusion) the overlap is absent and these
+    assertions pass vacuously. They are not useless there -- they still
+    catch a regression that makes the overlap WORSE on any style -- but a
+    green run offscreen does not mean the Windows 11 path is right. Run
+    with QT_QPA_PLATFORM=windows for that. Mutation-checked: removing the
+    padding repair in fit_spin is CAUGHT natively and SURVIVES offscreen.
+    """
+
+    def test_the_text_field_does_not_cover_the_buttons(self, viewer):
+        assert not _swallowed(_spins(viewer)), (
+            f"the line edit is sitting on the arrows, so they cannot be "
+            f"clicked: {_swallowed(_spins(viewer))}")
+
+
 class TestTheWidestValueStillFits:
     """Sized to the value it holds today, a box clips the moment the user
     spins it up. The assertion is against the widest value it can show."""
@@ -379,6 +436,11 @@ class TestTheOtherWindowsToo:
                if _rects(sp)[0].x() < 0 or _rects(sp)[1].x() < 0]
         assert not bad, f"arrows painted over the digits: {bad}"
 
+    def test_the_text_field_does_not_cover_the_buttons(self, sibling):
+        assert not _swallowed(_spins(sibling)), (
+            f"the line edit is sitting on the arrows: "
+            f"{_swallowed(_spins(sibling))}")
+
     def test_the_edit_area_has_room_for_it(self, sibling):
         assert not _cramped(_spins(sibling)), (
             f"widest value does not fit the edit area: "
@@ -446,6 +508,11 @@ class TestTheHeatmapToolbarToo:
                for sp in _spins(heatmap)
                if _rects(sp)[0].x() < 0 or _rects(sp)[1].x() < 0]
         assert not bad, f"arrows painted over the digits: {bad}"
+
+    def test_the_text_field_does_not_cover_the_buttons(self, heatmap):
+        assert not _swallowed(_spins(heatmap)), (
+            f"the line edit is sitting on the arrows: "
+            f"{_swallowed(_spins(heatmap))}")
 
     def test_the_edit_area_has_room_for_it(self, heatmap):
         assert not _cramped(_spins(heatmap)), (

@@ -32,6 +32,11 @@ SPIN_TEXT_GAP = 10
 # the number itself does not reach the result.
 _SPIN_PROBE_W = 400
 
+# Breathing room between the text and the first button, on top of the space
+# the buttons themselves need. Two pixels, so the caret at the end of the
+# longest value does not sit against the button's edge.
+_SPIN_BUTTON_PAD = 2
+
 
 def fit_spin(spin: QAbstractSpinBox, gap: int = SPIN_TEXT_GAP) -> None:
     """Widen a spin box until its own widest value clears the arrows.
@@ -71,6 +76,19 @@ def fit_spin(spin: QAbstractSpinBox, gap: int = SPIN_TEXT_GAP) -> None:
     against the other is how a 28 and a 26 ended up in this docstring
     claiming to be the same measurement.
 
+    It also repairs a SECOND consequence of that same overlapping rect,
+    which the width fix alone does not touch: the spin box gives its
+    internal QLineEdit the rect the style hands back, and a QLineEdit is a
+    real child widget, so wherever that rect covers the up button the line
+    edit eats the clicks. Measured on windows11 with a stylesheet, the edit
+    runs 21 of the up button's 24 px, leaving a 3 px strip -- which is why
+    every up arrow in the toolbars looked painted-on while the down arrows,
+    which sit past the edit's right edge, worked. The repair is a
+    padding-right on the widget itself, wide enough to clear both buttons,
+    applied ONLY when the overlap is detected and sized from the measured
+    button width rather than from a constant, so a style that lays its
+    buttons out differently gets a different number or none at all.
+
     Call this AFTER any stylesheet is applied. Not because the box comes out
     too narrow otherwise -- measured, it comes out 18 px too WIDE (100
     against 82 for a plain QSpinBox, 103 against 88 for a double): the
@@ -92,11 +110,38 @@ def fit_spin(spin: QAbstractSpinBox, gap: int = SPIN_TEXT_GAP) -> None:
                        | QStyle.SubControl.SC_SpinBoxEditField)
     opt.rect = QRect(0, 0, _SPIN_PROBE_W, spin.sizeHint().height())
 
+    def _rects():
+        st = spin.style()
+        cc_ = QStyle.ComplexControl.CC_SpinBox
+        return (st.subControlRect(cc_, opt, QStyle.SubControl.SC_SpinBoxUp,
+                                  spin),
+                st.subControlRect(cc_, opt, QStyle.SubControl.SC_SpinBoxDown,
+                                  spin),
+                st.subControlRect(cc_, opt,
+                                  QStyle.SubControl.SC_SpinBoxEditField, spin))
+
+    up, down, edit = _rects()
+
+    # Push the edit field off the buttons before anything is measured from
+    # it. Without this the line edit covers them and the up arrow cannot be
+    # clicked; see the docstring. The padding is added to whatever the
+    # sheet already asked for, so the text keeps the inset it was given.
+    if edit.right() > min(up.x(), down.x()):
+        # The buttons' own widths, measured on this style -- NOT the
+        # widget's current width, which has not been laid out yet and at
+        # the probe width would ask for a 344 px box.
+        need = up.width() + down.width() + _SPIN_BUTTON_PAD
+        extra = f"padding-right: {need}px;"
+        sheet = spin.styleSheet()
+        if "padding-right" not in sheet:
+            spin.setStyleSheet(f"{sheet}\nQAbstractSpinBox {{ {extra} }}"
+                               if sheet else
+                               f"QAbstractSpinBox {{ {extra} }}")
+            spin.ensurePolished()
+            opt.rect = QRect(0, 0, _SPIN_PROBE_W, spin.sizeHint().height())
+            up, down, edit = _rects()
+
     style, cc = spin.style(), QStyle.ComplexControl.CC_SpinBox
-    up = style.subControlRect(cc, opt, QStyle.SubControl.SC_SpinBoxUp, spin)
-    down = style.subControlRect(cc, opt, QStyle.SubControl.SC_SpinBoxDown, spin)
-    edit = style.subControlRect(cc, opt,
-                                QStyle.SubControl.SC_SpinBoxEditField, spin)
 
     chrome = _SPIN_PROBE_W - edit.width()
     if edit.right() > min(up.x(), down.x()):
