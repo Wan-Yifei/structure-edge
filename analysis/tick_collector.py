@@ -21,6 +21,7 @@ import time
 from datetime import datetime
 
 from core import single_instance
+from core.sdk_log import quiet_sdk_file_log
 
 logging.basicConfig(
     level=logging.INFO,
@@ -295,6 +296,13 @@ Examples:
 
 
 def main(argv=None):
+    # The SDK installs a rotating handler on one hard-coded log path,
+    # shared by every process of ours. Once that file is a day old the
+    # rollover fails (another process holds it) and logging prints a
+    # traceback from the SDK's single push-callback thread -- measured
+    # at 6.6 s, long enough to drop K-line pushes and tear a hole in
+    # the live chart. Detach it before any context is opened.
+    quiet_sdk_file_log()
     args = _parse_args(argv)
 
     # One collector per database. A scheduler only knows the processes

@@ -11,6 +11,7 @@ Real-time resting order book depth as price × time heatmap.
 from __future__ import annotations
 
 import bisect
+import math
 import pathlib
 import sqlite3
 import sys
@@ -41,6 +42,12 @@ from feeds.order_book_store import SERVER_LEAD_SECS
 # ── palette (matches trade_viewer_qt) ──────────────────────────────────────────
 _BG   = "#0d1117"
 _FG   = "#b0bec5"
+# Secondary ink for legend notes that explain an ABSENCE. Dimmer than
+# _FG so it reads as a footnote rather than as another legend entry,
+# and deliberately not a side colour: nothing on the chart is being
+# named here, so borrowing teal or red would imply a mark that is not
+# there.
+_MUTED = "#78909c"
 _GRID = "#263238"
 _TEAL = "#26a69a"   # bid side (also bull color in green-up / Western convention)
 _RED  = "#ef5350"   # ask side (also bull color in red-up / CN convention)
@@ -854,7 +861,18 @@ class LiqHmWindow(QWidget):
             "Price-axis resolution: number of bands the current price span is\n"
             "divided into. Higher = finer bands (each one covers less price\n"
             "range) at the cost of thinner rows. Current $/band is shown in\n"
-            "the legend below.")
+            "the legend below.\n\n"
+            "It also decides whether a wall label can say 'pulled / eaten':\n"
+            "that attribution matches prints against the band they fall in,\n"
+            "so it is refused once the band is wider than $0.03. The legend\n"
+            "names the Bins needed whenever it is being refused.\n\n"
+            "Clearing that threshold is the MINIMUM, not a clean read. One\n"
+            "band aggregates every level inside it, so the wider it is the\n"
+            "more of a neighbour's size and volume is credited to this wall.\n"
+            "On a high-priced instrument the band stays coarse well past the\n"
+            "threshold -- measured on QQQ over a single session, a band at\n"
+            "the default resolution held about 11 price levels against about\n"
+            "3 on a $50 instrument. Prefer more Bins than the minimum.")
         self._n_price_spin.valueChanged.connect(self._on_n_price_changed)
         row1.addWidget(self._n_price_spin)
 
@@ -942,7 +960,15 @@ class LiqHmWindow(QWidget):
         self._wall_n_spin.valueChanged.connect(self._on_controls_changed)
         row2.addWidget(self._wall_n_spin)
 
-        row2.addSeparator()
+        # A third row, not a longer second one. The window's minimum
+        # width is its widest row, so every control added to the
+        # longest row raises the floor for the whole window -- and at
+        # 1273 px two of these windows no longer fit side by side on a
+        # 2560 px screen. Imbalance and Aggressor move down together
+        # because they are the two groups that carry their own spin
+        # boxes; splitting anywhere else leaves row2 just as wide.
+        row3 = QToolBar()
+        row3.setMovable(False)
 
         self._simb_cb = QCheckBox("Imbalance")
         self._simb_cb.setChecked(vcfg.liq("imbalance"))
@@ -951,18 +977,18 @@ class LiqHmWindow(QWidget):
             "Pink bar   = bearish stacked imbalance (ask dominates N consecutive depth levels)\n"
             "Bid/ask levels paired by depth rank; missing side counts as 0.")
         self._simb_cb.stateChanged.connect(self._on_controls_changed)
-        row2.addWidget(self._simb_cb)
+        row3.addWidget(self._simb_cb)
 
-        row2.addWidget(_lbl("Lvl:"))
+        row3.addWidget(_lbl("Lvl:"))
         self._simb_levels_spin = QSpinBox()
         self._simb_levels_spin.setRange(2, 10)
         self._simb_levels_spin.setSingleStep(1)
         self._simb_levels_spin.setValue(vcfg.liq("simb_levels"))
         self._simb_levels_spin.setToolTip("Minimum consecutive imbalanced depth levels")
         self._simb_levels_spin.valueChanged.connect(self._on_controls_changed)
-        row2.addWidget(self._simb_levels_spin)
+        row3.addWidget(self._simb_levels_spin)
 
-        row2.addWidget(_lbl("Ratio:"))
+        row3.addWidget(_lbl("Ratio:"))
         self._simb_ratio_spin = QDoubleSpinBox()
         self._simb_ratio_spin.setRange(1.5, 20.0)
         self._simb_ratio_spin.setSingleStep(0.5)
@@ -970,9 +996,9 @@ class LiqHmWindow(QWidget):
         self._simb_ratio_spin.setDecimals(1)
         self._simb_ratio_spin.setToolTip("bid/ask (or ask/bid) volume ratio threshold per level")
         self._simb_ratio_spin.valueChanged.connect(self._on_controls_changed)
-        row2.addWidget(self._simb_ratio_spin)
+        row3.addWidget(self._simb_ratio_spin)
 
-        row2.addWidget(_lbl("Depth:"))
+        row3.addWidget(_lbl("Depth:"))
         self._simb_depth_spin = QSpinBox()
         self._simb_depth_spin.setRange(3, 50)
         self._simb_depth_spin.setSingleStep(1)
@@ -981,9 +1007,9 @@ class LiqHmWindow(QWidget):
             "Max depth ranks to analyse (top-of-book only).\n"
             "Deep orders far from the spread are noise — keep this at 5–15.")
         self._simb_depth_spin.valueChanged.connect(self._on_controls_changed)
-        row2.addWidget(self._simb_depth_spin)
+        row3.addWidget(self._simb_depth_spin)
 
-        row2.addSeparator()
+        row3.addSeparator()
 
         self._absorb_cb = QCheckBox("Aggressor")
         self._absorb_cb.setChecked(vcfg.liq("absorb"))
@@ -993,9 +1019,9 @@ class LiqHmWindow(QWidget):
             "Bubble size encodes net delta volume.  Reads ticks.db.\n"
             "Whether the flow was absorbed is for the user to judge from the heatmap.")
         self._absorb_cb.stateChanged.connect(self._on_absorb_changed)
-        row2.addWidget(self._absorb_cb)
+        row3.addWidget(self._absorb_cb)
 
-        row2.addWidget(_lbl("MinΔ:"))
+        row3.addWidget(_lbl("MinΔ:"))
         self._absorb_min_vol_spin = QSpinBox()
         self._absorb_min_vol_spin.setRange(10, 100_000)
         self._absorb_min_vol_spin.setSingleStep(10)
@@ -1003,15 +1029,16 @@ class LiqHmWindow(QWidget):
         self._absorb_min_vol_spin.setToolTip(
             "Minimum |buy_vol − sell_vol| per column to show a bubble.")
         self._absorb_min_vol_spin.valueChanged.connect(self._on_absorb_changed)
-        row2.addWidget(self._absorb_min_vol_spin)
+        row3.addWidget(self._absorb_min_vol_spin)
 
-        # ── Two-row toolbar container ──────────────────────────────────────────
+        # ── Three-row toolbar container ──────────────────────────────────────────
         self._toolbar = QWidget()
         tb_lay = QVBoxLayout(self._toolbar)
         tb_lay.setContentsMargins(0, 0, 0, 0)
         tb_lay.setSpacing(0)
         tb_lay.addWidget(row1)
         tb_lay.addWidget(row2)
+        tb_lay.addWidget(row3)
 
         # Before the floor is taken: Windows 11 lays a spin box's two arrow
         # buttons out side by side rather than stacked, which needs about
@@ -1032,7 +1059,7 @@ class LiqHmWindow(QWidget):
         fitted = fit_all_spins(self._toolbar)
         assert fitted, "no spin boxes found to fit -- wrong root?"
 
-        # row1/row2 are QToolBar instances used purely as a convenient
+        # row1/row2/row3 are QToolBar instances used purely as a convenient
         # addWidget()/addSeparator() container here -- they were never docked
         # via addToolBar(), so Qt's native toolbar overflow chevron (which
         # only engages for toolbars managed by a QMainWindow toolbar area)
@@ -1040,7 +1067,8 @@ class LiqHmWindow(QWidget):
         # widest row's trailing controls off the edge with no way to reach
         # them. Floor the window width at the widest row's natural size so
         # that state is never reachable.
-        widest = max(row1.sizeHint().width(), row2.sizeHint().width())
+        widest = max(row1.sizeHint().width(), row2.sizeHint().width(),
+                     row3.sizeHint().width())
         self.setMinimumWidth(widest + 16)
 
         # Legend bar — separate row below toolbar so it never gets truncated
@@ -2647,6 +2675,39 @@ class LiqHmWindow(QWidget):
                 out.append(txt)
         return out
 
+    def _wall_fate_min_bins(self) -> int | None:
+        """Bins needed before `_wall_fate` would speak, or None if unreachable.
+
+        The suffix is gated on the half-band, which is the window width over
+        Bins -- so the cure is a Bins setting, and the user has no way to
+        work that out from a band width and a constant neither of which is
+        on screen. Rounded UP to the spin box's own step, because a value it
+        cannot be set to is not advice.
+
+        None when even the maximum will not do it. That is a real case, not
+        a defensive branch: the window is `(hi-lo) + max(hi-lo, mid*2%)`
+        wide, so a book whose near-touch depth spreads past 2% of price
+        outruns any Bins this spin box offers. Naming a number the spin box
+        would silently clamp is worse than saying it cannot be reached.
+
+        Tracks the CURRENT window, so it moves when the book does. It is the
+        floor for what is on screen now, not a setting that stays right.
+
+        Width comes from `bin_size * bins`, NOT from price_max - price_min.
+        Those are equal after a rebuild sets all three together, but not in
+        between: setting the Bins spin box calls _reset_grid, and a window
+        read mid-reset advised "unreachable" for a window that needed 240.
+        The gate judges bin_size, so the advice is derived from bin_size and
+        the two cannot drift apart.
+        """
+        if self._bin_size <= 0:
+            return None
+        width = self._bin_size * self._n_price_spin.value()
+        need = math.ceil(width / (2 * _WALL_FATE_MAX_HALF))
+        step = self._n_price_spin.singleStep() or 1
+        need = math.ceil(need / step) * step
+        return need if need <= self._n_price_spin.maximum() else None
+
     def _wall_fate(self, grid, bi: int, lo: int, hi: int,
                    peak: float, now: float, half: float, side: str) -> str:
         """Why a wall shrank: ' pulled 86%' or ' eaten 73%', or '' if unknown.
@@ -2767,6 +2828,25 @@ class LiqHmWindow(QWidget):
             parts.append(
                 f'<font color="{_FG}">${self._bin_size:.3f}/band</font>&nbsp;&nbsp;'
             )
+            # Why the wall labels carry no 'pulled / eaten' here. Reported as
+            # "QQQ never shows it", and the honest answer was unreachable
+            # from the UI: the gate is a half-band against a constant, and
+            # neither number is on screen. The band width IS on screen, right
+            # here, so the explanation belongs beside it rather than in a
+            # tooltip on some other control.
+            #
+            # Stated whatever the Aggressor checkbox says. That checkbox is
+            # visible and its effect is guessable; this gate is neither, and
+            # listing every gate that could be shut would cost more width
+            # than it buys.
+            if self._bin_size / 2 > _WALL_FATE_MAX_HALF:
+                need = self._wall_fate_min_bins()
+                cure = (f'needs Bins&nbsp;≥&nbsp;{need}' if need is not None
+                        else 'too wide at any Bins')
+                parts.append(
+                    f'<font color="{_MUTED}">no pulled/eaten: band &gt; '
+                    f'${_WALL_FATE_MAX_HALF:.2f} — {cure}</font>&nbsp;&nbsp;'
+                )
 
         # Colormap section — use <font> tags (safest Qt HTML subset)
         if self._bid_ask_cb.isChecked():
@@ -3046,6 +3126,10 @@ class LiqHmWindow(QWidget):
 # ── standalone test ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    from core.sdk_log import quiet_sdk_file_log
+    # see core/sdk_log.py: a stale shared SDK log file wedges
+    # the push thread and tears holes in the live chart
+    quiet_sdk_file_log()
     import sys
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)

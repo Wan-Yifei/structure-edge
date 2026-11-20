@@ -127,10 +127,21 @@ def fit_spin(spin: QAbstractSpinBox, gap: int = SPIN_TEXT_GAP) -> None:
     # clicked; see the docstring. The padding is added to whatever the
     # sheet already asked for, so the text keeps the inset it was given.
     if edit.right() > min(up.x(), down.x()):
-        # The buttons' own widths, measured on this style -- NOT the
-        # widget's current width, which has not been laid out yet and at
-        # the probe width would ask for a 344 px box.
-        need = up.width() + down.width() + _SPIN_BUTTON_PAD
+        # Pad by the MEASURED OVERLAP, not by the buttons' combined width.
+        #
+        # The first version used `up.width() + down.width() + 2`, which on
+        # windows11 is 50 px where the edit only runs 22 px past the
+        # leftmost button. The 28 px difference went straight into every
+        # spin box in the application, and with six of them on one
+        # heatmap toolbar row that row grew 168 px -- enough that the
+        # viewer and the heatmap could no longer be tiled side by side on
+        # a 2560 px screen. Fixing a dead arrow is not worth a window
+        # that will not fit.
+        #
+        # The overlap is what the defect actually is, so it is what gets
+        # corrected. Swept across padding values on this style: the edit
+        # clears the buttons at exactly 22 px and not at 20.
+        need = edit.right() - min(up.x(), down.x()) + _SPIN_BUTTON_PAD
         extra = f"padding-right: {need}px;"
         sheet = spin.styleSheet()
         if "padding-right" not in sheet:
@@ -140,6 +151,18 @@ def fit_spin(spin: QAbstractSpinBox, gap: int = SPIN_TEXT_GAP) -> None:
             spin.ensurePolished()
             opt.rect = QRect(0, 0, _SPIN_PROBE_W, spin.sizeHint().height())
             up, down, edit = _rects()
+            # Padding moves the edit field, and a style is free to move
+            # the buttons with it. Re-check rather than assume one pass
+            # was enough: a residual overlap is the original bug back.
+            if edit.right() > min(up.x(), down.x()):
+                need += edit.right() - min(up.x(), down.x()) + _SPIN_BUTTON_PAD
+                spin.setStyleSheet(
+                    spin.styleSheet().replace(extra,
+                                              f"padding-right: {need}px;"))
+                spin.ensurePolished()
+                opt.rect = QRect(0, 0, _SPIN_PROBE_W,
+                                 spin.sizeHint().height())
+                up, down, edit = _rects()
 
     style, cc = spin.style(), QStyle.ComplexControl.CC_SpinBox
 

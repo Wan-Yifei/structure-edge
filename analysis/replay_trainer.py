@@ -50,6 +50,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from core.sdk_log import quiet_sdk_file_log
 from feeds.fetcher import fetch_klines
 from strategy.smc.fvg import detect_fvg
 from strategy.smc.order_blocks import detect_order_blocks
@@ -2194,6 +2195,13 @@ class ReplayTrainerWindow(QMainWindow):
 
 
 def main(argv=None) -> None:
+    # Detach the SDK's own file handler before any quote context is
+    # opened. FTLog is a per-process singleton on a HARD-CODED path,
+    # so every process that opens a context rotates the same file;
+    # on Windows the loser raises, logging prints the traceback on
+    # the SDK's single callback thread, and that thread then stalls
+    # every push behind it. Measured at 6.6 s. See core/sdk_log.py.
+    quiet_sdk_file_log()
     p = argparse.ArgumentParser(description="K-line Replay Trainer")
     p.parse_args(argv)
     app = QApplication(sys.argv[:1])

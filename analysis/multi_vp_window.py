@@ -32,6 +32,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel, QMainWindow,
                              QPushButton, QSpinBox, QToolBar, QWidget)
+from core.sdk_log import quiet_sdk_file_log
 
 _BG = "#1a1a2e"
 _FG = "#e0e0e0"
@@ -529,6 +530,13 @@ class MultiVPWindow(QMainWindow):
 
 
 def main() -> None:
+    # Detach the SDK's own file handler before any quote context is
+    # opened. FTLog is a per-process singleton on a HARD-CODED path,
+    # so every process that opens a context rotates the same file;
+    # on Windows the loser raises, logging prints the traceback on
+    # the SDK's single callback thread, and that thread then stalls
+    # every push behind it. Measured at 6.6 s. See core/sdk_log.py.
+    quiet_sdk_file_log()
     app = QApplication(sys.argv)
     w = MultiVPWindow()
     if len(sys.argv) > 1:

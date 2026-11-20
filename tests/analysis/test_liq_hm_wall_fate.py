@@ -152,28 +152,86 @@ class TestItDeclinesToGuess:
 
 
 class TestTheGateIsReachable:
-    """The first version capped the band at one cent, which no instrument this
-    was written for could reach: the heatmap spans at least +/-1% of mid and
-    cuts it into N_PRICE bins, so SOXL's half-band is about two cents at the
-    default resolution. The feature shipped unable to appear. These pin the
-    arithmetic rather than the constant, so narrowing it again fails here."""
+    """The gate is a constant in dollars; the band it judges scales with price.
+
+    So the feature has a PRICE CEILING, and the first version shipped above
+    it: the cap was one cent, which no instrument this was written for could
+    reach. It was raised to three, which clears SOXL. It does not clear QQQ,
+    and nothing here noticed, because the parametrize below stopped at $130
+    while QQQ trades near $615.
+
+    These tests therefore pin TWO things, and the second is the one that was
+    missing: that the constant is not narrowed below what the instruments in
+    use need, AND what the ceiling actually is, written down as a number
+    rather than implied by whichever mids someone happened to list.
+
+    Do not "fix" a failure here by raising _WALL_FATE_MAX_HALF. The cap is
+    not a tuning knob: the attribution matches prints against the band they
+    land in, so a wider band credits a neighbour's volume to this wall.
+    Measured on QQQ over one session, a band at the default resolution held
+    about 11 price levels against about 3 on SOXL, and about 85% of the
+    volume matched to a wall belonged to another level. Raising the cap would
+    not make that right, it would publish it.
+    """
 
     @staticmethod
-    def _half(mid, n_price):
-        """Half-band at the WIDEST zoom, which is the narrowest band on offer:
-        the window is at least +/-1% of mid, so it is never thinner than this.
-        Mirrors the span/bin arithmetic in _rebuild_grid."""
-        span = mid * 0.02
-        return ((span * 2) / n_price) / 2
+    def _half_band(mid, near_width, n_price):
+        """Half-band for a book whose near-touch levels span `near_width`.
 
-    @pytest.mark.parametrize("mid", [45.0, 103.0, 116.0, 130.0])
-    def test_default_resolution_can_show_a_suffix(self, win, mid):
+        Mirrors _rebuild_grid exactly -- `span = max(near_width, mid*2%)` and
+        the window is `near_width + span` wide -- because the shortcut that
+        used to stand here did not. It assumed `near_width == span` and
+        returned `mid*0.04/n/2`, described as "the narrowest band on offer".
+        It is neither bound. It is the boundary between the two regimes, and
+        measured on 2026-11-20 it overstated QQQ's real half-band by 1.9x and
+        understated SOXL's by 1.3x -- wrong in both directions, so it could
+        not even be relied on as conservative.
+        """
+        span = max(near_width, mid * 0.02)
+        return ((near_width + span) / n_price) / 2
+
+    def test_the_formula_matches_a_reading_taken_off_the_screen(self):
+        """QQQ, 2026-11-20: the legend read $0.134/band at 100 bins.
+
+        Pinning the arithmetic against a number that was actually on screen,
+        because every claim below is computed with it.
+        """
+        from analysis.liq_hm_window import N_PRICE
+        band = self._half_band(615.6, 1.09, N_PRICE) * 2
+        assert abs(band - 0.134) < 0.0005, f"got ${band:.4f}/band"
+
+    @pytest.mark.parametrize("mid,near_width", [
+        (45.0, 1.2), (103.0, 1.2), (116.0, 1.2), (130.0, 1.2),
+    ])
+    def test_default_resolution_can_show_a_suffix(self, win, mid, near_width):
         from analysis.liq_hm_window import N_PRICE
         win._absorb_ticks = ticks([(12, 73_072)], price=116.40)
-        half = self._half(mid, N_PRICE)
+        half = self._half_band(mid, near_width, N_PRICE)
         assert fate(win, 73_072, 0, half=half) != "", (
             f"no suffix at mid={mid} with N_PRICE={N_PRICE} "
             f"(half={half:.4f}) -- the gate is unreachable again")
+
+    def test_a_high_priced_instrument_is_above_the_ceiling(self, win):
+        """QQQ at the default resolution. Not a bug being pinned as correct:
+        the suffix is refused because the attribution would be wrong, and
+        TestItSaysWhyItIsSilent pins that the UI says so."""
+        from analysis.liq_hm_window import N_PRICE
+        win._absorb_ticks = ticks([(12, 73_072)], price=116.40)
+        half = self._half_band(615.6, 1.09, N_PRICE)
+        assert fate(win, 73_072, 0, half=half) == ""
+
+    def test_the_ceiling_is_about_250_dollars(self):
+        """The number the parametrize above only implied.
+
+        For a book whose near-touch levels span ~$1 at the default
+        resolution: half = (1 + mid*2%) / 200 <= 0.03 => mid <= $250. Stated
+        as a fact so the next high-priced instrument is a known limitation
+        rather than a surprise.
+        """
+        from analysis.liq_hm_window import N_PRICE, _WALL_FATE_MAX_HALF
+        ok = [m for m in range(10, 1000)
+              if self._half_band(m, 1.0, N_PRICE) <= _WALL_FATE_MAX_HALF]
+        assert max(ok) == 250, f"ceiling moved to ${max(ok)}"
 
     def test_a_quarter_dollar_band_is_still_refused(self, win):
         win._absorb_ticks = ticks([(12, 10_000)])
@@ -184,6 +242,106 @@ class TestTheGateIsReachable:
         default heatmap resolution stops clearing it."""
         from analysis.liq_hm_window import _WALL_FATE_MAX_HALF
         assert _WALL_FATE_MAX_HALF >= 0.03
+
+
+class TestItSaysWhyItIsSilent:
+    """An absence the user cannot account for is the actual defect.
+
+    Reported as "QQQ never shows pulled/eaten". Everything about why was
+    off screen: the gate is a half-band compared against a constant, and
+    neither number was anywhere in the UI. The band width was -- in the
+    legend, as $/band -- so the explanation goes beside it.
+
+    The load-bearing test here is not that a note appears. It is that the
+    Bins value the note names ACTUALLY CLEARS THE GATE: advice that does not
+    work is worse than silence, because it costs the user a round trip to
+    find that out.
+    """
+
+    @staticmethod
+    def _legend_with(win, lo, hi, n_price):
+        """Order matters: setValue calls _reset_grid, which clears bin_size.
+
+        The first version of this helper set bin_size first and passed only
+        because the fixture's spin box already held 100, so setValue fired no
+        signal. It would have gone green against a window whose width had
+        been zeroed.
+        """
+        win._n_price_spin.setValue(n_price)
+        win._price_min, win._price_max = lo, hi
+        win._bin_size = (hi - lo) / n_price
+        win._update_legend()
+        return win._legend_lbl.text()
+
+    def test_the_advice_does_not_depend_on_the_current_bins(self, win):
+        """Same window, different starting resolution -> same answer.
+
+        The advice is about the WINDOW, so it must be invariant to the knob
+        it is advising on. Reading it off price_min/price_max instead of off
+        bin_size broke exactly this.
+        """
+        self._legend_with(win, 609.0, 622.4, 100)
+        a = win._wall_fate_min_bins()
+        self._legend_with(win, 609.0, 622.4, 200)
+        b = win._wall_fate_min_bins()
+        assert a == b == 240, f"got {a} at 100 bins and {b} at 200"
+
+    def test_a_wide_band_says_so(self, win):
+        txt = self._legend_with(win, 609.0, 622.4, 100)       # QQQ, $0.134
+        assert "no pulled/eaten" in txt
+        assert "needs Bins" in txt
+
+    def test_the_bins_it_names_actually_clear_the_gate(self, win):
+        """The one that matters: take its own advice and check it works."""
+        from analysis.liq_hm_window import _WALL_FATE_MAX_HALF
+        lo, hi = 609.0, 622.4
+        self._legend_with(win, lo, hi, 100)
+        need = win._wall_fate_min_bins()
+        assert need is not None
+        half = ((hi - lo) / need) / 2
+        assert half <= _WALL_FATE_MAX_HALF, (
+            f"it told the user Bins={need}, which still gives half={half:.4f} "
+            f"against a limit of {_WALL_FATE_MAX_HALF}")
+
+    def test_it_does_not_name_more_than_needed(self, win):
+        """One spin-box step below its answer must NOT clear the gate, or it
+        is quietly costing resolution it did not have to."""
+        from analysis.liq_hm_window import _WALL_FATE_MAX_HALF
+        lo, hi = 609.0, 622.4
+        self._legend_with(win, lo, hi, 100)
+        need = win._wall_fate_min_bins()
+        step = win._n_price_spin.singleStep()
+        half_below = ((hi - lo) / (need - step)) / 2
+        assert half_below > _WALL_FATE_MAX_HALF, (
+            f"Bins={need - step} would have been enough; {need} is wasteful")
+
+    def test_the_value_it_names_can_be_set(self, win):
+        """A number the spin box would clamp is not advice."""
+        self._legend_with(win, 609.0, 622.4, 100)
+        need = win._wall_fate_min_bins()
+        win._n_price_spin.setValue(need)
+        assert win._n_price_spin.value() == need
+
+    def test_a_narrow_band_says_nothing(self, win):
+        txt = self._legend_with(win, 46.5, 47.7, 100)         # SOXL, $0.012
+        assert "pulled/eaten" not in txt
+
+    def test_an_unreachable_width_says_so(self, win):
+        """A book spreading past 2% of price outruns the spin box, and naming
+        a number it cannot be set to would be a lie. Real case, not a
+        defensive branch -- see _wall_fate_min_bins."""
+        wide = 0.06 * win._n_price_spin.maximum() * 1.5
+        txt = self._legend_with(win, 600.0, 600.0 + wide, 100)
+        assert win._wall_fate_min_bins() is None
+        assert "too wide at any Bins" in txt
+        assert "needs Bins" not in txt
+
+    def test_the_note_is_not_shown_when_the_suffix_can_appear(self, win):
+        """Pins the direction of the condition: the first draft of this check
+        can pass while inverted, because both branches mention the feature."""
+        narrow = self._legend_with(win, 46.5, 47.7, 100)
+        wide = self._legend_with(win, 609.0, 622.4, 100)
+        assert "no pulled/eaten" in wide and "no pulled/eaten" not in narrow
 
 
 class TestItNamesTheLoss:

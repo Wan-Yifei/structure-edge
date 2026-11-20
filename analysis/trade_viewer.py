@@ -77,6 +77,7 @@ from strategy.smc.market_structure import detect_bos_choch
 from strategy.smc.fvg import detect_fvg
 from strategy.smc.order_blocks import detect_order_blocks
 from strategy.smc.kd_trend import compute_kd
+from core.sdk_log import quiet_sdk_file_log
 
 # ── Performance monitor ───────────────────────────────────────────────────────
 
@@ -2988,6 +2989,13 @@ def _render_headless(args: argparse.Namespace) -> None:
 
 
 def main(argv=None):
+    # Detach the SDK's own file handler before any quote context is
+    # opened. FTLog is a per-process singleton on a HARD-CODED path,
+    # so every process that opens a context rotates the same file;
+    # on Windows the loser raises, logging prints the traceback on
+    # the SDK's single callback thread, and that thread then stalls
+    # every push behind it. Measured at 6.6 s. See core/sdk_log.py.
+    quiet_sdk_file_log()
     args = _parse_args(argv)
     if args.output:
         args.mode = "Historical"

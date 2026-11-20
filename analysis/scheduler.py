@@ -28,6 +28,7 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from core import single_instance            # noqa: E402
+from core.sdk_log import quiet_sdk_file_log
 
 
 # ── Keeping collectors from outliving us ──────────────────────────────────
@@ -1888,6 +1889,13 @@ class SchedulerApp(tk.Tk):
 
 
 def main(argv=None):  # argv accepted for uniform main.py dispatch, not used
+    # The SDK installs a rotating handler on one hard-coded log path,
+    # shared by every process of ours. Once that file is a day old the
+    # rollover fails (another process holds it) and logging prints a
+    # traceback from the SDK's single push-callback thread -- measured
+    # at 6.6 s, long enough to drop K-line pushes and tear a hole in
+    # the live chart. Detach it before any context is opened.
+    quiet_sdk_file_log()
     app = SchedulerApp()
     app.mainloop()
 

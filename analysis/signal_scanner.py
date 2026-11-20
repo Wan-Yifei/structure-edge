@@ -58,6 +58,7 @@ from PyQt6.QtWidgets import (
 from backtest.engine import ALGO_VERSION, BacktestParams
 from strategy.smc.market_structure import detect_bos_choch, determine_trend, find_swings
 from strategy.smc.fvg import detect_fvg
+from core.sdk_log import quiet_sdk_file_log
 
 _ROOT = pathlib.Path(__file__).parent.parent
 _CFG_PATH = _ROOT / "config" / "schedule.json"
@@ -1993,6 +1994,13 @@ class SignalScanner(QMainWindow):
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main(argv=None) -> None:
+    # The SDK installs a rotating handler on one hard-coded log path,
+    # shared by every process of ours. Once that file is a day old the
+    # rollover fails (another process holds it) and logging prints a
+    # traceback from the SDK's single push-callback thread -- measured
+    # at 6.6 s, long enough to drop K-line pushes and tear a hole in
+    # the live chart. Detach it before any context is opened.
+    quiet_sdk_file_log()
     app = QApplication(sys.argv if argv is None else [sys.argv[0]] + list(argv))
     app.setApplicationName("SMC Signal Scanner")
     app.setQuitOnLastWindowClosed(False)  # keep alive when minimized to tray

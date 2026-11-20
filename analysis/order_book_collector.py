@@ -25,6 +25,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from core import single_instance
+from core.sdk_log import quiet_sdk_file_log
 
 _ET = ZoneInfo("America/New_York")
 
@@ -63,7 +64,7 @@ _SIDE_STALE_SECS = 10.0  # drop a cached side once it's gone this long without a
                           # the live ask -- structurally impossible for a real
                           # resting order, since it would just cross and fill).
 
-# Retention (see _watchdog's prune call) -- same "give this one symbol more
+# Retention (see _watchdog's prune call) -- same "give these symbols more
 # history" intent as tick_collector.py's _RETENTION_EXEMPT, but ob_snapshots
 # is pruned by row count, not age, so an unbounded exemption (like ticks.db's)
 # isn't appropriate here.
@@ -90,9 +91,27 @@ _SIDE_STALE_SECS = 10.0  # drop a cached side once it's gone this long without a
 # day, and unlike everything else here the book only accumulates FORWARD --
 # a session pruned before the question is asked is gone for good. 61.5h is
 # 5 x 274,388 rows at the regular-session rate; ~2.9 GB.
+#
+# QQQ joined on 2026-11-20, same figure, same reason -- and the reason is
+# worth stating because it is the one that cannot be deferred. The wall
+# "pulled / eaten" suffix never appears on QQQ; the measurement that
+# explains why (how many price levels one heatmap bin really aggregates at
+# QQQ's price, 11 against SOXL's 3) could be run on ONE day only, because
+# the default 6.5h is exactly one session. Raising retention AFTER such a
+# question is asked buys nothing, since the days wanted are the ones
+# already pruned. Anything on this table that needs more than a session has
+# to be anticipated, or it cannot be answered at all.
+#
+# Disk at 2,093 B/snapshot: each code at 61.5h is ~2.9 GB, so the live set
+# is ~5.7 GB for two. Measured on the day QQQ was added, the file held
+# 5.57 GB for 3.18 GB of live rows -- SQLite does not return pages on
+# DELETE without VACUUM, so most of this should reuse free pages rather
+# than grow the file. Watch it anyway: a third code at this setting would
+# not have that cushion.
 _SNAPSHOTS_PER_SEC = 6.2                       # measured, regular session
 _RETENTION_HOURS_DEFAULT = 6.5                 # one regular session
-_RETENTION_HOURS_OVERRIDE = {"US.SOXL": 61.5}  # five trading sessions
+_RETENTION_HOURS_OVERRIDE = {"US.SOXL": 61.5,  # five trading sessions
+                             "US.QQQ": 61.5}   # ditto, see above
 
 
 def _keep_for_hours(hours: float) -> int:
@@ -338,6 +357,13 @@ Examples:
 
 
 def main(argv=None):
+    # The SDK installs a rotating handler on one hard-coded log path,
+    # shared by every process of ours. Once that file is a day old the
+    # rollover fails (another process holds it) and logging prints a
+    # traceback from the SDK's single push-callback thread -- measured
+    # at 6.6 s, long enough to drop K-line pushes and tear a hole in
+    # the live chart. Detach it before any context is opened.
+    quiet_sdk_file_log()
     args = _parse_args(argv)
 
     # One collector per database. A scheduler only knows the processes

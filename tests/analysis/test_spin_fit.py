@@ -525,10 +525,18 @@ class TestTheHeatmapToolbarToo:
         assert not loose, f"not sized by fit_spin: {loose}"
 
     def test_the_floor_covers_the_rows_as_drawn(self, heatmap):
-        """Its two rows are plain QToolBars inside a QVBoxLayout, never
-        docked, so Qt's overflow chevron never engages for them: too narrow
-        a window simply clips the trailing controls off the edge."""
-        rows = [heatmap._toolbar.layout().itemAt(i).widget() for i in range(2)]
+        """Its rows are plain QToolBars inside a QVBoxLayout, never docked,
+        so Qt's overflow chevron never engages for them: too narrow a window
+        simply clips the trailing controls off the edge.
+
+        EVERY row, not a fixed count. This read `range(2)` and went stale the
+        moment a third row was split out -- it kept passing while no longer
+        covering the new row at all.
+        """
+        lay = heatmap._toolbar.layout()
+        rows = [lay.itemAt(i).widget() for i in range(lay.count())]
+        rows = [r for r in rows if r is not None]
+        assert len(rows) >= 3, f"expected the split rows, found {len(rows)}"
         widest = max(r.sizeHint().width() for r in rows)
         assert heatmap.minimumWidth() >= widest, (
             f"minimum width {heatmap.minimumWidth()} is under the widest "

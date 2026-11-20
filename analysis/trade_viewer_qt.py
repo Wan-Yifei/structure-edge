@@ -72,6 +72,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from analysis import viewer_config as vcfg
 from analysis.qt_widgets import fit_all_spins
 from core.time_utils import candle_start
+from core.sdk_log import quiet_sdk_file_log
 from feeds.fetcher import fetch_klines
 from strategy.smc.market_structure import detect_bos_choch
 from strategy.smc.fvg import detect_fvg
@@ -8652,22 +8653,55 @@ class TradeViewerQt(QMainWindow):
                 self._cvd_label.setPos(lx_cvd, cvd_val)
                 self._cvd_label.setText(cvd_str)
                 self._cvd_label.setVisible(True)
+                # Where the off-exchange label parks itself (see below).
+                cvd_anchor = (lx_cvd, cvd_val)
             else:
                 self._cvd_label.setVisible(False)
+                cvd_anchor = None
 
             # Off-exchange line: show it next to CVD so a divergence can be
             # read off as numbers, not just eyeballed from two curves.
+            #
+            # It is parked BESIDE the on-exchange figure, not at its own
+            # value. Its own value is exactly where it cannot be read: the
+            # two series diverge by design -- that divergence is the thing
+            # the label exists to show -- so on a panel a few hundred
+            # pixels tall the off label sits off the bottom edge whenever
+            # the gap is wide. Reported with +7.19M on screen and off at
+            # -4.49M, 11.7M apart, the label was simply gone.
             off = getattr(self, "_offex_arr", None)
             if self._plot_cvd.isVisible() and off is not None:
                 o_idx = max(0, min(idx, len(off) - 1))
                 o_val = float(off[o_idx])
-                xlo_o, xhi_o = self._plot_cvd.vb.viewRange()[0]
-                lx_o = xlo_o + (xhi_o - xlo_o) * 0.12
+                ylo_o, yhi_o = self._plot_cvd.vb.viewRange()[1]
+                if cvd_anchor is None:
+                    # No on-exchange label to sit beside (that bar has no
+                    # tick coverage), so fall back to the middle.
+                    xlo_o, xhi_o = self._plot_cvd.vb.viewRange()[0]
+                    lx_o = xlo_o + (xhi_o - xlo_o) * 0.01
+                    ly_o = (ylo_o + yhi_o) / 2
+                else:
+                    # Clear the on-exchange text by its MEASURED width.
+                    #
+                    # The horizontal spacing was NOT the reported bug --
+                    # only the y was. The old gap of 11% of the view
+                    # range is zoom-invariant in pixels (range and pixels
+                    # scale together) and measured 157 px against a
+                    # 74-96 px label, so it cleared comfortably. This is
+                    # a robustness change, not a fix: a fraction of the
+                    # panel cannot know how wide the text is, so it would
+                    # fail on a panel narrow enough or a number long
+                    # enough. That case could not be demonstrated here --
+                    # the offscreen platform does not propagate a resize
+                    # to the view box -- so it is stated as a reason, not
+                    # as a measurement.
+                    gap_px = self._cvd_label.textItem.boundingRect().width() + 8
+                    lx_o = cvd_anchor[0] + gap_px * self._plot_cvd.vb.viewPixelSize()[0]
+                    ly_o = cvd_anchor[1]
                 if not np.isfinite(o_val):
                     # Past the last classified bar. Say so rather than showing
                     # the last known figure as though it still held.
-                    ylo_o, yhi_o = self._plot_cvd.vb.viewRange()[1]
-                    self._offex_label.setPos(lx_o, (ylo_o + yhi_o) / 2)
+                    self._offex_label.setPos(lx_o, ly_o)
                     self._offex_label.setText("off n/a")
                 else:
                     sign = "+" if o_val >= 0 else ""
@@ -8677,7 +8711,7 @@ class TradeViewerQt(QMainWindow):
                         o_str = f"{sign}{o_val/1_000:.0f}K"
                     else:
                         o_str = f"{sign}{o_val:.0f}"
-                    self._offex_label.setPos(lx_o, o_val)
+                    self._offex_label.setPos(lx_o, ly_o)
                     self._offex_label.setText(f"off {o_str}")
                 self._offex_label.setVisible(True)
             else:
@@ -8981,6 +9015,13 @@ def _parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> None:
     """Entry point — accepts optional argv list for dispatch from main.py."""
+    # The SDK installs a rotating handler on one hard-coded log path,
+    # shared by every process of ours. Once that file is a day old the
+    # rollover fails (another process holds it) and logging prints a
+    # traceback from the SDK's single push-callback thread -- measured
+    # at 6.6 s, long enough to drop K-line pushes and tear a hole in
+    # the live chart. Detach it before any context is opened.
+    quiet_sdk_file_log()
     args = _parse_args(argv)
     app  = QApplication(sys.argv)
     app.setApplicationName("Trade Viewer Qt")
