@@ -110,3 +110,5 @@ Date,Win Rate,Daily PnL %,Trades,Profit/Loss Ratio,Comment
 2026-11-11,0.75,0.01,4,0.38,OpenD 历史成交口径：账户每笔往返，未与复盘配对
 2026-11-12,1.00,0.12,4,1.00,"OpenD 历史成交口径：账户每笔往返，未与复盘配对 -- all wins or all losses, defaulted to 1:1"
 2026-11-13,1.00,0.07,2,1.00,"OpenD 历史成交口径：账户每笔往返，未与复盘配对 -- all wins or all losses, defaulted to 1:1"
+2026-11-16,0.67,-0.02,3,0.07,OpenD 历史成交口径：账户每笔往返，未与复盘配对
+2026-11-17,0.83,0.03,6,0.43,OpenD 历史成交口径：账户每笔往返，未与复盘配对
