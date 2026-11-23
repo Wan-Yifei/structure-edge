@@ -130,7 +130,15 @@ def classify_day(code: str, day: datetime, store: TickStore,
 
     ticks = store.query_ticks(code, w0, d1)
     # "direction" is what query_ticks returns; the store never renames it.
-    neutral = [t for t in ticks if t["direction"] == "NEUTRAL"]
+    #
+    # NOT `== "NEUTRAL"`. moomoo's TickerDirect has four values -- BUY,
+    # SELL, NEUTRAL and NONE('N/A') -- and the collectors used to fold the
+    # last two together. The option collector stopped folding on
+    # 2026-11-23; when the stock one follows, an `== "NEUTRAL"` test here
+    # would SILENTLY SKIP every 'N/A' print instead of trying to direct it,
+    # with no error and no count. Every other reader of this column already
+    # asks `not in ("BUY", "SELL")`; this line was the last one that did not.
+    neutral = [t for t in ticks if t["direction"] not in ("BUY", "SELL")]
 
     updates, stale, at_mid = [], 0, 0
     for t in neutral:

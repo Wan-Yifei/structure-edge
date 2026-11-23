@@ -58,7 +58,10 @@ CREATE TABLE IF NOT EXISTS option_ticks (
     ts        TEXT    NOT NULL,        -- exchange time, as the feed states it
     price     REAL    NOT NULL,
     volume    INTEGER NOT NULL,
-    direction TEXT    NOT NULL,        -- BUY | SELL | NEUTRAL
+    direction TEXT    NOT NULL,        -- BUY | SELL | NEUTRAL | N/A
+                                       -- N/A is TickerDirect.NONE: field absent, non-int,
+                                       -- or the feed's own unknown. Rows written before
+                                       -- 2026-11-23 have N/A folded into NEUTRAL.
     ttype     TEXT,                    -- moomoo ticker_type: AUTO_MATCH, ...
     seq       INTEGER NOT NULL,        -- feed counter, -1 when absent
     recv_ts   REAL,

@@ -263,9 +263,18 @@ def _make_handler(store: OptionTickStore, state: dict):
 
             rows = []
             for i, (_, row) in enumerate(data.iterrows()):
-                direction = str(row.get("ticker_direction", "NEUTRAL")).upper()
-                if direction not in ("BUY", "SELL"):
-                    direction = "NEUTRAL"
+                # Four values, not three. moomoo's TickerDirect is
+                # BUY / SELL / NEUTRAL / NONE('N/A'), and the last two are
+                # different facts: NEUTRAL means the print landed between
+                # the bid and the ask, 'N/A' means the feed does not know.
+                # Folding 'N/A' into NEUTRAL -- which this did -- throws
+                # away the only thing that separates "classified as
+                # mid-market" from "unclassified", and the indicator that
+                # drops NEUTRAL would then be dropping both without being
+                # able to report how much of each.
+                direction = str(row.get("ticker_direction", "")).upper()
+                if direction not in ("BUY", "SELL", "NEUTRAL"):
+                    direction = "N/A"
                 recv_ts, feed_ts = svr[i] if svr else (None, None)
                 rows.append({
                     "code": row["code"], "ts": row["time"],

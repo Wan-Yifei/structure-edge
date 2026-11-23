@@ -31,7 +31,8 @@ BURST = [
     ("2026-11-20 15:14:37.998", 0.47, 10, "BUY", 902),
     ("2026-11-20 15:14:38.004", 0.48, 3, "BUY", 903),
     ("2026-11-20 15:14:38.019", 0.48, 1, "SELL", 904),
-    ("2026-11-20 15:14:38.022", 0.48, 1, "", 905),      # no side -> NEUTRAL
+    ("2026-11-20 15:14:38.022", 0.48, 1, "", 905),      # no side -> 'N/A'
+    ("2026-11-20 15:14:38.031", 0.48, 2, "NEUTRAL", 906),  # between the quotes
 ]
 
 
@@ -95,13 +96,31 @@ class TestTheHandlerReportsThatItIsAlive:
             "SELECT COUNT(*), SUM(volume) FROM option_ticks").fetchone()
         assert got == (len(BURST), sum(r[2] for r in BURST)), got
 
-    def test_an_unknown_side_becomes_neutral_not_a_crash(self, handler_and_state):
+    def test_unknown_and_mid_market_stay_apart(self, handler_and_state):
+        """'N/A' and NEUTRAL are different facts and must not merge.
+
+        moomoo's TickerDirect carries both: NEUTRAL means the print landed
+        between the bid and the ask, 'N/A' means the feed could not say.
+        The collector used to write both as NEUTRAL, so a session could not
+        report how much of its dropped flow was classified-as-mid versus
+        simply unknown -- and the delta indicator drops that whole bucket.
+        """
         h, state, store, pd = handler_and_state
         h.on_recv_rsp(_frame(pd, BURST))
         dirs = dict(store._con.execute(
             "SELECT direction, COUNT(*) FROM option_ticks GROUP BY 1").fetchall())
+        assert dirs.get("N/A") == 1, dirs
         assert dirs.get("NEUTRAL") == 1, dirs
         assert dirs.get("BUY") == 4 and dirs.get("SELL") == 1, dirs
+
+    def test_an_unrecognised_side_is_unknown_not_a_crash(self, handler_and_state):
+        """Anything outside the enum is 'N/A' -- unknown is what it is."""
+        h, state, store, pd = handler_and_state
+        h.on_recv_rsp(_frame(pd, [
+            ("2026-11-20 15:20:00.000", 0.5, 1, "WHATEVER", 950)]))
+        dirs = dict(store._con.execute(
+            "SELECT direction, COUNT(*) FROM option_ticks GROUP BY 1").fetchall())
+        assert dirs == {"N/A": 1}, dirs
 
     def test_a_replayed_batch_counts_as_dropped_not_as_new(self, handler_and_state):
         h, state, store, pd = handler_and_state
