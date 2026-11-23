@@ -43,7 +43,7 @@ def qapp():
     from PyQt6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
     yield app
-    app.processEvents()
+    # No processEvents() at teardown -- see test_absorption_marker.py
 
 
 def _floor(qapp, cls):

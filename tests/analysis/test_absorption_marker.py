@@ -85,7 +85,13 @@ def qapp():
     from PyQt6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
     yield app
-    app.processEvents()
+    # No processEvents() here. At teardown the tests' widgets are
+    # already garbage-collected while Qt still holds deleteLater events
+    # for them; running those calls back into wrappers that have no
+    # Python thread state left, and the interpreter aborts with
+    # "PyEval_SaveThread ... the GIL is released". Measured: 3/3 aborts
+    # with the call, 3/3 clean without. The app goes away with the
+    # process anyway.
 
 
 @pytest.fixture(scope="module")

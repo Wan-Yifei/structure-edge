@@ -29,7 +29,7 @@ PMIN = 97.00
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
-    app.processEvents()
+    # No processEvents() at teardown -- see test_absorption_marker.py
 
 
 @pytest.fixture(scope="module")

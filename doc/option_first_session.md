@@ -10,30 +10,76 @@
 
 ---
 
+## 开盘前必须做的三件事
+
+Windows 计划任务已经取消了，**全部走 scheduler**。所以 09:15 什么都不会发生，
+除非下面三件都做了：
+
+| # | 做什么 | 怎么确认 |
+|---|---|---|
+| 1 | **重启 scheduler** | 日志里 `Scheduler started.  v0.97.x` 的时间戳是重启之后的 |
+| 2 | **勾上 Option tape 勾选框** | 面板右侧状态灯从 `off` 变成 `outside window` |
+| 3 | **确认 Start 已按下** | `■ Stop` 可点、`▶ Start Scheduler` 变灰 |
+
+**第 1 条不能省。** 11-22 23:13 之后改了 `_tail_opt_proc`（后台线程直接碰 Tk
+控件 → 日志会**静默停止**，而停掉的正好是这一场要看的全部输出）和 Start 门控。
+跑着旧代码的 scheduler 这两条都没有。
+
+**第 3 条是新行为**：`active = _collector_running and 窗口开着`。按 Stop 之后
+期权采集器也会停——否则 Stop 会留下一个屏幕上没有任何东西交代的进程。
+
+---
+
 ## 时间表（美东，本机时区就是 ET）
 
-| 时刻 | 做什么 | 怎么触发 |
-|---|---|---|
-| **09:15** | 启动采集器 | 计划任务 `moomoo option collect (first session)`，会弹出一个**可见的控制台** |
-| 09:30 | 开盘，盯 `DATA RECEIVED` | 看那个窗口 |
-| 全天 | 每约 30 分钟一行 `telemetry:` | 同上 |
-| **16:25** | 在控制台里按 **Ctrl-C**（不要点叉关窗） | 手动 |
-| **16:45** | 对账 | 计划任务 `moomoo option reconcile (first session)` |
+全自动，不需要手动介入。
 
-两个任务都是**一次性**的，不是每周重复 —— 第一场必须有人盯着。确认跑得住之后
-再谈自动化。
+| 时刻 | 发生什么 | 在哪看 |
+|---|---|---|
+| **09:15** | scheduler 拉起采集器 | 状态灯 → `running pid NNNNN`；日志 `[opt] ...` |
+| 09:30 | 开盘 | 日志里 `[opt] ... DATA RECEIVED` |
+| 全天 | 每约 30 分钟一行 `telemetry:` | 日志 |
+| **16:25** | 窗口关闭，scheduler 发 CTRL_BREAK | 日志 `[opt] window closed`、`Option collector stopped cleanly` |
+| **16:50** | 对账（独立进程） | 日志 `[opt-reconcile] coverage ...` |
 
 **为什么 09:15 而不是 09:35**：开盘后头五分钟的流量最重，尤其在周五 −31.8%
 之后。代价是选合约时 `last_price` 还是周五收盘价（30.88，而夜盘已到 35+），
 但 ±80% 的窗口是 $6.18–$55.58，宽到覆盖所有会成交的行权价 —— 排序可能略偏，
 窗口不会漏。
 
-**为什么 16:45 而不是收盘即跑**：**5.6% 的笔数、7.8% 的张数在 16:00 之后**
+**为什么 16:50 而不是收盘即跑**：**5.6% 的笔数、7.8% 的张数在 16:00 之后**
 （迟报，拖到约 16:15），券商的当日 `volume` 那之前没结清。跑太早比率会读错。
 
-**为什么必须 Ctrl-C**：Windows 上父进程的 `terminate()` 调 `TerminateProcess`，
-**不走 handler 也不走 `finally`** —— 退订、对账、prune、WAL checkpoint 全部
-跳过。前台控制台的 Ctrl-C（SIGINT）是能跑到清理代码的。
+**为什么是 CTRL_BREAK 而不是 terminate()**：Windows 上 `terminate()` 调
+`TerminateProcess`，**不走 handler 也不走 `finally`** —— 退订、对账、prune、
+WAL checkpoint 全部跳过。CTRL_BREAK 能到达，前提是子进程用
+`CREATE_NEW_PROCESS_GROUP` 起（漏了这个 flag，事件会打回 scheduler 自己，
+实测把它和两个正股采集器一起打死）。
+
+对账**跑两次**，故意的：采集器退出时一次（即时反馈），16:50 的 cron 一次
+（兜底）。采集器崩了、被杀了、压根没启动时，只有后者会跑——而那恰恰是最需要
+对账的情形。`INSERT OR REPLACE` 保证不写重。
+
+---
+
+## 它没起来怎么办（兜底）
+
+09:15 过了状态灯还是 `outside window` 或 `in window, not running`，就手动跑：
+
+```bash
+uv run analysis/option_tick_collector.py --code US.SOXL
+```
+
+这会开一个可见控制台。**收工时在那个窗口里按 Ctrl-C，不要点叉** —— SIGINT
+能跑到清理代码，关窗口不能。然后：
+
+```bash
+uv run analysis/option_tick_collector.py --code US.SOXL --reconcile-only
+```
+
+手动起的那份和 scheduler 不会打架：`single_instance` 锁在选合约**之前**，
+后到的八秒内就退出，一次 `get_option_chain` 都不烧。但 scheduler 到 16:25
+杀不掉它（它手上的 `_opt_proc` 是那个失败者），所以手动起的就得手动停。
 
 ---
 

@@ -127,3 +127,63 @@ class TestTheHandlerReportsThatItIsAlive:
         h.on_recv_rsp(pd.DataFrame())
         assert state.get("handler_errors") in (None, 0)
         assert state.get("ticks", 0) == 0
+
+
+class TestTheSleepCanBeInterrupted:
+    """A long wait must not outlast the supervisor's patience.
+
+    On Windows a signal handler runs only between bytecodes in the main
+    thread, and Event.wait() blocks below that level, so a single wait(60)
+    ignores CTRL_BREAK for up to a minute. The scheduler gives the
+    collector 10 s before falling back to terminate(), which runs no
+    cleanup -- so the idle branch's wait(60) AND the default 15 s sampling
+    wait both outlasted it, and unsubscribe / reconcile / prune / checkpoint
+    were skipped on every scheduled stop.
+
+    Caught only by driving the scheduler's real stop path; it passed an
+    earlier check that happened to use a 5 s interval.
+    """
+
+    def test_it_returns_as_soon_as_the_flag_is_set(self):
+        import threading
+        import time as t
+        from analysis.option_tick_collector import wait_interruptible
+
+        stop = threading.Event()
+        threading.Timer(0.3, stop.set).start()
+        t0 = t.monotonic()
+        wait_interruptible(stop, 60)
+        elapsed = t.monotonic() - t0
+
+        assert elapsed < 2.0, (
+            f"waited {elapsed:.1f}s of 60 after the flag was set at 0.3s -- "
+            f"the supervisor gives up at 10s and skips the cleanup")
+        assert stop.is_set()
+
+    def test_it_still_waits_the_full_time_when_nothing_interrupts(self):
+        import threading
+        import time as t
+        from analysis.option_tick_collector import wait_interruptible
+
+        t0 = t.monotonic()
+        wait_interruptible(threading.Event(), 1.5)
+        elapsed = t.monotonic() - t0
+        assert 1.3 <= elapsed <= 3.0, elapsed
+
+    def test_an_already_set_flag_returns_at_once(self):
+        import threading
+        import time as t
+        from analysis.option_tick_collector import wait_interruptible
+
+        stop = threading.Event()
+        stop.set()
+        t0 = t.monotonic()
+        wait_interruptible(stop, 30)
+        assert t.monotonic() - t0 < 0.5
+
+    def test_the_slices_are_short_enough_for_the_supervisor(self):
+        """Under 10 s, which is what _kill_opt allows before terminate()."""
+        import inspect
+        from analysis.option_tick_collector import wait_interruptible
+        default = inspect.signature(wait_interruptible).parameters["slice_s"].default
+        assert default <= 5.0, default

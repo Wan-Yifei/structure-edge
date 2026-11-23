@@ -579,6 +579,14 @@ class SchedulerApp(tk.Tk):
         self._opt_proc: subprocess.Popen | None = None
         self._last_opt_reconcile_minute: tuple | None = None
         self._opt_reconcile_proc: subprocess.Popen | None = None
+        # Declared here rather than guarded with hasattr() at each use.
+        # hasattr on a Tk subclass goes through Misc.__getattr__, which
+        # delegates to the Tcl interpreter -- in a real window it quietly
+        # returns False, but it makes this logic impossible to exercise
+        # without a display, and the attempt to do so recursed until the
+        # stack ran out. A plain None is checkable anywhere.
+        self.opt_status_lbl = None
+        self.opt_enabled_var = None
 
         self._build_clock()
         self._build_sessions()
@@ -736,7 +744,7 @@ class SchedulerApp(tk.Tk):
         self.cfg["order_book_enabled"] = bool(self.ob_var.get())
         self.cfg["autostart"]          = bool(self.autostart_var.get())
 
-        if hasattr(self, "opt_enabled_var"):
+        if self.opt_enabled_var is not None:
             # Merged onto the defaults, not written field by field: a config
             # file from before this panel existed has no option_window key,
             # and reconcile_cron is not on the panel at all.
@@ -1137,7 +1145,12 @@ class SchedulerApp(tk.Tk):
 
     def _check_option_window(self, et: datetime):
         """Start the option collector inside its window, stop it outside."""
-        active = self._option_window_active(et)
+        # The Start button governs this too. It sits outside the stock
+        # collectors' own guard because the four stock sessions must not
+        # decide when options run -- but "the scheduler is stopped" has to
+        # mean everything is stopped, or Stop would leave a collector
+        # running that nothing on screen accounts for.
+        active = self._collector_running and self._option_window_active(et)
         running = self._opt_proc is not None and self._opt_proc.poll() is None
 
         if active and not running:
@@ -1150,7 +1163,7 @@ class SchedulerApp(tk.Tk):
                     # the session, and the loser cost one lock attempt.
                     self._log("[opt] another collector holds the lock — "
                               "leaving it alone")
-                    if hasattr(self, "opt_status_lbl"):
+                    if self.opt_status_lbl is not None:
                         self.opt_status_lbl.config(text="external collector")
                     return
                 if not self._died_young("opt"):
@@ -1160,7 +1173,7 @@ class SchedulerApp(tk.Tk):
             self._log("[opt] window closed — stopping collector")
             self._kill_opt()
 
-        if hasattr(self, "opt_status_lbl"):
+        if self.opt_status_lbl is not None:
             cfg = self.cfg.get("option_window", self._DEFAULT_OPTION)
             if not cfg.get("enabled", False):
                 txt = "off"
@@ -1511,7 +1524,28 @@ class SchedulerApp(tk.Tk):
             return
         try:
             for line in proc.stdout:
-                self._log(f"[opt] {line.rstrip()}")
+                # self.after(0, ...), never self._log() directly: _log writes
+                # into a Tk text widget, and Tk is not thread-safe. The other
+                # two tail threads marshal for this reason; this one did not,
+                # and the `except` below would have swallowed the resulting
+                # "main thread is not in main loop" -- so [opt] output would
+                # simply stop part-way through a session, with nothing said.
+                #
+                # That output is the entire point of the first live session:
+                # DATA RECEIVED, "telemetry: subscribed N of 200", the greeks
+                # lag. Losing it silently means running the session and not
+                # knowing whether it worked.
+                self.after(0, self._log, f"[opt] {line.rstrip()}")
+        except Exception:                                        # noqa: BLE001
+            pass
+
+    def _tail_opt_reconcile(self):
+        proc = self._opt_reconcile_proc
+        if proc is None or proc.stdout is None:
+            return
+        try:
+            for line in proc.stdout:
+                self.after(0, self._log, f"[opt-reconcile] {line.rstrip()}")
         except Exception:                                        # noqa: BLE001
             pass
 
@@ -1688,16 +1722,6 @@ class SchedulerApp(tk.Tk):
                              daemon=True).start()
         except Exception as exc:                                 # noqa: BLE001
             self._log(f"[opt] Reconcile cron error: {exc}")
-
-    def _tail_opt_reconcile(self):
-        proc = self._opt_reconcile_proc
-        if proc is None or proc.stdout is None:
-            return
-        try:
-            for line in proc.stdout:
-                self._log(f"[opt-reconcile] {line.rstrip()}")
-        except Exception:                                        # noqa: BLE001
-            pass
 
     def _check_classify_cron(self, et: datetime):
         """Fire the off-exchange classifier if ET matches its cron."""

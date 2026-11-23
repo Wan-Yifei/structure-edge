@@ -46,7 +46,7 @@ SCALE = 100          # lifts the toy flows clear of DCVD_MIN_SIGNED
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
-    app.processEvents()
+    # No processEvents() at teardown -- see test_absorption_marker.py
 
 
 @pytest.fixture(scope="module")

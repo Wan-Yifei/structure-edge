@@ -472,6 +472,32 @@ def _i(v):
 
 # ── main ───────────────────────────────────────────────────────────────────
 
+def wait_interruptible(stop: threading.Event, secs: float,
+                       slice_s: float = 1.0) -> None:
+    """Sleep, but stay able to notice a signal while doing it.
+
+    On Windows a signal handler only runs between bytecodes in the main
+    thread, and Event.wait() blocks below that level -- the handler cannot
+    run until the wait returns on its own. A single wait(60) therefore
+    ignores CTRL_BREAK for up to a minute.
+
+    That is not theoretical. The supervisor allows 10 s before falling back
+    to terminate(), so a 15 s sampling wait -- the default -- already
+    outlasts it, and the whole cleanup path (unsubscribe, reconcile, prune,
+    checkpoint) was being skipped on every scheduled stop. It passed an
+    earlier check only because that one happened to run with a 5 s interval.
+
+    Waiting in short slices returns to Python between each, which is where
+    a pending signal gets handled.
+    """
+    deadline = time_mod.monotonic() + secs
+    while not stop.is_set():
+        left = deadline - time_mod.monotonic()
+        if left <= 0:
+            return
+        stop.wait(min(slice_s, left))
+
+
 def log_telemetry(ctx, codes: list[str], last_greeks: dict, state: dict) -> None:
     """The four things a first live session has to answer. Never fatal.
 
@@ -735,7 +761,7 @@ def main(argv=None) -> int:
                         log.info("outside 09:20-16:20 ET -- sampler idle "
                                  "(TICKER stays subscribed)")
                         idle_logged = True
-                    stop.wait(60)
+                    wait_interruptible(stop, 60)
                     continue
                 idle_logged = False
                 sample_greeks(ctx, codes, args.code, store, last_greeks, state)
@@ -747,7 +773,7 @@ def main(argv=None) -> int:
                              "over %d sweeps", t, state.get("dropped", 0), g, sweeps)
                 if sweeps % _TELEMETRY_EVERY == 0:
                     log_telemetry(ctx, codes, last_greeks, state)
-                stop.wait(args.greeks_secs)
+                wait_interruptible(stop, args.greeks_secs)
         finally:
             log.info("stopping -- unsubscribing")
             try:

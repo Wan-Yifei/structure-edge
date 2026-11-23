@@ -1,5 +1,120 @@
 # Changelog
 
+## v0.97.1 - 一个会在停止时跳过全部清理的等待，以及 23 个测试文件的析构 (2026-11-23)
+
+patch 级。三处修复加一处测试卫生，都是上一版留下的。
+
+### CTRL_BREAK 停止在默认配置下必定超时
+
+`_kill_opt` 用 `CTRL_BREAK_EVENT` 而不是 `terminate()`，为的是让采集器的
+`finally` 跑到。但**采集器当时在等什么，决定了它多久才能听见**。
+
+驱动 scheduler 自己的 `_check_option_window` → `_launch_opt` / `_kill_opt`
+（之前那次验证用的是**手搓的 Popen**，只复制了参数，没调 scheduler 的方法）：
+
+```
+采集器在 stop.wait(5)    CTRL_BREAK 0.02 秒响应，清理跑到      ← 之前"验通"的那次
+采集器在 stop.wait(60)   10 秒超时 → 回退 terminate → 清理跳过
+```
+
+**而默认采样间隔是 15 秒 > `_kill_opt` 给的 10 秒,所以每天 16:25 的自动停止
+都会跳过清理。** 上一次之所以通过，纯粹因为随手用了 `--greeks-secs 5`。那是
+一次运气，不是一次验证。
+
+新增 `wait_interruptible()`，把等待切成 1 秒片。审查独立复现了 bug 和修复
+（真实 console event，不依赖本地 harness）：`wait60` 10.00 秒超时回退，
+`sliced60` 0.02 秒干净退出。
+
+**机制的解释改过一次。** 原先写的是「信号处理器只在字节码之间跑，
+`Event.wait()` 阻塞在 C 层所以跑不了」—— 审查用 `time.sleep` + SIGINT
+证伪了（处理器 0.00 秒就跑了，PEP 475）。成立的说法更简单：**SIGBREAK 下
+所有被测的阻塞构件都把处理器压到各自超时为止，所以规则是「任何单次阻塞
+不能超过监管者的耐心」。** 修复不变，理由换了。
+
+**一个够不到的阻塞点，记录在案：** SDK 每个同步查询底下都是
+`Event.wait(timeout=20)`，所以清理块本身最坏能跑 60 秒以上、超过 10 秒预算。
+不改，因为跳过清理不丢任何补不回来的东西 —— 16:50 的对账是独立进程。
+
+### 后台线程直接写 Tk 控件
+
+`_tail_opt_proc`（以及 `_tail_opt_reconcile`）从采集器的 stdout 读行，然后
+**直接调 `self._log()`，而 `_log` 操作 Tk 文本控件**。另外两个 tail 线程都走
+`self.after(0, ...)` —— 它们是故意绕的，新写的这两个没绕。
+
+后果是静默的：`except Exception: pass` 会吞掉
+`RuntimeError: main thread is not in main loop`，于是 **`[opt]` 日志行中途
+停止**。而那些行是第一场观测的全部产出 —— `DATA RECEIVED`、
+`telemetry: subscribed N of 200`、greeks lag。跑了一整场却不知道它跑得好不好。
+
+本地 harness **结构上看不见这个** —— 它把 `_log` 换成了 list append，
+替换掉的正是出问题的那个东西。
+
+### Start 按钮现在也管期权
+
+`_check_option_window` 原来在 `_collector_running` 守卫之外，所以不按 Start
+它也会跑。那不是深思熟虑的决定，只是和几个 cron 检查放在了一起。改成
+`active = self._collector_running and ...`：按 Stop 必须意味着全停，否则会
+留下一个屏幕上没有任何东西交代的采集器。
+
+### 23 个测试文件 teardown 里的 processEvents
+
+`tests/analysis/test_multi_vp_live.py` 在原位连跑 10 次崩 **9 次**，每次都在
+21 条测试全过之后、module-scoped `qapp` fixture 的析构里。`-s` 下的真因：
+
+```
+Fatal Python error: PyEval_SaveThread: the function must be called with the
+GIL held ... but the GIL is released (the current Python thread state is NULL)
+```
+
+删掉那一行之后，同位置同命令 **10 次 0 崩**。
+
+```
+旧 teardown   9 / 10
+加上修复      0 / 10
+```
+
+全仓 23 个文件是同一个写法，全部改掉。改动可证明无害：module-scoped
+fixture 的 `yield` 之后运行在该模块最后一个测试结束之后，**没有任何断言能
+观察到它**；`git diff` 确认 23 个删除行全部紧跟 `yield app`，没有一个在测试
+体内。
+
+**没有被证实的部分，照实写：**
+
+- **机制未定位。** 「widget 已 GC + 积压 deleteLater + processEvents 执行
+  它们」是推断。审查把文件逐字节复制到别处，跑五种 pytest 形态、成分矩阵
+  （强制 GC / 保住包装器 / 只跑 DeferredDelete / 停掉 QTimer / 注入必失败的
+  测试），**39 次一次都没复现**。唯一未排除的差异是运行位置 —— 而在原位
+  是 9/10。位置本身是个变量，原因不明。
+- **套件级的间歇崩溃是否因此消除，尚未证实。** 改动后只有 1 次干净的全套。
+  在「什么都没变」的零假说下，连续 k 次干净的概率是 (1/3)^k，1 次说明不了
+  任何事。下次真崩的时候要用 `faulthandler` 抓全栈，并记下**是哪条测试
+  失败了**，而不只是记下它 abort 了。
+- `CHANGELOG:4587` 早就记过这个 abort，触发条件写的是「**这个文件里有测试
+  失败时**」。那个条件审查也复现不了。
+
+**真正买到的东西不是消掉 abort。** 按 `CHANGELOG:4587` 的记载，这个 abort
+会**把失败信息盖掉一半** —— 所以这次改动买到的是：以后失败的那一跑会告诉
+你什么失败了。这比消掉 abort 值钱。
+
+**不是生产 bug 的回声。** 一度担心测试里绕开它等于藏起一个真实缺陷。排除了：
+`processEvents` 在 `tests/` 之外**全仓零处**，生产永远不会执行那个构件。
+审查另外用生产形状（`WA_DeleteOnClose` + `destroyed` 接 Python 槽，放在真实
+`app.exec()` 里开关窗 36 次）跑过，零 abort。
+
+### 其余
+
+- `--dry-run` 不再加锁（锁前置的副作用：它什么都不写，而它存在的意义正是
+  在采集器运行时查看选择结果）
+- `db/option_ticks.db` 删掉重来：验证用的 harness 隔离从未生效（它在自己
+  进程里改默认路径，而采集器是子进程、`_launch_opt` 不传 `--db`），库里已经
+  攒下 200 行周日的 `option_subscriptions`，正好是对账的 day-0 污染
+- `doc/option_first_session.md` 改写：Windows 计划任务已取消，全部走
+  scheduler；补了开盘前必须做的三件事和它没起来时的兜底命令
+
+### 待办
+
+`_launch_opt` 加 `--db`（需要新配置键，不在开盘前加表面）。
+
 ## v0.97.0 - 期权采集接进 scheduler，以及一个会打死 scheduler 的停止方式 (2026-11-22)
 
 给期权一套**独立的时段配置和面板**，而不是挂在现有那四个股票时段上。

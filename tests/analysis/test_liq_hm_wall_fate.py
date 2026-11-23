@@ -40,7 +40,7 @@ WALL_BIN = int((116.00 - PMIN) / BIN)      # the 116.00 band
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
-    app.processEvents()
+    # No processEvents() at teardown -- see test_absorption_marker.py
 
 
 @pytest.fixture

@@ -31,7 +31,7 @@ HEADROOM = 1.15   # _rebuild_session_profile / _draw_tick_vp pin X to this
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
-    app.processEvents()
+    # No processEvents() at teardown -- see test_absorption_marker.py
 
 
 @pytest.fixture(scope="module")

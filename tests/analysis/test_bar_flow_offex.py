@@ -93,7 +93,7 @@ def loop_off_delta(viewer, df, buckets, cm):
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
-    app.processEvents()
+    # No processEvents() at teardown -- see test_absorption_marker.py
 
 
 @pytest.fixture(scope="module")

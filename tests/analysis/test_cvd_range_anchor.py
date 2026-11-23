@@ -30,7 +30,7 @@ DAY0 = datetime(2026, 9, 21, 10, 0)   # 10:00, well inside one trading day
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
-    app.processEvents()
+    # No processEvents() at teardown -- see test_absorption_marker.py
 
 
 @pytest.fixture(scope="module")
