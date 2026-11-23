@@ -20,7 +20,8 @@ ITM (In The Money):
 import argparse
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -30,6 +31,45 @@ import pandas as pd
 from moomoo import AuType, KLType, OpenQuoteContext, RET_OK  # noqa: F401 (AuType/KLType used as string constants via their class attributes)
 
 SHARES_PER_CONTRACT = 100  # US standard
+
+# Time to expiry is measured against the exchange's clock, not the machine's:
+# US equity options stop trading 16:00 New York time on the expiry date.
+_ET = ZoneInfo("America/New_York")
+_CLOSE_FULL_ET = time(16, 0)
+_CLOSE_HALF_ET = time(13, 0)
+_SECONDS_PER_YEAR = 365 * 24 * 3600
+_MIN_T_YEARS = 3600 / _SECONDS_PER_YEAR      # one hour; see _t_years
+
+
+def _thanksgiving(year: int) -> date:
+    """Fourth Thursday of November."""
+    d = date(year, 11, 1)
+    d += timedelta(days=(3 - d.weekday()) % 7)      # first Thursday
+    return d + timedelta(days=21)
+
+
+def _market_close_et(d: date) -> time:
+    """13:00 on a half session, 16:00 otherwise.
+
+    Not an exchange calendar -- the three recurring 1pm closes, which is
+    what matters here because two of them land on option expiry Fridays.
+    Worth 0.22 on Zero Gamma each time one is the near expiry (the line
+    moves about 7.5 cents per hour of time-to-expiry), and 2026-11-27 is
+    one: assuming 16:00 for it put us 0.17 below moomoo's reading, and
+    13:00 closes that to 0.05.
+
+    Not covered, deliberately: full holidays (an expiry never falls on
+    one) and the rare unscheduled early close.
+    """
+    if d.weekday() >= 5:
+        return _CLOSE_FULL_ET                       # never a session anyway
+    if d == _thanksgiving(d.year) + timedelta(days=1):
+        return _CLOSE_HALF_ET                       # Black Friday
+    if (d.month, d.day) == (12, 24):
+        return _CLOSE_HALF_ET                       # Christmas Eve
+    if (d.month, d.day) == (7, 3) and date(d.year, 7, 4).weekday() < 5:
+        return _CLOSE_HALF_ET                       # July 4th eve
+    return _CLOSE_FULL_ET
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 11111
 RISK_FREE_RATE = 0.045  # approx. short-term T-bill; gamma is only weakly sensitive to r
@@ -96,8 +136,54 @@ def get_near_expiry_dates(ctx: OpenQuoteContext, code: str, dte_limit: int) -> l
     return sorted(set(results))
 
 
-def fetch_option_data(ctx: OpenQuoteContext, code: str, expiries: list[str]) -> pd.DataFrame:
-    """Fetch option chain and greeks for the given expiry dates via market snapshot."""
+def coverage_is_full(cov: dict | None) -> bool:
+    """Did every requested expiry and every snapshot batch come back?"""
+    if not cov:
+        return False
+    return (len(cov["expiries_ok"]) == len(cov["expiries_requested"])
+            and cov["batches_ok"] == cov["batches_total"])
+
+
+def coverage_note(cov: dict | None) -> str:
+    """'2/4 expiries' etc., or '' when nothing is missing.
+
+    Short enough to append to a chart title, a status bar or a stdout line
+    without wrapping -- every surface that shows a GEX magnitude has to carry
+    it, because the magnitudes are what a partial fetch gets wrong.
+    """
+    # None means "not reported", which only a synthetic caller produces --
+    # fetch_option_data always returns one. Saying nothing is right here:
+    # a warning on every hand-built stats dict would train the eye to skip
+    # the banner, which is the one thing it must not do.
+    if cov is None or coverage_is_full(cov):
+        return ""
+    bits = []
+    ok, want = len(cov["expiries_ok"]), len(cov["expiries_requested"])
+    if ok != want:
+        bits.append(f"{ok}/{want} expiries")
+    if cov["batches_ok"] != cov["batches_total"]:
+        bits.append(f"{cov['batches_ok']}/{cov['batches_total']} batches")
+    return "PARTIAL: " + ", ".join(bits)
+
+
+def fetch_option_data(ctx: OpenQuoteContext, code: str,
+                      expiries: list[str]) -> tuple[pd.DataFrame, dict]:
+    """Fetch option chain and greeks, with a report of what was missed.
+
+    Returns (frame, coverage). Both per-expiry and per-batch failures used to
+    print one line to stderr and carry on; in the viewer stderr goes nowhere,
+    so a chain that lost half its expiries produced a GEX number 44% smaller
+    with the status bar still reading "updated". The walls barely move when
+    that happens -- measured: 660/600 before and after -- so nothing on
+    screen betrayed it. Hence coverage travels with the data instead of being
+    left for the caller to notice.
+
+    expiries_ok is the list, not a count, because build_gex_stats() labels the
+    chart with it: fed the REQUESTED list it names expiries whose contracts
+    are not in the sum.
+    """
+    coverage = {"expiries_requested": list(expiries), "expiries_ok": [],
+                "batches_ok": 0, "batches_total": 0}
     chain_frames = []
     for expiry in expiries:
         ret, df = ctx.get_option_chain(code, start=expiry, end=expiry)
@@ -105,6 +191,7 @@ def fetch_option_data(ctx: OpenQuoteContext, code: str, expiries: list[str]) -> 
             print(f"  Warning: chain fetch failed for {expiry}: {df}", file=sys.stderr, flush=True)
             continue
         chain_frames.append(df[["code"]].copy())
+        coverage["expiries_ok"].append(expiry)
 
     if not chain_frames:
         raise RuntimeError("No option chain data returned for any expiry.")
@@ -114,11 +201,13 @@ def fetch_option_data(ctx: OpenQuoteContext, code: str, expiries: list[str]) -> 
     snap_frames = []
     batch = 200
     for i in range(0, len(all_codes), batch):
+        coverage["batches_total"] += 1
         ret, snap = ctx.get_market_snapshot(all_codes[i : i + batch])
         if ret != RET_OK:
             print(f"  Warning: snapshot batch {i} failed: {snap}", file=sys.stderr, flush=True)
             continue
         snap_frames.append(snap)
+        coverage["batches_ok"] += 1
 
     if not snap_frames:
         raise RuntimeError("No snapshot data returned.")
@@ -129,9 +218,13 @@ def fetch_option_data(ctx: OpenQuoteContext, code: str, expiries: list[str]) -> 
         "code", "option_type", "option_strike_price",
         "option_open_interest", "option_delta", "option_gamma",
         "option_implied_volatility", "strike_time", "volume",
+        # Carried so the chart can date itself by the DATA rather than by
+        # this machine's clock. Per-contract: a quiet strike's stamp can be
+        # hours behind a busy one, so only the newest is quoted.
+        "update_time",
     ]
     available = [c for c in needed if c in snap.columns]
-    return snap[available].copy()
+    return snap[available].copy(), coverage
 
 
 # ── GEX computation ────────────────────────────────────────────────────────────
@@ -201,15 +294,45 @@ def zero_gamma(df: pd.DataFrame) -> float | None:
     if rows.empty:
         return None
 
-    today = date.today()
+    now = datetime.now(_ET)
 
     def _t_years(strike_time) -> float:
+        """Time to expiry in years, from the actual clock.
+
+        This used to be `max((exp - date.today()).days, 0.5) / 365` -- whole
+        LOCAL CALENDAR DAYS. Measured consequence: dZG/dT is about -$1.80 per
+        day on a real SOXL chain, so the Zero Gamma line sat frozen all day
+        and jumped $1.80 at local midnight, with the market shut. It also
+        over-counted: against moomoo's own Gamma chart for the same chain and
+        the same expiry, ours read 40.80 against their 41.32, and solving for
+        T put the difference at 4.705 days vs our 5 -- 7.1 hours of
+        over-counting, which accounts for the whole $0.52 with nothing left
+        over.
+
+        US equity options stop trading at the close on the expiry date, in
+        New York time rather than whatever the machine is set to, and that
+        close is 13:00 on a half session -- see _market_close_et, which two
+        of the next nine expiries need.
+        """
         try:
             exp = date.fromisoformat(str(strike_time)[:10])
         except ValueError:
             return float("nan")
-        days = (exp - today).days
-        return max(days, 0.5) / 365.0  # floor so same-day expiry doesn't divide by zero
+        close = datetime.combine(exp, _market_close_et(exp), tzinfo=_ET)
+        years = (close - now).total_seconds() / _SECONDS_PER_YEAR
+        # An ALREADY EXPIRED contract has negative time and gets no number:
+        # the server does serve expired chains (distance -2 seen live), and
+        # clamping one would answer with a confident, plausible-looking
+        # level computed from nothing. dropna() below drops it instead.
+        if years < 0:
+            return float("nan")
+        # Inside the last hour the BS assumptions have stopped describing
+        # anything -- open interest is being exercised or closed out, not
+        # hedged -- and 1/sqrt(T) runs away. Floor there. The floor barely
+        # moves zero_gamma (0.20 across 15 min to 4 h, measured, because the
+        # root is a ratio) but it does hold down the MAGNITUDES, which run
+        # about 13x normal in that last hour.
+        return max(years, _MIN_T_YEARS)
 
     rows["t_years"] = rows["strike_time"].map(_t_years)
     rows = rows.dropna(subset=["t_years"])
@@ -274,8 +397,47 @@ def _hedge_label(pct_adv: float) -> str:
     return "dominant"
 
 
+def _data_as_of(df: pd.DataFrame) -> str:
+    """When the newest quote in this chain was stamped.
+
+    Falls back to today's date only when the column is absent, and says so,
+    because the whole point is that a reader can tell the two apart: on a
+    Sunday the two differ by two days, and nothing on the chart used to.
+    """
+    if "update_time" not in df.columns:
+        return f"{date.today().isoformat()} (clock)"
+    stamps = pd.to_datetime(df["update_time"], errors="coerce").dropna()
+    if stamps.empty:
+        return f"{date.today().isoformat()} (clock)"
+    return stamps.max().strftime("%Y-%m-%d %H:%M")
+
+
+def _live_side(by_strike: pd.DataFrame, col: str, want_max: bool) -> pd.DataFrame:
+    """The strikes that actually carry GEX on one side.
+
+    A strike whose GEX is exactly zero is not a weak wall -- it is the
+    absence of one. Nothing downstream can draw "we looked here and found
+    nothing" in a way that differs from the strikes that are never drawn at
+    all: the chart fades weaker ranks, so a zero strike arrives looking
+    exactly like a genuine wall that happens to rank low. Dropping it is the
+    only honest option, so it is dropped here rather than ranked last.
+    """
+    return by_strike[by_strike[col] > 0] if want_max else by_strike[by_strike[col] < 0]
+
+
+def _wall_at(by_strike: pd.DataFrame, col: str,
+             want_max: bool) -> tuple[float | None, float | None]:
+    """(strike, value) of the strongest wall on one side, or (None, None)."""
+    live = _live_side(by_strike, col, want_max)
+    if live.empty:
+        return None, None
+    idx = live[col].idxmax() if want_max else live[col].idxmin()
+    return (float(live.loc[idx, "option_strike_price"]), float(live.loc[idx, col]))
+
+
 def build_gex_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
-                 spot: float, avg_vol: float, expiries: list[str]) -> dict:
+                 spot: float, avg_vol: float, expiries: list[str],
+                 coverage: dict | None = None) -> dict:
     itm_calls = df[(df["option_type"] == "CALL") & df["itm"]]
     itm_puts  = df[(df["option_type"] == "PUT")  & df["itm"]]
 
@@ -286,15 +448,11 @@ def build_gex_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
     total_sh = call_sh + put_sh
     net_gex  = float(df["gex"].sum())
 
-    # Call Wall: strike with highest call GEX
-    cw_idx      = by_strike["call_gex"].idxmax()
-    call_wall   = float(by_strike.loc[cw_idx, "option_strike_price"])
-    call_wall_v = float(by_strike.loc[cw_idx, "call_gex"])
-
-    # Put Wall: strike with most negative put GEX
-    pw_idx     = by_strike["put_gex"].idxmin()
-    put_wall   = float(by_strike.loc[pw_idx, "option_strike_price"])
-    put_wall_v = float(by_strike.loc[pw_idx, "put_gex"])
+    # Call Wall: strongest call GEX. Put Wall: most negative put GEX.
+    # Both may be None -- see _wall_at() for why a zero strike is dropped
+    # rather than ranked last.
+    call_wall, call_wall_v = _wall_at(by_strike, "call_gex", want_max=True)
+    put_wall,  put_wall_v  = _wall_at(by_strike, "put_gex",  want_max=False)
 
     def _pct(n: float) -> float:
         return n / avg_vol * 100 if avg_vol else float("nan")
@@ -318,7 +476,11 @@ def build_gex_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
         "spot": spot,
         "avg_vol": avg_vol,
         "expiries": expiries,
-        "as_of": date.today().isoformat(),
+        "coverage": coverage,
+        # The data's own stamp, not date.today(). Generated on a Sunday, the
+        # old field titled a chart of Friday's greeks "Data: 2026-11-22" --
+        # and a saved PNG carries that lie for as long as it exists.
+        "as_of": _data_as_of(df),
         "call_oi": call_oi,
         "put_oi": put_oi,
         "call_sh": call_sh,
@@ -350,9 +512,14 @@ def top_gex_walls(by_strike: pd.DataFrame, n: int) -> tuple[list[dict], list[dic
     idxmin) -- this generalizes to "top N" for callers that want to show
     more than the single strongest strike per side (e.g. a multi-wall
     chart overlay). Each entry is {"strike": float, "gex": float}.
+
+    Returns AT MOST n per side, not exactly n: zero-GEX strikes are excluded
+    (see _live_side), so a side with fewer live strikes than asked yields a
+    shorter list. That shortfall is itself information -- padding it with
+    zeros produced lines indistinguishable from real walls.
     """
-    calls = by_strike.nlargest(n, "call_gex")
-    puts  = by_strike.nsmallest(n, "put_gex")
+    calls = _live_side(by_strike, "call_gex", True).nlargest(n, "call_gex")
+    puts  = _live_side(by_strike, "put_gex", False).nsmallest(n, "put_gex")
     call_walls = [
         {"strike": float(r["option_strike_price"]), "gex": float(r["call_gex"])}
         for _, r in calls.iterrows()
@@ -365,6 +532,27 @@ def top_gex_walls(by_strike: pd.DataFrame, n: int) -> tuple[list[dict], list[dic
 
 
 # ── Formatting helpers ─────────────────────────────────────────────────────────
+
+def _per_pct(gex):
+    """GEX restated as shares to hedge per 1% move in spot.
+
+    The stored `gex` column is gamma x OI x 100 x spot -- the delta change for
+    a move of one WHOLE spot, i.e. 100%. Printing that raw next to a
+    "% of 20d Avg Vol" column invited a reading 100x too large, so every
+    number a reader sees goes through here and the 0.01 lives in exactly one
+    place. The stored columns stay in the 100% unit; build_gex_stats() scales
+    its own hedge figures independently and must not be routed through this.
+    """
+    return gex * 0.01
+
+
+def _wall_str(stats: dict, side: str) -> str:
+    """'$660  (3.0K sh/1%)', or 'none' when that side carries no GEX."""
+    strike, value = stats[f"{side}_wall"], stats[f"{side}_wall_v"]
+    if strike is None:
+        return "none"
+    return f"${strike:.0f}  ({_fmt(_per_pct(value))} sh/1%)"
+
 
 def _fmt(n: float) -> str:
     if abs(n) >= 1_000_000:
@@ -433,9 +621,9 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
     # Cumulative GEX curve on right axis
     ax_r.plot(strikes, cum_gex, color=CUM_COL, linewidth=1.8, zorder=5, label="Cumulative GEX")
     ax_r.axhline(0, color=CUM_COL, linewidth=0.4, linestyle=":", alpha=0.4, zorder=2)
-    ax_r.set_ylabel("Cumulative GEX (shares)", color=CUM_COL, fontsize=8)
+    ax_r.set_ylabel("Cumulative GEX (sh per 1% move)", color=CUM_COL, fontsize=8)
     ax_r.tick_params(axis="y", colors=CUM_COL, labelsize=7)
-    ax_r.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt(v)))
+    ax_r.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt(_per_pct(v))))
     for sp in ax_r.spines.values():
         sp.set_visible(False)
 
@@ -476,32 +664,36 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
                 va="top", ha="left", zorder=7,
                 bbox=dict(boxstyle="round,pad=0.2", fc=SURF, ec=ZERO_G_COL, alpha=0.85, lw=0.8))
 
-    # Call Wall — highest call GEX strike
+    # Call Wall — highest call GEX strike. None when no strike on that side
+    # carries any GEX; _slot() must stay inside the guard, since it records
+    # the slot it hands out and would be fed None.
     cw = stats["call_wall"]
-    ax.axvline(cw, color=CALL_COL, linewidth=0.8, linestyle=":", zorder=5, alpha=0.7)
-    ax.text(cw, _slot(cw),
-            f"Call Wall\n${cw:.0f}", color=CALL_COL, fontsize=7.5,
-            va="top", ha="center", zorder=7,
-            bbox=dict(boxstyle="round,pad=0.2", fc=SURF, ec=CALL_COL, alpha=0.85, lw=0.8))
+    if cw is not None:
+        ax.axvline(cw, color=CALL_COL, linewidth=0.8, linestyle=":", zorder=5, alpha=0.7)
+        ax.text(cw, _slot(cw),
+                f"Call Wall\n${cw:.0f}", color=CALL_COL, fontsize=7.5,
+                va="top", ha="center", zorder=7,
+                bbox=dict(boxstyle="round,pad=0.2", fc=SURF, ec=CALL_COL, alpha=0.85, lw=0.8))
 
     # Put Wall — most negative put GEX strike
     pw = stats["put_wall"]
-    ax.axvline(pw, color=PUT_COL, linewidth=0.8, linestyle=":", zorder=5, alpha=0.7)
-    ax.text(pw, ymin + span * 0.02,
-            f"Put Wall\n${pw:.0f}", color=PUT_COL, fontsize=7.5,
-            va="bottom", ha="center", zorder=7,
-            bbox=dict(boxstyle="round,pad=0.2", fc=SURF, ec=PUT_COL, alpha=0.85, lw=0.8))
+    if pw is not None:
+        ax.axvline(pw, color=PUT_COL, linewidth=0.8, linestyle=":", zorder=5, alpha=0.7)
+        ax.text(pw, ymin + span * 0.02,
+                f"Put Wall\n${pw:.0f}", color=PUT_COL, fontsize=7.5,
+                va="bottom", ha="center", zorder=7,
+                bbox=dict(boxstyle="round,pad=0.2", fc=SURF, ec=PUT_COL, alpha=0.85, lw=0.8))
 
     # ── Axis styling ───────────────────────────────────────────────────────────
     ax.set_xlim(xmin, xmax)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt(v)))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt(_per_pct(v))))
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:.0f}"))
     ax.tick_params(labelsize=8)
     ax.grid(axis="y", zorder=0)
     for sp in ax.spines.values():
         sp.set_color(GRID)
     ax.set_xlabel("Strike Price", fontsize=9)
-    ax.set_ylabel("Call / Put GEX (shares)", fontsize=9)
+    ax.set_ylabel("Call / Put GEX (sh per 1% move)", fontsize=9)
 
     # ── Title ──────────────────────────────────────────────────────────────────
     ticker  = code.split(".")[-1]
@@ -513,6 +705,16 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
         f"  |  Expiries: {exp_str}",
         color=TEXT_PRI, fontsize=10.5, fontweight="bold", pad=10,
     )
+    # A saved PNG outlives any terminal it was printed beside, and a chart
+    # missing half its chain is indistinguishable from a complete one by
+    # eye -- the walls land on the same strikes. So the warning rides on the
+    # image itself, in the title band where it cannot be missed, not in the
+    # 7pt italic footnote nobody reads.
+    note = coverage_note(stats.get("coverage"))
+    if note:
+        ax.text(0.5, 1.085, f"⚠  {note} — magnitudes understated",
+                transform=ax.transAxes, color=CALL_COL, fontsize=9,
+                fontweight="bold", ha="center", va="bottom", zorder=20)
 
     # ── Legend ─────────────────────────────────────────────────────────────────
     import matplotlib.lines as mlines
@@ -548,14 +750,14 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
     _txt(COL[0], V1_Y,   f"Data: {stats['as_of']}  |  Spot: ${stats['spot']:.2f}", color=TEXT_SEC, fontsize=9)
     _txt(COL[0], V2_Y,   f"Zero Gamma: {zg_str}   20d Avg Vol: {_fmt(stats['avg_vol'])} sh",
          color=TEXT_SEC, fontsize=9)
-    _txt(COL[0], V3_Y,   f"Net GEX: {_fmt(stats['net_gex'])} sh  {dir_str}",
+    _txt(COL[0], V3_Y,   f"Net GEX: {_fmt(_per_pct(stats['net_gex']))} sh/1%  {dir_str}",
          color=dir_col, fontsize=9, fontweight="bold")
 
     # Col 1: Walls
     _txt(COL[1], HEAD_Y, "Key Strikes",   color=TEXT_SEC, fontsize=9, fontweight="bold")
-    _txt(COL[1], V1_Y,   f"Call Wall:  ${stats['call_wall']:.0f}  ({_fmt(stats['call_wall_v'])} sh)",
+    _txt(COL[1], V1_Y,   f"Call Wall:  {_wall_str(stats, 'call')}",
          color=CALL_COL, fontsize=9)
-    _txt(COL[1], V2_Y,   f"Put Wall:   ${stats['put_wall']:.0f}  ({_fmt(stats['put_wall_v'])} sh)",
+    _txt(COL[1], V2_Y,   f"Put Wall:   {_wall_str(stats, 'put')}",
          color=PUT_COL,  fontsize=9)
     _txt(COL[1], V3_Y,   f"Expiries: {_expiry_label(stats['expiries'], 2)}",
          color=TEXT_MUTED, fontsize=8)
@@ -591,7 +793,7 @@ def _plot(code: str, by_strike: pd.DataFrame, stats: dict, out_path: str | None)
     # On the figure, not inside ax2: sharing the panel meant it sat on the same
     # band as the "% 20d Avg Vol" row and the two printed over each other.
     fig.text(0.98, 0.016,
-             "Dealers assumed net short  ·  GEX = γ × OI × 100 × spot  ·  "
+             "Dealers assumed net short  ·  GEX = γ × OI × 100 × spot × 1%  ·  "
              "Zero Gamma = BS-repriced dealer GEX flips sign vs. hypothetical spot",
              color=TEXT_MUTED, fontsize=7,
              va="bottom", ha="right", style="italic")
@@ -621,18 +823,29 @@ def main() -> None:
             return
         print(f"  Expiries: {expiries}", flush=True)
 
-        df = fetch_option_data(ctx, args.code, expiries)
+        df, coverage = fetch_option_data(ctx, args.code, expiries)
         print(f"  Options loaded: {len(df)}", flush=True)
+        note = coverage_note(coverage)
+        if note:
+            # Loud, and before the numbers it invalidates. Not an exception:
+            # raising here would leave no chart at all, which reads as a
+            # different failure entirely.
+            print(f"  *** {note} -- every magnitude below is understated ***",
+                  flush=True)
 
         df, by_strike = compute_gex(df, spot)
-        stats = build_gex_stats(df, by_strike, spot, avg_vol, expiries)
+        # The FETCHED expiries, not the requested ones: the chart titles
+        # itself from this list and would otherwise name expiries whose
+        # contracts are not in the sum.
+        stats = build_gex_stats(df, by_strike, spot, avg_vol,
+                                coverage["expiries_ok"], coverage)
 
         zg_str = f"${stats['zero_gamma']:.2f}" if stats["zero_gamma"] else "none in range"
-        print(f"\n  Net GEX    : {_fmt(stats['net_gex'])} sh  "
+        print(f"\n  Net GEX    : {_fmt(_per_pct(stats['net_gex']))} sh/1%  "
               f"{'▲ Stabilizing' if stats['stable'] else '▼ Destabilizing'}", flush=True)
         print(f"  Zero Gamma : {zg_str}  (gamma flip strike)", flush=True)
-        print(f"  Call Wall  : ${stats['call_wall']:.0f}  GEX {_fmt(stats['call_wall_v'])} sh", flush=True)
-        print(f"  Put Wall   : ${stats['put_wall']:.0f}  GEX {_fmt(stats['put_wall_v'])} sh", flush=True)
+        print(f"  Call Wall  : {_wall_str(stats, 'call')}", flush=True)
+        print(f"  Put Wall   : {_wall_str(stats, 'put')}", flush=True)
         print(f"  ITM Call OI: {stats['call_oi']:,} contracts = {_fmt(stats['call_sh'])} sh"
               f"  ({stats['call_pct']:.1f}% of avg vol)", flush=True)
         print(f"  ITM Put  OI: {stats['put_oi']:,} contracts = {_fmt(stats['put_sh'])} sh"

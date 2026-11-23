@@ -81,6 +81,7 @@ from strategy.smc.kd_trend import compute_kd
 from strategy.chandelier_exit.chandelier import current_stop
 from strategy.option.gex import (
     get_near_expiry_dates, fetch_option_data as fetch_option_chain_data,
+    coverage_note,
     compute_gex, build_gex_stats, top_gex_walls,
 )
 from ta.volume import AccDistIndexIndicator
@@ -263,6 +264,13 @@ def _pair_refs(base_row, pair_row) -> tuple[float, float] | None:
     return None
 _AVWAP_COL = "#ffeb3b"  # anchored VWAP line/label color
 _ZERO_GAMMA_COL = "#ff8c00"  # option Zero Gamma line -- matches gex.py's own matplotlib chart
+
+# Consecutive failed option polls tolerated before the walls are dropped.
+# Two, against the default 15 s poll, is ~30 s -- one chain rate-limit window
+# (10 calls / 30 s), so a single burst from a manual refresh is absorbed
+# without the lines blinking, while a structural overrun clears them as it
+# should.
+_OPTION_STALE_POLLS = 2
 # Half-width, in percent of price, of the window the POC switch hysteresis
 # sums volume over. Comparing two single bins does not work: the profile is
 # re-binned from scratch on every rebuild over a lo/hi that grows with the
@@ -2431,7 +2439,7 @@ class OptionChainFetcher(QThread):
                     f"No option expiries within {self._dte} DTE for {self._code}.")
                 return
 
-            df = fetch_option_chain_data(self._ctx, self._code, expiries)
+            df, coverage = fetch_option_chain_data(self._ctx, self._code, expiries)
 
             ret, snap = self._ctx.get_market_snapshot([self._code])
             if ret != RET_OK or snap is None or snap.empty:
@@ -2443,7 +2451,11 @@ class OptionChainFetcher(QThread):
             # build_gex_stats() computes zero_gamma internally (it's part of
             # the returned stats dict) -- calling it separately here would
             # just redo the same BS-repricing grid search a second time.
-            stats = build_gex_stats(df, by_strike, spot, 0.0, expiries)
+            # coverage["expiries_ok"], not expiries: a partial fetch would
+            # otherwise label the result with expiries whose contracts are
+            # not in the sum.
+            stats = build_gex_stats(df, by_strike, spot, 0.0,
+                                    coverage["expiries_ok"], coverage)
             call_walls, put_walls = top_gex_walls(by_strike, self._wall_count)
 
             # Large-trade detection: diff this poll's per-contract volume
@@ -2477,7 +2489,8 @@ class OptionChainFetcher(QThread):
                 "put_walls":    put_walls,
                 "zero_gamma":   stats["zero_gamma"],
                 "net_gex":      stats["net_gex"],
-                "expiries":     expiries,
+                "coverage":     coverage,
+                "expiries":     coverage["expiries_ok"],
                 "spot":         spot,
                 "computed_at":  datetime.now(),
                 "large_trades": large_trades,
@@ -2852,6 +2865,12 @@ class TradeViewerQt(QMainWindow):
         self._option_wall_data: dict | None = None
         self._option_prev_volumes: dict[str, int] = {}
         self._option_code: str = ""   # symbol the cached option state belongs to
+        # Consecutive failed polls. Walls are dropped after a bounded grace
+        # rather than on the first error: hitting the chain rate limit fails
+        # every poll until the window rolls, and clearing instantly would
+        # make the lines blink once per poll. Counted in polls, not seconds,
+        # because the poll interval is user-set (5-300 s).
+        self._option_fail_streak: int = 0
         self._tray: QSystemTrayIcon | None = None   # built lazily on first alert
 
         # Range Profile state
@@ -5016,6 +5035,15 @@ class TradeViewerQt(QMainWindow):
             # belong to the old symbol.
             self._option_prev_volumes = {}
             self._option_code = code
+            # The CACHE too, not just the drawn items: _render repaints from
+            # the cache every tick, so clearing only the items put the old
+            # symbol's walls straight back on the new symbol's chart -- for
+            # the 0.3-1.4 s until the new fetch lands, or forever if the new
+            # symbol has no options.
+            self._option_wall_data = None
+            # Fresh symbol, fresh grace: inheriting the streak would let the
+            # previous symbol's failures drop this one's walls on its first.
+            self._option_fail_streak = 0
             self._clear_option_wall_items()
             self._clear_option_alert_items()
         dte = 0 if self._option_0dte_cb.isChecked() else self._option_dte_spin.value()
@@ -5029,14 +5057,34 @@ class TradeViewerQt(QMainWindow):
         self._option_fetcher.start()
 
     def _on_option_fetch_error(self, msg: str) -> None:
+        """Drop the walls once a short grace has run out.
+
+        This used to log, retitle an 8pt label, and leave self._option_wall_data
+        in place -- which _render redraws unconditionally. OpenD dropping out,
+        the chain rate limit, a symbol with no options, or 0DTE ticked on a day
+        nothing expires all land here, and each left the last good walls on the
+        chart for as long as the window stayed open, with nothing to say they
+        were minutes or days old.
+        """
         self._log(f"Option fetch: {msg}")
-        self._option_status_lbl.setText("options: no data")
+        self._option_fail_streak += 1
+        if self._option_fail_streak > _OPTION_STALE_POLLS:
+            self._option_wall_data = None
+            self._clear_option_wall_items()
+            self._option_status_lbl.setText("options: no data")
+        else:
+            self._option_status_lbl.setText(
+                f"options: stale {self._option_fail_streak}/{_OPTION_STALE_POLLS}")
 
     def _on_option_fetch_ready(self, result: dict) -> None:
+        self._option_fail_streak   = 0
         self._option_wall_data     = result
         self._option_prev_volumes  = result["volumes"]
         ts_str = result["computed_at"].strftime("%H:%M:%S")
-        self._option_status_lbl.setText(f"options: updated {ts_str}")
+        note = coverage_note(result.get("coverage"))
+        self._option_status_lbl.setText(
+            f"options: updated {ts_str}" if not note
+            else f"options: {ts_str}  {note}")
         if self._ind("option_walls") and self._klines is not None:
             self._clear_option_wall_items()
             self._draw_option_walls(self._klines)
@@ -6026,7 +6074,42 @@ class TradeViewerQt(QMainWindow):
         if zero_gamma is not None:
             self._draw_option_wall_line(zero_gamma, _ZERO_GAMMA_COL, "Zero Gamma", n)
 
+        self._draw_option_coverage_banner(data, n)
         self._pin_option_wall_labels()
+
+    def _draw_option_coverage_banner(self, data: dict, n: int) -> None:
+        """Say so when the chain behind these walls came back incomplete.
+
+        Geometry cannot carry this. A fetch that lost half its expiries moves
+        the walls by nothing measurable -- 660/600 before and after, measured
+        -- so there is no line, style or alpha that would differ; what breaks
+        is the magnitude, and the magnitude is not on this chart at all. Only
+        text can say "44% of the exposure is missing", so text it is.
+
+        Dash and alpha are both spoken for anyway: every wall is dashed, and
+        alpha already encodes rank, so a faded dashed line would read as
+        "wall #4", not "bad data".
+        """
+        note = coverage_note(data.get("coverage"))
+        if not note:
+            return
+        try:
+            y_top = self._plot_c.vb.viewRange()[1][1]
+        except Exception:                               # noqa: BLE001
+            return
+        lbl = pg.TextItem(
+            text=f"⚠ {note}", color=_RED,
+            fill=pg.mkBrush(_qc(_BG_TIP, 230)), anchor=(1.0, 0.0),
+        )
+        lbl.setFont(QFont("Monospace", 8))
+        lbl.setZValue(60)
+        lbl.setPos(n - 1, y_top)
+        self._plot_c.addItem(lbl, ignoreBounds=True)
+        # Into _option_wall_items so _clear_option_wall_items() removes it;
+        # deliberately NOT into _option_wall_labels, whose entries share one
+        # column width set by the widest of them -- this banner is far wider
+        # than "Call Wall 660" and would shove the leftmost column off view.
+        self._option_wall_items.append(lbl)
 
     def _pin_option_wall_labels(self, *_) -> None:
         """Lay the wall labels out in columns so their text never overlaps.

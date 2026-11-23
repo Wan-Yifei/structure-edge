@@ -33,8 +33,15 @@ WHAT THIS DOES
 --------------
 Detaches the SDK's file handler in THIS process. We keep our own logs;
 the SDK's debug file is not read by anything here, and nothing about it
-is worth a stalled push thread. The console handler is left alone, so
-SDK warnings still reach our own captured stdout.
+is worth a stalled push thread.
+
+The cost, stated plainly: the SDK's own log output is DISCARDED here, not
+rerouted. Its warning/error/info/debug all call through with the ONLY_FILE
+flag and never set ONLY_CONSOLE, so the console handler -- which this does
+leave attached -- was never going to carry them in the first place. An
+earlier version of this note claimed they still reached stdout; they do
+not, and never did. Accepted: those lines went to a file nobody reads,
+and the alternative is a callback thread that stalls 6.6 s on a rotation.
 
 Call it once, before opening any context:
 

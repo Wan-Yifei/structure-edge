@@ -291,6 +291,30 @@ class TestItSaysWhyItIsSilent:
         assert "no pulled/eaten" in txt
         assert "needs Bins" in txt
 
+    def test_the_threshold_it_prints_is_the_one_it_enforces(self, win):
+        """The note quotes a BAND; the gate compares a HALF-band.
+
+        It shipped quoting $0.03 -- the half-band constant -- right beside a
+        "needs Bins" figure derived from the real $0.06 cut-off, so the two
+        halves of one sentence disagreed by 2x and a reader taking the stated
+        threshold at face value would have asked for twice the resolution
+        they needed. Nothing pinned the printed number to the gate, so this
+        reads it back out of the rendered text and flips the gate across it.
+        """
+        import re
+        txt = self._legend_with(win, 609.0, 622.4, 100)
+        m = re.search(r"band &gt; \$([0-9.]+)", txt)
+        assert m, f"no threshold in legend: {txt}"
+        printed = float(m.group(1))
+
+        lo, bins = 600.0, 100
+        for factor, want_note in ((0.99, False), (1.01, True)):
+            band = printed * factor
+            t = self._legend_with(win, lo, lo + band * bins, bins)
+            assert ("no pulled/eaten" in t) is want_note, (
+                f"band ${band:.4f} against a printed cut-off of ${printed:.2f}: "
+                f"note {'missing' if want_note else 'should not be there'}")
+
     def test_the_bins_it_names_actually_clear_the_gate(self, win):
         """The one that matters: take its own advice and check it works."""
         from analysis.liq_hm_window import _WALL_FATE_MAX_HALF

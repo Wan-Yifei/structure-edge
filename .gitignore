@@ -79,3 +79,15 @@ strategy/drill/questions_mine.js
 # market data, same class as backtest/results/. The script that makes one
 # belongs in git; the PNG it writes does not.
 analysis/outputs/
+
+# Brokerage statements (account numbers, positions, P&L) -- never commit.
+# bill/ holds the PDFs pulled from moomoo; daily_win_rate.csv is the
+# derived, committable summary.
+bill/
+
+# Drill answer log -- personal practice records, regenerated per session
+drill_records.json
+
+# Loose decks exported in the repo root, same class as the screenshots
+# above. A deck that belongs in git goes in a subdirectory.
+/*.pptx

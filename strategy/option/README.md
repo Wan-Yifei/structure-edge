@@ -31,10 +31,16 @@ by trading the underlying.  The rate at which their hedge must change as the
 underlying moves is determined by **gamma**:
 
 ```
-GEX per contract  =  gamma × open_interest × 100 × spot_price   (shares)
+GEX per contract  =  gamma × open_interest × 100 × spot_price
 
 Net GEX  =  Σ GEX_calls  −  Σ GEX_puts
 ```
+
+That product is the hedge for a move of one **whole** spot — a 100% move.
+Every GEX figure the tool displays (chart axes, panel, stdout) is scaled by
+1% and labelled **`sh/1%`**: shares the dealer must trade per 1% move in the
+underlying.  That is the only unit directly comparable with the
+"% of 20d Avg Vol" column beside it.
 
 | Net GEX | MM position | Market behaviour |
 |---------|-------------|------------------|

@@ -170,6 +170,14 @@ _WALL_RANK_SLACK = 2
 # still refusing a quarter-dollar band.
 _WALL_FATE_MAX_HALF = 0.03
 
+# The gate compares HALF a band, but every message to the reader quotes a
+# whole band ("$0.134/band" is what the legend shows). Derived, never written
+# out a second time: a separate literal is exactly how the legend and the
+# Bins tooltip came to announce a $0.03 cut-off while the gate enforced
+# $0.06 -- and while the "needs Bins >= N" advice beside them, computed from
+# the real figure, said something the stated threshold contradicted.
+_WALL_FATE_MAX_BAND = 2 * _WALL_FATE_MAX_HALF
+
 _DB_PATH = pathlib.Path(__file__).parent.parent / "db" / "order_book.db"
 
 # OpenD endpoint for the heatmap's own ORDER_BOOK subscription (same
@@ -864,7 +872,7 @@ class LiqHmWindow(QWidget):
             "the legend below.\n\n"
             "It also decides whether a wall label can say 'pulled / eaten':\n"
             "that attribution matches prints against the band they fall in,\n"
-            "so it is refused once the band is wider than $0.03. The legend\n"
+            "so it is refused once the band is wider than $0.06. The legend\n"
             "names the Bins needed whenever it is being refused.\n\n"
             "Clearing that threshold is the MINIMUM, not a clean read. One\n"
             "band aggregates every level inside it, so the wider it is the\n"
@@ -2703,7 +2711,7 @@ class LiqHmWindow(QWidget):
         if self._bin_size <= 0:
             return None
         width = self._bin_size * self._n_price_spin.value()
-        need = math.ceil(width / (2 * _WALL_FATE_MAX_HALF))
+        need = math.ceil(width / _WALL_FATE_MAX_BAND)
         step = self._n_price_spin.singleStep() or 1
         need = math.ceil(need / step) * step
         return need if need <= self._n_price_spin.maximum() else None
@@ -2845,7 +2853,7 @@ class LiqHmWindow(QWidget):
                         else 'too wide at any Bins')
                 parts.append(
                     f'<font color="{_MUTED}">no pulled/eaten: band &gt; '
-                    f'${_WALL_FATE_MAX_HALF:.2f} — {cure}</font>&nbsp;&nbsp;'
+                    f'${_WALL_FATE_MAX_BAND:.2f} — {cure}</font>&nbsp;&nbsp;'
                 )
 
         # Colormap section — use <font> tags (safest Qt HTML subset)
