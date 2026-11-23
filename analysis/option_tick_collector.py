@@ -305,7 +305,14 @@ def _make_handler(store: OptionTickStore, state: dict):
                              last["volume"], last["direction"])
             return ret, data
 
-    return _Handler
+    # An INSTANCE, not the class. HandlerContext.set_handler decides with
+    # isinstance(handler, TickerHandlerBase), so a class falls through every
+    # branch and the call returns RET_ERROR. Returning the class cost the
+    # first 22 minutes of 2026-11-23: subscribe() reported RET_OK, OpenD
+    # pushed, and the SDK had no handler registered for the proto, so every
+    # print was dropped before any of this code ran -- which is why the
+    # counters read 0 ticks, 0 dropped AND 0 handler_errors at once.
+    return _Handler()
 
 
 # ── greeks sampler ─────────────────────────────────────────────────────────
@@ -726,7 +733,14 @@ def main(argv=None) -> int:
 
         state: dict = {"last_tick_time": None, "first_tick_done": False,
                       "t0": time_mod.time()}
-        ctx.set_handler(_make_handler(store, state))
+        # Checked, because the failure is otherwise completely silent:
+        # set_handler returns RET_ERROR for anything isinstance() rejects and
+        # the subscribe below still succeeds, so the collector runs all day,
+        # samples greeks, logs healthy telemetry, and stores not one tick.
+        if ctx.set_handler(_make_handler(store, state)) != RET_OK:
+            log.error("set_handler refused the tick handler -- no print would "
+                      "ever reach the store; refusing to run")
+            return 6
         ret, msg = ctx.subscribe(codes, [SubType.TICKER])
         if ret != RET_OK:
             log.error("subscribe failed: %s", msg)

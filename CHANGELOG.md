@@ -1,5 +1,128 @@
 # Changelog
 
+## v0.97.2 - 第一场开盘 22 分钟一笔没存，而三个计数器都是 0 (2026-11-23)
+
+patch 级。一行。`_make_handler` 返回的是**类**，不是实例。
+
+### 症状
+
+2026-11-23 09:15 采集器按时启动，订阅报 `RET_OK`，greeks 采样每 15 秒一轮正常
+写入，`session:` 行一路健康 —— 而 `option_ticks` 到 09:37 为止 **0 行**。
+
+```
+09:32:26  session: 0 ticks (0 dropped dup), 1007 greeks rows over 50 sweeps
+09:34:58  session: 0 ticks (0 dropped dup), 1207 greeks rows over 60 sweeps
+09:37:30  session: 0 ticks (0 dropped dup), 1407 greeks rows over 70 sweeps
+```
+
+**三个计数器同时为零**是唯一的线索：`ticks=0` 加 `dropped=0` 加
+`handler_errors=0`。handler 要是跑过而数据有问题，`dropped` 或 `handler_errors`
+里总得有一个动；三个都不动，说明 handler **一次都没被调用**。
+
+### 定位
+
+排除顺序（每一步都是可证伪的，不是推测）：
+
+1. **合约在不在成交** —— 快照 `US.SOXL261127C36000` 今天 `vol=2385`、
+   `update_time=09:32:14`。在成交。
+2. **订阅在不在** —— `query_subscription` 返回 200 个期权合约全在 `TICKER`
+   列表里，`option_used_quota=6 / remain=194`。在。
+3. **是不是账户没有期权逐笔推送权限** —— 从一个独立 context 订阅同一个合约，
+   45 秒收到 7 笔推送（7.55 → 8.55，全 BUY），`get_rt_ticker` 也正常返回。
+   **推送本身完全正常，配额前后都是 6，这次探测一分钱没花。**
+
+   （顺带记一条：`get_rt_ticker` 的「请先订阅 Ticker」是 **per-context** 的。
+   配额是账户级的、任何 context 都看得见，但**读取权限跟着订阅它的那个
+   context 走**。所以从外部 context 拉取来判断采集器的死活是无效实验。）
+4. 于是只剩代码。差别就一个字符：探测里写的是 `set_handler(H())`，采集器写的是
+   `set_handler(_make_handler(store, state))`，而 `_make_handler` 结尾是
+   `return _Handler`。
+
+### 真因
+
+```python
+# moomoo/common/handler_context.py
+for protoc in self._handler_table:
+    if isinstance(handler, self._handler_table[protoc]["type"]):
+        self._handler_table[protoc]["obj"] = handler
+        return RET_OK
+return RET_ERROR
+```
+
+`isinstance(类, TickerHandlerBase)` 是 `False` —— **类不是自己的实例**。所以
+`set_handler` 落到 `return RET_ERROR`，**而调用方把返回值丢掉了**。
+
+handler 从头到尾没装上。OpenD 照常推送，SDK 在 `_handler_table` 里找不到这个
+proto 的处理器，每一笔都在进入本文件任何一行代码之前就被丢弃了。订阅是真的、
+greeks 是真的、日志是真的 —— 只有逐笔是空的。
+
+### 修复
+
+两处：
+
+- `_make_handler` 返回 `_Handler()`
+- **检查 `set_handler` 的返回值**，`RET_ERROR` 直接退出码 6 拒绝运行
+
+第二条才是真正的修复。第一条是这次的具体错误，第二条让下一次同类错误在启动的
+第一秒就喊出来，而不是跑一整天再从空表里发现。
+
+### 测试为什么十条全过却没拦住
+
+`tests/analysis/test_option_tick_handler.py` 的 fixture 是
+`cls = _make_handler(...)` 然后 `cls()` —— **它自己实例化，再直接调
+`on_recv_rsp`**。十条测试测的全是 handler 的逻辑（计数、去重、方向归一、异常
+不外逃），**没有一条碰过 `ctx.set_handler`**，也就是 bug 所在的那一步。
+
+新增 `TestTheHandlerIsActuallyInstallable` 两条，钉的是接线不是逻辑：
+
+- `isinstance(_make_handler(...), TickerHandlerBase)` —— 用**真的** SDK 基类，
+  因为那正是 `set_handler` 用的谓词
+- `HandlerContext().set_handler(_make_handler(...)) == RET_OK` —— 再往下一层，
+  让 SDK 自己的派发表来判
+
+变异测试：把 `return _Handler()` 改回 `return _Handler`，两条新测试都红。
+
+### 这一场的数据：开盘没丢，但有一道缝
+
+09:39:29 强杀采集器、scheduler 一秒内用新代码拉起，`DATA RECEIVED` 在订阅的
+**同一秒**就打出来了。而且**开盘那 9 分钟没有丢**：库里最早一笔是
+`09:30:05.962`，早于重启 —— 订阅会把当天已累积的逐笔补发回来（受每合约 1000 笔
+上限约束）。
+
+**但这一场的 `option_subscriptions` 有 261 行，不是 200。** 两次选合约用的 spot
+不同（09:15 的 `$30.88` 是周五收盘，09:39 的 `$41.89` 是盘中实时），选出的集合
+只有 139 个重叠。所以：
+
+> **16:50 的对账会把只出现在第一次选择里的 61 个合约报成 `caught NOTHING`。
+> 那是今天这次重启的产物，不是订阅掉线。** 判断订阅有没有被踢，要看
+> `telemetry: subscribed N of 200` 那一行，不是看 `caught_nothing` 的个数。
+
+第二次选择明显更好：764 个候选（第一次 468），只有 27 个没有 greeks 可打分
+（第一次 120）—— 因为窗口这次是围着真实价算的。
+
+### 附带记录：盘前快照不刷新
+
+`get_market_snapshot('US.SOXL')` 在 09:15 返回的是 **周五 16:00 的冻结记录**
+（`update_time=2026-11-20 16:00:00`，`pre_price/pre_high/pre_low` 全是周五盘前的
+44.26 / 44.89 / 35.08）。而同一时刻 ob_collector 看得到今天实时的 35.74/35.73
+—— 因为它订阅时带了 `extended_time=True, session=Session.ALL`。
+
+**期权合约的快照是活的**（`update_time` 是当天、秒级），只有标的的不是。
+`pick_contracts` 用标的快照取 spot，所以盘前启动时拿到的必然是上一个 RTH 收盘价。
+
+今天这个偏差有 16%（30.88 vs 35.75），但 ±80% 的窗口是 $6.18–$55.58，没有漏掉
+任何会成交的行权价；而且排序也没有被带偏 —— 实测选出的 200 个里，落在真实价
+±10% 内的有 49 个，落在陈旧价 ±10% 内的只有 31 个。原因是打分用的
+`|delta|×OI` 里 **OI 是真实的**，持仓反映市场实际押在哪。
+
+### 待办
+
+- `_launch_opt` 加 `--days`，让盘前启动时能用更稳的 spot 口径（或者干脆在
+  `pick_contracts` 里优先用 `overnight_price` / `pre_price`，需要先确认这两个
+  字段在盘前是不是也冻结）
+- 全套测试今天没跑 —— 09:15–16:25 之间跑全套会构造 `TradeViewerQt` 并订阅，
+  污染 `subscribed N of 200` 的读数。收盘后补。
+
 ## v0.97.1 - 一个会在停止时跳过全部清理的等待，以及 23 个测试文件的析构 (2026-11-23)
 
 patch 级。三处修复加一处测试卫生，都是上一版留下的。

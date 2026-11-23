@@ -57,8 +57,10 @@ def handler_and_state(tmp_path, monkeypatch):
     # the stand-in is injected there rather than by patching the module.
     import moomoo
     monkeypatch.setattr(moomoo, "TickerHandlerBase", FakeTickerBase)
-    cls = m._make_handler(store, state)
-    yield cls(), state, store, pd
+    # _make_handler returns an INSTANCE -- see the test at the bottom of this
+    # file for why that is load-bearing rather than a style choice.
+    handler = m._make_handler(store, state)
+    yield handler, state, store, pd
     store.close()
 
 
@@ -187,3 +189,55 @@ class TestTheSleepCanBeInterrupted:
         from analysis.option_tick_collector import wait_interruptible
         default = inspect.signature(wait_interruptible).parameters["slice_s"].default
         assert default <= 5.0, default
+
+
+class TestTheHandlerIsActuallyInstallable:
+    """The gap every other test in this file left open.
+
+    On 2026-11-23 the collector ran for 22 minutes of the open and stored
+    zero ticks while reporting 0 dropped and 0 handler errors. _make_handler
+    returned the CLASS; HandlerContext.set_handler decides with
+    isinstance(handler, TickerHandlerBase), a class is not an instance of
+    itself, so it fell through every branch and returned RET_ERROR -- which
+    the caller discarded. subscribe() then succeeded, OpenD pushed, and the
+    SDK had no handler registered for the proto.
+
+    Every test above instantiated the handler itself and called on_recv_rsp
+    directly, so all ten passed against a collector that could never receive
+    anything. These two pin the wiring instead of the logic.
+    """
+
+    def test_what_main_hands_to_set_handler_passes_isinstance(self, tmp_path):
+        """The real SDK base class, not the stand-in: isinstance against the
+        genuine TickerHandlerBase is the exact predicate set_handler uses."""
+        from moomoo import TickerHandlerBase
+        import analysis.option_tick_collector as m
+
+        store = OptionTickStore(tmp_path / "opt.db")
+        try:
+            h = m._make_handler(store, {})
+            assert isinstance(h, TickerHandlerBase), (
+                "set_handler() rejects this and returns RET_ERROR; the "
+                "collector would subscribe, log healthy telemetry and store "
+                f"nothing. got {type(h)!r}")
+        finally:
+            store.close()
+
+    def test_the_sdk_accepts_it(self, tmp_path):
+        """One level further down: hand it to the SDK's own dispatch table.
+
+        isinstance passing and HandlerContext accepting are the same thing
+        today, but the test above asserts our end of the contract and this
+        one asserts theirs -- an SDK that adds a second condition would break
+        the collector silently again, and only this test would say so.
+        """
+        from moomoo.common.handler_context import HandlerContext
+        from moomoo import RET_OK
+        import analysis.option_tick_collector as m
+
+        store = OptionTickStore(tmp_path / "opt.db")
+        try:
+            hc = HandlerContext(lambda *a, **k: None)
+            assert hc.set_handler(m._make_handler(store, {})) == RET_OK
+        finally:
+            store.close()
