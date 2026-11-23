@@ -30,6 +30,24 @@ Windows 计划任务已经取消了，**全部走 scheduler**。所以 09:15 什
 
 ---
 
+### 开盘前再确认一次：OpenD 上只剩该在的东西
+
+```bash
+powershell -NoProfile -Command "Get-NetTCPConnection -RemotePort 11111 -State Established | ForEach-Object { \$p = Get-CimInstance Win32_Process -Filter \"ProcessId=\$(\$_.OwningProcess)\"; \"\$(\$_.OwningProcess)  \$(\$p.CommandLine)\" }"
+```
+
+应该**只有** `tick_collector.py` 和 `order_book_collector.py` 两条。多出来的
+每一条都在和期权采集器抢同一个账户的订阅额度。
+
+**已经发生过一次**：两个跑完但没退出的 pytest 全套各自挂着一个 quote
+context，孤儿状态（父进程早没了），活了五十分钟。全套里的 GUI 测试会构造
+`TradeViewerQt`，那是会订阅的。
+
+**所以：09:15–16:25 之间不要跑全套。** `telemetry: subscribed N of 200` 是
+今天的头号指标，多一个 quote context，那行读数就解释不了。
+
+---
+
 ## 时间表（美东，本机时区就是 ET）
 
 全自动，不需要手动介入。
