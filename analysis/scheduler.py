@@ -21,6 +21,7 @@ from datetime import datetime, time, timedelta, timezone
 import threading
 import time as time_mod
 
+import signal
 import os
 
 import pystray
@@ -575,10 +576,14 @@ class SchedulerApp(tk.Tk):
         self._holdout_proc: subprocess.Popen | None = None
         self._last_drill_minute: tuple | None = None
         self._drill_proc: subprocess.Popen | None = None
+        self._opt_proc: subprocess.Popen | None = None
+        self._last_opt_reconcile_minute: tuple | None = None
+        self._opt_reconcile_proc: subprocess.Popen | None = None
 
         self._build_clock()
         self._build_sessions()
         self._build_collectors()
+        self._build_option_panel()
         self._build_stocks()
         self._build_backup()
         self._build_controls()
@@ -641,6 +646,28 @@ class SchedulerApp(tk.Tk):
         "enabled": True,
         "cron":    "0 21 * * 1-5",
         "keep":    600,
+    }
+
+    # The option tape collector runs on its OWN window, not on the four
+    # stock sessions. Those four are chained 20:00 -> 04:00 -> 09:30 ->
+    # 16:00 -> 20:00 with no weekday test, so a minute-by-minute scan finds
+    # no moment when none of them is active -- which means the "session
+    # ended and nothing else is running" condition that stops a collector
+    # never fires. A collector hung off them would start once and never be
+    # stopped, and therefore never re-pick its contracts: by Friday it would
+    # still hold Monday's set, whose near expiry has since expired.
+    #
+    # This window closes every evening, so the collector is stopped, and
+    # restarted next morning, and re-picks. Options trade 09:30-16:00 with
+    # late prints to about 16:15; the margins are for pre-open selection and
+    # for those late prints.
+    _DEFAULT_OPTION = {
+        "enabled":       False,   # OFF until a watched session proves it out
+        "code":          "US.SOXL",
+        "start":         "09:15",
+        "end":           "16:25",
+        "pct":           80.0,
+        "reconcile_cron": "50 16 * * 1-5",
     }
 
     _DEFAULT_BACKUP = {
@@ -708,6 +735,18 @@ class SchedulerApp(tk.Tk):
         # Collectors
         self.cfg["order_book_enabled"] = bool(self.ob_var.get())
         self.cfg["autostart"]          = bool(self.autostart_var.get())
+
+        if hasattr(self, "opt_enabled_var"):
+            # Merged onto the defaults, not written field by field: a config
+            # file from before this panel existed has no option_window key,
+            # and reconcile_cron is not on the panel at all.
+            opt = dict(self._DEFAULT_OPTION)
+            opt.update(self.cfg.get("option_window") or {})
+            opt["enabled"] = bool(self.opt_enabled_var.get())
+            opt["code"] = self.opt_code_var.get().strip() or "US.SOXL"
+            opt["start"] = self.opt_start_var.get().strip() or "09:15"
+            opt["end"] = self.opt_end_var.get().strip() or "16:25"
+            self.cfg["option_window"] = opt
         # Remote backup
         rb = self.cfg.setdefault("remote_backup", {})
         rb["enabled"]          = bool(self.backup_enabled_var.get())
@@ -830,6 +869,74 @@ class SchedulerApp(tk.Tk):
             activebackground=BG_DARK, activeforeground=FG,
             font=("Helvetica", 9), command=self._save_config,
         ).pack(side=tk.LEFT, padx=(24, 8), pady=4)
+
+    def _build_option_panel(self):
+        """Its own row, and deliberately NOT part of self._row_widgets.
+
+        _save_config walks that dict and writes straight into
+        self.cfg["sessions"][name] with no guard, so an entry that is not a
+        stock session raises KeyError and the whole save fails.
+        """
+        cfg = self.cfg.get("option_window", self._DEFAULT_OPTION)
+        frame = tk.LabelFrame(self, text=" Option tape ", bg=BG_DARK, fg=FG,
+                              font=("Helvetica", 10, "bold"))
+        frame.pack(fill=tk.X, padx=12, pady=(2, 4))
+
+        self.opt_enabled_var = tk.BooleanVar(value=bool(cfg.get("enabled", False)))
+        tk.Checkbutton(
+            frame,
+            text="Option tape collector  (the tape CANNOT be re-fetched)",
+            variable=self.opt_enabled_var, bg=BG_DARK, fg=FG,
+            selectcolor=BG_EDIT, activebackground=BG_DARK, activeforeground=FG,
+            font=("Helvetica", 9), command=self._save_config,
+        ).pack(side=tk.LEFT, padx=8, pady=4)
+
+        self.opt_code_var = tk.StringVar(value=cfg.get("code", "US.SOXL"))
+        self.opt_start_var = tk.StringVar(value=cfg.get("start", "09:15"))
+        self.opt_end_var = tk.StringVar(value=cfg.get("end", "16:25"))
+        for label, var, width in (("Code:", self.opt_code_var, 10),
+                                  ("Start:", self.opt_start_var, 6),
+                                  ("End:", self.opt_end_var, 6)):
+            tk.Label(frame, text=label, bg=BG_DARK, fg=FG,
+                     font=("Helvetica", 9)).pack(side=tk.LEFT, padx=(10, 3))
+            e = tk.Entry(frame, textvariable=var, width=width, bg=BG_EDIT,
+                         fg=FG, insertbackground=FG)
+            e.pack(side=tk.LEFT)
+            e.bind("<FocusOut>", lambda _e: self._save_config())
+
+        self.opt_status_lbl = tk.Label(frame, text="", bg=BG_DARK, fg="#8888aa",
+                                       font=("Helvetica", 8))
+        self.opt_status_lbl.pack(side=tk.LEFT, padx=(14, 4))
+
+    @staticmethod
+    def _hhmm(text: str, fallback: str) -> time:
+        try:
+            h, m = str(text).strip().split(":")
+            return time(int(h), int(m))
+        except Exception:                                        # noqa: BLE001
+            h, m = fallback.split(":")
+            return time(int(h), int(m))
+
+    def _option_window_active(self, et: datetime) -> bool:
+        """Is the option window open right now?
+
+        Its own test, not session_status(): that one answers for the four
+        stock sessions, and _watchdog_collectors returns early when none of
+        them is active -- which would leave the option collector unwatched
+        for anyone who turns the stock sessions off.
+
+        prestart_minutes is deliberately NOT applied. It is a global knob,
+        and letting it shift this window means the start time on the panel
+        is not the start time that happens.
+        """
+        cfg = self.cfg.get("option_window", self._DEFAULT_OPTION)
+        if not cfg.get("enabled", False):
+            return False
+        if et.weekday() >= 5:
+            return False
+        start = self._hhmm(cfg.get("start"), "09:15")
+        end = self._hhmm(cfg.get("end"), "16:25")
+        return start <= et.time() <= end
 
     def _build_stocks(self):
         frame = tk.Frame(self, bg=BG_DARK)
@@ -1018,7 +1125,50 @@ class SchedulerApp(tk.Tk):
         if self.cfg.get("drill", self._DEFAULT_DRILL).get("enabled"):
             self._check_drill_cron(et)
 
+        # The option tape, on its own window. Outside the stock-session
+        # machinery on purpose -- that one is never idle, so a collector
+        # attached to it would never be stopped and never re-pick its
+        # contracts. Also outside _watchdog_collectors, which returns early
+        # when no stock session is active.
+        self._check_option_window(et)
+        self._check_option_reconcile_cron(et)
+
         self._tick_job = self.after(1000, self._tick)
+
+    def _check_option_window(self, et: datetime):
+        """Start the option collector inside its window, stop it outside."""
+        active = self._option_window_active(et)
+        running = self._opt_proc is not None and self._opt_proc.poll() is None
+
+        if active and not running:
+            if self._opt_proc is not None:          # exited on its own
+                rc = self._opt_proc.returncode
+                self._opt_proc = None
+                if rc == single_instance.EXIT_ALREADY_RUNNING:
+                    # Expected while the Windows scheduled task still runs
+                    # the same collector: whoever got the lock first owns
+                    # the session, and the loser cost one lock attempt.
+                    self._log("[opt] another collector holds the lock — "
+                              "leaving it alone")
+                    if hasattr(self, "opt_status_lbl"):
+                        self.opt_status_lbl.config(text="external collector")
+                    return
+                if not self._died_young("opt"):
+                    self._log(f"[opt] collector exited (rc={rc}) — restarting")
+            self._launch_opt()
+        elif running and not active:
+            self._log("[opt] window closed — stopping collector")
+            self._kill_opt()
+
+        if hasattr(self, "opt_status_lbl"):
+            cfg = self.cfg.get("option_window", self._DEFAULT_OPTION)
+            if not cfg.get("enabled", False):
+                txt = "off"
+            elif self._opt_proc is not None and self._opt_proc.poll() is None:
+                txt = f"running pid {self._opt_proc.pid}"
+            else:
+                txt = "in window, not running" if active else "outside window"
+            self.opt_status_lbl.config(text=txt)
 
     def _check_session_transitions(self, et: datetime):
         """Launch / stop the tick collector at session boundaries."""
@@ -1318,6 +1468,86 @@ class SchedulerApp(tk.Tk):
         self._log(f"OB collector PID {self._ob_proc.pid} started")
         threading.Thread(target=self._tail_ob_proc, daemon=True).start()
 
+    def _launch_opt(self):
+        """Start option_tick_collector.py for the configured underlying."""
+        cfg = self.cfg.get("option_window", self._DEFAULT_OPTION)
+        if not cfg.get("enabled", False):
+            return
+        if self._opt_proc is not None and self._opt_proc.poll() is None:
+            return
+        script = pathlib.Path(__file__).parent / "option_tick_collector.py"
+        if not script.exists():
+            return
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        cmd = [sys.executable, str(script),
+               "--code", str(cfg.get("code", "US.SOXL")),
+               "--pct", str(cfg.get("pct", 80.0))]
+        try:
+            self._opt_proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, env=env,
+                # MANDATORY, not an optimisation. _kill_opt stops this child
+                # with CTRL_BREAK_EVENT, and a console control event goes to
+                # the whole process GROUP. Without its own group the child
+                # shares ours, so the event comes straight back at this
+                # process: measured, the sender dies with 0xC000013A
+                # (STATUS_CONTROL_C_EXIT), its job object closes, and both
+                # stock collectors go down with it -- while the option
+                # collector, the intended target, keeps running.
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        except Exception as exc:                                 # noqa: BLE001
+            self._log(f"Failed to start option collector: {exc}")
+            return
+        _kill_with_me(self._opt_proc.pid)
+        self._launched_at["opt"] = time_mod.monotonic()
+        self._log(f"Option collector PID {self._opt_proc.pid} started "
+                  f"({cfg.get('code')})")
+        threading.Thread(target=self._tail_opt_proc, daemon=True).start()
+
+    def _tail_opt_proc(self):
+        proc = self._opt_proc
+        if proc is None or proc.stdout is None:
+            return
+        try:
+            for line in proc.stdout:
+                self._log(f"[opt] {line.rstrip()}")
+        except Exception:                                        # noqa: BLE001
+            pass
+
+    def _kill_opt(self):
+        """Stop it in a way that reaches its cleanup.
+
+        terminate() is TerminateProcess on Windows: no handler, no `finally`,
+        so the collector's unsubscribe, reconcile, prune and WAL checkpoint
+        would all be skipped. CTRL_BREAK_EVENT does arrive -- verified under
+        both a visible console and the hidden one launch_scheduler.vbs
+        creates -- and the collector registers SIGBREAK for it.
+
+        The fallback stays: a stop that hangs is worse than a stop that
+        skips its cleanup, and the 16:50 reconcile runs as its own process
+        either way.
+        """
+        proc = self._opt_proc
+        self._opt_proc = None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+            proc.wait(timeout=10)
+            self._log("Option collector stopped cleanly")
+            return
+        except Exception as exc:                                 # noqa: BLE001
+            self._log(f"Option collector did not stop on CTRL_BREAK ({exc}) "
+                      f"— terminating; its cleanup will be skipped")
+        for step in (proc.terminate, proc.kill):
+            try:
+                step()
+                proc.wait(timeout=5)
+                return
+            except Exception:                                    # noqa: BLE001
+                continue
+
     def _launch_collector(self):
         """Start both collectors. Kept for the callers that want both."""
         self._launch_tick()
@@ -1413,6 +1643,61 @@ class SchedulerApp(tk.Tk):
             threading.Thread(target=self._run_backup, daemon=True).start()
         except Exception as exc:
             self._log(f"[backup] Cron parse error: {exc}")
+
+    def _check_option_reconcile_cron(self, et: datetime):
+        """Reconcile the option tape after the close, as its own process.
+
+        Deliberately independent of self._opt_proc. The failure this check
+        exists to catch is a collector that died, was killed, or never
+        started -- making it conditional on a live collector would switch it
+        off in exactly those cases.
+
+        --session is passed explicitly rather than defaulted to "today ET":
+        a run delayed past midnight would otherwise ask about the wrong day
+        and get back "NOT COMPARABLE", which reads like a finding.
+        """
+        cfg = self.cfg.get("option_window", self._DEFAULT_OPTION)
+        if not cfg.get("enabled", False):
+            return
+        cron = str(cfg.get("reconcile_cron", "")).strip()
+        parts = cron.split()
+        if len(parts) != 5:
+            return
+        try:
+            m_f, h_f, _, _, dow_f = parts
+            cron_dow = et.isoweekday() % 7
+            if not (self._cron_field_match(m_f, et.minute) and
+                    self._cron_field_match(h_f, et.hour) and
+                    self._cron_field_match(dow_f, cron_dow)):
+                return
+            cur_min = (et.year, et.month, et.day, et.hour, et.minute)
+            if cur_min == self._last_opt_reconcile_minute:
+                return
+            self._last_opt_reconcile_minute = cur_min
+            script = pathlib.Path(__file__).parent / "option_tick_collector.py"
+            cmd = [sys.executable, str(script),
+                   "--code", str(cfg.get("code", "US.SOXL")),
+                   "--reconcile-only",
+                   "--session", et.strftime("%Y-%m-%d")]
+            self._log(f"[opt] Reconcile cron matched ({cron})")
+            self._opt_reconcile_proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"})
+            threading.Thread(target=self._tail_opt_reconcile,
+                             daemon=True).start()
+        except Exception as exc:                                 # noqa: BLE001
+            self._log(f"[opt] Reconcile cron error: {exc}")
+
+    def _tail_opt_reconcile(self):
+        proc = self._opt_reconcile_proc
+        if proc is None or proc.stdout is None:
+            return
+        try:
+            for line in proc.stdout:
+                self._log(f"[opt-reconcile] {line.rstrip()}")
+        except Exception:                                        # noqa: BLE001
+            pass
 
     def _check_classify_cron(self, et: datetime):
         """Fire the off-exchange classifier if ET matches its cron."""

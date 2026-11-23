@@ -49,8 +49,8 @@ import pathlib
 import signal
 import sys
 import threading
-import time
-from datetime import date, datetime, time
+import time as time_mod
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -70,6 +70,10 @@ _DEFAULT_DB = pathlib.Path(__file__).parent.parent / "db" / "option_ticks.db"
 _QUOTA = 200                 # option_remain_quota, account-wide
 _RETENTION_DAYS = 60
 _CHECKPOINT_EVERY = 10       # watchdog ticks between WAL checkpoints
+# Telemetry every ~30 min at the default 15 s sweep: the subscription count,
+# the quota fields and the greeks-lag distribution are what a first live
+# session exists to measure, and none of them can be read with the market shut.
+_TELEMETRY_EVERY = 120  # overridden to 2 only in the smoke test below
 _MAX_CHAINS = 8              # get_option_chain is limited to 10 per 30 s
 
 _ET = ZoneInfo("America/New_York")
@@ -275,7 +279,23 @@ def _make_handler(store: OptionTickStore, state: dict):
             state["offered"] = state.get("offered", 0) + len(rows)
             state["dropped"] = state.get("dropped", 0) + len(rows) - n
             if n:
-                state["last_tick_time"] = time.time()
+                # time_mod, not time: `from datetime import ... time` for the
+                # session gate shadows the module, so time.time() raises
+                # AttributeError here, inside the handler, where it is caught.
+                #
+                # It does NOT lose ticks -- insert_ticks() above has already
+                # committed them, verified by replaying a real four-print
+                # burst against both versions: 4 rows stored either way. What
+                # it loses is every SIGN OF LIFE: state["ticks"] stays 0,
+                # last_tick_time stays None, and DATA RECEIVED never prints.
+                #
+                # That is the worse failure for an operator. The runbook says
+                # "no DATA RECEIVED within a minute of the open -> the feed is
+                # not connected -> restart", so this bug would have had
+                # someone restarting a perfectly healthy collector, and any
+                # future zombie check keyed on last_tick_time would restart it
+                # forever. Never ran in testing: the market was shut.
+                state["last_tick_time"] = time_mod.time()
                 state["ticks"] = state.get("ticks", 0) + n
                 if not state.get("first_tick_done"):
                     state["first_tick_done"] = True
@@ -343,7 +363,11 @@ def sample_greeks(ctx, codes: list[str], underlying: str, store: OptionTickStore
             # deep in-the-money put with a true delta near -0.97 arrives
             # here as 0.0 and would contribute exactly as much as a contract
             # that never traded.
-            missing = (d == 0.0 and g == 0.0 and v == 0.0)
+            # None counts as missing too. Written as `d == 0.0 and ...` alone,
+            # a non-numeric field that _f() turned into None takes the False
+            # branch and stores delta=None with nogreeks=0 -- the flag lying
+            # in precisely the case it exists for.
+            missing = all(x is None or x == 0.0 for x in (d, g, v))
             cur = {
                 "delta": None if missing else d,
                 "gamma": None if missing else g,
@@ -359,7 +383,8 @@ def sample_greeks(ctx, codes: list[str], underlying: str, store: OptionTickStore
                 continue
             out.append({**cur, "code": code, "ts": now_s, "spot": spot,
                         "upd": str(r.get("update_time") or "")})
-            last[code] = {**cur, "_at": now.timestamp()}
+            last[code] = {**cur, "_at": now.timestamp(),
+                          "_upd": str(r.get("update_time") or "")}
 
     n = store.insert_greeks(out)
     state["greeks"] = state.get("greeks", 0) + n
@@ -447,6 +472,81 @@ def _i(v):
 
 # ── main ───────────────────────────────────────────────────────────────────
 
+def log_telemetry(ctx, codes: list[str], last_greeks: dict, state: dict) -> None:
+    """The four things a first live session has to answer. Never fatal.
+
+    Each of these is a number that cannot be obtained with the market shut,
+    and each one is a parameter something downstream needs:
+
+      subscription count   whether subscribing one symbol's chain quietly
+                           evicts part of it. A Sunday probe saw 210 SOXL
+                           contracts fall to 60 after 30 QQQ ones were
+                           added, but unsubscribe_all did not take effect
+                           in the same run and the figure decayed on its
+                           own, so it could equally have been a stale read
+                           at the close. Only a live session separates them.
+      quota fields         option_used_quota is NOT a contract count --
+                           50 contracts read 1, 400 read 2, and adding 120
+                           already-subscribed ones took it from 4 DOWN to 3.
+                           Logged to learn the unit, never used as a gate.
+      greeks staleness     now - update_time, which sets how much a tick's
+                           delta can be wrong. The after-hours snapshot only
+                           gives the ordering, not the magnitudes.
+      flow rate            ticks per minute, which sets the zombie-detection
+                           threshold a supervisor would need.
+    """
+    from moomoo import RET_OK
+    try:
+        ret, sub = ctx.query_subscription()
+        if ret == RET_OK:
+            lst = (sub.get("sub_list") or {}) if isinstance(sub, dict) else {}
+            tick_subs = {c for v in lst.values() for c in (v or [])
+                         if isinstance(c, str)}
+            live = len(tick_subs & set(codes)) if tick_subs else None
+            log.info("telemetry: subscribed %s of %d requested  "
+                     "option_used=%s option_remain=%s",
+                     live if live is not None else "?", len(codes),
+                     sub.get("option_used_quota"), sub.get("option_remain_quota"))
+            if live is not None and live < len(codes):
+                log.warning("telemetry: %d requested contracts are NOT in the "
+                            "subscription list", len(codes) - live)
+    except Exception as exc:                                    # noqa: BLE001
+        log.warning("telemetry: subscription read failed: %s", exc)
+
+    now = datetime.now(_ET)
+    lags = []
+    for v in last_greeks.values():
+        upd = v.get("_upd")
+        if not upd:
+            continue
+        try:
+            t = datetime.strptime(str(upd)[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        lags.append((now.replace(tzinfo=None) - t).total_seconds() / 60.0)
+    if lags:
+        lags.sort()
+        def _q(p):
+            return lags[min(len(lags) - 1, int(p * len(lags)))]
+        # BIASED HIGH, by up to one heartbeat (300 s). This reads the
+        # write-cache, which only updates when a row is written, so a
+        # contract whose greeks are genuinely one minute old can read six.
+        # The bias falls on the ACTIVE contracts, which is the end that
+        # matters. Live, it is a direction indicator only; the unbiased
+        # figure is option_greeks.ts - upd over the rows that actually
+        # changed, computed after the close -- see doc/option_first_session.md.
+        log.info("telemetry: greeks lag min (biased high, <=1 heartbeat)  "
+                 "p50=%.1f p90=%.1f p99=%.1f max=%.1f (n=%d)",
+                 _q(0.5), _q(0.9), _q(0.99), lags[-1], len(lags))
+
+    mins = max((time_mod.time() - state.get("t0", time_mod.time())) / 60.0, 1e-9)
+    log.info("telemetry: %d ticks over %.1f min = %.1f/min  "
+             "(dup %d, snap_fail %d, handler_err %d)",
+             state.get("ticks", 0), mins, state.get("ticks", 0) / mins,
+             state.get("dropped", 0), state.get("snap_fail", 0),
+             state.get("handler_errors", 0))
+
+
 def _log_reconcile(ctx, codes: list[str], store: OptionTickStore,
                    session: str | None = None) -> dict | None:
     """Reconcile and say the result out loud. Never fatal."""
@@ -519,15 +619,42 @@ def main(argv=None) -> int:
             # would choose -- a set that changed between sessions would
             # otherwise hide exactly the contracts that went uncollected.
             store = OptionTickStore(args.db)
-            codes = sorted({c["code"] for c in store.contracts_for(args.code)})
             session = args.session or datetime.now(_ET).strftime("%Y-%m-%d")
+            # What was subscribed THAT DAY, not every contract ever recorded.
+            # option_contracts is cumulative and never pruned, so within a
+            # week it holds several days' rolling selections. Scoring today's
+            # tape against contracts today never subscribed to puts every one
+            # of them in `caught_nothing` -- the single detector for a dropped
+            # subscription, drowned in false positives and then ignored.
+            codes = store.subscribed_on(session)
             if not codes:
-                log.error("no contracts recorded for %s in %s", args.code, args.db)
+                log.error("nothing recorded as subscribed for %s on %s in %s "
+                          "-- was the collector running that day?",
+                          args.code, session, args.db)
                 return 5
             log.info("reconciling %s over %d recorded contracts", session, len(codes))
             s = _log_reconcile(ctx, codes, store, session)
             store.close()
             return 0 if s else 5
+
+        # The lock goes BEFORE contract selection, not after. Selection
+        # spends one get_option_chain per expiry against a 10-per-30s
+        # budget, so two copies racing both burned six to eight of them
+        # before one was refused -- and the winner could then fail on the
+        # limit the loser had helped exhaust.
+        #
+        # --dry-run is exempt: it writes nothing and subscribes to nothing,
+        # and the point of it is to inspect the selection WHILE a collector
+        # is running. Taking the lock here would have made the one case it
+        # is for the one case it refuses.
+        lock = None
+        name = f"option_tick_collector_{args.code.replace('.', '_')}"
+        try:
+            if not args.dry_run:
+                lock = single_instance.acquire(name, wait_s=8.0)
+        except single_instance.AlreadyRunning as exc:
+            log.error("%s", exc)
+            return single_instance.EXIT_ALREADY_RUNNING
 
         contracts, info = pick_contracts(ctx, args.code, args.pct, days=args.days)
         log.info("%s spot $%.2f  window $%.2f-$%.2f  expiries %s",
@@ -565,20 +692,14 @@ def main(argv=None) -> int:
             log.info("dry run -- not subscribing")
             return 0
 
-        # Keep the handle alive for the whole process: the lock is released
-        # by closing it, not by a release() call.
-        name = f"option_tick_collector_{args.code.replace('.', '_')}"
-        try:
-            lock = single_instance.acquire(name, wait_s=8.0)
-        except single_instance.AlreadyRunning as exc:
-            log.error("%s", exc)
-            return single_instance.EXIT_ALREADY_RUNNING
-
         store = OptionTickStore(args.db)
         store.upsert_contracts(contracts)
+        session_day = datetime.now(_ET).strftime("%Y-%m-%d")
+        store.record_subscriptions(session_day, [c["code"] for c in contracts])
         codes = [c["code"] for c in contracts]
 
-        state: dict = {"last_tick_time": None, "first_tick_done": False}
+        state: dict = {"last_tick_time": None, "first_tick_done": False,
+                      "t0": time_mod.time()}
         ctx.set_handler(_make_handler(store, state))
         ret, msg = ctx.subscribe(codes, [SubType.TICKER])
         if ret != RET_OK:
@@ -590,10 +711,20 @@ def main(argv=None) -> int:
 
         def _bye(*_a):
             stop.set()
+        # SIGBREAK as well as SIGTERM, because on Windows SIGTERM is not
+        # what a parent actually sends: Popen.terminate() calls
+        # TerminateProcess, which runs no handler and no `finally` -- the
+        # unsubscribe, the reconcile, the prune and the WAL checkpoint below
+        # would all be dead code under a supervisor that stops it that way.
+        # CTRL_BREAK_EVENT, to a process started in its own process group,
+        # does arrive here. (The repo's two existing collectors register
+        # only SIGTERM and have the same dead path.)
         signal.signal(signal.SIGINT, _bye)
         signal.signal(signal.SIGTERM, _bye)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, _bye)
 
-        started = datetime.now().isoformat(sep=" ")
+        started = datetime.now(_ET).strftime("%Y-%m-%d %H:%M:%S.%f")
         last_greeks: dict = {}
         sweeps = 0
         try:
@@ -614,6 +745,8 @@ def main(argv=None) -> int:
                     t, g = store.session_counts(started)
                     log.info("session: %d ticks (%d dropped dup), %d greeks rows "
                              "over %d sweeps", t, state.get("dropped", 0), g, sweeps)
+                if sweeps % _TELEMETRY_EVERY == 0:
+                    log_telemetry(ctx, codes, last_greeks, state)
                 stop.wait(args.greeks_secs)
         finally:
             log.info("stopping -- unsubscribing")
@@ -634,7 +767,8 @@ def main(argv=None) -> int:
             store.checkpoint()
             store.close()
             try:
-                lock.close()
+                if lock is not None:
+                    lock.close()
             except Exception:                                   # noqa: BLE001
                 pass
         return 0

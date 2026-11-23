@@ -129,6 +129,26 @@ CREATE TABLE IF NOT EXISTS option_coverage (
     UNIQUE(session, code)
 );
 CREATE INDEX IF NOT EXISTS idx_ocov_session ON option_coverage (session);
+
+-- Which contracts were actually subscribed on a given day.
+--
+-- Reconciliation needs this, and option_contracts cannot provide it: that
+-- table is cumulative and never pruned, so by the end of the first week it
+-- holds every contract ever selected across rolling expiries. Reconciling
+-- against all of them compares today's tape with contracts today's run
+-- never subscribed to -- the broker reports volume for them, we stored
+-- none, and every one lands in `caught_nothing`.
+--
+-- caught_nothing is the only detector for a dropped subscription. A few
+-- hundred false positives a day and nobody reads it again, which costs
+-- more than the bug it was built to find.
+CREATE TABLE IF NOT EXISTS option_subscriptions (
+    session    TEXT NOT NULL,
+    code       TEXT NOT NULL,
+    subscribed TEXT NOT NULL,
+    UNIQUE(session, code)
+);
+CREATE INDEX IF NOT EXISTS idx_osub_session ON option_subscriptions (session);
 """
 
 
@@ -216,6 +236,24 @@ class OptionTickStore:
             "VALUES (?,?,?,?,?,?,?,?,?)", data)
         self._con.commit()
         return cur.rowcount
+
+    def record_subscriptions(self, session: str, codes: Iterable[str]) -> int:
+        """Note which contracts were subscribed for this trading day."""
+        now = _ts_str(datetime.now())
+        data = [(session, c, now) for c in codes]
+        if not data:
+            return 0
+        cur = self._con.executemany(
+            "INSERT OR IGNORE INTO option_subscriptions (session, code, subscribed) "
+            "VALUES (?,?,?)", data)
+        self._con.commit()
+        return cur.rowcount
+
+    def subscribed_on(self, session: str) -> list[str]:
+        """Codes subscribed that day, for reconciliation to score against."""
+        return [r[0] for r in self._con.execute(
+            "SELECT code FROM option_subscriptions WHERE session = ? ORDER BY code",
+            (session,))]
 
     def our_volume_for(self, session: str, codes: list[str]) -> dict[str, tuple[int, int]]:
         """{code: (contracts, prints)} stored for that trading day.

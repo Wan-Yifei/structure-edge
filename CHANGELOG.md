@@ -1,5 +1,124 @@
 # Changelog
 
+## v0.97.0 - 期权采集接进 scheduler，以及一个会打死 scheduler 的停止方式 (2026-11-22)
+
+给期权一套**独立的时段配置和面板**，而不是挂在现有那四个股票时段上。
+默认**关**，周一用 Windows 计划任务先跑一场有人盯着的，周二再切换。
+
+### 为什么不能挂现有时段
+
+逐分钟扫三天（周三 / 周六 / 周日），**「没有任何会话活跃」的分钟数都是 0**。
+四个时段 20:00→04:00→09:30→16:00→20:00 首尾相接，而 `session_status` 里
+没有任何 weekday 判断。`_kill_collector` 的触发条件「本时段结束**且**无其他
+时段活跃」**永远不成立**。
+
+挂上去的后果不是「夜盘空转」，是：**起来之后永不被停 → 永不重选合约。**
+周一起的进程到周五还握着周一的合约集，而它选的近月（11-27）周五已经到期，
+对账会报一堆「券商说有成交我们一张没采」的假警报。
+
+独立窗口 09:15–16:25 之外是**真空档**，所以每晚真的停、第二天真的起、
+**真的重选**。
+
+### `CREATE_NEW_PROCESS_GROUP` 是硬前提，漏了会打死 scheduler
+
+`_kill_opt` 用 `CTRL_BREAK_EVENT` 而不是 `terminate()`，因为 Windows 上
+`terminate()` 是 `TerminateProcess` —— 不走 handler 也不走 `finally`，
+采集器的退订、对账、prune、WAL checkpoint **全是死代码**。
+
+但控制台控制事件是发给整个进程**组**的。漏掉 flag 的实测结果：
+
+```
+send_signal 不报错，目标子进程纹丝不动
+发信号的那个进程自己退出码 3221225786 = 0xC000013A = STATUS_CONTROL_C_EXIT
+```
+
+在 scheduler 身上就是：**scheduler 自己被打死 → `_kill_with_me` 的 job
+object 关闭 → 两个正股采集器一起陪葬，而期权采集器毫发无损。**
+
+不需要 `AttachConsole`：scheduler 走 vbs 起的是隐藏但存在的控制台，
+`proc.send_signal` 直接可用（可见控制台和隐藏控制台两种形态都实测过）。
+端到端验证用真采集器跑通：`child rc=0`、父进程存活、`finally` 里三行全部
+打印、`option_subscriptions` 落了 200 行。
+
+保留了超时回退（`wait(10)` 之后 terminate → kill）：**挂死比跳过清理更糟**，
+而且 16:50 的对账是独立进程，走不走清理都会跑。
+
+### 对账留两份，cron 那份不依赖采集器
+
+用户指出 cron 比「采集器退出时自己对账」更好：**采集器崩了、被杀了、压根
+没启动，cron 照样跑** —— 而「崩了」恰恰是最需要对账的情形。把唯一的完整性
+检查挂在「被检查对象优雅退出」这个前提上，等于在最需要它的时候它不在。
+
+所以两个都留（`INSERT OR REPLACE` 幂等）。cron 那份两条约束：
+**显式传 `--session`**（默认「今天 ET」在任务积压跨午夜时会给出
+「NOT COMPARABLE」——一个看起来像结论的假结论），**不检查 `_opt_proc`**。
+
+### 对账的合约集：一周内就会开始叫狼来了
+
+`--reconcile-only` 原来取 `contracts_for(code)` —— **该标的曾经记录过的
+全部合约，没有按 session 过滤**，而 `option_contracts` 按设计永不 prune。
+
+第 7 天表里累积了七天各自的选择（到期日在滚，重叠不是 100%），对账会把
+**今天根本没订阅的合约**拿去比：它们今天在券商那边有成交、`update_time`
+是今天 → `feed_vol` 有值、`our_vol` = 0 → **全部落进 `caught_nothing`**。
+
+而 `caught_nothing` 是唯一的掉订阅探测器。天天报几百个假阳性，就不会再有人
+读它 —— 代价比它要找的那个 bug 更大。新增 `option_subscriptions(session, code)`，
+订阅成功时写，对账只比当天真订阅过的。
+
+### scheduler 侧的三个坑（审查指出，都已避开）
+
+- **期权面板的控件不进 `self._row_widgets`** —— `_save_config` 遍历它并直接
+  写 `self.cfg["sessions"][name][...]`，没有任何守卫，多一个键就是 KeyError，
+  整个保存失败。
+- **配置一律 `.get(key, DEFAULT)` 取** —— `_load_config` 的两个分支不对称，
+  文件存在时只 setdefault 了四个键。
+- **期权要自己的活跃判断** —— `_watchdog_collectors` 开头 `if not any_active:
+  return`，而 `any_active` 算的是四个股票时段。用户把它们全关掉只留期权窗口的话，
+  期权采集器就永远不会被看门狗照顾。
+
+另外 `prestart_minutes` 是全局的，**故意不套用到期权窗口**：面板上写的开始
+时间就该是真正的开始时间，不该随一个全局旋钮漂移。
+
+### 又一个自己写出来的 bug，和它教的事
+
+为了时段门控加的 `from datetime import ... time` **把 `time` 模块盖掉了**，
+而 handler 里有 `time.time()` → `AttributeError` → 被 try/except 接住。
+
+**我最初的诊断是错的**：以为「每批逐笔静默丢弃」。用真实推送对照跑过之后 ——
+落库发生在抛异常**之前**，两个版本都是 4 行，**一条逐笔都没丢**。坏掉的是
+`state["ticks"]` 永远 0、`last_tick_time` 永远 None、**`DATA RECEIVED`
+永远不打印**。
+
+这个差别不是措辞问题：runbook 第一条写的是「开盘一分钟没有 DATA RECEIVED →
+推送没通 → 重起」，照那条处理会**去重启一个完全健康的采集器**，甚至得出
+「200 路订阅根本不工作」的结论。runbook 已改成「先查库再下判断」。
+
+**而且行数断言抓不到它**（4/4 两边一样）。原有 18 条测试没有一条进入
+`_make_handler` —— 这正是它能发出去的原因。新增 6 条 handler 级测试，
+断言的是**计数器**不是行数。
+
+### 其余
+
+- `--dry-run` 不再加锁（挪锁的副作用：它什么都不写，而它存在的意义正是
+  在采集器运行时查看选择结果）
+- `started` 统一成 ET，删掉遮蔽导入留下的未使用 `date`
+- telemetry 的 greeks lag 标注**高估最多一个心跳**，且偏差落在活跃合约那端；
+  无偏的数用 `option_greeks.ts - upd`（排除心跳行）在收盘后算，查询写进文档
+- `doc/option_first_session.md`：周一的时间表、盯什么、收盘后记哪六个数、
+  出事怎么办
+
+### 测试
+
+新增 27 条（handler 6 + 窗口 21），测试总数 2002。变异 10 个全抓到，
+包括把去重键改回出厂 bug、把遮蔽 bug 原样还原、拿掉对账的跨日守卫。
+
+### 已知未验
+
+200 路期权 TICKER 的实时推送吞吐，周一才有。真·无控制台的父进程
+（pythonw）下 CTRL_BREAK 走不走得通也没测到 —— scheduler 还走 vbs/bat
+就无所谓，改了要重测。
+
 ## v0.96.0 - 期权逐笔采集器，以及三个会让整场数据作废的设计错误 (2026-11-22)
 
 新子系统:`feeds/option_tick_store.py` + `analysis/option_tick_collector.py`。
