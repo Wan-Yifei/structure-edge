@@ -1670,6 +1670,24 @@ class LiqHmWindow(QWidget):
 
         n_price = self._n_price_spin.value()
         if self._bin_size == 0.0:
+            # NOTE, before changing where n_price comes from: this branch
+            # sets bin_size WITHOUT reallocating the grids, unlike the
+            # rebuild branch below. It is only correct because n_price here
+            # is the same value _reset_grid (or __init__) allocated with.
+            #
+            # Make n_price differ from the grid's real width and nothing
+            # raises: _paint_column drops out-of-range bins with a silent
+            # `continue`, and the book sits at the centre of the window, so
+            # EVERY level lands past the end. Modelled for a bins=240 grid
+            # left 100 wide: levels map to bins 115-124, 0 of 41 painted,
+            # and the panel goes black with no error. It does not self-heal
+            # either -- none of the rebuild triggers (touch_outside,
+            # too_wide, out_lo/out_hi) fire, because the window itself is
+            # perfectly fine.
+            #
+            # So: any scheme that derives n_price (e.g. raising it until the
+            # band clears the pulled/eaten gate) has to reallocate here too,
+            # the way the rebuild branch does.
             self._price_min = new_min
             self._price_max = new_max
             self._bin_size  = (new_max - new_min) / n_price

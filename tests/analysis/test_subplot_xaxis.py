@@ -26,6 +26,7 @@ SUBPLOTS = {
     "_plot_cvd":  "cvd",
     "_plot_adi":  "adi",
     "_plot_dcvd": "dcvd",
+    "_plot_oflow": "opt_flow",
 }
 
 
@@ -58,14 +59,38 @@ def tick_text(plot):
 class TestEverySubplotIsBlanked:
     @pytest.mark.parametrize("attr,key", sorted(SUBPLOTS.items()))
     def test_no_subplot_shows_bar_indices(self, viewer, klines, attr, key):
+        """Each row ALONE, with every other subplot switched off.
+
+        Leaving the others at their defaults made this test blind to the
+        failure it is named for. `_set_xaxis_ticks` sets each row's ticks
+        under its own `if self._ind(...)`, and the Opt delta row's call had
+        been written inside the DCVD guard -- which defaults ON, so the row
+        was ticked by its neighbour and the test saw a pass. Switching the
+        others off is what makes a missing or misplaced guard visible.
+        """
+        others = {k: viewer._ind_checks[k] for k in SUBPLOTS.values()
+                  if k != key}
+        was_others = {k: cb.isChecked() for k, cb in others.items()}
         cb = viewer._ind_checks[key]
         was = cb.isChecked()
+        for other in others.values():
+            other.setChecked(False)
         cb.setChecked(True)
         try:
+            # Clear first, or this measures whether the axis has ticks at
+            # all rather than whether THIS call set them. The viewer is
+            # module-scoped and the cases run in name order, so a row whose
+            # guard is wrong can be ticked by an earlier case and read as a
+            # pass -- which is exactly what happened: the mutation that put
+            # the Opt delta row back under the DCVD guard survived, because
+            # the _plot_dcvd case had already set its ticks.
+            getattr(viewer, attr).getAxis("bottom").setTicks(None)
             viewer._set_xaxis_ticks(klines)
             labels = tick_text(getattr(viewer, attr))
         finally:
             cb.setChecked(was)
+            for k, state in was_others.items():
+                others[k].setChecked(state)
 
         assert labels is not None, (
             f"{attr} was never given ticks, so pyqtgraph auto-labels it "

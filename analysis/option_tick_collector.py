@@ -324,6 +324,51 @@ def _make_handler(store: OptionTickStore, state: dict):
     return _Handler()
 
 
+# How long into the session a silent tape is still plausibly just a quiet
+# market. SOXL's options did 656 prints a minute at the 2026-11-23 open and
+# 69 at the median, so three minutes of nothing while the market is open is
+# not quiet, it is broken.
+_SILENT_MINUTES = 3
+
+
+def check_not_blind(ctx, codes: list[str], store, state: dict, args) -> bool:
+    """Say so, loudly, if the session is open and nothing has arrived.
+
+    The failure this exists for is silent by construction: subscribe()
+    returns RET_OK, greeks keep sampling, telemetry keeps printing, and the
+    only symptom is a table that is not growing. Nothing read
+    last_tick_time, so on 2026-11-23 the symptom went unread for nine and a
+    half minutes -- which is the entire coverage gap for that session.
+
+    Fires once. Re-subscribing in a loop against an OpenD that is refusing
+    is how a stale process elsewhere in this repo turned into a restart
+    every eight seconds.
+    """
+    if state.get("blind_checked") or state.get("ticks", 0) > 0:
+        return False
+    mins = (time_mod.time() - state.get("t0", time_mod.time())) / 60.0
+    if mins < _SILENT_MINUTES:
+        return False
+    state["blind_checked"] = True
+    log.error("NO PRINTS in %.1f minutes with the session open. The feed is "
+              "not reaching the handler. Re-subscribing and backfilling "
+              "once; if this line repeats tomorrow, check set_handler's "
+              "return value before anything else.", mins)
+    try:
+        from moomoo import SubType
+        ctx.unsubscribe(codes, [SubType.TICKER])
+        ret, msg = ctx.subscribe(codes, [SubType.TICKER])
+        log.error("re-subscribe returned %s %s", ret, msg)
+    except Exception as exc:                                    # noqa: BLE001
+        log.exception("re-subscribe failed: %s", exc)
+    if not getattr(args, "no_backfill", False):
+        try:
+            backfill_after_subscribe(ctx, codes, store, state)
+        except Exception as exc:                                # noqa: BLE001
+            log.exception("recovery backfill failed: %s", exc)
+    return True
+
+
 # ── greeks sampler ─────────────────────────────────────────────────────────
 
 def _changed(prev: dict | None, cur: dict) -> bool:
@@ -450,14 +495,22 @@ def reconcile(ctx, codes: list[str], store: OptionTickStore,
             else:
                 feed[r["code"]] = _i(r.get("volume"))
 
+    firsts = store.first_ts_for(session, codes)
     rows = []
     for c in codes:
         v, n = ours.get(c, (0, 0))
         rows.append({"code": c, "feed_vol": feed.get(c),
-                     "our_vol": v, "our_ticks": n})
+                     "our_vol": v, "our_ticks": n,
+                     "first_ts": firsts.get(c)})
     store.record_coverage(session, rows)
     summary = store.coverage_summary(session)
     summary["session"] = session
+    # When the tape actually starts. The ratio above divides by the feed's
+    # figure for the WHOLE session, so a collector that went live late
+    # reports the time before it was subscribed as volume it lost. Carried
+    # into the log line rather than left for a reader to work out -- on
+    # 2026-11-23 nobody could have, because nothing stored said so.
+    summary["live_from"] = min(firsts.values()) if firsts else None
 
     # Worst offenders first: a contract the feed says traded and we have
     # nothing for is the shape a dropped subscription makes.
@@ -487,6 +540,67 @@ def _i(v):
 
 
 # ── main ───────────────────────────────────────────────────────────────────
+
+def backfill_after_subscribe(ctx, codes: list[str], store, state: dict,
+                             batch: int = 20, pause_s: float = 1.0) -> int:
+    """Fetch the prints that happened before we subscribed.
+
+    Subscribing replays nothing -- it pushes each contract's last trade and
+    then only new ones -- so without this, starting at 09:39 means the
+    session simply has no 09:30-09:39. get_rt_ticker returns up to 1000 of
+    OpenD's cached prints for a contract this context is subscribed to,
+    which is the same data the push would have delivered.
+
+    Inserted through the same store call as live prints, so the UNIQUE key
+    does the de-duplication: anything the push already delivered comes back
+    as a duplicate and is counted, not stored twice.
+
+    Written to be harmless if a frequency limit exists and is hit: batches
+    with a pause, and the FIRST refusal stops the whole thing. Retrying
+    into a limiter is how one stale collector became a process every eight
+    seconds elsewhere in this repo.
+    """
+    from moomoo import RET_OK
+
+    got = dropped = refused = 0
+    for i in range(0, len(codes), batch):
+        for code in codes[i:i + batch]:
+            try:
+                ret, df = ctx.get_rt_ticker(code, 1000)
+            except Exception as exc:                        # noqa: BLE001
+                log.warning("backfill raised on %s: %s", code, exc)
+                refused += 1
+                break
+            if ret != RET_OK or df is None or df.empty:
+                if ret != RET_OK:
+                    log.warning("backfill refused for %s: %s", code, str(df)[:80])
+                    refused += 1
+                    break
+                continue
+            rows = []
+            for _, r in df.iterrows():
+                direction = str(r.get("ticker_direction", "")).upper()
+                if direction not in ("BUY", "SELL", "NEUTRAL"):
+                    direction = "N/A"
+                rows.append({
+                    "code": r["code"], "ts": r["time"],
+                    "price": float(r["price"]), "volume": int(r["volume"]),
+                    "direction": direction, "ttype": r.get("type"),
+                    "seq": r.get("sequence"),
+                    "recv_ts": None, "feed_ts": None,
+                })
+            n = store.insert_ticks(rows)
+            got += n
+            dropped += len(rows) - n
+        if refused:
+            break
+        if i + batch < len(codes):
+            wait_interruptible(state["stop"], pause_s)
+    log.info("backfill: %d new prints, %d already had, %d contracts refused",
+             got, dropped, refused)
+    state["backfilled"] = got
+    return got
+
 
 def wait_interruptible(stop: threading.Event, secs: float,
                        slice_s: float = 1.0) -> None:
@@ -605,10 +719,19 @@ def _log_reconcile(ctx, codes: list[str], store: OptionTickStore,
             "reconciled.", s["session"], s["wrong_day"], s["contracts"])
         return s
     pct = f"{s['ratio'] * 100:.1f}%" if s["ratio"] is not None else "n/a"
-    log.info("coverage %s: %s of the feed's volume (%s of %s contracts over "
-             "%d prints, %d contracts with no feed figure)",
+    # "WHOLE-SESSION", and the time we went live, because the ratio divides
+    # by the feed's figure for the entire day. If the collector started
+    # late, this number counts the time before it was subscribed as data it
+    # lost -- which is exactly how 2026-11-23 read 83.5% while every
+    # contract whose whole tape fell inside the live window matched the
+    # feed exactly.
+    live = s.get("live_from") or "unknown"
+    log.info("coverage %s: %s of the feed's WHOLE-SESSION volume (%s of %s "
+             "contracts over %d prints, %d contracts with no feed figure) "
+             "-- our tape starts %s; anything the feed counted before that "
+             "is in this ratio too",
              s["session"], pct, f"{s['our_vol']:,}", f"{s['feed_vol']:,}",
-             s["our_ticks"], s["feed_vol_unknown"])
+             s["our_ticks"], s["feed_vol_unknown"], live)
     if s["caught_nothing"]:
         log.warning("%d contracts traded per the feed and we caught NOTHING "
                     "-- that is the shape of a dropped subscription",
@@ -627,6 +750,8 @@ def _parse_args(argv=None):
     # the quota is what actually bounds the set.
     p.add_argument("--pct", type=float, default=80.0,
                    help="pre-filter: strikes within +/-PCT%% of spot (default 80)")
+    p.add_argument("--no-backfill", action="store_true",
+                   help="skip the get_rt_ticker catch-up after subscribing")
     p.add_argument("--days", type=int, default=45,
                    help="include expiries up to DAYS out (default 45)")
     p.add_argument("--greeks-secs", type=float, default=15.0,
@@ -757,6 +882,12 @@ def main(argv=None) -> int:
         log.info("subscribed TICKER on %d contracts", len(codes))
 
         stop = threading.Event()
+        state["stop"] = stop
+        # Immediately, not on a timer: every second between the session
+        # opening and this call is tape that only get_rt_ticker can still
+        # reach. Harmless before the open, when there is nothing to fetch.
+        if not args.no_backfill:
+            backfill_after_subscribe(ctx, codes, store, state)
 
         def _bye(*_a):
             stop.set()
@@ -787,6 +918,9 @@ def main(argv=None) -> int:
                     wait_interruptible(stop, 60)
                     continue
                 idle_logged = False
+                # Before the sampling, so a blind session is caught on the
+                # first sweep that can see it rather than one interval later.
+                check_not_blind(ctx, codes, store, state, args)
                 sample_greeks(ctx, codes, args.code, store, last_greeks, state)
                 sweeps += 1
                 if sweeps % _CHECKPOINT_EVERY == 0:

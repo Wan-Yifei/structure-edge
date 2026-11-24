@@ -505,7 +505,8 @@ def build_gex_stats(df: pd.DataFrame, by_strike: pd.DataFrame,
     }
 
 
-def top_gex_walls(by_strike: pd.DataFrame, n: int) -> tuple[list[dict], list[dict]]:
+def top_gex_walls(by_strike: pd.DataFrame, n: int,
+                  net: bool = False) -> tuple[list[dict], list[dict]]:
     """Return the top *n* Call Wall / Put Wall candidates, strongest first.
 
     build_gex_stats()'s call_wall/put_wall are just this with n=1 (idxmax/
@@ -513,19 +514,31 @@ def top_gex_walls(by_strike: pd.DataFrame, n: int) -> tuple[list[dict], list[dic
     more than the single strongest strike per side (e.g. a multi-wall
     chart overlay). Each entry is {"strike": float, "gex": float}.
 
+    With net=True both sides rank on net_gex instead, giving the strongest
+    POSITIVE net and the most NEGATIVE net strike -- where dealer hedging
+    actually bites, after calls and puts at the same strike cancel.
+
     Returns AT MOST n per side, not exactly n: zero-GEX strikes are excluded
     (see _live_side), so a side with fewer live strikes than asked yields a
     shorter list. That shortfall is itself information -- padding it with
     zeros produced lines indistinguishable from real walls.
     """
-    calls = _live_side(by_strike, "call_gex", True).nlargest(n, "call_gex")
-    puts  = _live_side(by_strike, "put_gex", False).nsmallest(n, "put_gex")
+    # net=True ranks both sides on net_gex (= call_gex + put_gex), so the
+    # pair becomes "strongest positive net" and "most negative net" rather
+    # than "most call gamma" and "most put gamma". The two can land on
+    # completely different strikes: a strike can hold the day's largest
+    # call gamma and almost none of the net, because puts written at the
+    # same strike offset it, and the dealer only hedges what is left.
+    pos_col = "net_gex" if net else "call_gex"
+    neg_col = "net_gex" if net else "put_gex"
+    calls = _live_side(by_strike, pos_col, True).nlargest(n, pos_col)
+    puts  = _live_side(by_strike, neg_col, False).nsmallest(n, neg_col)
     call_walls = [
-        {"strike": float(r["option_strike_price"]), "gex": float(r["call_gex"])}
+        {"strike": float(r["option_strike_price"]), "gex": float(r[pos_col])}
         for _, r in calls.iterrows()
     ]
     put_walls = [
-        {"strike": float(r["option_strike_price"]), "gex": float(r["put_gex"])}
+        {"strike": float(r["option_strike_price"]), "gex": float(r[neg_col])}
         for _, r in puts.iterrows()
     ]
     return call_walls, put_walls

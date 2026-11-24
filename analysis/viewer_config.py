@@ -52,6 +52,16 @@ DEFAULTS: dict[str, dict] = {
         "vol": False,
         "chandelier": False,
         "atr_stop": False,
+        # Option delta flow subplot. Off by default: the option tape
+        # starts 2026-11-23 and exists for SOXL only, so for most
+        # frames this row has nothing to draw.
+        "opt_flow": False,
+        # Cumulative vs bar-by-bar within that one row. Bar-by-bar is the
+        # default: the cumulative line answers "where has the session got
+        # to", which is a slow-moving number, while the bars show what each
+        # minute actually did -- and that is what gets read beside the
+        # candles. DeepGamma defaults the same way.
+        "opt_flow_cum": False,
         "red_up": True,
         # Order-flow row: tick profile size filter and display mode
         "tick_s": True,
@@ -64,6 +74,11 @@ DEFAULTS: dict[str, dict] = {
         # unasked is not.
         "option_walls": True,
         "option_alerts": False,
+        # Rank the walls on NET gamma per strike (calls + puts after they
+        # cancel) instead of each side alone. Off by default: every other
+        # GEX tool shows the separated view, and disagreeing with them
+        # silently is worse than a toggle.
+        "option_net_walls": False,
     },
     # Which sessions feed the volume profile, and how many trading days
     # the profile and the CVD window cover.
@@ -85,6 +100,10 @@ DEFAULTS: dict[str, dict] = {
         "option_dte": 7,
         "option_wall_count": 4,
         "option_poll_secs": 15,
+        # Opt delta-flow refresh. Slower than the chain poll because
+        # the query is a three-table join plus a merge_asof over the
+        # whole session, not a network call.
+        "opt_flow_poll_secs": 30,
         "option_threshold": 500,
     },
     # The Liquidity Heatmap window (liq_hm_window.py).

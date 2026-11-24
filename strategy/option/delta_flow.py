@@ -81,6 +81,35 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+from core.time_utils import candle_start
+
+
+def _bar_starts(ts: pd.Series, minutes: int) -> pd.Series:
+    """candle_start() over a column, without the per-row Python call.
+
+    Vectorised because the obvious loop cost 140 ms per refresh on one
+    session of prints and the panel refreshes on a timer -- and the loop was
+    itself introduced while fixing something else, which is how a correctness
+    fix turns into a performance bug nobody attributes.
+
+    Branch for branch the same as core.time_utils.candle_start, NOT
+    Series.dt.floor(): floor() is epoch-aligned while candle_start() aligns
+    within the hour, and the two agree only while 60 is divisible by the
+    candle size. The viewer's bar_start_keys() carries the identical warning
+    for the identical reason; these two have to agree or no option bar lands
+    on a chart bar, and the panel goes blank with no error.
+    """
+    ts = pd.to_datetime(ts, errors="coerce")
+    if minutes >= 1440:
+        return ts.dt.normalize()
+    if minutes > 60:
+        total = ts.dt.hour * 60 + ts.dt.minute
+        floored = (total // minutes) * minutes
+        return (ts.dt.normalize()
+                + pd.to_timedelta(floored, unit="m"))
+    return (ts.dt.floor("h")
+            + pd.to_timedelta((ts.dt.minute // minutes) * minutes, unit="m"))
+
 # Shares per option contract. US equity options are 100x except after a
 # corporate action; SOXL's 2026-11-05 3:1 split adjusted the underlying,
 # not the multiplier.
@@ -143,6 +172,13 @@ def load_ticks(db: str, underlying: str, start: str, end: str) -> pd.DataFrame:
 
 def load_greeks(db: str, underlying: str, start: str, end: str) -> pd.DataFrame:
     """Greeks samples for one underlying, widened at the start.
+
+    CALL THIS AFTER load_ticks, NEVER BEFORE. Each opens its own connection,
+    so under WAL the two see snapshots taken a few hundred ms apart while the
+    collector writes. Ticks first means the greeks snapshot is the newer one
+    and every print can find its sample; reversed, the prints written in
+    between arrive with no greeks behind them and are silently dropped as
+    `no_greeks`.
 
     The window is widened backwards by MAX_GREEKS_AGE_S because a print at
     `start` is legitimately priced off a sample taken before it -- querying
@@ -267,7 +303,11 @@ def by_bar(flow: pd.DataFrame, minutes: int = 1) -> pd.DataFrame:
     trading day rather than running across the whole frame -- a cumulative
     series with no reset is dominated by whichever day happened to be first.
     """
-    cols = ["bar", "net", "cum", "buy", "sell", "prints", "contracts"]
+    # `day` included: an empty frame and a populated one have to carry the
+    # same columns, or every caller that touches bars["day"] works until the
+    # first symbol with no option tape -- which is the COMMON case here, not
+    # the edge one.
+    cols = ["bar", "net", "cum", "buy", "sell", "prints", "contracts", "day"]
     if flow.empty:
         return pd.DataFrame(columns=cols)
 
@@ -278,7 +318,16 @@ def by_bar(flow: pd.DataFrame, minutes: int = 1) -> pd.DataFrame:
     f = flow[flow["signed_delta"].notna()].copy()
     if f.empty:
         return pd.DataFrame(columns=cols)
-    f["bar"] = f["ts"].dt.floor(f"{minutes}min")
+
+    # candle_start(), NOT Series.dt.floor(). floor() is epoch-aligned while
+    # candle_start() aligns within the hour, and the two agree only while 60
+    # is divisible by the candle size. Every size in the viewer's
+    # TIMEFRAME_MAP satisfies that today, so floor() is correct right up
+    # until a 45-minute timeframe is added -- at which point these bars land
+    # on keys the chart never produces and the whole row silently goes
+    # blank. bar_start_keys() in trade_viewer_qt carries the same warning
+    # for the same reason, and these two have to agree or nothing aligns.
+    f["bar"] = _bar_starts(f["ts"], minutes)
     f["day"] = f["bar"].map(trading_day_of)
     # Columns, not a second groupby whose row order is assumed to line up
     # with the first one's. Both would sort by the same keys today, so the
@@ -296,4 +345,4 @@ def by_bar(flow: pd.DataFrame, minutes: int = 1) -> pd.DataFrame:
         contracts=("volume", "sum"),
     )
     out["cum"] = out.groupby("day")["net"].cumsum()
-    return out[cols + ["day"]].sort_values("bar").reset_index(drop=True)
+    return out[cols].sort_values("bar").reset_index(drop=True)

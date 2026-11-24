@@ -135,6 +135,13 @@ _OB_BREAK = "#9e9e9e"   # breaker OB grey
 _OB_MIT   = "#ffa726"   # mitigation OB amber
 _EMA_COLS = ["#42a5f5", "#ab47bc", "#ffa726"]  # EMA 20/50/200
 
+# The option tape the Opt Δ-Flow row reads. Derived the same way the
+# collector and the store derive it, so the three cannot drift apart;
+# opened read-only at every use -- the collector is writing to it and
+# its data cannot be re-collected.
+OPTION_TICK_DB = str(
+    pathlib.Path(__file__).resolve().parent.parent / "db" / "option_ticks.db")
+
 
 def _alpha_brush(hex_: str, alpha: int):
     """A brush at a fixed alpha, built once at import.
@@ -2409,6 +2416,67 @@ class DataFetcher(QThread):
 
 # ── Background option-chain fetch worker ────────────────────────────────────────
 
+class OptFlowFetcher(QThread):
+    """Reads the option tape and reduces it to per-bar signed delta.
+
+    A QThread and not an inline call in _draw_*: the chain here is
+    option_ticks x option_contracts x option_greeks plus a merge_asof over
+    the whole session, measured at 1-2 s on 30k prints, and _render runs on
+    every incoming tick in live mode. Done inline it would stall the chart
+    for longer than the interval between redraws.
+
+    Opens the database read-only. The collector is writing to the same file
+    and its data cannot be re-collected, so nothing on the viewer side may
+    be able to take a write lock on it.
+    """
+
+    ready = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, db: str, code: str, start: str, end: str, minutes: int,
+                 range_val: str = ""):
+        super().__init__()
+        self._db, self._code = db, code
+        self._start, self._end, self._minutes = start, end, minutes
+        self._range = range_val
+
+    def run(self):                                           # noqa: D102
+        try:
+            from strategy.option.delta_flow import (
+                load_ticks, load_greeks, attach_delta, by_bar)
+            ticks = load_ticks(self._db, self._code, self._start, self._end)
+            greeks = load_greeks(self._db, self._code, self._start, self._end)
+            flow, report = attach_delta(ticks, greeks)
+            # Total prints per bar, BEFORE anything was dropped. Without it
+            # a bar whose every print was NEUTRAL or unmatched is
+            # indistinguishable from a bar with no prints at all: both are
+            # simply absent from `bars`. Those are different statements --
+            # "nothing traded" versus "things traded and none could be
+            # signed" -- and the panel has to be able to say which. Same
+            # distinction _draw_cvd draws with its `seen` mask, which asks
+            # whether a tick bucket exists rather than whether its delta is
+            # non-zero.
+            seen = {}
+            if not ticks.empty:
+                from strategy.option.delta_flow import _bar_starts
+                seen = (ticks.assign(_b=_bar_starts(ticks["ts"], self._minutes))
+                        .groupby("_b").size().to_dict())
+            self.ready.emit({
+                "bars": by_bar(flow, self._minutes), "seen": seen,
+                # Carried in the payload with code and minutes, so all three
+                # describe THIS frame. Recording the Range at request time
+                # instead let "hide the row, change Range, show it again"
+                # pass the identity check against a frame fetched for the
+                # old window.
+                "range": self._range,
+                "report": report, "code": self._code,
+                "minutes": self._minutes,
+                "computed_at": datetime.now(),
+            })
+        except Exception as exc:                             # noqa: BLE001
+            self.error.emit(str(exc))
+
+
 class OptionChainFetcher(QThread):
     """Fetches near-expiry option chain data, computes GEX walls, and detects
     single-contract volume spikes since the last poll.
@@ -2422,7 +2490,8 @@ class OptionChainFetcher(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, ctx, code: str, dte: int, threshold: int,
-                 prev_volumes: dict[str, int], wall_count: int = 1):
+                 prev_volumes: dict[str, int], wall_count: int = 1,
+                 net_walls: bool = False):
         super().__init__()
         self._ctx          = ctx
         self._code         = code
@@ -2430,6 +2499,7 @@ class OptionChainFetcher(QThread):
         self._threshold    = threshold
         self._prev_volumes = prev_volumes
         self._wall_count   = wall_count
+        self._net_walls    = net_walls
 
     def run(self) -> None:
         try:
@@ -2456,7 +2526,8 @@ class OptionChainFetcher(QThread):
             # not in the sum.
             stats = build_gex_stats(df, by_strike, spot, 0.0,
                                     coverage["expiries_ok"], coverage)
-            call_walls, put_walls = top_gex_walls(by_strike, self._wall_count)
+            call_walls, put_walls = top_gex_walls(
+                by_strike, self._wall_count, net=self._net_walls)
 
             # Large-trade detection: diff this poll's per-contract volume
             # against the previous poll's. A contract missing from
@@ -2485,6 +2556,7 @@ class OptionChainFetcher(QThread):
                         })
 
             self.ready.emit({
+                "net_walls":    self._net_walls,
                 "call_walls":   call_walls,   # [{"strike":, "gex":}, ...] strongest first
                 "put_walls":    put_walls,
                 "zero_gamma":   stats["zero_gamma"],
@@ -2862,6 +2934,12 @@ class TradeViewerQt(QMainWindow):
         self._option_fetcher: OptionChainFetcher | None = None
         self._option_timer = QTimer(self)
         self._option_timer.timeout.connect(self._trigger_option_fetch)
+        # Separate timer from the chain poll above: that one is a network
+        # call against OpenD on a rate-limited budget, this one is a local
+        # SQLite read. Sharing an interval would tie the cheaper of the two
+        # to the constraints of the other.
+        self._opt_flow_timer = QTimer(self)
+        self._opt_flow_timer.timeout.connect(self._trigger_opt_flow_fetch)
         self._option_wall_data: dict | None = None
         self._option_prev_volumes: dict[str, int] = {}
         self._option_code: str = ""   # symbol the cached option state belongs to
@@ -3177,12 +3255,61 @@ class TradeViewerQt(QMainWindow):
             ("vol",       "MAVOL"), # Volume subplot toggle
             ("chandelier", "Chandelier"), # ATR trailing-stop suggestion, bottom-right corner label
             ("atr_stop",  "ATR Stop"),  # fixed k x ATR stop lines from an anchor
+            ("opt_flow",  "Opt \u0394-Flow"),  # option delta that traded, in shares of underlying
         ]:
             cb = QCheckBox(label)
             cb.setChecked(vcfg.flag(key))
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
             tb_ind.addWidget(cb)
+            if key == "opt_flow":
+                # Whose delta this is will not fit on a chart title and is
+                # the first thing anyone gets wrong, so the long form lives
+                # here. NOT "buyer": a customer who hits the bid to sell a
+                # call is the option SELLER and the aggressor at the same
+                # time, and this series records that print as his.
+                cb.setToolTip(
+                    "Option delta that changed hands, in shares of "
+                    "underlying exposure.\n\n"
+                    "WHOSE DELTA: the AGGRESSOR'S \u2014 whoever crossed "
+                    "the spread.\n"
+                    "  \u2022 The DEALER'S is this series negated, and only "
+                    "under the assumption that\n"
+                    "    the dealer is the sole counterparty. Market makers "
+                    "take liquidity too and\n"
+                    "    customers rest passive orders; nothing stored here "
+                    "can separate them.\n"
+                    "  \u2022 The option SELLER'S is neither. A seller who "
+                    "hits the bid is also the\n"
+                    "    aggressor, so that framing agrees on one print and "
+                    "opposes on the next.\n\n"
+                    "Gold = the aggressor took on bullish delta. "
+                    "Purple = bearish.\n"
+                    "Sign is carried by position too: above or below the "
+                    "zero line.\n\n"
+                    "Open vs close is NOT known: a buy may be opening a long "
+                    "or closing a short.\n"
+                    "Fine for a flow series, but nothing here supports a "
+                    "claim about positioning.\n\n"
+                    "NOT the CVD scale. CVD is signed SHARE volume off the "
+                    "equity tape, where only\n"
+                    "40-50% of volume carries an exchange direction tag; "
+                    "this is greek-weighted\n"
+                    "option volume, where about 92% does."
+                )
+                # One row, two readings -- not two rows. At seven rows the
+                # price chart already drops from 5/10 of the height to 5/11;
+                # a second option row would make it 5/12 for a quantity
+                # nobody reads both ways at once.
+                self._opt_flow_cum_cb = QCheckBox("Cumulative")
+                self._opt_flow_cum_cb.setChecked(vcfg.flag("opt_flow_cum"))
+                self._opt_flow_cum_cb.setToolTip(
+                    "Running total since the session reset (on), or each "
+                    "bar's own net (off).")
+                self._opt_flow_cum_cb.stateChanged.connect(
+                    self._on_indicator_toggle)
+                self._ind_checks["opt_flow_cum"] = self._opt_flow_cum_cb
+                tb_ind.addWidget(self._opt_flow_cum_cb)
             if key == "dcvd":
                 # 1 is the window that predicts; widening it is for looking
                 # around, not for deciding. The panel rescales with the
@@ -3573,6 +3700,22 @@ class TradeViewerQt(QMainWindow):
         self._option_wall_count_spin.valueChanged.connect(self._on_option_wall_count_changed)
         tb_opt.addWidget(self._option_wall_count_spin)
 
+        cb_net_walls = QCheckBox("Net")
+        cb_net_walls.setChecked(vcfg.flag("option_net_walls"))
+        cb_net_walls.setToolTip(
+            "Rank the walls on NET gamma per strike (calls + puts) instead "
+            "of\neach side on its own.\n\n"
+            "A strike holds both, and the desk hedges what is left after "
+            "they\ncancel. The strike with the most call gamma can have "
+            "most of it\noffset by puts written at the same strike, and the "
+            "line drawn\nthere overstates what anyone has to trade.\n\n"
+            "Off = Call Wall / Put Wall, each side alone (what other GEX "
+            "tools show).\n"
+            "On  = Net Wall +/-, where hedging actually bites.")
+        cb_net_walls.stateChanged.connect(self._on_option_wall_count_changed)
+        self._ind_checks["option_net_walls"] = cb_net_walls
+        tb_opt.addWidget(cb_net_walls)
+
         tb_opt.addSeparator()
         tb_opt.addWidget(_lbl("Poll(s):"))
         self._option_interval_spin = QSpinBox()
@@ -3748,6 +3891,42 @@ class TradeViewerQt(QMainWindow):
         self._dcvd_guides: list = []
         self._apply_dcvd_scale()
 
+        self._chart_widget.nextRow()
+        self._plot_oflow: pg.PlotItem = self._chart_widget.addPlot(row=6, col=0)
+        self._plot_oflow.showGrid(x=True, y=True, alpha=0.10)
+        self._plot_oflow.setLabel("left", "Opt \u0394", **{"color": _FG})
+        # The axis label stays SHORT and the framing lives on the
+        # title. This label is drawn vertically inside a row that is
+        # one eleventh of the chart height, so every extra character
+        # is spent in the most cramped place on screen -- while the
+        # title is horizontal across the full panel and already says
+        # "aggressor".
+        #
+        # SI prefixes left ON, unlike the DCVD row below which turns
+        # them off because its values live inside +/-1 and the prefix
+        # degrades into a "(x0.001)" suffix. Here the values are
+        # 1e4-1e6 shares and the prefix is what keeps the axis column
+        # narrow: "100000" is six glyphs where "100K" is four.
+        self._plot_oflow.getAxis("left").setTextPen(_qc(_FG))
+        self._plot_oflow.getAxis("bottom").setTextPen(_qc(_FG))
+        self._plot_oflow.setMenuEnabled(False)
+        self._plot_oflow.setXLink(self._plot_c)
+        self._plot_oflow.vb.setMouseEnabled(y=False)
+        self._opt_flow_items: list = []
+        # Last good reduction from OptFlowFetcher. _render paints from this
+        # and never touches the database itself.
+        self._opt_flow_data: dict | None = None
+        self._opt_flow_fetcher: OptFlowFetcher | None = None
+        self._opt_flow_code: str = ""
+        self._opt_flow_minutes: int = 0
+        self._opt_flow_range: str = ""
+        self._opt_flow_error: str = ""
+        # Set when a result had to be discarded as stale. Acted on in
+        # _on_opt_flow_finished rather than at the discard site, because at
+        # the discard site the worker that produced it is still running and
+        # _trigger_opt_flow_fetch would refuse on its own in-flight guard.
+        self._opt_flow_refetch: bool = False
+
         # Row stretch factors — main chart is fixed; subplot rows collapse to
         # zero height when their indicator is off instead of leaving a gap.
         self._chart_widget.ci.layout.setRowStretchFactor(0, 5)
@@ -3763,8 +3942,19 @@ class TradeViewerQt(QMainWindow):
                                (self._plot_kd,   2, "kd"),
                                (self._plot_cvd,  3, "cvd"),
                                (self._plot_adi,  4, "adi"),
-                               (self._plot_dcvd, 5, "dcvd")):
+                               (self._plot_dcvd, 5, "dcvd"),
+                               (self._plot_oflow, 6, "opt_flow")):
             self._set_subplot_row_visible(plot, row, self._ind(key))
+        # Arm the option poll here too, for exactly the reason the comment
+        # above gives: a checkbox that STARTS checked never emits
+        # stateChanged, so _on_indicator_toggle -- the only other place the
+        # timer is started -- never runs. Switching this row on in
+        # config/viewer_qt.toml would otherwise give a visible row that
+        # polls nothing and shows "loading..." for ever, until the user
+        # happened to toggle some unrelated indicator. That is the DCVD bug
+        # recorded eight lines up, wearing a different hat.
+        if self._ind("opt_flow"):
+            self._opt_flow_timer.start(vcfg.num("opt_flow_poll_secs") * 1000)
 
         # ── Graphics items ────────────────────────────────────────────────────
         self._candle_item = CandlestickItem()
@@ -3924,6 +4114,14 @@ class TradeViewerQt(QMainWindow):
         self._vline_dcvd = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
         self._vline_dcvd.setVisible(False)
         self._plot_dcvd.addItem(self._vline_dcvd, ignoreBounds=True)
+
+        # Each subplot owns its own crosshair line; they are separate items
+        # rather than one line drawn across the layout, so every new row
+        # needs its own here AND in the three places below that move, show
+        # and hide them.
+        self._vline_oflow = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._vline_oflow.setVisible(False)
+        self._plot_oflow.addItem(self._vline_oflow, ignoreBounds=True)
 
         self._dcvd_label = pg.TextItem(
             text="", color=_FG,
@@ -4116,6 +4314,7 @@ class TradeViewerQt(QMainWindow):
         self._ob_legend.setVisible(False)
         self._plot_c.addItem(self._ob_legend, ignoreBounds=True)
         self._plot_c.vb.sigRangeChanged.connect(self._pin_ob_legend)
+        self._plot_c.vb.sigRangeChanged.connect(self._pin_opt_flow_note)
 
         # ── DCVD light (bottom-right, above the chandelier label) ─────────────
         # Lives on the price chart rather than in the DCVD panel: at 7pt in a
@@ -4356,6 +4555,10 @@ class TradeViewerQt(QMainWindow):
 
     def _on_tf_changed(self, tf: str) -> None:
         _, self._candle_mins = TIMEFRAME_MAP[tf]
+        # The option frame is reduced at a specific bar size, so it is about
+        # the old timeframe now. Without this the identity check holds the
+        # row at "loading" for up to one poll interval.
+        self._opt_flow_resync()
         # The DCVD window is counted in bars but scaled in minutes, so the
         # axis and its guides change meaning with the timeframe.
         self._apply_dcvd_scale()
@@ -4636,6 +4839,26 @@ class TradeViewerQt(QMainWindow):
         if show_dcvd:
             self._plot_dcvd.setTitle(f"{code}  DCVD", color=_FG, size="8pt")
         self._set_subplot_row_visible(self._plot_dcvd, 5, show_dcvd)
+
+        # Opt Delta-Flow row. The poll timer runs only while the row is
+        # visible: the query is a three-table join plus a merge_asof over the
+        # session, so a hidden row polling in the background would spend
+        # 1-2 s of CPU every interval to compute something nobody is looking
+        # at -- on the same machine the collector is sampling greeks on.
+        show_oflow = self._ind("opt_flow")
+        self._set_subplot_row_visible(self._plot_oflow, 6, show_oflow)
+        if show_oflow:
+            if not self._opt_flow_timer.isActive():
+                self._opt_flow_timer.start(
+                    vcfg.num("opt_flow_poll_secs") * 1000)
+            # Only when there is nothing to draw. This slot is connected to
+            # EVERY indicator checkbox, so an unconditional fetch here meant
+            # ticking EMA or MAVOL spent 0.5-2.8 s on a three-table join and
+            # a merge_asof for a frame that was already correct.
+            if self._opt_flow_data is None:
+                self._trigger_opt_flow_fetch(stale=True)
+        else:
+            self._opt_flow_timer.stop()
         if not show_adi:
             self._vline_adi.setVisible(False)
         # Toggle heatmap legend visibility
@@ -4684,6 +4907,32 @@ class TradeViewerQt(QMainWindow):
         if widest:
             self.setMinimumWidth(widest + 16)
 
+    def _opt_flow_resync(self) -> None:
+        """Drop the frame and ask for one that matches what is on screen.
+
+        Shared by the three things that change what a frame has to be about
+        -- Range, timeframe and symbol. Each used to be wired separately
+        and timeframe was simply missed, which left a 1-minute frame drawn
+        over 5-minute candles until the identity check (added later) turned
+        it into a 30-second "loading" instead.
+        """
+        if not self._ind("opt_flow"):
+            return
+        self._invalidate_opt_flow()
+        self._trigger_opt_flow_fetch(stale=True)
+
+    def _opt_flow_on_range_changed(self) -> None:
+        """Range now decides the fetch WINDOW, not just the drawing.
+
+        Before the clamp, the cached frame covered the whole kline span and
+        a Range change only moved where the reset blocks fell. Now a frame
+        fetched for 1D does not contain the bars a 3D view draws, so keeping
+        it would show one day of flow across three days of chart with
+        nothing on screen admitting it. Dropping it shows the note instead,
+        which is the true statement until the new frame lands.
+        """
+        self._opt_flow_resync()
+
     def _on_range_radio_toggled(self, checked: bool) -> None:
         """One click on the range radios emits twice: toggled(False) on the
         button being left and toggled(True) on the one being taken. Both used
@@ -4695,6 +4944,11 @@ class TradeViewerQt(QMainWindow):
 
     def _on_range_changed(self) -> None:
         self._rebuild_session_profile()
+        # Same reason the tick fetch below is redone rather than redrawn:
+        # Range now decides the option fetch WINDOW too, so the cached frame
+        # covers the old span. Redrawing alone painted one day of option
+        # flow across three days of chart with nothing admitting it.
+        self._opt_flow_on_range_changed()
         # A refetch, not just a redraw: CVD anchors on this window, and the
         # extra trading days it now spans need their ticks loaded before the
         # curve means anything. Redrawing alone left the older bars at delta 0.
@@ -5046,12 +5300,19 @@ class TradeViewerQt(QMainWindow):
             self._option_fail_streak = 0
             self._clear_option_wall_items()
             self._clear_option_alert_items()
+            # Same reason the walls are dropped here: the cached frame
+            # describes the previous underlying, and _render repaints from
+            # the cache, so leaving it would draw SOXL's option flow under
+            # QQQ's candles.
+            self._invalidate_opt_flow()
         dte = 0 if self._option_0dte_cb.isChecked() else self._option_dte_spin.value()
         threshold  = self._option_threshold_spin.value()
         wall_count = self._option_wall_count_spin.value()
         self._option_status_lbl.setText("options: fetching…")
         self._option_fetcher = OptionChainFetcher(
-            self._option_ctx, code, dte, threshold, dict(self._option_prev_volumes), wall_count)
+            self._option_ctx, code, dte, threshold,
+            dict(self._option_prev_volumes), wall_count,
+            net_walls=self._ind("option_net_walls"))
         self._option_fetcher.ready.connect(self._on_option_fetch_ready)
         self._option_fetcher.error.connect(self._on_option_fetch_error)
         self._option_fetcher.start()
@@ -5281,6 +5542,11 @@ class TradeViewerQt(QMainWindow):
         self._clear_dcvd_items()
         if self._ind("dcvd"):
             self._draw_dcvd(klines, buckets, cm)
+
+        # Opt Delta-Flow subplot (option tape, not the equity tape)
+        self._clear_opt_flow_items()
+        if self._ind("opt_flow"):
+            self._draw_opt_flow(klines, cm)
 
         # Absorption markers (price chart)
         self._clear_abs_items()
@@ -6062,12 +6328,17 @@ class TradeViewerQt(QMainWindow):
 
         for rank, wall in enumerate(data.get("call_walls") or []):
             alpha = max(60, 255 - rank * 40)
-            label = "Call Wall" if rank == 0 else f"Call Wall #{rank + 1}"
+            # The name says which question was asked. A "Call Wall" and a
+            # "Net Wall +" can sit at different strikes on the same chain,
+            # and a screenshot with no label cannot be told apart later.
+            base = "Net Wall +" if data.get("net_walls") else "Call Wall"
+            label = base if rank == 0 else f"{base} #{rank + 1}"
             self._draw_option_wall_line(wall["strike"], _RED, label, n, alpha)
 
         for rank, wall in enumerate(data.get("put_walls") or []):
             alpha = max(60, 255 - rank * 40)
-            label = "Put Wall" if rank == 0 else f"Put Wall #{rank + 1}"
+            base = "Net Wall \u2212" if data.get("net_walls") else "Put Wall"
+            label = base if rank == 0 else f"{base} #{rank + 1}"
             self._draw_option_wall_line(wall["strike"], _GREEN, label, n, alpha)
 
         zero_gamma = data.get("zero_gamma")
@@ -6499,6 +6770,395 @@ class TradeViewerQt(QMainWindow):
         self._apply_dcvd_scale()
         if self._klines is not None:
             self._redraw()
+
+
+    # ── Opt Delta-Flow subplot ────────────────────────────────────────────
+
+    def _clear_opt_flow_items(self) -> None:
+        self._opt_flow_note_item = None
+        # With the items, the way _clear_cvd_items / _clear_adi_items /
+        # _clear_dcvd_items all do it. Left behind, a pan after a note path
+        # ranges the axis on a series that is no longer on screen.
+        self._oflow_arr = None
+        for it in self._opt_flow_items:
+            self._plot_oflow.removeItem(it)
+        self._opt_flow_items.clear()
+
+    def _opt_flow_note(self, text: str) -> None:
+        """Say WHY the row is empty instead of drawing a bare axis.
+
+        Clears the title as well. Every early return used to leave the last
+        successful title in place, so an empty panel could sit under
+        "SOXL Opt delta-Flow ... 12,480 prints" -- which is exactly the
+        reading failure that hid the first bug for an hour: title populated,
+        panel blank, and the title believed.
+
+        An empty panel and "no option flow this session" look identical, and
+        the second is a statement about the market. The option tape starts
+        2026-11-23 and covers SOXL only, so an empty row is the normal case
+        on most frames -- it has to name its own reason.
+        """
+        self._plot_oflow.setTitle(
+            f"{self._code_edit.text().strip()}  Opt \u0394-Flow",
+            color=_GREY_HI, size="8pt")
+        lbl = pg.TextItem(text, color=_GREY_HI, anchor=(0, 0.5))
+        self._opt_flow_note_item = lbl
+        # Placed in the CURRENT view, not at bar 0. The chart holds
+        # thousands of bars and opens scrolled to the newest, so a note
+        # pinned to index 0 sits several thousand bars off the left edge --
+        # the row then looks blank for no stated reason, which is the exact
+        # failure the note exists to prevent. Observed: "loading..." was
+        # invisible for the 0.7 s of every fetch.
+        self._plot_oflow.addItem(lbl)
+        self._opt_flow_items.append(lbl)
+        # A fixed range so the note sits in the middle of an empty panel --
+        # but setYRange DISABLES auto-ranging on that axis for good, so the
+        # draw path has to switch it back on. It did not, and the panel
+        # stayed locked at +/-1 while the line was drawn at +/-1,000,000:
+        # title populated, axis reading 0.5, nothing visible. Found by
+        # opening the app, not by any test here.
+        self._plot_oflow.setYRange(-1, 1, padding=0)
+        # Positioned AFTER the range above, not before. Pinning first reads
+        # whatever the panel was showing a moment ago and then the view
+        # moves out from under the text: measured y=-32035 inside a +/-1
+        # view. The renders that take this path -- symbol change, Range
+        # change, a failed fetch -- are precisely the ones where the reason
+        # has to be legible.
+        self._pin_opt_flow_note()
+
+    def _pin_opt_flow_note(self, *_) -> None:
+        """Re-anchor the note to the left edge of the CURRENT view.
+
+        Connected to sigRangeChanged, the same way the heatmap and OB
+        legends are. Setting the position once at draw time was not enough
+        twice over: panning does not trigger a redraw, so the note sailed
+        off screen; and on the first render of a frame the view has not been
+        ranged yet (_reset_view is queued with singleShot AFTER the drawing
+        block), so the position read there is about to be thrown away --
+        which is precisely the render where "loading..." or "no option tape
+        for QQQ" most needs to be legible.
+        """
+        lbl = getattr(self, "_opt_flow_note_item", None)
+        if lbl is None or lbl not in self._opt_flow_items:
+            return
+        (x0, x1), (y0, y1) = self._plot_oflow.vb.viewRange()
+        lbl.setPos(x0 + (x1 - x0) * 0.02, (y0 + y1) / 2)
+
+    def _trigger_opt_flow_fetch(self, *, stale: bool = False) -> None:
+        """Start one background reduction of the option tape, if none is in
+        flight. Everything about this is off the GUI thread.
+
+        `stale` separates two callers that want opposite things from a busy
+        worker. A poll wants to SKIP -- its turn comes round again in 30 s,
+        and queuing a retry turns "the query took longer than the interval"
+        into back-to-back queries with no idle time between them. A caller
+        whose identity changed (symbol, timeframe, Range, the checkbox)
+        cannot skip: the frame in flight is about to be discarded, and
+        without the latch nothing would ask again.
+        """
+        if not self._ind("opt_flow"):
+            return
+        if self._opt_flow_fetcher is not None and self._opt_flow_fetcher.isRunning():
+            # Only an identity change queues a retry -- see the docstring.
+            # A Range change during a fetch that then FAILS would otherwise
+            # be lost entirely: the error path sets no flag and `finished`
+            # does nothing, so the old window would stay until the next poll.
+            if stale:
+                self._opt_flow_refetch = True
+            return
+        code = self._code_edit.text().strip()
+        if not code or self._klines is None or self._klines.empty:
+            return
+        cm = TIMEFRAME_MAP[self._tf_combo.currentText()][1]
+        keys = [k for k in self._bucket_keys(self._klines, cm) if k is not pd.NaT]
+        if not keys:
+            return
+        # Clamped to the Range control, NOT to the whole kline frame.
+        #
+        # Two reasons, and the first is correctness. _draw_cvd loads ticks
+        # for RANGE_DAYS days and draws NaN outside that, so an unclamped
+        # window here would put a solid Opt delta line across days where the
+        # CVD panel above it is deliberately blank -- two series stacked
+        # together covering different spans, which is worse than any
+        # disagreement about where they reset.
+        #
+        # The second is cost: the query is superlinear in window length
+        # (measured 481 / 1,299 / 2,752 ms at one, three and five days), and
+        # a ten-day frame would put six to seven seconds of pandas -- which
+        # does not release the GIL -- behind every refresh.
+        n_days = RANGE_DAYS.get(self._get_range_val(), 1)
+        present = sorted({_trading_day_of_bucket(k) for k in keys})
+        keep = set(present[-n_days:])
+        keys = [k for k in keys if _trading_day_of_bucket(k) in keep]
+        if not keys:
+            return
+        start = min(keys).strftime("%Y-%m-%d %H:%M:%S")
+        end = (max(keys) + timedelta(minutes=cm)).strftime("%Y-%m-%d %H:%M:%S")
+        f = OptFlowFetcher(OPTION_TICK_DB, code, start, end, cm,
+                           range_val=self._get_range_val())
+        f.ready.connect(self._on_opt_flow_ready)
+        f.error.connect(self._on_opt_flow_error)
+        f.finished.connect(self._on_opt_flow_finished)
+        self._opt_flow_fetcher = f
+        f.start()
+
+    def _on_opt_flow_ready(self, data: dict) -> None:
+        # Guard against a result that arrives after the user has moved on:
+        # the fetch is asynchronous and the symbol or timeframe may have
+        # changed while it ran, in which case this frame describes a
+        # different instrument than the chart now shows.
+        code = self._code_edit.text().strip()
+        cm = TIMEFRAME_MAP[self._tf_combo.currentText()][1]
+        if data.get("code") != code or data.get("minutes") != cm:
+            self._opt_flow_refetch = True
+            return
+        # Range too, now that it decides the fetch window and not just the
+        # drawing: a frame fetched for 1D does not contain the bars a 3D
+        # view would draw, so reusing it would silently show a third of the
+        # range with no indication that is what happened.
+        if data.get("range") != self._get_range_val():
+            self._opt_flow_refetch = True
+            return
+        self._opt_flow_data = data
+        self._opt_flow_code = code
+        self._opt_flow_minutes = cm
+        self._opt_flow_range = data.get("range", "")
+        # A good frame retires the previous failure. Left latched, a single
+        # transient error would keep its message ready to reappear the next
+        # time the cache is empty, describing a fetch that has since
+        # succeeded.
+        self._opt_flow_error = ""
+        self._redraw()
+
+    def _on_opt_flow_finished(self) -> None:
+        """Retry here, where the worker has actually stopped.
+
+        Qt emits `finished` after run() returns, so isRunning() is false and
+        _trigger_opt_flow_fetch's in-flight guard will let the new one
+        through. Retrying at the point the stale result was discarded could
+        not work: that runs inside the worker's own signal.
+        """
+        if not self._opt_flow_refetch:
+            return
+        self._opt_flow_refetch = False
+        self._trigger_opt_flow_fetch(stale=True)
+
+    def _on_opt_flow_error(self, msg: str) -> None:
+        # Recorded on the panel, not only in the log. Leaving _opt_flow_data
+        # as None means _draw_opt_flow keeps printing "loading..." forever,
+        # so a dead database and a slow one look identical to the reader.
+        self._log(f"Opt flow fetch failed: {msg}")
+        self._opt_flow_error = msg
+        self._redraw()
+
+    def _invalidate_opt_flow(self) -> None:
+        """Drop the cache AND the drawn items.
+
+        Both, deliberately. Clearing only the items looks fixed until the
+        next _render repaints them straight back out of the surviving cache
+        -- the exact bug the option walls shipped with.
+        """
+        self._opt_flow_data = None
+        self._opt_flow_code = ""
+        self._opt_flow_minutes = 0
+        self._opt_flow_range = ""
+        self._opt_flow_error = ""
+        self._clear_opt_flow_items()
+
+    def _opt_flow_cache_is_current(self, code: str, cm: int) -> bool:
+        """Does the cached frame describe what is on screen right now?
+
+        All three fields are recorded when a frame ARRIVES, from the
+        frame's own payload, so they answer "what is this frame about"
+        rather than "what did we last ask for". Range used to be the
+        exception -- written when the fetch was launched -- which let this
+        sequence through: hide the row, change Range (the hook returns
+        early while hidden), show it again (the toggle launches a fetch and
+        stamped the NEW Range onto the OLD frame), and the 1D frame was
+        drawn over a 3D chart for as long as the new fetch took.
+
+        Checked at draw time rather than by invalidating from every place
+        that can change one of them, so a hook anyone forgets in future
+        costs a "loading..." instead of a plausible wrong line.
+        """
+        if self._opt_flow_data is None:
+            return False
+        return (self._opt_flow_code == code
+                and self._opt_flow_minutes == cm
+                and self._opt_flow_range == self._get_range_val())
+
+    def _draw_opt_flow(self, klines: pd.DataFrame, cm: int) -> None:
+        """Signed option delta per bar, in shares of underlying exposure.
+
+        NOT the same quantity as CVD two rows up, and not measured with the
+        same instrument. CVD is signed SHARE volume off the equity tape,
+        where only 40-50% of volume carries an exchange direction tag; this
+        is greek-delta-weighted option volume, where 92% does. Two lines
+        that both end in "shares" invite being read as one scale, so the
+        title says which this is.
+        """
+        # The cached frame has to be ABOUT this chart. _opt_flow_code and
+        # _opt_flow_minutes were already being stored and never read; two
+        # separate paths relied on a hook elsewhere remembering to drop the
+        # cache, and both had a hole. Switching timeframe had no hook at
+        # all, and the symbol-change hook sits inside _trigger_option_fetch,
+        # which returns early when the Walls indicator is off -- so with
+        # Walls unticked, SOXL's flow kept drawing under QQQ's candles with
+        # the title reading QQQ.
+        #
+        # Checked HERE rather than by adding a third hook, so that any hook
+        # anyone forgets in future degrades to "loading..." rather than to
+        # a plausible line made of the wrong instrument.
+        data = self._opt_flow_data
+        if not self._opt_flow_cache_is_current(
+                self._code_edit.text().strip(), cm):
+            data = None
+        if data is None:
+            if self._opt_flow_error:
+                self._opt_flow_note(
+                    f"Opt \u0394-Flow unavailable: {self._opt_flow_error[:80]}")
+            else:
+                self._opt_flow_note("Opt \u0394-Flow: loading\u2026")
+            return
+        bars = data["bars"]
+        code = self._code_edit.text().strip()
+        if bars is None or bars.empty:
+            self._opt_flow_note(f"no option tape for {code} in this range")
+            return
+
+        n = len(klines)
+        net = np.full(n, np.nan, dtype=float)
+        by_start = dict(zip(bars["bar"], bars["net"]))
+        seen = data.get("seen") or {}
+        unusable = 0
+        for i, bk in enumerate(self._bucket_keys(klines, cm)):
+            if bk is pd.NaT:
+                continue
+            if bk in by_start:
+                net[i] = by_start[bk]
+            elif bk in seen:
+                # Prints landed here and not one could be signed. Left NaN
+                # -- the line breaks rather than reading 0, which would say
+                # "balanced" about a bar where nothing is known -- but
+                # counted, so the title can own up to it.
+                unusable += 1
+
+        covered = ~np.isnan(net)
+        if not covered.any():
+            self._opt_flow_note(
+                f"option tape has no prints inside this range ({code})")
+            return
+
+        # Undo the note path's fixed range. Without this the panel keeps
+        # whatever _opt_flow_note last pinned it to -- and the note runs
+        # first every time, because the first render after the row is
+        # switched on happens while the fetch is still in flight.
+        # NOT enableAutoRange, and NOT setAutoVisible(y=True).
+        #
+        # enableAutoRange fits the WHOLE series and runs on every redraw, so
+        # it undid _autorange_cumulative_subplots on every tick that did not
+        # produce a new bar: measured, the visible bars came back at 19.9%
+        # of the panel. setAutoVisible would be the right idea, except
+        # silently does nothing for the bars: pyqtgraph's BarGraphItem
+        # accepts `orthoRange` in dataBounds() and ignores it, so the range
+        # keeps coming from the whole series. Measured on one panel: with
+        # the visible bars spanning -2,398..+1,816 against a series of
+        # -116,983..+52,913, the view was set to -127,758..+63,688 and the
+        # bars on screen occupied 2% of the panel height.
+        #
+        # pyqtgraph's BarGraphItem accepts `orthoRange` in dataBounds()
+        # and ignores it, so it silently does nothing for the bars.
+        #
+        # _autorange_cumulative_subplots already does this correctly for CVD
+        # and the A/D line by slicing the stored array to the visible
+        # window, and it re-runs on pan, which no autorange flag does. Store
+        # the series, join that mechanism, and call it at the end of this
+        # method so a redraw cannot leave the row scaled to the whole day.
+        self._oflow_arr = None
+
+        cum = self._ind("opt_flow_cum")
+        if cum:
+            # Reset on the SAME blocks as _draw_cvd, not on delta_flow's own
+            # trading-day boundary. Two cumulative lines stacked one above
+            # the other cannot be compared at all between two different
+            # reset points, and CVD's block (N trading days, counted back
+            # from the newest so the last block is always full) is the one
+            # the Range control already means.
+            # _trading_day_of_bucket over the MEMOISED bucket keys, not
+            # _trading_day over raw time_key. Measured on a 3,980-bar frame:
+            # 49.1 ms versus 1.0 ms, element-for-element identical, and this
+            # function has already called _bucket_keys three lines above.
+            # The whole QThread arrangement exists to move 688 ms off this
+            # thread; paying 49 ms of it back every redraw is absurd.
+            #
+            # It also parses more: _trading_day returns None for any stamp
+            # that is not "%Y-%m-%d %H:%M" (an ISO "T" separator, say), and
+            # a None day silently suppresses the block reset.
+            day = [None if bk is pd.NaT else _trading_day_of_bucket(bk)
+                   for bk in self._bucket_keys(klines, cm)]
+            n_days = RANGE_DAYS.get(self._get_range_val(), 1)
+            present = sorted({d for d in day if d is not None})
+            block = {d: (len(present) - 1 - i) // n_days
+                     for i, d in enumerate(present)}
+            vals = np.full(n, np.nan, dtype=float)
+            running, prev_block = 0.0, None
+            for i in range(n):
+                if day[i] is not None:
+                    b = block[day[i]]
+                    if b != prev_block:
+                        running, prev_block = 0.0, b
+                if covered[i]:
+                    running += net[i]
+                    vals[i] = running
+            self._oflow_arr = vals
+            item = pg.PlotDataItem(
+                np.arange(n), vals, pen=pg.mkPen(_FG, width=2),
+                connect="finite")
+            self._plot_oflow.addItem(item)
+            self._opt_flow_items.append(item)
+        else:
+            # Diverging bars around zero. The sign is carried by POSITION as
+            # well as hue, so the panel still reads under colour-vision
+            # deficiency and in print.
+            #
+            # TWO batched items, not one per bar. Measured on an offscreen
+            # QApplication: 3,900 one-bar items cost 1,249 ms to create and
+            # 6,613 ms to DELETE -- on the GUI thread, once per _render,
+            # which in live mode is once per incoming tick. The two batched
+            # items are 1.0 ms for the same picture. The whole QThread
+            # arrangement above exists to keep a 688 ms query off this
+            # thread; a loop here would have spent eight seconds on it.
+            self._oflow_arr = net
+            x = np.nonzero(covered)[0].astype(float)
+            v = net[covered]
+            if len(x):
+                for vals, colour in ((np.clip(v, 0, None), _UP),
+                                     (np.clip(v, None, 0), _DOWN)):
+                    br = pg.BarGraphItem(x=x, height=vals, width=0.7, y0=0,
+                                         brush=colour, pen=None)
+                    self._plot_oflow.addItem(br)
+                    self._opt_flow_items.append(br)
+            zero = pg.InfiniteLine(pos=0, angle=0,
+                                   pen=pg.mkPen(_GREY_HI, width=1,
+                                                style=Qt.PenStyle.DashLine))
+            self._plot_oflow.addItem(zero)
+            self._opt_flow_items.append(zero)
+
+        # Scale to the visible window now that the series is stored. Doing
+        # it here rather than leaving it to the next pan is what keeps a
+        # plain redraw from reverting the panel to whole-series range.
+        self._autorange_cumulative_subplots(*self._plot_c.vb.viewRange()[0])
+
+        rep = data.get("report") or {}
+        mode = "cum" if cum else "bar"
+        dropped = rep.get("neutral", 0) + rep.get("unknown", 0)
+        self._plot_oflow.setTitle(
+            f"{code}  Opt \u0394-Flow \u00b7 {mode} \u00b7 aggressor \u00b7 sh-eq"
+            f"   (option tape; {rep.get('used', 0):,} prints, "
+            f"{dropped:,} undirected"
+            + (f", {unusable} bars all-undirected" if unusable else "")
+            + " — NOT the CVD scale)",
+            color=_FG, size="8pt")
 
     def _draw_dcvd(self, klines: pd.DataFrame, buckets: dict, cm: int) -> None:
         """Draw DCVD: the CVD slope normalised to [-1, +1].
@@ -8536,13 +9196,16 @@ class TradeViewerQt(QMainWindow):
                      and self._plot_adi.sceneBoundingRect().contains(pos))
         in_dcvd   = (self._plot_dcvd.isVisible()
                      and self._plot_dcvd.sceneBoundingRect().contains(pos))
+        in_oflow  = (self._plot_oflow.isVisible()
+                     and self._plot_oflow.sceneBoundingRect().contains(pos))
         in_any    = (in_candle or in_vol or in_kd or in_cvd or in_adi
-                     or in_dcvd)
+                     or in_dcvd or in_oflow)
 
         if not in_any:
             for line in (self._vline, self._hline,
                          self._vline_v, self._vline_kd, self._vline_cvd,
                          self._vline_adi, self._vline_dcvd,
+                         self._vline_oflow,
                          self._dcvd_label,
                          self._offex_label,
                          self._price_label, self._pair_price_label,
@@ -8587,6 +9250,8 @@ class TradeViewerQt(QMainWindow):
             self._vline_adi.setPos(x); self._vline_adi.setVisible(True)
         if self._plot_dcvd.isVisible():
             self._vline_dcvd.setPos(x); self._vline_dcvd.setVisible(True)
+        if self._plot_oflow.isVisible():
+            self._vline_oflow.setPos(x); self._vline_oflow.setVisible(True)
 
         # Horizontal line only in candle plot
         self._hline.setPos(y);  self._hline.setVisible(in_candle)
@@ -8916,7 +9581,8 @@ class TradeViewerQt(QMainWindow):
         """
         i0 = max(0, int(x_lo))
         for arr, plot in ((self._cvd_arr, self._plot_cvd),
-                          (self._adi_arr, self._plot_adi)):
+                          (self._adi_arr, self._plot_adi),
+                          (getattr(self, "_oflow_arr", None), self._plot_oflow)):
             if arr is None or len(arr) == 0:
                 continue
             i1 = min(int(x_hi) + 1, len(arr))
@@ -8967,6 +9633,13 @@ class TradeViewerQt(QMainWindow):
             self._plot_adi.getAxis("bottom").setTicks([pos_only])
         if self._ind("dcvd"):
             self._plot_dcvd.getAxis("bottom").setTicks([pos_only])
+        # Its OWN guard. Nested under dcvd's, this row fell back to
+        # pyqtgraph's automatic ticks -- raw bar indices where a time
+        # belongs -- the moment DCVD was switched off, and DCVD is on by
+        # default, so the default configuration hid it. Same shape as the
+        # v0.44.0-v0.45.2 DCVD bug this function's docstring records.
+        if self._ind("opt_flow"):
+            self._plot_oflow.getAxis("bottom").setTicks([pos_only])
 
     # ── Event filter (Enter key in toolbar QLineEdit) ─────────────────────────
 
@@ -9021,6 +9694,24 @@ class TradeViewerQt(QMainWindow):
 
         # A pending tick-profile redraw has nothing left to draw into.
         self._profile_timer.stop()
+
+        # The Opt delta-flow poll and its worker, for the same reason the
+        # chain fetcher below is stopped: closing the window during a 0.7-2.8 s
+        # read drops the last reference to a RUNNING QThread, and Qt aborts
+        # the process on that ("QThread: Destroyed while thread is still
+        # running"). It is a plain SQLite read with no context to close, so
+        # the timer and the wait are all it needs.
+        self._opt_flow_timer.stop()
+        if self._opt_flow_fetcher and self._opt_flow_fetcher.isRunning():
+            self._opt_flow_fetcher.quit()
+            # 8 s, and no terminate(). The worst measured query is 2.75 s
+            # at the five-day Range, before the worker's first import of
+            # pandas -- so a 3 s budget made terminate() a path the Range
+            # control can reach, not a backstop. Terminating a thread in the
+            # middle of sqlite3 or pandas is the one step in this teardown
+            # that can take the process down with it, and there is nothing
+            # to gain: it holds no context and no lock worth breaking.
+            self._opt_flow_fetcher.wait(8000)
 
         # Stop the option-chain poll timer and its context/fetcher, mirroring
         # the main ctx/fetcher teardown below (own connection, own thread).

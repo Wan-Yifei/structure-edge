@@ -31,7 +31,9 @@ Hence option_greeks, and hence `spot` and `upd` on every row:
 from __future__ import annotations
 
 import pathlib
+import functools
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from typing import Iterable
 
@@ -129,9 +131,17 @@ CREATE TABLE IF NOT EXISTS option_coverage (
     our_vol    INTEGER NOT NULL,       -- what we stored
     our_ticks  INTEGER NOT NULL,
     checked_at TEXT    NOT NULL,
+    -- Our first stored print for this contract that session. feed_vol is
+    -- the WHOLE session's volume, so without this the ratio cannot be told
+    -- apart from "we were late": 2026-11-23 read 83.5% purely because the
+    -- collector only went live at 09:39:29, and nothing stored said so.
+    first_ts   TEXT,
     UNIQUE(session, code)
 );
 CREATE INDEX IF NOT EXISTS idx_ocov_session ON option_coverage (session);
+-- Added after the first live session; existing rows get NULL.
+-- sqlite has no IF NOT EXISTS for columns, so the collector
+-- calls _ensure_columns() rather than failing on a second run.
 
 -- Which contracts were actually subscribed on a given day.
 --
@@ -178,19 +188,45 @@ def _ts_str(ts) -> str:
     return str(ts)
 
 
+def _locked(fn):
+    """Hold the store's lock for the whole method body.
+
+    Not per statement: the unit that must not interleave is
+    `executemany(...)` followed by its `commit()`, and locking each call
+    separately leaves exactly the window that produced two
+    "cannot commit - no transaction is active" errors on 2026-11-23.
+    """
+    @functools.wraps(fn)
+    def inner(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+    return inner
+
+
 class OptionTickStore:
     def __init__(self, db_path: str | pathlib.Path = _DEFAULT_DB,
                  read_only: bool = False):
         self._path = pathlib.Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # check_same_thread=False is what makes the lock necessary, not
+        # what makes it safe: it only silences sqlite3's own guard.
+        self._lock = threading.RLock()
         self._con = sqlite3.connect(str(self._path), check_same_thread=False)
         if read_only:
             self._con.execute("PRAGMA busy_timeout=30000")
         else:
             self._con.executescript(_SETUP_SQL)
+            # CREATE TABLE IF NOT EXISTS does nothing to a table that
+            # already exists, so a column added after the first live file
+            # never reaches the database it was added to describe. Run on
+            # every writable open rather than from one call site -- there
+            # are three, and the one that matters most (--reconcile-only)
+            # is the one most likely to be forgotten.
+            self._ensure_columns()
 
     # ── write ──────────────────────────────────────────────────────────────
 
+    @_locked
     def upsert_contracts(self, rows: Iterable[dict]) -> int:
         """Record what each subscribed contract code means. Idempotent."""
         data = [(r["code"], r["underlying"], r["expiry"], float(r["strike"]),
@@ -205,6 +241,7 @@ class OptionTickStore:
         self._con.commit()
         return cur.rowcount
 
+    @_locked
     def insert_ticks(self, rows: Iterable[dict]) -> int:
         """Insert prints, skipping duplicates. Returns rows ACTUALLY written.
 
@@ -226,6 +263,7 @@ class OptionTickStore:
         self._con.commit()
         return cur.rowcount
 
+    @_locked
     def insert_greeks(self, rows: Iterable[dict]) -> int:
         data = [(r["code"], _ts_str(r["ts"]), r.get("delta"), r.get("gamma"),
                  r.get("iv"), r.get("oi"), r.get("spot"), r.get("upd"),
@@ -240,6 +278,7 @@ class OptionTickStore:
         self._con.commit()
         return cur.rowcount
 
+    @_locked
     def record_subscriptions(self, session: str, codes: Iterable[str]) -> int:
         """Note which contracts were subscribed for this trading day."""
         now = _ts_str(datetime.now())
@@ -252,12 +291,14 @@ class OptionTickStore:
         self._con.commit()
         return cur.rowcount
 
+    @_locked
     def subscribed_on(self, session: str) -> list[str]:
         """Codes subscribed that day, for reconciliation to score against."""
         return [r[0] for r in self._con.execute(
             "SELECT code FROM option_subscriptions WHERE session = ? ORDER BY code",
             (session,))]
 
+    @_locked
     def our_volume_for(self, session: str, codes: list[str]) -> dict[str, tuple[int, int]]:
         """{code: (contracts, prints)} stored for that trading day.
 
@@ -276,19 +317,59 @@ class OptionTickStore:
                 out[c] = (int(v or 0), int(n))
         return out
 
+    @_locked
+    def _ensure_columns(self) -> None:
+        """Add columns that post-date an existing database file.
+
+        _SETUP_SQL only runs CREATE TABLE IF NOT EXISTS, so a column added
+        later never reaches a database that already exists -- and this one
+        does exist, on the machine that produced the session the column is
+        there to describe.
+        """
+        have = {r[1] for r in self._con.execute(
+            "PRAGMA table_info(option_coverage)")}
+        if "first_ts" not in have:
+            self._con.execute(
+                "ALTER TABLE option_coverage ADD COLUMN first_ts TEXT")
+            self._con.commit()
+
+    @_locked
+    def first_ts_for(self, session: str, codes: list[str]) -> dict[str, str]:
+        """Earliest stored print per contract for one session.
+
+        Reconcile divides by the feed's WHOLE-SESSION volume, so without
+        this a late start cannot be told from data loss. 2026-11-23 read
+        83.5% entirely because the tape began at 09:39:29.
+        """
+        found: dict[str, str] = {}
+        for i in range(0, len(codes), 500):
+            chunk = codes[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = self._con.execute(
+                "SELECT code, MIN(ts) FROM option_ticks "
+                f"WHERE substr(ts,1,10)=? AND code IN ({marks}) GROUP BY code",
+                (session, *chunk)).fetchall()
+            for code, ts in rows:
+                if ts:
+                    found[code] = ts
+        return found
+
+    @_locked
     def record_coverage(self, session: str, rows: Iterable[dict]) -> int:
+        now = _ts_str(datetime.now())
         data = [(session, r["code"], r.get("feed_vol"), int(r["our_vol"]),
-                 int(r["our_ticks"]), _ts_str(datetime.now()))
+                 int(r["our_ticks"]), now, r.get("first_ts"))
                 for r in rows]
         if not data:
             return 0
         cur = self._con.executemany(
             "INSERT OR REPLACE INTO option_coverage "
-            "(session, code, feed_vol, our_vol, our_ticks, checked_at) "
-            "VALUES (?,?,?,?,?,?)", data)
+            "(session, code, feed_vol, our_vol, our_ticks, checked_at, first_ts) "
+            "VALUES (?,?,?,?,?,?,?)", data)
         self._con.commit()
         return cur.rowcount
 
+    @_locked
     def coverage_summary(self, session: str) -> dict:
         row = self._con.execute(
             "SELECT COUNT(*), SUM(feed_vol), SUM(our_vol), SUM(our_ticks), "
@@ -301,6 +382,7 @@ class OptionTickStore:
 
     # ── housekeeping ───────────────────────────────────────────────────────
 
+    @_locked
     def prune_before(self, days: int) -> tuple[int, int]:
         """Drop ticks and greeks older than *days*. Returns (ticks, greeks).
 
@@ -315,6 +397,7 @@ class OptionTickStore:
         self._con.commit()
         return t, g
 
+    @_locked
     def checkpoint(self) -> None:
         try:
             self._con.execute("PRAGMA wal_checkpoint(PASSIVE)")
@@ -323,6 +406,7 @@ class OptionTickStore:
 
     # ── read ───────────────────────────────────────────────────────────────
 
+    @_locked
     def session_counts(self, since: str) -> tuple[int, int]:
         t = self._con.execute(
             "SELECT COUNT(*) FROM option_ticks WHERE ts >= ?", (since,)).fetchone()[0]
@@ -330,6 +414,7 @@ class OptionTickStore:
             "SELECT COUNT(*) FROM option_greeks WHERE ts >= ?", (since,)).fetchone()[0]
         return t, g
 
+    @_locked
     def contracts_for(self, underlying: str, expiry: str | None = None) -> list[dict]:
         sql = "SELECT code, underlying, expiry, strike, opt_type FROM option_contracts WHERE underlying = ?"
         args: list = [underlying]
@@ -339,6 +424,7 @@ class OptionTickStore:
         cols = ("code", "underlying", "expiry", "strike", "opt_type")
         return [dict(zip(cols, r)) for r in self._con.execute(sql, args)]
 
+    @_locked
     def close(self) -> None:
         try:
             self._con.close()
