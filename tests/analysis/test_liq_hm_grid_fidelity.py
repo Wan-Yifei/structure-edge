@@ -310,6 +310,12 @@ def _marker_stub(min_vol: float):
         _raw_snaps=_book([("BID", 10.00, 900), ("ASK", 10.01, 100)]),
         _min_vol_spin=types.SimpleNamespace(value=lambda: min_vol),
         _n_price_spin=types.SimpleNamespace(value=lambda: 100),
+        # The detectors take the GRID's width, not the control's value: it
+        # is only used to bound-check `0 <= p_bin < n_price`, and the two
+        # numbers can now differ because the count is derived from the
+        # window. Passing the control's value while the grid ran wider
+        # silently discarded every marker above that index.
+        _bid_grid=np.zeros((4, 100)), _ask_grid=np.zeros((4, 100)),
         _col_secs_spin=types.SimpleNamespace(value=lambda: 1),
         _simb_levels_spin=types.SimpleNamespace(value=lambda: 3),
         _simb_ratio_spin=types.SimpleNamespace(value=lambda: 3.0),

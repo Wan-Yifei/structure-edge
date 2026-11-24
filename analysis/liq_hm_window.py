@@ -683,6 +683,20 @@ class LiqHmWindow(QWidget):
         self._clock_corr: float = 0.0
 
         # Rolling grid (index 0 = oldest visible column)
+        # BOTH dimensions here can disagree with the controls that
+        # actually govern them, and neither constant is consulted again:
+        # the stored settings are max_cols=720 against MAX_COLS_DEF=240,
+        # and the bin count is derived from the price window rather than
+        # from N_PRICE at all. This array is safe for exactly one reason --
+        # _bin_size is still 0.0, and every reader of the grid except
+        # _paint_column is behind a `bin_size <= 0` guard. _paint_column is
+        # reachable only through _push_column, and nothing pushes before
+        # set_code() has run -- which calls _reset_grid() in the same
+        # breath as setting _code, reallocating from the controls.
+        #
+        # (Not "every caller of _push_column runs _maybe_init_price_range
+        # first": the push branch of _on_tick does not. The guarantee comes
+        # from set_code, not from the call sites.)
         self._bid_grid = np.zeros((MAX_COLS_DEF, N_PRICE), dtype=np.float64)
         self._ask_grid = np.zeros((MAX_COLS_DEF, N_PRICE), dtype=np.float64)
         self._col_ts:  list[datetime] = []
@@ -866,21 +880,23 @@ class LiqHmWindow(QWidget):
         self._n_price_spin.setSingleStep(20)
         self._n_price_spin.setValue(vcfg.liq("n_price"))
         self._n_price_spin.setToolTip(
-            "Price-axis resolution: number of bands the current price span is\n"
-            "divided into. Higher = finer bands (each one covers less price\n"
-            "range) at the cost of thinner rows. Current $/band is shown in\n"
-            "the legend below.\n\n"
-            "It also decides whether a wall label can say 'pulled / eaten':\n"
-            "that attribution matches prints against the band they fall in,\n"
-            "so it is refused once the band is wider than $0.06. The legend\n"
-            "names the Bins needed whenever it is being refused.\n\n"
-            "Clearing that threshold is the MINIMUM, not a clean read. One\n"
-            "band aggregates every level inside it, so the wider it is the\n"
-            "more of a neighbour's size and volume is credited to this wall.\n"
-            "On a high-priced instrument the band stays coarse well past the\n"
-            "threshold -- measured on QQQ over a single session, a band at\n"
-            "the default resolution held about 11 price levels against about\n"
-            "3 on a $50 instrument. Prefer more Bins than the minimum.")
+            "Price bins in the window -- a FLOOR, not the exact count.\n\n"
+            "The window follows the near-touch book, with a floor of "
+            "+/-1% of\nprice. Which of the two decides it varies by "
+            "symbol, so one fixed\ncount gives very different bands: "
+            "measured, SOXL $0.024 (its own book\nis wider than the floor, "
+            "and the band does not move with price) and\nQQQ $0.146 (the "
+            "floor decides it in every snapshot).\n\n"
+            "The wall labels need <= $0.06 per band, so the count is raised "
+            "above\nthis floor whenever the band would miss that.\n\n"
+            "So on a high-priced symbol the grid can be finer than the "
+            "number\nshown here, and nudging this up one step may change "
+            "nothing you can\nsee. The legend's $X/band is always the real "
+            "figure.\n\n"
+            "Raising it further still works -- finer than the gate needs is "
+            "your\ncall. It costs grid memory and render time, and past "
+            "about one cent\nper band most rows are structurally empty."
+        )
         self._n_price_spin.valueChanged.connect(self._on_n_price_changed)
         row1.addWidget(self._n_price_spin)
 
@@ -1668,29 +1684,33 @@ class LiqHmWindow(QWidget):
         new_min = lo  - span * 0.5
         new_max = hi  + span * 0.5
 
-        n_price = self._n_price_spin.value()
+        n_price = self._bins_for_window(new_max - new_min)
         if self._bin_size == 0.0:
-            # NOTE, before changing where n_price comes from: this branch
-            # sets bin_size WITHOUT reallocating the grids, unlike the
-            # rebuild branch below. It is only correct because n_price here
-            # is the same value _reset_grid (or __init__) allocated with.
+            # Reallocated HERE, which this branch did not used to do.
+            # It was correct only while n_price was whatever _reset_grid
+            # had allocated with. Now that the count comes from the window,
+            # a mismatch sends every level past the end of the array --
+            # _paint_column drops those with a silent `continue`, so the
+            # panel goes black with no error, and nothing recovers it: the
+            # window itself is fine, so touch_outside / too_wide / out_lo /
+            # out_hi all stay quiet. Modelled: 240 bins against a 100-wide
+            # grid puts the book at bins 115-124, 0 of 41 levels painted.
             #
-            # Make n_price differ from the grid's real width and nothing
-            # raises: _paint_column drops out-of-range bins with a silent
-            # `continue`, and the book sits at the centre of the window, so
-            # EVERY level lands past the end. Modelled for a bins=240 grid
-            # left 100 wide: levels map to bins 115-124, 0 of 41 painted,
-            # and the panel goes black with no error. It does not self-heal
-            # either -- none of the rebuild triggers (touch_outside,
-            # too_wide, out_lo/out_hi) fire, because the window itself is
-            # perfectly fine.
-            #
-            # So: any scheme that derives n_price (e.g. raising it until the
-            # band clears the pulled/eaten gate) has to reallocate here too,
-            # the way the rebuild branch does.
+            # max_cols from the spin box, not MAX_COLS_DEF: _push_column
+            # decides when to roll from that same control, and a grid with
+            # a different row count rolls in the wrong place.
             self._price_min = new_min
             self._price_max = new_max
             self._bin_size  = (new_max - new_min) / n_price
+            max_cols = self._max_cols_spin.value()
+            self._bid_grid = np.zeros((max_cols, n_price), dtype=np.float64)
+            self._ask_grid = np.zeros((max_cols, n_price), dtype=np.float64)
+            # Defensive and cheap: bin_size == 0 implies no columns, since
+            # the only place that zeroes it also clears them. A no-op today;
+            # it pins that invariant instead of leaving it to be re-derived
+            # from four separate early returns.
+            if self._col_ts:
+                self._clear_columns()
             self._update_legend()   # bin_size just became known -- show it
         else:
             # Rebuild trigger threshold is a fraction of *price* (mid), not
@@ -2164,7 +2184,11 @@ class LiqHmWindow(QWidget):
 
         bucket_to_idx = self._build_bucket_to_idx()
         min_vol = self._min_vol_spin.value()
-        n_price = self._n_price_spin.value()
+        # The GRID's width. These three use it only to bound-check
+        # `0 <= p_bin < n_price`, so passing the control's value while
+        # the grid runs wider discards every marker above that index --
+        # on QQQ the touch sits at bins 112-116, which is all of them.
+        n_price = self._bid_grid.shape[1]
 
         if has_book and self._ice_cb.isChecked():
             from analysis.orderflow_detect import detect_icebergs
@@ -2701,6 +2725,66 @@ class LiqHmWindow(QWidget):
                 out.append(txt)
         return out
 
+    def _bins_needed_for_gate(self, width: float) -> int:
+        """Bins a `width`-dollar window needs before the band clears the
+        pulled/eaten gate, rounded up to a step the control can hold.
+
+        One function, because there are two callers that must never
+        disagree: _wall_fate_min_bins puts this number in the legend as
+        advice, and _bins_for_window acts on it. Two copies drifted the
+        first time one of them gained a floating-point guard -- the legend
+        said 280 while the grid ran 300.
+
+        The guard: ceil() answers in exact arithmetic, the gate asks in
+        floating point. A 16.8 window gives 280, and 16.8/280/2 is
+        0.030000000000000002 -- one ULP over the 0.03 half-band, so the
+        suffix stays suppressed after paying for all 280 bins. Step up
+        until the division the gate itself performs comes out under.
+        """
+        step = self._n_price_spin.singleStep() or 1
+        # Both callers guard this today, but a zero or negative width here
+        # is a ZeroDivisionError in the loop below rather than an answer,
+        # and nothing in the signature says the caller must check.
+        if width <= 0:
+            return self._n_price_spin.value()
+        need = math.ceil(math.ceil(width / _WALL_FATE_MAX_BAND) / step) * step
+        cap = self._n_price_spin.maximum()
+        while need <= cap and width / need / 2 > _WALL_FATE_MAX_HALF:
+            need += step
+        return need
+
+    def _bins_for_window(self, width: float) -> int:
+        """Bins for a window `width` dollars wide: the floor, raised if the
+        band would otherwise be too wide for pulled/eaten to mean anything.
+
+        Same arithmetic as _wall_fate_min_bins, which computes the advice;
+        this one acts on it so the user does not have to.
+
+        PURE -- it does not touch the spin box. That stays the user's floor
+        and every caller recomputes from it, so the count drops back when
+        the window narrows or the symbol changes. Writing the control would
+        make this a one-way ratchet: one wide pre-market book would pin it
+        at the maximum for the session and carry that into the next symbol.
+
+        Falls back to the FLOOR, not the maximum, when even the maximum
+        cannot clear the gate. Spending 500 bins of grid and render time to
+        still not get the suffix buys nothing, and the legend's "too wide at
+        any Bins" is the honest thing to show there.
+
+        CALLERS MUST REALLOCATE THE GRIDS with the number this returns, in
+        the same breath as setting _bin_size. A count that differs from the
+        grid's real width sends every level past the end of the array, and
+        _paint_column drops those with a silent `continue`.
+        """
+        spin = self._n_price_spin
+        cur = spin.value()
+        if width <= 0:
+            return cur
+        need = self._bins_needed_for_gate(width)
+        if need <= cur:
+            return cur
+        return need if need <= spin.maximum() else cur
+
     def _wall_fate_min_bins(self) -> int | None:
         """Bins needed before `_wall_fate` would speak, or None if unreachable.
 
@@ -2728,10 +2812,18 @@ class LiqHmWindow(QWidget):
         """
         if self._bin_size <= 0:
             return None
-        width = self._bin_size * self._n_price_spin.value()
-        need = math.ceil(width / _WALL_FATE_MAX_BAND)
-        step = self._n_price_spin.singleStep() or 1
-        need = math.ceil(need / step) * step
+        # The GRID's width, not the control's value: the two are no
+        # longer guaranteed to be the same number, and this function's own
+        # docstring says it must not drift from what the gate judges.
+        #
+        # NOT a bug that was observed. With the derived count in place the
+        # only state that reaches this line is the fall-back one -- where
+        # even the maximum cannot clear the gate, so _bins_for_window
+        # returns the floor and the grid is exactly that wide. Reading the
+        # control would give the same answer there. This reads the grid so
+        # the function does not depend on that coincidence holding.
+        width = self._bin_size * self._bid_grid.shape[1]
+        need = self._bins_needed_for_gate(width)
         return need if need <= self._n_price_spin.maximum() else None
 
     def _wall_fate(self, grid, bi: int, lo: int, hi: int,
@@ -3024,7 +3116,9 @@ class LiqHmWindow(QWidget):
             hi = lo + 0.01
 
         self._hist_bucket = bucket
-        n_price = self._n_price_spin.value()
+        # From THIS window. A replay can span a very different price
+        # range than whatever the live panel is showing.
+        n_price = self._bins_for_window(hi - lo)
         self._price_min, self._price_max = lo, hi
         self._bin_size = (hi - lo) / n_price
 

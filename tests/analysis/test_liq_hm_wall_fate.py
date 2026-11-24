@@ -270,6 +270,14 @@ class TestItSaysWhyItIsSilent:
         win._n_price_spin.setValue(n_price)
         win._price_min, win._price_max = lo, hi
         win._bin_size = (hi - lo) / n_price
+        # The grid too. The advice reads its width rather than the spin box
+        # now that the two can differ -- the count is derived from the
+        # window and the grid is allocated with it. Setting bin_size alone
+        # models a window that cannot occur, and the advice computed from
+        # it would be wrong by exactly the ratio under test.
+        import numpy as _np
+        win._bid_grid = _np.zeros((4, n_price), dtype=float)
+        win._ask_grid = _np.zeros((4, n_price), dtype=float)
         win._update_legend()
         return win._legend_lbl.text()
 
