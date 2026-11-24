@@ -50,7 +50,7 @@ import signal
 import sys
 import threading
 import time as time_mod
-from datetime import datetime, time
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -74,7 +74,17 @@ _CHECKPOINT_EVERY = 10       # watchdog ticks between WAL checkpoints
 # the quota fields and the greeks-lag distribution are what a first live
 # session exists to measure, and none of them can be read with the market shut.
 _TELEMETRY_EVERY = 120  # overridden to 2 only in the smoke test below
-_MAX_CHAINS = 8              # get_option_chain is limited to 10 per 30 s
+_MAX_CHAINS = 8              # expiries to collect -- NOT chain calls
+
+# Span of one get_option_chain call, in days. The API documents a 30-day
+# limit on start..end, so a 45-day window is two calls -- against a budget
+# of ten per thirty seconds that is account-wide, and therefore shared by
+# every underlying being collected at once.
+#
+# Chunked by SPAN, not by count: eight SOXL weeklies reach 49 days apart
+# while eight QQQ dailies span about eleven, so fixed-size slices would ask
+# for a range the API refuses for one and waste a call on the other.
+_CHAIN_SPAN_DAYS = 28
 
 _ET = ZoneInfo("America/New_York")
 # US equity options trade 09:30-16:00, with late prints to about 16:15. The
@@ -135,6 +145,30 @@ def _score_contracts(ctx, rows: list[dict]) -> tuple[list[dict], int]:
     return rows, unscored
 
 
+def _chunk_by_span(expiries: list[str], span_days: int) -> list[list[str]]:
+    """Group sorted expiry dates into runs no wider than `span_days`."""
+    out: list[list[str]] = []
+    for e in expiries:
+        # Skipped, not raised. The SDK substitutes a single space for a
+        # missing strikeTime (quote_query.py:3576 -- `optional` in the
+        # proto, unlike the distance field beside it) and
+        # get_near_expiry_dates appends it unchecked on its `dist` branch.
+        # The per-expiry loop this replaced asked OpenD for `start=' '`,
+        # got nothing back and carried on one expiry short; raising here
+        # would turn that into no session at all, since contracts are
+        # picked once per run.
+        try:
+            when = date.fromisoformat(e)
+        except ValueError:
+            log.warning("skipping malformed expiry %r from the ladder", e)
+            continue
+        if out and (when - date.fromisoformat(out[-1][0])).days <= span_days:
+            out[-1].append(e)
+        else:
+            out.append([e])
+    return out
+
+
 def pick_contracts(ctx, code: str, pct: float, quota: int = _QUOTA,
                    days: int = 45) -> tuple[list[dict], dict]:
     """Nearest expiry, strikes within +/-pct% of spot, capped at *quota*.
@@ -167,13 +201,39 @@ def pick_contracts(ctx, code: str, pct: float, quota: int = _QUOTA,
     # chain's delta-weighted flow while leaving 81% of the subscription
     # quota unused.
     lo, hi = spot * (1 - pct / 100), spot * (1 + pct / 100)
+    off_range = 0
     rows = []
-    for expiry in expiries:
-        ret, chain = ctx.get_option_chain(code, start=expiry, end=expiry)
+    want = set(expiries)
+    # Separate from `rows`: a chain can answer perfectly for an expiry that
+    # happens to have no strike inside the +/-pct band, and comparing
+    # against the filtered rows reported that as a MISSING chain. Measured
+    # once on a synthetic ladder: "covered 5 of 6, MISSING ['2026-12-11']"
+    # while the chain had answered for it.
+    answered: set[str] = set()
+    # Ranges, not one call per expiry -- see _CHAIN_SPAN_DAYS for why the
+    # per-expiry version was expensive enough to matter.
+    for chunk in _chunk_by_span(expiries, _CHAIN_SPAN_DAYS):
+        ret, chain = ctx.get_option_chain(code, start=chunk[0], end=chunk[-1])
         if ret != RET_OK or chain is None or chain.empty:
-            log.warning("chain fetch failed for %s: %s", expiry, str(chain)[:100])
+            log.warning("chain fetch failed for %s..%s: %s",
+                        chunk[0], chunk[-1], str(chain)[:100])
             continue
         for _, r in chain.iterrows():
+            # Expiry FIRST, band second. `answered` has to record that the
+            # chain replied for this expiry at all, and reading it after
+            # the band filter made it a count of in-band rows instead --
+            # which reported a perfectly good chain as MISSING whenever an
+            # expiry had no strike inside +/-pct%.
+            #
+            # From the ROW, not a loop variable: a range answers for every
+            # expiry inside it, including ones this run did not ask for, so
+            # anything outside the requested set is dropped rather than
+            # quietly widening the selection past _MAX_CHAINS.
+            expiry = str(r.get("strike_time") or "")[:10]
+            if expiry not in want:
+                off_range += 1
+                continue
+            answered.add(expiry)
             k = r.get("strike_price")
             if k is None or not (lo <= float(k) <= hi):
                 continue
@@ -184,7 +244,21 @@ def pick_contracts(ctx, code: str, pct: float, quota: int = _QUOTA,
                 "opt_type": "CALL" if "CALL" in t else ("PUT" if "PUT" in t else t),
             })
     if not rows:
-        raise RuntimeError(f"no strikes inside +/-{pct}% of {spot:.2f}")
+        # The band is the usual reason, but not the only one: if every row
+        # carried an expiry outside `want` the band is innocent and the
+        # ladder is the suspect, and a message about strike prices would
+        # send the next reader to the wrong place.
+        raise RuntimeError(
+            f"no strikes inside +/-{pct}% of {spot:.2f} "
+            f"({off_range} rows dropped for being outside the requested "
+            f"expiries)")
+    if answered != want:
+        # Compared against what the CHAIN returned, not against the rows
+        # that survived the band filter. Named rather than counted: a
+        # missing expiry is gone for the whole session, because contracts
+        # are picked once per run.
+        log.warning("chain covered %d of %d expiries; MISSING %s",
+                    len(answered), len(want), sorted(want - answered))
 
     # Rank by |delta| x OI, which is what the indicator actually sums -- not
     # by distance from spot. Distance ranks a near-dated 20-delta strike
