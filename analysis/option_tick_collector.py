@@ -177,6 +177,27 @@ def _score_contracts(ctx, rows: list[dict]) -> tuple[list[dict], int]:
     return rows, unscored
 
 
+def _is_rate_limited(msg: str) -> bool:
+    """Is this refusal the chain quota rather than a transport fault?
+
+    The two call for opposite responses and OpenD distinguishes them in
+    words: a timeout says `PacketErr.Timeout`, a refusal says the limit out
+    loud -- "获取期权链频率太高,请求失败,每30秒最多10次。" (seen in
+    scripts/viewer.log on 2026-11-25). Matched on the digits and on the
+    English the SDK uses elsewhere, so a translated build still trips it.
+    """
+    # Normalised once, before any test touches it. The first version
+    # guarded only the lowercased copy and read the raw argument for the
+    # Chinese substrings, so None raised TypeError -- on the failure path,
+    # which is to say it would have taken the collector down at the one
+    # moment this function exists to handle.
+    text = msg or ""
+    low = text.lower()
+    return ("频率太高" in text or "每30秒" in text
+            or "frequency" in low or "too frequent" in low
+            or "rate limit" in low)
+
+
 def pick_contracts(ctx, code: str, pct: float, quota: int = _QUOTA,
                    days: int = 45) -> tuple[list[dict], dict]:
     """Nearest expiry, strikes within +/-pct% of spot, capped at *quota*.
@@ -221,11 +242,46 @@ def pick_contracts(ctx, code: str, pct: float, quota: int = _QUOTA,
     # Ranges, not one call per expiry -- see strategy.option.chain_range for
     # the budget the per-expiry version blew, and for why the span rather
     # than a count decides where the chunks fall.
+    chunks_failed = 0
     for chunk in _chunk_by_span(expiries, _CHAIN_SPAN_DAYS):
-        ret, chain = ctx.get_option_chain(code, start=chunk[0], end=chunk[-1])
-        if ret != RET_OK or chain is None or chain.empty:
-            log.warning("chain fetch failed for %s..%s: %s",
-                        chunk[0], chunk[-1], str(chain)[:100])
+        # Retried once, because this function runs ONCE per process and a
+        # chunk is now several expiries. 2026-11-25 15:41 is the case: one
+        # PacketErr.Timeout took QQQ's only chunk, pick_contracts raised,
+        # the process died, and the collector spent three backoff rounds --
+        # about a minute of tape -- getting back in. SOXL survived the SAME
+        # timeout in the same second because its seven expiries split into
+        # two chunks and it only lost one.
+        #
+        # That is the trade ranges made: far fewer calls, but a
+        # single-chunk underlying has no partial degradation left. A retry
+        # buys it back for at most one extra call, and only on failure --
+        # against a budget of ten per thirty seconds.
+        chain = None
+        for attempt in (1, 2):
+            ret, chain = ctx.get_option_chain(code, start=chunk[0],
+                                              end=chunk[-1])
+            if ret == RET_OK and chain is not None and not chain.empty:
+                break
+            why = str(chain)[:100]
+            log.warning("chain fetch failed for %s..%s (attempt %d): %s",
+                        chunk[0], chunk[-1], attempt, why)
+            chain = None
+            # Transport hiccups are worth another go; a quota refusal is
+            # NOT. Retrying because the budget is full is how a retry
+            # manufactures the next failure -- worst case here is two
+            # expiry-date calls plus four range requests across both
+            # collectors restarting together, against ten per thirty
+            # seconds, and the failure path is three backoff rounds over
+            # about a minute. So the retry hands back exactly the headroom
+            # the ranges were introduced to win.
+            if _is_rate_limited(why):
+                log.warning("  not retrying: that is the quota talking, and "
+                            "asking again now is what spends it")
+                break
+            if attempt == 1:
+                time_mod.sleep(2.0)
+        if chain is None:
+            chunks_failed += 1
             continue
         for _, r in chain.iterrows():
             # Expiry FIRST, band second. `answered` has to record that the
@@ -253,6 +309,17 @@ def pick_contracts(ctx, code: str, pct: float, quota: int = _QUOTA,
                 "opt_type": "CALL" if "CALL" in t else ("PUT" if "PUT" in t else t),
             })
     if not rows:
+        # Three different causes, and the message has to name the right one
+        # or the next reader tunes the wrong knob. On 2026-11-25 15:41 this
+        # said "no strikes inside +/-15.0% of 629.83" when every chunk had
+        # timed out -- the band was innocent, the chain was empty, and the
+        # only hint was a WARNING one line above the traceback. Someone
+        # reading just the exception would have gone and changed --pct.
+        if chunks_failed:
+            raise RuntimeError(
+                f"the chain returned nothing: {chunks_failed} of "
+                f"{len(_chunk_by_span(expiries, _CHAIN_SPAN_DAYS))} range "
+                f"requests failed even after a retry. NOT a --pct problem")
         # The band is the usual reason, but not the only one: if every row
         # carried an expiry outside `want` the band is innocent and the
         # ladder is the suspect, and a message about strike prices would

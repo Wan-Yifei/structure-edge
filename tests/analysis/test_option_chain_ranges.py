@@ -252,3 +252,155 @@ class TestMissingMeasuresTheChainNotTheBand:
         missing = [r.getMessage() for r in caplog.records
                    if "MISSING" in r.getMessage()]
         assert not missing, missing
+
+
+# ── a single-chunk underlying has no partial degradation left ────────────────
+#
+# Ranges bought budget headroom and sold the ability to lose a little. On
+# 2026-11-25 15:41 one PacketErr.Timeout hit both collectors in the same
+# second: SOXL's seven expiries split into two chunks, so it lost one and
+# reported "covered 5 of 7"; QQQ's eight fit in ONE chunk, so it got zero
+# rows, pick_contracts raised, the process died, and three backoff rounds --
+# about a minute of tape -- went into getting back in.
+#
+# pick_contracts runs once per process, so a transient failure on the only
+# call is not a degradation, it is the session.
+
+
+class _TimeoutOnce(_Ctx):
+    """Fails the first attempt at every range, then answers normally."""
+
+    def __init__(self, expiries, fail_times=1, **kw):
+        super().__init__(expiries, **kw)
+        self.attempts = 0
+        self._fail_times = fail_times
+
+    def get_option_chain(self, code, start=None, end=None, **kw):
+        self.attempts += 1
+        if self.attempts <= self._fail_times:
+            return -1, "PacketErr.Timeout"
+        return super().get_option_chain(code, start=start, end=end, **kw)
+
+
+def test_a_transient_timeout_is_retried_not_fatal(monkeypatch):
+    import analysis.option_tick_collector as m
+    import strategy.option.gex as gex
+
+    monkeypatch.setattr(gex, "get_near_expiry_dates",
+                        lambda *a, **k: QQQ_DAILIES)
+    monkeypatch.setattr(m.time_mod, "sleep", lambda s: None)
+    ctx = _TimeoutOnce(QQQ_DAILIES)
+
+    contracts, info = m.pick_contracts(ctx, "US.QQQ", 80.0, quota=10)
+
+    assert contracts, "one timeout on the only chunk killed the selection"
+    assert ctx.attempts == 2, "the chunk was not retried exactly once"
+
+
+def test_a_persistent_failure_says_it_was_the_chain(monkeypatch):
+    """And not --pct. The old message named the moneyness band while every
+    chunk had timed out, so the only honest hint sat in a WARNING above the
+    traceback -- someone reading the exception would have changed the wrong
+    knob."""
+    import analysis.option_tick_collector as m
+    import strategy.option.gex as gex
+
+    monkeypatch.setattr(gex, "get_near_expiry_dates",
+                        lambda *a, **k: QQQ_DAILIES)
+    monkeypatch.setattr(m.time_mod, "sleep", lambda s: None)
+    ctx = _TimeoutOnce(QQQ_DAILIES, fail_times=99)
+
+    with pytest.raises(RuntimeError) as exc:
+        m.pick_contracts(ctx, "US.QQQ", 80.0, quota=10)
+
+    msg = str(exc.value)
+    assert "chain returned nothing" in msg, msg
+    assert "NOT a --pct problem" in msg, msg
+    assert "no strikes inside" not in msg, msg
+
+
+def test_the_retry_costs_one_extra_call_not_a_loop(monkeypatch):
+    """Against a budget of ten chain calls per thirty seconds, account-wide:
+    a retry that looped would be the original problem again."""
+    import analysis.option_tick_collector as m
+    import strategy.option.gex as gex
+
+    monkeypatch.setattr(gex, "get_near_expiry_dates",
+                        lambda *a, **k: QQQ_DAILIES)
+    monkeypatch.setattr(m.time_mod, "sleep", lambda s: None)
+    ctx = _TimeoutOnce(QQQ_DAILIES, fail_times=99)
+
+    with pytest.raises(RuntimeError):
+        m.pick_contracts(ctx, "US.QQQ", 80.0, quota=10)
+
+    # One chunk for the QQQ ladder, two attempts at it. Not three, not ten.
+    assert ctx.attempts == 2, ctx.attempts
+
+
+class TestTheRetryDoesNotSpendTheBudgetItSaved:
+    """A retry fires exactly when the budget is most likely to be strained,
+    so retrying the wrong refusal manufactures the next failure.
+
+    Worst case for one restart is two expiry-date calls plus four range
+    requests across both collectors coming up together, against ten per
+    thirty seconds -- and the failure path is three backoff rounds over
+    about a minute. Retrying a quota refusal hands back exactly the headroom
+    the ranges were introduced to win. OpenD says which is which: a timeout
+    reads `PacketErr.Timeout`, a refusal names the limit out loud.
+    """
+
+    def test_a_quota_refusal_is_not_retried(self, monkeypatch):
+        import analysis.option_tick_collector as m
+        import strategy.option.gex as gex
+
+        monkeypatch.setattr(gex, "get_near_expiry_dates",
+                            lambda *a, **k: QQQ_DAILIES)
+        monkeypatch.setattr(m.time_mod, "sleep", lambda s: None)
+
+        class _Refused(_Ctx):
+            def __init__(self, expiries):
+                super().__init__(expiries)
+                self.attempts = 0
+
+            def get_option_chain(self, code, start=None, end=None, **kw):
+                self.attempts += 1
+                return -1, "获取期权链频率太高,请求失败,每30秒最多10次。"
+
+        ctx = _Refused(QQQ_DAILIES)
+        with pytest.raises(RuntimeError, match="chain returned nothing"):
+            m.pick_contracts(ctx, "US.QQQ", 80.0, quota=10)
+        assert ctx.attempts == 1, (
+            f"{ctx.attempts} attempts: the quota was asked again while it "
+            f"was still full")
+
+    def test_a_timeout_is_still_retried(self, monkeypatch):
+        """The distinction is the whole point -- narrowing the retry must
+        not turn it off."""
+        import analysis.option_tick_collector as m
+        import strategy.option.gex as gex
+
+        monkeypatch.setattr(gex, "get_near_expiry_dates",
+                            lambda *a, **k: QQQ_DAILIES)
+        monkeypatch.setattr(m.time_mod, "sleep", lambda s: None)
+        ctx = _TimeoutOnce(QQQ_DAILIES)
+
+        contracts, _ = m.pick_contracts(ctx, "US.QQQ", 80.0, quota=10)
+        assert contracts
+        assert ctx.attempts == 2
+
+    @pytest.mark.parametrize("msg", [
+        "获取期权链频率太高,请求失败,每30秒最多10次。",
+        "request too frequent",
+        "RATE LIMIT exceeded",
+        "每30秒最多10次",
+    ])
+    def test_the_refusal_is_recognised_in_either_language(self, msg):
+        from analysis.option_tick_collector import _is_rate_limited
+        assert _is_rate_limited(msg)
+
+    @pytest.mark.parametrize("msg", [
+        "PacketErr.Timeout", "connection reset", "", None,
+    ])
+    def test_a_transport_fault_is_not_mistaken_for_the_quota(self, msg):
+        from analysis.option_tick_collector import _is_rate_limited
+        assert not _is_rate_limited(msg)
