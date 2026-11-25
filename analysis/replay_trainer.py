@@ -51,6 +51,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.sdk_log import quiet_sdk_file_log
+from core.sdk_patches import patch_close_reason
 from feeds.fetcher import fetch_klines
 from strategy.smc.fvg import detect_fvg
 from strategy.smc.order_blocks import detect_order_blocks
@@ -2202,6 +2203,7 @@ def main(argv=None) -> None:
     # the SDK's single callback thread, and that thread then stalls
     # every push behind it. Measured at 6.6 s. See core/sdk_log.py.
     quiet_sdk_file_log()
+    patch_close_reason()
     p = argparse.ArgumentParser(description="K-line Replay Trainer")
     p.parse_args(argv)
     app = QApplication(sys.argv[:1])

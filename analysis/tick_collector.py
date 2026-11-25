@@ -22,6 +22,7 @@ from datetime import datetime
 
 from core import single_instance
 from core.sdk_log import quiet_sdk_file_log
+from core.sdk_patches import patch_close_reason
 
 logging.basicConfig(
     level=logging.INFO,
@@ -303,6 +304,7 @@ def main(argv=None):
     # at 6.6 s, long enough to drop K-line pushes and tear a hole in
     # the live chart. Detach it before any context is opened.
     quiet_sdk_file_log()
+    patch_close_reason()
     args = _parse_args(argv)
 
     # One collector per database. A scheduler only knows the processes

@@ -33,6 +33,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel, QMainWindow,
                              QPushButton, QSpinBox, QToolBar, QWidget)
 from core.sdk_log import quiet_sdk_file_log
+from core.sdk_patches import patch_close_reason
 
 _BG = "#1a1a2e"
 _FG = "#e0e0e0"
@@ -537,6 +538,7 @@ def main() -> None:
     # the SDK's single callback thread, and that thread then stalls
     # every push behind it. Measured at 6.6 s. See core/sdk_log.py.
     quiet_sdk_file_log()
+    patch_close_reason()
     app = QApplication(sys.argv)
     w = MultiVPWindow()
     if len(sys.argv) > 1:

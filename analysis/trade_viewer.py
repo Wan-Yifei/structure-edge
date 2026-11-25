@@ -78,6 +78,7 @@ from strategy.smc.fvg import detect_fvg
 from strategy.smc.order_blocks import detect_order_blocks
 from strategy.smc.kd_trend import compute_kd
 from core.sdk_log import quiet_sdk_file_log
+from core.sdk_patches import patch_close_reason
 
 # ── Performance monitor ───────────────────────────────────────────────────────
 
@@ -2996,6 +2997,7 @@ def main(argv=None):
     # the SDK's single callback thread, and that thread then stalls
     # every push behind it. Measured at 6.6 s. See core/sdk_log.py.
     quiet_sdk_file_log()
+    patch_close_reason()
     args = _parse_args(argv)
     if args.output:
         args.mode = "Historical"
