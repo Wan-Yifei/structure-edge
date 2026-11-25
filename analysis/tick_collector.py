@@ -76,14 +76,36 @@ def _classify_drops(rows: list[dict], state: dict) -> None:
     push counter, so re-sending a print cannot renumber it. A split fill's
     second leg carries a new one.
 
-    Zero-volume prints are counted SEPARATELY and deliberately. They are
-    all ODD_LOT and they are 24% of a QQQ session; `volume` arrives from
-    the SDK as a float (hpVolume) and this collector casts it with int(),
-    so a fractional-share fill becomes 0 before it reaches the key. The
-    loss there already happened at the cast, and every reader of this table
-    sums volume, so a zero row contributes exactly 0. Folding them into
-    "real prints the key ate" would inflate that count -- QQQ worst -- into
-    a number nobody would act on.
+    Zero-volume prints are counted SEPARATELY and deliberately, and the
+    cast is where they come from: `volume` arrives from the SDK as a float
+    (hpVolume) and this collector takes int() of it, so a fractional-share
+    fill becomes 0 before it ever reaches the key. Confirmed live on
+    2026-11-25 -- over 9,059 ODD_LOT prints sampled, NOT ONE arrived as
+    zero from the feed, while 0 < v < 1 fills were ordinary (QQQ 620.12 for
+    0.032138 shares). Bound that zero observation at 0.033% one-sided.
+
+    Two things that reading does NOT establish, both worth keeping straight:
+      * it is a LOW-REGIME reading. QQQ's zero-volume share swings by
+        30-minute block -- 16.4%, 33.6%, 49.0%, 52.7%, 55.2%, then back to
+        10.7% on 2026-11-25 -- and both live samples landed near 11%, the
+        lowest band of the day against a peak five times higher. What the
+        feed does in the 50% regime has not been measured.
+      * 0.033% is too tight a bound. Those 9,059 prints are one ~240-second
+        window, not 9,059 independent draws; treating each second as the
+        unit widens it to 1.24%. The claim that survives either bound is
+        the ratio, not the bound: 1.24% of the sampled flow is at most
+        ~5,000 prints against the 182,431 zero-volume rows QQQ stored in
+        one morning, so at least 97% of them are made here, not sent.
+      * in SHARES the cast takes almost nothing: 0.011%-0.019% of gross
+        volume, one or two basis points. Its real cost is ROWS -- a fill
+        flattened to 0 then collides on a key that includes volume, and
+        about 85% of the zero-volume collisions are manufactured by the
+        cast itself (measured by re-running the same classification on the
+        raw float). Non-zero collisions did not change at all.
+
+    So they are kept apart from "real prints the key ate": that count is
+    what would justify rekeying a 16.6 GB table, and folding in a loss that
+    carries no shares -- QQQ worst -- would make it unactionable.
 
     BOUNDS. The seq fallback only keeps _RECENT_SECONDS of print-seconds,
     so a repeat older than that reads as neither; the primary test has no
@@ -102,7 +124,8 @@ def _classify_drops(rows: list[dict], state: dict) -> None:
     """
     recent = state.setdefault("_recent", {})
     for r in rows:
-        per_code = recent.setdefault(r["code"], {})
+        code = r["code"]
+        per_code = recent.setdefault(code, {})
         sec = str(r["ts"])[:19]
         if sec not in per_code and len(per_code) >= _RECENT_SECONDS:
             for old in sorted(per_code)[:-(_RECENT_SECONDS - 1)]:
@@ -120,35 +143,70 @@ def _classify_drops(rows: list[dict], state: dict) -> None:
         # way round made `key_victim` over-count, and that count is what
         # would justify changing the key on a 16.6 GB table: it has to err
         # low, not high.
-        if seq is not None and seq in seqs:
-            _bump(state, "session_replayed")
-        elif label in _REPUSHED:
-            _bump(state, "session_replayed")
+        repeat = (seq is not None and seq in seqs) or label in _REPUSHED
+        if repeat:
+            # A repeat is only LOST if the key is already present; otherwise
+            # SQLite stores it. Both happen, and conflating them is what put
+            # the residual permanently negative: two CACHE rows replayed at
+            # 2026-11-24 23:52 were counted as dropped while the table shows
+            # them stored, because the collector had just restarted and the
+            # previous process never recorded them (it died at 23:22, so
+            # half an hour of both symbols is missing). Subtracting a row
+            # that was stored over-counts, and `max(0, ...)` then hid it.
+            _bump(state, "session_replayed_dropped" if key in keys
+                  else "session_replayed_stored", code)
         elif key in keys:
             _bump(state, "session_key_victim_zero" if not r["volume"]
-                  else "session_key_victim")
+                  else "session_key_victim", code)
 
         if seq is not None:
             seqs.add(seq)
         keys.add(key)
 
 
-def _bump(state: dict, name: str) -> None:
+def _bump(state: dict, name: str, code: str | None = None) -> None:
+    """Count it once overall and once for this underlying.
+
+    Per code because one collector serves several and the offline work this
+    is compared against is reported per symbol: a blended figure cannot be
+    held against it. Measured 2026-11-25 over four minutes, SOXL ran 7.94%
+    against QQQ's 5.60% -- the same direction the offline estimate gives,
+    but that is one four-minute cluster, so it says the direction agrees
+    and nothing about the size of the gap.
+    """
     state[name] = state.get(name, 0) + 1
+    if code:
+        state.setdefault("by_code", {}).setdefault(code, {})
+        state["by_code"][code][name] = (
+            state["by_code"][code].get(name, 0) + 1)
 
 
 def _drop_residual(state: dict) -> int:
-    """Dropped rows this process could not attribute to either cause.
+    """Dropped rows this process could not attribute to a cause.
 
-    Not an unknown: see the BOUNDS note in _classify_drops. It is repeats
-    older than the fallback window -- a BYDISCONN catch-up, or a restart --
-    because a real second leg cannot share a millisecond and arrive three
-    seconds late.
+    Only the classes that were actually REFUSED are subtracted --
+    `session_replayed_stored` is a repeat SQLite kept, and subtracting it is
+    what held the residual at -2 all of 2026-11-25 while `max(0, ...)` made
+    it read as a clean zero. The clamp is gone with it: a negative now means
+    a row counted as dropped was stored, which is a defect to look at, not a
+    number to floor.
+
+    What is left over is attributed rather than unknown: a row is refused
+    only if one with the same millisecond, price and size is already stored,
+    and a genuine second leg cannot arrive three seconds after the
+    millisecond it shares -- so a collision with anything older than the
+    fallback window is a repeat. The two sources are a BYDISCONN catch-up
+    and a collector restart.
+
+    One caveat on the minuend: `INSERT OR IGNORE` swallows NOT NULL and
+    CHECK violations as well as UNIQUE conflicts, so `session_dropped`
+    is not purely key collisions. Measured it is ~0 -- the classes below
+    account for all but one row of it -- but the channel exists.
     """
-    return max(0, state.get("session_dropped", 0)
-               - state.get("session_replayed", 0)
-               - state.get("session_key_victim", 0)
-               - state.get("session_key_victim_zero", 0))
+    return (state.get("session_dropped", 0)
+            - state.get("session_replayed_dropped", 0)
+            - state.get("session_key_victim", 0)
+            - state.get("session_key_victim_zero", 0))
 
 
 def _make_handler(store, state: dict):
@@ -374,15 +432,32 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
             dropped = state.get("session_dropped", 0)
             if offered:
                 log.info("Since this process started: %d ticks (%d offered, "
-                         "%d not stored = %.2f%% -- %d re-pushed, %d REAL "
-                         "prints the key ate, %d zero-volume odd lots, "
-                         "%d older repeats)",
+                         "%d not stored = %.2f%% -- %d re-pushed and refused, "
+                         "%d REAL prints the key ate, %d zero-volume odd "
+                         "lots, %d older repeats; %d re-pushed but stored)",
                          state.get("session_count", 0), offered, dropped,
                          dropped / offered * 100,
-                         state.get("session_replayed", 0),
+                         state.get("session_replayed_dropped", 0),
                          state.get("session_key_victim", 0),
                          state.get("session_key_victim_zero", 0),
-                         _drop_residual(state))
+                         _drop_residual(state),
+                         state.get("session_replayed_stored", 0))
+                # Per underlying, because the figure this is held against is
+                # reported per symbol and a blend cannot be compared to it.
+                # Only codes still configured: a symbol swapped out by
+                # TargetReloader would otherwise keep a line of its own
+                # every ten minutes for the life of the process, and this
+                # log is already 400 MB.
+                live = set(codes)
+                for c, d in sorted(state.get("by_code", {}).items()):
+                    if c not in live:
+                        continue
+                    log.info("  %s: %d key-ate, %d zero-vol, %d re-pushed "
+                             "(%d refused)", c, d.get("session_key_victim", 0),
+                             d.get("session_key_victim_zero", 0),
+                             d.get("session_replayed_stored", 0)
+                             + d.get("session_replayed_dropped", 0),
+                             d.get("session_replayed_dropped", 0))
             else:
                 log.info("This session: %d ticks",
                          state.get("session_count", 0))

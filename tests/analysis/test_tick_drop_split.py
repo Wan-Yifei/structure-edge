@@ -37,19 +37,19 @@ class TestTheTwoCausesAreToldApart:
         st: dict = {}
         _classify_drops([_row(101), _row(102)], st)
         assert st.get("session_key_victim") == 1
-        assert st.get("session_replayed", 0) == 0
+        assert st.get("session_replayed_dropped", 0) == 0
 
     def test_a_seen_seq_is_a_replay(self):
         st: dict = {}
         _classify_drops([_row(101), _row(101)], st)
-        assert st.get("session_replayed") == 1
+        assert st.get("session_replayed_dropped") == 1
         assert st.get("session_key_victim", 0) == 0
 
     def test_both_in_one_batch(self):
         st: dict = {}
         _classify_drops([_row(101), _row(102), _row(101)], st)
         assert st.get("session_key_victim") == 1
-        assert st.get("session_replayed") == 1
+        assert st.get("session_replayed_dropped") == 1
 
     def test_a_different_size_at_the_same_instant_is_neither(self):
         """Two legs the key can tell apart are both stored, so they are not
@@ -58,7 +58,7 @@ class TestTheTwoCausesAreToldApart:
         st: dict = {}
         _classify_drops([_row(101, volume=50), _row(102, volume=100)], st)
         assert st.get("session_key_victim", 0) == 0
-        assert st.get("session_replayed", 0) == 0
+        assert st.get("session_replayed_dropped", 0) == 0
 
     def test_a_different_millisecond_is_neither(self):
         """The real 2026-11-20 10:00:00 case: counter 2 and counter 7 are
@@ -82,7 +82,7 @@ class TestItDoesNotMixUpSymbols:
         st: dict = {}
         _classify_drops([_row(101, code="US.SOXL"),
                          _row(101, code="US.QQQ")], st)
-        assert st.get("session_replayed", 0) == 0
+        assert st.get("session_replayed_dropped", 0) == 0
         assert st.get("session_key_victim", 0) == 0
 
 
@@ -115,7 +115,7 @@ class TestTheBoundsAreWhatTheyClaim:
         replay."""
         st: dict = {}
         _classify_drops([_row(None), _row(None)], st)
-        assert st.get("session_replayed", 0) == 0
+        assert st.get("session_replayed_dropped", 0) == 0
         # The pair is still a key collision: identical ts, price and size.
         assert st.get("session_key_victim") == 1
 
@@ -144,20 +144,20 @@ class TestTheFeedsOwnLabelIsUsedFirst:
     def test_a_cache_row_is_a_replay_whatever_its_seq(self):
         st: dict = {}
         _classify_drops([_row(101), _row(999, push="CACHE")], st)
-        assert st.get("session_replayed") == 1
+        assert st.get("session_replayed_dropped") == 1
         assert st.get("session_key_victim", 0) == 0
 
     def test_a_bydisconn_row_is_a_replay(self):
         st: dict = {}
         _classify_drops([_row(101), _row(999, push="BYDISCONN")], st)
-        assert st.get("session_replayed") == 1
+        assert st.get("session_replayed_dropped") == 1
 
     def test_an_unlabelled_row_falls_back_to_seq(self):
         """proto2 optional: the label can be absent, and then the seq
         method still has to answer."""
         st: dict = {}
         _classify_drops([_row(101, push="N/A"), _row(101, push="N/A")], st)
-        assert st.get("session_replayed") == 1
+        assert st.get("session_replayed_dropped") == 1
 
     def test_a_missing_label_still_finds_a_key_victim(self):
         st: dict = {}
@@ -187,19 +187,67 @@ class TestZeroVolumeIsCountedApart:
         assert st.get("session_key_victim_zero") == 1
 
 
-class TestTheResidualIsAttributedNotUnknown:
+class TestTheResidualSubtractsOnlyWhatWasRefused:
+    """The residual held at -2 for a whole session and `max(0, ...)` printed
+    it as a clean zero. The cause was subtracting repeats SQLite had KEPT:
+    two CACHE rows replayed at 2026-11-24 23:52 are in the table, because
+    the collector had just restarted and the dead process never stored them.
+    A repeat is only lost when the key is already present."""
 
-    def test_it_is_what_the_two_causes_did_not_claim(self):
-        st = {"session_dropped": 10, "session_replayed": 3,
+    def test_it_is_what_the_refused_classes_did_not_claim(self):
+        st = {"session_dropped": 10, "session_replayed_dropped": 3,
               "session_key_victim": 2, "session_key_victim_zero": 1}
         assert _drop_residual(st) == 4
 
-    def test_it_never_goes_negative(self):
-        """A repeat can be labelled CACHE and still be stored -- the key
-        only drops it when a matching row is already there -- so the
-        classified counts can exceed `dropped`."""
-        st = {"session_dropped": 1, "session_replayed": 5}
-        assert _drop_residual(st) == 0
+    def test_a_repeat_that_was_stored_is_not_subtracted(self):
+        st = {"session_dropped": 4, "session_replayed_dropped": 1,
+              "session_replayed_stored": 99, "session_key_victim": 1}
+        assert _drop_residual(st) == 2
+
+    def test_it_is_allowed_to_go_negative(self):
+        """No clamp any more. A negative means a row counted as dropped was
+        in fact stored -- a defect to look at, not a number to floor. The
+        clamp is exactly what hid this for a day."""
+        st = {"session_dropped": 1, "session_replayed_dropped": 5}
+        assert _drop_residual(st) == -4
+
+    def test_the_real_session_arithmetic_leaves_exactly_one(self):
+        """2026-11-25 13:42, read off the live collector, with the split
+        applied.
+
+        EVERY replay that day was stored, not refused: the table holds five
+        rows with a non-NULL push_type and the counter recorded five
+        re-pushes, so replayed_dropped is 0. Checked against the rows, not
+        assumed -- an earlier version of this test filled in 1 and 2 for a
+        split nobody had observed and asserted the residual was 0, while its
+        own docstring said it closed to one. The residual is +1: a single
+        dropped row this process could not attribute, which is what an older
+        repeat looks like.
+        """
+        st = {"session_dropped": 189270, "session_replayed_dropped": 0,
+              "session_replayed_stored": 5,
+              "session_key_victim": 167905, "session_key_victim_zero": 21364}
+        assert _drop_residual(st) == 1
+
+
+class TestTheCountsAreKeptPerUnderlying:
+    """One collector serves several codes and the offline figure it is held
+    against is per symbol, so a blended number cannot be compared to it."""
+
+    def test_each_code_gets_its_own_tally(self):
+        st: dict = {}
+        _classify_drops([_row(1, code="US.SOXL"), _row(2, code="US.SOXL"),
+                         _row(1, code="US.QQQ")], st)
+        assert st["by_code"]["US.SOXL"]["session_key_victim"] == 1
+        assert "US.QQQ" not in st["by_code"] or             st["by_code"]["US.QQQ"].get("session_key_victim", 0) == 0
+
+    def test_the_total_still_adds_up(self):
+        st: dict = {}
+        _classify_drops([_row(1, code="US.SOXL"), _row(2, code="US.SOXL"),
+                         _row(1, code="US.QQQ"), _row(2, code="US.QQQ")], st)
+        per = sum(d.get("session_key_victim", 0)
+                  for d in st["by_code"].values())
+        assert per == st["session_key_victim"] == 2
 
 
 class TestTheBucketConstantIsNotFreelyAdjustable:
@@ -239,7 +287,7 @@ class TestSeqOutranksTheLabelWhenTheyDisagree:
     def test_a_repeated_seq_labelled_realtime_is_still_a_replay(self):
         st: dict = {}
         _classify_drops([_row(101), _row(101, push="REALTIME")], st)
-        assert st.get("session_replayed") == 1
+        assert st.get("session_replayed_dropped") == 1
         assert st.get("session_key_victim", 0) == 0
 
     def test_a_new_seq_labelled_cache_is_still_a_replay(self):
@@ -248,5 +296,5 @@ class TestSeqOutranksTheLabelWhenTheyDisagree:
         feed is sending again."""
         st: dict = {}
         _classify_drops([_row(101), _row(102, push="CACHE")], st)
-        assert st.get("session_replayed") == 1
+        assert st.get("session_replayed_dropped") == 1
         assert st.get("session_key_victim", 0) == 0
