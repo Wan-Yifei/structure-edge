@@ -21,7 +21,17 @@ sys.path.insert(0, str(ROOT))
 
 import analysis.trade_viewer_qt as tv  # noqa: E402
 
-_ensure = tv.TradeViewerQt.__dict__["_ensure_option_ctx"]
+def _ensure(viewer):
+    """Call _ensure_option_ctx, resolved AT CALL TIME.
+
+    It used to be bound at import: `_ensure = tv.TradeViewerQt.__dict__[...]`.
+    conftest stubs that method for the whole suite to keep the option-chain
+    budget intact, and pytest_configure runs before this module is imported
+    -- so the alias captured the stub and every test here silently exercised
+    a no-op. The real_ensure_option_ctx fixture puts the method back; this
+    has to look it up afterwards to see that.
+    """
+    return tv.TradeViewerQt.__dict__["_ensure_option_ctx"](viewer)
 
 
 class FakeViewer:
@@ -64,10 +74,19 @@ class TestProbe:
 
 
 class TestEnsureConsultsIt:
-    def test_it_does_not_construct_the_sdk_when_nothing_listens(self,
-                                                                monkeypatch):
+    def test_it_does_not_construct_the_sdk_when_nothing_listens(
+            self, real_ensure_option_ctx, monkeypatch):
         """The actual bug. Calling OpenQuoteContext here is what hangs, so
-        the test is that it is never called, not that it failed."""
+        the test is that it is never called, not that it failed.
+
+        real_ensure_option_ctx is MANDATORY here and was missing: this was
+        the one test in the class without it, so `_ensure` resolved to
+        conftest's no-op and both assertions held for a method that does
+        nothing. Shown both ways -- with the saved implementation replaced
+        by a no-probe version this test still passed while three of its
+        neighbours failed; with that version on the class attribute it
+        failed as it should.
+        """
         built = []
         monkeypatch.setattr(tv, "OpenQuoteContext",
                             lambda **kw: built.append(kw))
@@ -77,14 +96,14 @@ class TestEnsureConsultsIt:
         assert built == [], "the SDK was constructed with OpenD down"
         assert v._option_ctx is None
 
-    def test_it_connects_once_opend_is_up(self, monkeypatch):
+    def test_it_connects_once_opend_is_up(self, real_ensure_option_ctx, monkeypatch):
         monkeypatch.setattr(tv, "OpenQuoteContext", lambda **kw: ("ctx", kw))
         monkeypatch.setattr(tv, "_opend_listening", lambda *a, **k: True)
         v = FakeViewer()
         _ensure(v)
         assert v._option_ctx[0] == "ctx"
 
-    def test_a_later_poll_picks_it_up_without_a_restart(self, monkeypatch):
+    def test_a_later_poll_picks_it_up_without_a_restart(self, real_ensure_option_ctx, monkeypatch):
         """The option timer keeps calling in here, so coming up late has to
         be enough on its own -- no reconnect button, no restart."""
         up = {"yes": False}
@@ -97,8 +116,8 @@ class TestEnsureConsultsIt:
         _ensure(v)
         assert v._option_ctx == "ctx"
 
-    def test_the_warning_is_logged_on_transitions_not_every_poll(self,
-                                                                 monkeypatch):
+    def test_the_warning_is_logged_on_transitions_not_every_poll(
+            self, real_ensure_option_ctx, monkeypatch):
         """At one line per poll this would be four a minute saying the same
         thing, which is how a log stops being read."""
         up = {"yes": False}
@@ -112,7 +131,7 @@ class TestEnsureConsultsIt:
         _ensure(v)
         assert len(v.logs) == 2, "coming back up is worth a line too"
 
-    def test_the_probe_targets_the_port_the_sdk_is_given(self):
+    def test_the_probe_targets_the_port_the_sdk_is_given(self, real_ensure_option_ctx):
         """A probe of one address followed by a connect to another would
         pass every test above and still hang in the field."""
         seen = {}

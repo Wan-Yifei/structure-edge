@@ -17,6 +17,7 @@ import os
 import sys
 import threading
 import traceback
+import warnings
 
 import pytest
 
@@ -115,3 +116,142 @@ def pytest_unconfigure(config):
     # this repo uses it today; if that changes, fix the leak instead of
     # reaching here.
     os._exit(exitstatus)
+
+
+# ── keep the test suite off the live OpenD ────────────────────────────────
+#
+# Constructing TradeViewerQt opened a REAL quote context and pulled a REAL
+# option chain. viewer_config defaults `option_walls` to True and __init__
+# calls _on_option_indicator_toggle() unconditionally, so each of the ~25
+# test files that builds a viewer spent calls against the account-wide
+# 10-per-30s option-chain limit. Measured, before this:
+#
+#     Warning: chain fetch failed for 2026-11-27:
+#     获取期权链频率太高，请求失败，每30秒最多10次。
+#
+# That is the same budget the collectors' contract selection depends on, so
+# a test run could make a live session pick a short chain -- and it makes
+# any quota figure read off this machine untrustworthy.
+#
+# ONE method is patched: _ensure_option_ctx. _trigger_option_fetch already
+# returns when _option_ctx is None (trade_viewer_qt.py:5300), so stubbing
+# the context is enough to stop the network without silencing the fetch
+# logic that two test files drive on purpose. An earlier version also
+# stubbed _trigger_option_fetch and _opend_listening, which broke three
+# tests: the probe's own test, and two that call the fetch with the context
+# already stubbed on the instance.
+#
+# In pytest_configure, not an autouse fixture: a module-scoped `viewer`
+# fixture is instantiated BEFORE any function-scoped fixture, so the patch
+# arrived after the viewer had already been built and gone to the network.
+_REAL_ENSURE_OPTION_CTX = None
+
+# Spellings of localhost a test could reach OpenD by.
+_OPEND_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+# Duplicated deliberately. 11111 is a literal in ten modules with no shared
+# constant to import, and conftest must not import project code to decide
+# whether to guard it -- an import failure here is the exact hole this
+# guard exists to cover.
+_OPEND_PORT = 11111
+
+# An absent one of these means no GUI, which is a legitimate environment:
+# the non-GUI half of the suite still runs. Anything else failing to import
+# is a broken tree and must not be mistaken for "no PyQt6 here".
+_OPTIONAL_GUI_MODULES = frozenset({"PyQt6", "pyqtgraph", "matplotlib"})
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--allow-opend", action="store_true", default=False,
+        help="let tests open real OpenD connections and fetch option chains "
+             "(spends the account-wide 10-per-30s chain budget)")
+
+
+def _install_opend_guard():
+    """Make a connection to OpenD fail the test that opened it.
+
+    The stub below covers ONE entrance. Measured, the rest are not covered
+    at all: trade_viewer_qt._connect_opend (no listening probe, so a test
+    that passes `args` hangs forever), liq_hm_window, scheduler,
+    signal_scanner, the collectors, and fetcher.fetch_klines on a cache
+    miss. Today no test reaches them -- that is discipline, not structure,
+    and discipline is what a new test file silently breaks.
+
+    This is the structure. Measured cost before installing it: the default
+    run makes 5 socket connections, none of them to OpenD (they are the
+    probe's own tests, against port 1, a throwaway listener, and
+    10.255.255.1), so nothing legitimate is caught. With --allow-opend the
+    same instrumentation counted 111 connections from 56 tests.
+    """
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def guarded(self, address, *a, **k):
+        try:
+            host, port = address[0], address[1]
+        except Exception:                                   # noqa: BLE001
+            return real_connect(self, address, *a, **k)
+        if port == _OPEND_PORT and str(host) in _OPEND_HOSTS:
+            raise RuntimeError(
+                f"a test connected to OpenD at {host}:{port}. The suite "
+                f"shares one account-wide option-chain budget with the "
+                f"live collectors, so a run that talks to OpenD can make a "
+                f"real session pick a short chain. Stub the context (see "
+                f"conftest's _ensure_option_ctx patch) or pass "
+                f"--allow-opend if you really mean to.")
+        return real_connect(self, address, *a, **k)
+
+    socket.socket.connect = guarded
+
+
+def pytest_configure(config):
+    global _REAL_ENSURE_OPTION_CTX
+    if config.getoption("--allow-opend"):
+        return
+    _install_opend_guard()
+    try:
+        from analysis import trade_viewer_qt as tvq
+    except ImportError as exc:
+        # NOT `except Exception: return`. That swallowed every import-time
+        # failure and left the suite talking to the live OpenD with nothing
+        # on screen to say so: simulating one (sys.modules entry set to
+        # None before configure) took two test files to 71 passed, green,
+        # with 48 connections to OpenD and 24 option-API calls. The guard
+        # above now catches that case regardless, but a missing stub is
+        # still worth a word, and anything that is not a missing module is
+        # worth a crash.
+        missing = (getattr(exc, "name", "") or "").split(".")[0]
+        if missing not in _OPTIONAL_GUI_MODULES:
+            raise
+        warnings.warn(
+            f"conftest could not import analysis.trade_viewer_qt ({exc}); "
+            f"the option-context stub is NOT installed. The OpenD socket "
+            f"guard is.", RuntimeWarning, stacklevel=1)
+        return
+    _REAL_ENSURE_OPTION_CTX = tvq.TradeViewerQt._ensure_option_ctx
+    tvq.TradeViewerQt._ensure_option_ctx = lambda self, *a, **k: None
+
+
+@pytest.fixture()
+def real_ensure_option_ctx(monkeypatch):
+    """Put the real _ensure_option_ctx back, for the tests OF that method.
+
+    pytest_configure stubs it suite-wide to keep the chain budget intact.
+    A test whose subject IS the probe-then-connect logic has to opt back
+    in, explicitly, rather than the suite-wide stub being loosened for
+    everyone -- that loosening is what put the network back under 25 files.
+    """
+    from analysis import trade_viewer_qt as tvq
+    # Falls back to the live attribute instead of skipping. Under
+    # --allow-opend nothing was patched, so the class already carries the
+    # real method -- and skipping there removed the only four tests of the
+    # probe-then-connect logic from precisely the mode someone uses when
+    # they are debugging real OpenD behaviour. These four stub
+    # OpenQuoteContext and _opend_listening themselves, so they reach no
+    # network either way (verified: 0 connections to OpenD under
+    # --allow-opend with this fallback).
+    real = _REAL_ENSURE_OPTION_CTX or tvq.TradeViewerQt._ensure_option_ctx
+    monkeypatch.setattr(tvq.TradeViewerQt, "_ensure_option_ctx", real)
+    return real
