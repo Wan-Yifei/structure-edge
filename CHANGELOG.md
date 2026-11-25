@@ -1,5 +1,93 @@
 # Changelog
 
+## v0.102.0 - 「没存下来」终于分得开了,以及 feed 一直在贴的那个标签 (2026-11-24)
+
+minor 级。`ticks` 多一列,在线计数从一个混合量变成一个切分。
+
+### 一个数,两件相反的事
+
+`db/ticks.db` 的 `UNIQUE(code, ts, price, volume)` 不含 `seq`。一个订单在同一毫秒
+同一价格拆成两腿,第二腿只差 `seq`,被键吃掉 —— 那是一笔**市场上发生过、而我们
+任何地方都没有记录**的成交。而断线补推、订阅首推送来的重复 print 也撞同一把键,
+那种丢弃**什么都没损失**。SQLite 对两者报同一个数。
+
+`session_dropped`(offered 减 inserted)**早就算好了**,但全仓库只有一处引用 ——
+就是给它加数的那一行,从不打印、不落库。
+
+### feed 自己在每一行上贴了标签
+
+```python
+# moomoo/quote/quote_response_handler.py:194
+col_list = ['code','name','time','price','volume','turnover',
+            'ticker_direction','sequence','type','push_data_type']
+```
+
+`push_data_type` 取值 `REALTIME` / `CACHE`(订阅重放的那一行)/ `BYDISCONN`(后台
+行情连接断开期间的补拉,proto 写明最多 50 条)。**它一直在 handler 交给我们的
+DataFrame 里,collector 把它扔了** —— 这就是为什么「分开」一度需要靠 `seq` 记账去
+推断,而不是直接读。
+
+现在它是主判据,存进 `ticks.push_type`,**而且只存例外**:REALTIME 占 99.9% 以上,
+存那个字符串要在 233 万笔/天上花约 9 字节/行 —— 一个已经 16.6 GB 的表上**一年约
+5.8 GB**,只为记录「一切正常」。存 NULL 约 1 字节,要回答的问题一个字没少。
+`ALTER TABLE ADD COLUMN` 在 SQLite 里是元数据操作,16.6 GB 上也是瞬时,不重建任何
+数据;它需要写锁,所以由采集器下次启动时自己加(`_ensure_columns` 的既有路径)。
+
+### seq 优先于标签
+
+`seq` 是按**成交时刻**派生的雪花号(实测 `dseq/dt_ms ≈ 2^22`),不是推送计数器,
+所以重推同一笔不可能换号 —— 2026-11-20 整个 RTH 日,QQQ 1,010,217 行 /
+1,010,217 个不同 seq,SOXL 1,318,092 / 1,318,092,零重复。股票侧「重放带相同 seq」
+也在实盘上直接观测到一次(一行 CACHE 与此前的 REALTIME 带完全相同的 seq)。
+
+所以两者冲突时 **seq 赢**:同号就是同一笔到了两次,标着 REALTIME 只说明标签不对,
+不说明丢了一笔成交。反过来判(标签优先)会让 `key_victim` **多算** —— 而那个数是
+要拿去论证换键的,它必须宁可少算。这条判序由两条守卫钉着。
+
+### 零量行单列
+
+`volume` 来自 SDK 的 `hpVolume`(`quote_query.py:1375`),**是 float**,所以
+`analysis/tick_collector.py:81` 的 `int()` 是真截断。零量 print 全部是 `ODD_LOT`,
+占 QQQ 一个 RTH 日的 23.7%(5 个 session 区间 23.7–40.8%)。**损失在 cast 那一步
+就已经发生了,不是键造成的**;而且全仓库 8 个读 `ticks` 的地方逐个查过,每一处都是
+`SUM(volume)` 或 Python 里加 volume,零量行贡献恰好 0,`ttype` 这一列更是没有任何
+读取方。把它们混进「真实成交被吃掉」会把那个数抬成一个没人会据此行动的数,QQQ 尤甚。
+
+日志现在是四格加一个残差:
+
+```
+Since this process started: N ticks (M offered, K not stored = X%
+  -- R re-pushed, V REAL prints the key ate, Z zero-volume odd lots,
+     W older repeats)
+```
+
+残差**是归因过的,不是未知量**:一行被丢当且仅当表里已有同一毫秒、同价、同量的行,
+而真正的第二腿不可能在共享那一毫秒之后还迟到三秒 —— 所以与三秒以上的旧行相撞,
+只可能是重复投递(主通道是 BYDISCONN,而首推实测只有 1 行)。
+
+### 不改 `is_first_push`
+
+`_try_subscribe` 是在 no-data 超时时触发的,那一行 CACHE 是「订阅真的回来了」的
+唯一证据,关掉会让恢复看起来像失败。实测一次真正生效的重订阅恰好多 1 行。
+
+### 订正了三处我自己写错的
+
+- 一段注释说「nothing here separates them … Until that exists this number is a
+  ceiling」,而实现就在它上面。骗的恰好是下一个来查这件事的人。
+- 另一段说「不会被重放污染:这个采集器没有补拉路径,`insert_ticks` 只有一处调用点」
+  —— 调用点是对的,结论是错的:**重放正是从那同一个调用点进来的**。
+  `is_first_push` 默认 True,项目里从未显式传过。
+- 测试里「seq 每秒按 code 从 0 重新开始」—— 它是 7.7e18 的雪花号,从不归零,而且
+  **跨标的会撞**(实测 15 分钟内 QQQ 与 SOXL 共享 33,699 个值)。断言对,理由假。
+- 「碰撞不可能被修剪掉 / by construction」过强:第二腿在 3 个更新的 print-秒之后
+  才到就会漏。实测这个洞接近零(乱序最坏 8 ms、无一超过 3 秒),措辞改成实测边界,
+  反例本身写成了一条测试。
+
+### 测试
+
+2517 → **2545 passed / 6 skipped**。
+
+
 ## v0.101.1 - 净墙改为默认,以及对 v0.100.0 里三个捕获率的更正 (2026-11-24)
 
 patch 级。一个默认值,一个更正,没有新能力。

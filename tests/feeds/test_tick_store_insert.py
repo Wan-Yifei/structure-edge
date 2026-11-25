@@ -106,3 +106,42 @@ class TestInsertTicks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestThePushLabelStoresOnlyTheExceptions(unittest.TestCase):
+    """`push_data_type` says how a row reached us. REALTIME is >99.9% of
+    them, so storing that string would cost ~9 bytes on 2.33M prints a day
+    -- about 5.8 GB a year on a table already at 16.6 GB -- to record
+    "nothing unusual". Only the exceptions are kept.
+
+    Absent must stay NULL rather than becoming REALTIME: rows written
+    before 2026-11-24 carry no label, and unknown is not the same fact as
+    ordinary. This column exists precisely to tell those apart.
+    """
+
+    def setUp(self):
+        self.store = TickStore(
+            pathlib.Path(tempfile.mkdtemp()) / "t.db")
+
+    def _stored(self, **kw):
+        self.store.insert_ticks(
+            [_tick("2026-11-20 10:00:00.002", 41.72, 100, seq=1, **kw)])
+        return [r[0] for r in self.store._con.execute(
+            "SELECT push_type FROM ticks")]
+
+    def test_a_realtime_row_stores_null(self):
+        self.assertEqual(self._stored(push_type="REALTIME"), [None])
+
+    def test_a_cache_row_stores_its_label(self):
+        self.assertEqual(self._stored(push_type="CACHE"), ["CACHE"])
+
+    def test_a_bydisconn_row_stores_its_label(self):
+        self.assertEqual(self._stored(push_type="BYDISCONN"), ["BYDISCONN"])
+
+    def test_an_absent_label_stores_null_not_realtime(self):
+        self.assertEqual(self._stored(), [None])
+
+    def test_an_unrecognised_label_stores_null(self):
+        """'N/A' is what proto2 gives for an unset optional. Writing it
+        through would put a value in the column that means neither."""
+        self.assertEqual(self._stored(push_type="N/A"), [None])

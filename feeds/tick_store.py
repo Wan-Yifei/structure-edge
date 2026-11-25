@@ -60,6 +60,22 @@ CREATE TABLE IF NOT EXISTS ticks (
     -- which is the question behind ticks.db holding only 55-96% of the
     -- session volume the 1-minute klines report.
     seq       INTEGER,
+    -- How the feed says this row reached us: CACHE (the one row a
+    -- subscribe replays), BYDISCONN (the catch-up after the background
+    -- quote connection dropped, at most 50 rows per the proto), or NULL
+    -- for an ordinary live print.
+    --
+    -- NULL rather than 'REALTIME' on purpose. The label is in the handler's
+    -- DataFrame for every row and REALTIME is over 99.9% of them, so
+    -- storing the string would cost about 9 bytes on 2.33M prints a day --
+    -- roughly 5.8 GB a year on a table already at 16.6 GB -- to record
+    -- "nothing unusual". Storing only the exceptions answers the same
+    -- question for about a byte a row.
+    --
+    -- Rows written before 2026-11-24 have no label at all, the same
+    -- coverage boundary `seq` has before 2026-11-03: absent is not
+    -- REALTIME, it is unknown.
+    push_type TEXT,
     UNIQUE(code, ts, price, volume)
 );
 CREATE INDEX IF NOT EXISTS idx_ticks_code_ts ON ticks (code, ts);
@@ -98,7 +114,8 @@ class TickStore:
         try:
             cols = {r[1] for r in self._con.execute("PRAGMA table_info(ticks)")}
             for name, decl in (("ttype", "TEXT"), ("seq", "INTEGER"),
-                               ("recv_ts", "REAL"), ("feed_ts", "REAL")):
+                               ("recv_ts", "REAL"), ("feed_ts", "REAL"),
+                               ("push_type", "TEXT")):
                 if name not in cols:
                     self._con.execute(f"ALTER TABLE ticks ADD COLUMN {name} {decl}")
             self._con.commit()
@@ -146,6 +163,13 @@ class TickStore:
                 # information and is kept only as a cross-check.
                 (float(r["recv_ts"]) if r.get("recv_ts") else None),
                 (float(r["feed_ts"]) if r.get("feed_ts") else None),
+                # Only the exceptions -- see the column comment. An absent
+                # or unrecognised label stays NULL rather than becoming
+                # 'REALTIME', because unknown and ordinary are different
+                # facts and this column exists to tell them apart.
+                (str(r["push_type"]).upper()
+                 if str(r.get("push_type") or "").upper()
+                 in ("CACHE", "BYDISCONN") else None),
             )
             for r in rows
         ]
@@ -156,8 +180,8 @@ class TickStore:
         cur = self._con.executemany(
             "INSERT OR IGNORE INTO ticks "
             "(code, ts, price, volume, direction, ttype, seq, "
-            "recv_ts, feed_ts) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", data
+            "recv_ts, feed_ts, push_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", data
         )
         self._con.commit()
         return cur.rowcount

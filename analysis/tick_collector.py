@@ -37,6 +37,120 @@ _DEFAULT_DB     = pathlib.Path(__file__).parent.parent / "db" / "ticks.db"
 
 # ── Tick handler ───────────────────────────────────────────────────────────────
 
+# How many print-seconds of history the seq fallback keeps. A collision
+# needs an identical millisecond, so a twin is normally in the current
+# bucket; this only has to survive out-of-order arrival, measured at worst
+# 8 ms (2026-11-23 10:00-10:15, 70/36,843 QQQ and 300/76,957 SOXL rows
+# arriving behind the stored maximum, none later than 3 seconds).
+# Must be >= 2: at 1 the slice below becomes [:0] and prunes nothing.
+_RECENT_SECONDS = 3
+
+# push_data_type values that mean "the feed sent this again", as opposed to
+# REALTIME. CACHE is the one-row first push a (re-)subscribe triggers;
+# BYDISCONN is the catch-up after the background quote connection dropped,
+# documented in the proto as at most 50 rows -- a far bigger repeat channel
+# than the first push, and one the seq fallback below cannot see past its
+# three-second window.
+_REPUSHED = {"CACHE", "BYDISCONN"}
+
+
+def _classify_drops(rows: list[dict], state: dict) -> None:
+    """Split "offered but not stored" into its causes.
+
+    `offered - inserted` is one number for two opposite things. A re-pushed
+    print was already recorded and losing it costs nothing. A split fill
+    arriving as two legs at the same millisecond, price and size is a real
+    trade that exists nowhere else once the key drops it. Both collide on
+    UNIQUE(code, ts, price, volume), so SQLite reports them together.
+
+    PRIMARY TEST: the feed labels every row. `push_data_type` is REALTIME
+    for live prints, CACHE for the row a subscribe replays, BYDISCONN for
+    the catch-up after a dropped quote connection. It has been in the
+    handler's DataFrame all along (quote_response_handler.py:194) and the
+    collector discarded it, which is why this used to need inferring.
+
+    FALLBACK, for `N/A` or a missing label: the same question answered from
+    `seq`. A replay carries the SAME seq -- it is a snowflake derived from
+    the trade's own instant (measured: dseq/dt_ms ~ 2^22, and a whole RTH
+    day of QQQ and SOXL carried zero duplicate seq within a code), not a
+    push counter, so re-sending a print cannot renumber it. A split fill's
+    second leg carries a new one.
+
+    Zero-volume prints are counted SEPARATELY and deliberately. They are
+    all ODD_LOT and they are 24% of a QQQ session; `volume` arrives from
+    the SDK as a float (hpVolume) and this collector casts it with int(),
+    so a fractional-share fill becomes 0 before it reaches the key. The
+    loss there already happened at the cast, and every reader of this table
+    sums volume, so a zero row contributes exactly 0. Folding them into
+    "real prints the key ate" would inflate that count -- QQQ worst -- into
+    a number nobody would act on.
+
+    BOUNDS. The seq fallback only keeps _RECENT_SECONDS of print-seconds,
+    so a repeat older than that reads as neither; the primary test has no
+    such window. Both compare against what THIS PROCESS has seen, so after
+    a restart a repeat of a print stored by the previous process reads as
+    new. The residual that `_drop_residual` reports is therefore attributed
+    rather than unknown: a row is dropped only if a row with the same
+    millisecond, price and size is already stored, and a genuine second leg
+    cannot arrive three seconds after the millisecond it shares -- so a
+    collision with anything that old is a repeat, not a lost trade.
+
+    Why not stop the replay instead (is_first_push=False on re-subscribe):
+    _try_subscribe fires on a no-data timeout, and that one CACHE row is
+    the only evidence the subscription came back. Measured, a re-subscribe
+    costs exactly one repeated print per code.
+    """
+    recent = state.setdefault("_recent", {})
+    for r in rows:
+        per_code = recent.setdefault(r["code"], {})
+        sec = str(r["ts"])[:19]
+        if sec not in per_code and len(per_code) >= _RECENT_SECONDS:
+            for old in sorted(per_code)[:-(_RECENT_SECONDS - 1)]:
+                del per_code[old]
+        seqs, keys = per_code.setdefault(sec, (set(), set()))
+        seq = r.get("seq")
+        key = (str(r["ts"]), r["price"], r["volume"])
+        label = str(r.get("push_type") or "").upper()
+
+        # seq FIRST, ahead of the label, when the two disagree. A seq
+        # already seen means this exact trade arrived twice -- the number is
+        # derived from the trade's own instant, so a genuine second leg
+        # cannot reuse it. A REALTIME label on a repeated seq means the
+        # label is wrong, not that a trade was lost. Deciding it the other
+        # way round made `key_victim` over-count, and that count is what
+        # would justify changing the key on a 16.6 GB table: it has to err
+        # low, not high.
+        if seq is not None and seq in seqs:
+            _bump(state, "session_replayed")
+        elif label in _REPUSHED:
+            _bump(state, "session_replayed")
+        elif key in keys:
+            _bump(state, "session_key_victim_zero" if not r["volume"]
+                  else "session_key_victim")
+
+        if seq is not None:
+            seqs.add(seq)
+        keys.add(key)
+
+
+def _bump(state: dict, name: str) -> None:
+    state[name] = state.get(name, 0) + 1
+
+
+def _drop_residual(state: dict) -> int:
+    """Dropped rows this process could not attribute to either cause.
+
+    Not an unknown: see the BOUNDS note in _classify_drops. It is repeats
+    older than the fallback window -- a BYDISCONN catch-up, or a restart --
+    because a real second leg cannot share a millisecond and arrive three
+    seconds late.
+    """
+    return max(0, state.get("session_dropped", 0)
+               - state.get("session_replayed", 0)
+               - state.get("session_key_victim", 0)
+               - state.get("session_key_victim_zero", 0))
+
+
 def _make_handler(store, state: dict):
     """Return a TickerHandlerBase subclass that writes to *store*.
 
@@ -90,6 +204,13 @@ def _make_handler(store, state: dict):
                     # is the half of the ticks.db coverage question that
                     # cannot be answered from the table alone.
                     "seq":       row.get("sequence"),
+                    # REALTIME / CACHE / BYDISCONN / N/A. The feed labels
+                    # every row with how it got here, and this was being
+                    # thrown away -- which is why separating a re-pushed
+                    # print from one the UNIQUE key ate had to be inferred
+                    # from seq bookkeeping instead of simply read. Not
+                    # stored (yet); used by _classify_drops.
+                    "push_type": row.get("push_data_type"),
                     # `ts` above is the exchange time the feed reports as a
                     # string; the order book is stamped with THIS machine's
                     # datetime.now(). Those two ran -0.5 to -1.35 s apart
@@ -116,6 +237,7 @@ def _make_handler(store, state: dict):
             state["session_offered"] = state.get("session_offered", 0) + len(rows)
             state["session_dropped"] = (state.get("session_dropped", 0)
                                         + len(rows) - n)
+            _classify_drops(rows, state)
             if n:
                 state["last_tick_time"] = time.time()
                 state["session_count"]  = state.get("session_count", 0) + n
@@ -232,7 +354,38 @@ def _watchdog(state: dict, timeout_minutes: int, stop_event: threading.Event,
                 log.warning("Target reload failed: %s", exc)
 
         if now - last_log_time >= timeout_sec:
-            log.info("This session: %d ticks", state.get("session_count", 0))
+            # offered/dropped as well as stored. The difference is what the
+            # UNIQUE key threw away, and it was already being computed and
+            # then left in memory -- `session_dropped` had exactly one
+            # reference in the whole repository, the line that incremented
+            # it. Printing it turns a quantity that had to be reconstructed
+            # offline into a per-session reading.
+            #
+            # The window these cover is NOT the one the offline work used,
+            # and that matters before the two get compared: these keys are
+            # never initialised in main() and never reset, so they
+            # accumulate from PROCESS START, and the four configured
+            # sessions cover 24h continuously -- "this session" can be
+            # several days. The offline measurement was RTH only.
+            #
+            # What they do separate is real: see _classify_drops. The
+            # residual is attributed, not unknown.
+            offered = state.get("session_offered", 0)
+            dropped = state.get("session_dropped", 0)
+            if offered:
+                log.info("Since this process started: %d ticks (%d offered, "
+                         "%d not stored = %.2f%% -- %d re-pushed, %d REAL "
+                         "prints the key ate, %d zero-volume odd lots, "
+                         "%d older repeats)",
+                         state.get("session_count", 0), offered, dropped,
+                         dropped / offered * 100,
+                         state.get("session_replayed", 0),
+                         state.get("session_key_victim", 0),
+                         state.get("session_key_victim_zero", 0),
+                         _drop_residual(state))
+            else:
+                log.info("This session: %d ticks",
+                         state.get("session_count", 0))
             last_log_time = now
 
         if store is not None and watchdog_tick % _CHECKPOINT_INTERVAL == 0:
