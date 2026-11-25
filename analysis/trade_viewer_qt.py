@@ -73,6 +73,7 @@ from analysis import viewer_config as vcfg
 from analysis.qt_widgets import fit_all_spins
 from core.time_utils import candle_start
 from core.sdk_log import quiet_sdk_file_log
+from core.sdk_patches import patch_close_reason
 from feeds.fetcher import fetch_klines
 from strategy.smc.market_structure import detect_bos_choch
 from strategy.smc.fvg import detect_fvg
@@ -304,14 +305,22 @@ def _fmt_vol_short(v: float) -> str:
     return f"{v:.0f}"
 
 
-def _fmt_signed_short(v: float) -> str:
-    """Abbreviate a signed value: -45_000 -> '-45K', 1_234_567 -> '1.2M'."""
+def _fmt_signed_short(v: float, k_decimals: int = 0) -> str:
+    """Abbreviate a signed value: -45_000 -> '-45K', 1_234_567 -> '1.2M'.
+
+    `k_decimals` widens the K range's precision for a series that LIVES
+    there. Measured on 2026-11-23's option tape: 53% of one-minute bars
+    with any flow fall between 1K and 10K (median 3,165), which is exactly
+    where a whole-number K is coarsest -- 1,500 prints as "2K", off by a
+    third. The default stays 0 so the three older readouts, whose values
+    are an order of magnitude larger, are unchanged.
+    """
     sign = "-" if v < 0 else ""
     v = abs(v)
     if v >= 1_000_000:
         return f"{sign}{v/1_000_000:.1f}M"
     if v >= 1_000:
-        return f"{sign}{v/1_000:.0f}K"
+        return f"{sign}{v/1_000:.{k_decimals}f}K"
     return f"{sign}{v:.0f}"
 
 
@@ -3255,61 +3264,12 @@ class TradeViewerQt(QMainWindow):
             ("vol",       "MAVOL"), # Volume subplot toggle
             ("chandelier", "Chandelier"), # ATR trailing-stop suggestion, bottom-right corner label
             ("atr_stop",  "ATR Stop"),  # fixed k x ATR stop lines from an anchor
-            ("opt_flow",  "Opt \u0394-Flow"),  # option delta that traded, in shares of underlying
         ]:
             cb = QCheckBox(label)
             cb.setChecked(vcfg.flag(key))
             cb.stateChanged.connect(self._on_indicator_toggle)
             self._ind_checks[key] = cb
             tb_ind.addWidget(cb)
-            if key == "opt_flow":
-                # Whose delta this is will not fit on a chart title and is
-                # the first thing anyone gets wrong, so the long form lives
-                # here. NOT "buyer": a customer who hits the bid to sell a
-                # call is the option SELLER and the aggressor at the same
-                # time, and this series records that print as his.
-                cb.setToolTip(
-                    "Option delta that changed hands, in shares of "
-                    "underlying exposure.\n\n"
-                    "WHOSE DELTA: the AGGRESSOR'S \u2014 whoever crossed "
-                    "the spread.\n"
-                    "  \u2022 The DEALER'S is this series negated, and only "
-                    "under the assumption that\n"
-                    "    the dealer is the sole counterparty. Market makers "
-                    "take liquidity too and\n"
-                    "    customers rest passive orders; nothing stored here "
-                    "can separate them.\n"
-                    "  \u2022 The option SELLER'S is neither. A seller who "
-                    "hits the bid is also the\n"
-                    "    aggressor, so that framing agrees on one print and "
-                    "opposes on the next.\n\n"
-                    "Gold = the aggressor took on bullish delta. "
-                    "Purple = bearish.\n"
-                    "Sign is carried by position too: above or below the "
-                    "zero line.\n\n"
-                    "Open vs close is NOT known: a buy may be opening a long "
-                    "or closing a short.\n"
-                    "Fine for a flow series, but nothing here supports a "
-                    "claim about positioning.\n\n"
-                    "NOT the CVD scale. CVD is signed SHARE volume off the "
-                    "equity tape, where only\n"
-                    "40-50% of volume carries an exchange direction tag; "
-                    "this is greek-weighted\n"
-                    "option volume, where about 92% does."
-                )
-                # One row, two readings -- not two rows. At seven rows the
-                # price chart already drops from 5/10 of the height to 5/11;
-                # a second option row would make it 5/12 for a quantity
-                # nobody reads both ways at once.
-                self._opt_flow_cum_cb = QCheckBox("Cumulative")
-                self._opt_flow_cum_cb.setChecked(vcfg.flag("opt_flow_cum"))
-                self._opt_flow_cum_cb.setToolTip(
-                    "Running total since the session reset (on), or each "
-                    "bar's own net (off).")
-                self._opt_flow_cum_cb.stateChanged.connect(
-                    self._on_indicator_toggle)
-                self._ind_checks["opt_flow_cum"] = self._opt_flow_cum_cb
-                tb_ind.addWidget(self._opt_flow_cum_cb)
             if key == "dcvd":
                 # 1 is the window that predicts; widening it is for looking
                 # around, not for deciding. The panel rescales with the
@@ -3671,7 +3631,78 @@ class TradeViewerQt(QMainWindow):
 
         tb_opt.addSeparator()
 
-        # Shared controls -- both indicators come from the same poll cycle.
+        # These two lived on the Indicators row until 2026-11-24, and they are
+        # here for width, not for taxonomy: they ARE subplot toggles, like
+        # everything on that row. The window's minimum width is its widest
+        # toolbar row (_set_toolbar_width_floor), the Indicators row is that
+        # row, and these two checkboxes are 93 px each. With them on it the
+        # floor measured 1473 px against the Liquidity Heatmap's 1140 -- 2613
+        # on a 2560 screen, so the two windows could not be placed side by
+        # side at any size, which is the same regression 4f57a58 fixed once
+        # already by splitting the heatmap's own toolbar (2626 -> 2413 px).
+        #
+        # Moved rather than shortened, and not given a row of their own: a
+        # seventh row takes the price chart from 5/11 of the window's height
+        # to 5/12, which is the trade the comment that used to sit beside
+        # Cumulative refused for exactly this pair.
+        #
+        # They are NOT part of the poll cycle the rest of this row drives --
+        # Opt Delta-Flow reads the option TAPE (OPTION_TICK_DB), the chain
+        # poll feeds Walls and Alerts -- so they keep their own handler and
+        # sit behind their own separator.
+        self._ind_checks["opt_flow"] = cb_opt_flow = QCheckBox("Opt Δ-Flow")
+        cb_opt_flow.setChecked(vcfg.flag("opt_flow"))
+        # Whose delta this is will not fit on a chart title and is the first
+        # thing anyone gets wrong, so the long form lives here. NOT "buyer":
+        # a customer who hits the bid to sell a call is the option SELLER and
+        # the aggressor at the same time, and this series records that print
+        # as his.
+        cb_opt_flow.setToolTip(
+            "Option delta that changed hands, in shares of "
+            "underlying exposure.\n\n"
+            "WHOSE DELTA: the AGGRESSOR'S — whoever crossed "
+            "the spread.\n"
+            "  • The DEALER'S is this series negated, and only "
+            "under the assumption that\n"
+            "    the dealer is the sole counterparty. Market makers "
+            "take liquidity too and\n"
+            "    customers rest passive orders; nothing stored here "
+            "can separate them.\n"
+            "  • The option SELLER'S is neither. A seller who "
+            "hits the bid is also the\n"
+            "    aggressor, so that framing agrees on one print and "
+            "opposes on the next.\n\n"
+            "Gold = the aggressor took on bullish delta. "
+            "Purple = bearish.\n"
+            "Sign is carried by position too: above or below the "
+            "zero line.\n\n"
+            "Open vs close is NOT known: a buy may be opening a long "
+            "or closing a short.\n"
+            "Fine for a flow series, but nothing here supports a "
+            "claim about positioning.\n\n"
+            "NOT the CVD scale. CVD is signed SHARE volume off the "
+            "equity tape, where only\n"
+            "40-50% of volume carries an exchange direction tag; "
+            "this is greek-weighted\n"
+            "option volume, where about 92% does."
+        )
+        cb_opt_flow.stateChanged.connect(self._on_indicator_toggle)
+        tb_opt.addWidget(cb_opt_flow)
+
+        self._opt_flow_cum_cb = QCheckBox("Cumulative")
+        self._opt_flow_cum_cb.setChecked(vcfg.flag("opt_flow_cum"))
+        self._opt_flow_cum_cb.setToolTip(
+            "Running total since the session reset (on), or each "
+            "bar's own net (off).")
+        self._opt_flow_cum_cb.stateChanged.connect(
+            self._on_indicator_toggle)
+        self._ind_checks["opt_flow_cum"] = self._opt_flow_cum_cb
+        tb_opt.addWidget(self._opt_flow_cum_cb)
+
+        tb_opt.addSeparator()
+
+        # Shared controls -- Option Walls and Option Alerts, the two that come
+        # from the same chain poll. Not the pair above.
         tb_opt.addWidget(_lbl("DTE:"))
         self._option_dte_spin = QSpinBox()
         self._option_dte_spin.setRange(0, 30)
@@ -4122,6 +4153,19 @@ class TradeViewerQt(QMainWindow):
         self._vline_oflow = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
         self._vline_oflow.setVisible(False)
         self._plot_oflow.addItem(self._vline_oflow, ignoreBounds=True)
+
+        # Opt Delta-Flow readout. Created beside DCVD's so the two rows'
+        # labels keep the same font, fill and anchor without a second place
+        # to remember them in.
+        self._oflow_label = pg.TextItem(
+            text="", color=_FG,
+            fill=pg.mkBrush(_qc(_BG_TIP, 200)),
+            anchor=(0.0, 0.5),
+        )
+        self._oflow_label.setFont(QFont("Monospace", 8))
+        self._oflow_label.setZValue(100)
+        self._oflow_label.setVisible(False)
+        self._plot_oflow.addItem(self._oflow_label, ignoreBounds=True)
 
         self._dcvd_label = pg.TextItem(
             text="", color=_FG,
@@ -9207,6 +9251,7 @@ class TradeViewerQt(QMainWindow):
                          self._vline_adi, self._vline_dcvd,
                          self._vline_oflow,
                          self._dcvd_label,
+                         self._oflow_label,
                          self._offex_label,
                          self._price_label, self._pair_price_label,
                          self._ohlcv_label,
@@ -9495,6 +9540,40 @@ class TradeViewerQt(QMainWindow):
                 self._dcvd_label.setVisible(True)
             else:
                 self._dcvd_label.setVisible(False)
+
+            # Opt Delta-Flow: delta-weighted aggressor flow, in SHARES of
+            # the underlying (contracts x 100 x delta), so it abbreviates
+            # like A/D rather than printing as a ratio.
+            #
+            # NaN means no signable option print landed in that bar, which
+            # is not the same as zero flow -- the bars are simply absent
+            # there, and a readout of "+0" would claim balance where nothing
+            # is known. Hidden, as the bar is.
+            if self._plot_oflow.isVisible() and self._oflow_arr is not None:
+                o_idx = max(0, min(idx, len(self._oflow_arr) - 1))
+                ov = float(self._oflow_arr[o_idx])
+                if ov == ov:                       # not NaN
+                    # The toggle changes the quantity, not just the scale:
+                    # per-bar net versus a running sum since the block
+                    # reset. Named, because the two differ by orders of
+                    # magnitude and the axis label cannot say which is on.
+                    tag = "\u03a3 " if self._ind("opt_flow_cum") else ""
+                    xlo_o2, xhi_o2 = self._plot_oflow.vb.viewRange()[0]
+                    self._oflow_label.setPos(
+                        xlo_o2 + (xhi_o2 - xlo_o2) * 0.01, ov)
+                    # _fmt_signed_short, not a fourth private copy of the
+                    # K/M arithmetic -- the three older labels each grew
+                    # their own and can adopt this one later. It omits the
+                    # plus on positives, and on a flow panel the sign is
+                    # the entire reading, so it is added here.
+                    txt = _fmt_signed_short(ov, k_decimals=1)
+                    self._oflow_label.setText(
+                        tag + (txt if ov < 0 else "+" + txt))
+                    self._oflow_label.setVisible(True)
+                else:
+                    self._oflow_label.setVisible(False)
+            else:
+                self._oflow_label.setVisible(False)
 
     # ── X-axis tick labels ────────────────────────────────────────────────────
 
@@ -9796,6 +9875,7 @@ def main(argv=None) -> None:
     # at 6.6 s, long enough to drop K-line pushes and tear a hole in
     # the live chart. Detach it before any context is opened.
     quiet_sdk_file_log()
+    patch_close_reason()
     args = _parse_args(argv)
     app  = QApplication(sys.argv)
     app.setApplicationName("Trade Viewer Qt")
