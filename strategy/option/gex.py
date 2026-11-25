@@ -19,9 +19,17 @@ ITM (In The Money):
 
 import argparse
 import os
+import pathlib
 import sys
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
+
+# Run as a script, so the repo root is not on sys.path -- Python adds the
+# SCRIPT's directory, not the working directory.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
+from core.market_calendar import (                             # noqa: E402
+    CLOSE_FULL_ET, CLOSE_HALF_ET, market_close_et as _calendar_close,
+    thanksgiving as _thanksgiving)
 
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -35,41 +43,32 @@ SHARES_PER_CONTRACT = 100  # US standard
 # Time to expiry is measured against the exchange's clock, not the machine's:
 # US equity options stop trading 16:00 New York time on the expiry date.
 _ET = ZoneInfo("America/New_York")
-_CLOSE_FULL_ET = time(16, 0)
-_CLOSE_HALF_ET = time(13, 0)
+_CLOSE_FULL_ET = CLOSE_FULL_ET
+_CLOSE_HALF_ET = CLOSE_HALF_ET
 _SECONDS_PER_YEAR = 365 * 24 * 3600
 _MIN_T_YEARS = 3600 / _SECONDS_PER_YEAR      # one hour; see _t_years
-
-
-def _thanksgiving(year: int) -> date:
-    """Fourth Thursday of November."""
-    d = date(year, 11, 1)
-    d += timedelta(days=(3 - d.weekday()) % 7)      # first Thursday
-    return d + timedelta(days=21)
 
 
 def _market_close_et(d: date) -> time:
     """13:00 on a half session, 16:00 otherwise.
 
-    Not an exchange calendar -- the three recurring 1pm closes, which is
-    what matters here because two of them land on option expiry Fridays.
-    Worth 0.22 on Zero Gamma each time one is the near expiry (the line
-    moves about 7.5 cents per hour of time-to-expiry), and 2026-11-27 is
-    one: assuming 16:00 for it put us 0.17 below moomoo's reading, and
-    13:00 closes that to 0.05.
+    Delegates to core.market_calendar, which is the one place the rules
+    live. This function kept its own copy of the three recurring 1pm
+    closes, and the duplicate was how the collectors ended up with a
+    calendar that knew Black Friday closes early but not that Thanksgiving
+    does not open at all.
 
-    Not covered, deliberately: full holidays (an expiry never falls on
-    one) and the rare unscheduled early close.
+    Worth 0.22 on Zero Gamma each time a half day is the near expiry (the
+    line moves about 7.5 cents per hour of time-to-expiry): assuming 16:00
+    for 2026-11-27 put us 0.17 below moomoo's reading, and 13:00 closes
+    that to 0.05.
+
+    Still answers for a date that is no session at all, returning the
+    full-day close, because an expiry never lands on one. A caller asking
+    whether to RUN wants core.market_calendar.is_trading_day -- that is the
+    question this signature cannot express.
     """
-    if d.weekday() >= 5:
-        return _CLOSE_FULL_ET                       # never a session anyway
-    if d == _thanksgiving(d.year) + timedelta(days=1):
-        return _CLOSE_HALF_ET                       # Black Friday
-    if (d.month, d.day) == (12, 24):
-        return _CLOSE_HALF_ET                       # Christmas Eve
-    if (d.month, d.day) == (7, 3) and date(d.year, 7, 4).weekday() < 5:
-        return _CLOSE_HALF_ET                       # July 4th eve
-    return _CLOSE_FULL_ET
+    return _calendar_close(d)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 11111
 RISK_FREE_RATE = 0.045  # approx. short-term T-bill; gamma is only weakly sensitive to r
