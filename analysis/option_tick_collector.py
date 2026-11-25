@@ -1062,6 +1062,97 @@ def _underlying_of(codes: list[str]) -> str | None:
     return next(iter(seen), None)
 
 
+def calibration_advice(store: OptionTickStore, session: str,
+                       underlying: str, summary: dict) -> list[str]:
+    """What the session says about this underlying's parameters.
+
+    PROPOSES ONLY. It returns lines to log and writes nothing, because a
+    single session is not enough to tune anything: one contract carried 19.5%
+    of a day's delta-weighted flow on 2026-11-24, so a parameter fitted to
+    one day is fitted to that day's accident. Ranking changes, per-expiry slot
+    caps and the quota split between underlyings all need the 8-10 sessions
+    the band dataset is being collected for.
+
+    What CAN be read from one session is the difference between a parameter
+    that is wrong and one that is merely unproven, and only where the reading
+    is a FACT rather than an estimate:
+
+      * asked vs listed is a fact. If OpenD listed fewer contracts than were
+        requested, the account-wide quota was over-committed and this code's
+        share is too high -- no amount of further sessions makes that more
+        true.
+      * candidates vs slots is a fact about whether the pre-filter is even
+        binding. With 2,288 candidates for 60 slots the band cannot be too
+        narrow in any way that matters, whatever the volume did. Measured on
+        2026-11-24: the strikes between QQQ's +/-15% band and +/-40% held
+        0.74% of the day's raw volume and 0.01% of its delta-weighted flow,
+        so a band this loose is nowhere near the constraint.
+      * a shortfall with a full subscription list is NOT a quota problem.
+        Saying so is the point: the two look identical in the coverage
+        numbers and call for opposite responses.
+    """
+    out: list[str] = []
+    cands = store.candidates_on(session, underlying)
+    chk = store.subscription_check_on(session, underlying)
+    band = summary.get("band") or {}
+
+    picked = sum(1 for c in cands if c["picked"])
+    if cands and not picked:
+        # Unreachable from today's caller -- main returns before recording
+        # when pick_contracts selects nothing -- and pinned anyway, because
+        # the arithmetic below had `or 1` and that fabricated the HEALTHIEST
+        # possible reading out of the loudest possible failure: 2,288
+        # candidates divided by a made-up single slot printed as "2288x, not
+        # binding". Same mistake as reporting a failed read as zero, which
+        # the quota branch below is careful about.
+        out.append(f"  band      {len(cands):,} candidates and NOTHING was "
+                   f"selected -- the ratio below is not computable and the "
+                   f"session collected no tape")
+    elif cands:
+        ratio = len(cands) / picked
+        out.append(f"  band      {len(cands):,} candidates for {picked} slots "
+                   f"({ratio:.0f}x)")
+        if ratio < 2:
+            out.append(f"  -> the pre-filter is binding at {ratio:.1f}x; "
+                       f"widen this code's pct so the quota, not the band, "
+                       f"chooses")
+    else:
+        out.append("  band      no candidate list recorded for this session")
+
+    if chk is None:
+        out.append("  quota     no subscription check recorded "
+                   "(session predates it, or selection never finished)")
+    elif chk["listed"] is None:
+        out.append(f"  quota     asked {chk['asked']}, the subscription read "
+                   f"failed -- unknown, not zero")
+    elif chk["listed"] < chk["asked"]:
+        out.append(f"  quota     asked {chk['asked']}, listed "
+                   f"{chk['listed']} -- {chk['asked'] - chk['listed']} short")
+        out.append(f"  -> the account-wide quota was over-committed; lower "
+                   f"this code's share to {chk['listed']} or lower another "
+                   f"code's")
+    else:
+        out.append(f"  quota     asked {chk['asked']}, listed "
+                   f"{chk['listed']} -- the split held")
+        if summary.get("caught_nothing"):
+            out.append(f"  -> {summary['caught_nothing']} contracts traded "
+                       f"and we caught nothing, with the full list "
+                       f"subscribed: NOT a quota problem, so lowering it "
+                       f"would change nothing. A subscription stopped "
+                       f"delivering")
+
+    if band.get("ratio") is not None:
+        sel = band.get("selection_ratio")
+        out.append(
+            f"  coverage  band {band['ratio'] * 100:.1f}%"
+            + (f", of which selection {sel * 100:.1f}%" if sel is not None
+               else ""))
+
+    if not any(line.lstrip().startswith("->") for line in out):
+        out.append("  -> no change proposed")
+    return out
+
+
 def _log_reconcile(ctx, codes: list[str], store: OptionTickStore,
                    session: str | None = None,
                    underlying: str | None = None) -> dict | None:
@@ -1132,6 +1223,20 @@ def _log_reconcile(ctx, codes: list[str], store: OptionTickStore,
                     s["caught_nothing"])
     for code, ours, theirs in s["worst"]:
         log.warning("  short on %s: %s of %s", code, f"{ours:,}", f"{theirs:,}")
+    # Last, and in its own guard: advice is the least important thing in this
+    # function and must never be the reason the coverage report is lost.
+    if s.get("underlying"):
+        try:
+            # Computed before the header is printed: logging the header first
+            # leaves a heading with nothing under it when this raises.
+            advice = calibration_advice(store, s["session"],
+                                        s["underlying"], s)
+        except Exception as exc:                                # noqa: BLE001
+            log.warning("calibration advice failed: %s", exc)
+        else:
+            log.info("calibration %s %s:", s["underlying"], s["session"])
+            for line in advice:
+                log.info("%s", line)
     return s
 
 
@@ -1364,8 +1469,15 @@ def main(argv=None) -> int:
         log.info("subscribed TICKER on %d contracts", len(codes))
         # Read back immediately rather than waiting for the first telemetry
         # sweep: a quota shortfall shows up here, and it is the one failure
-        # a divided quota introduces.
-        verify_subscription(ctx, codes)
+        # a divided quota introduces. Recorded, not just logged -- the next
+        # morning's parameter advice reads it, and nothing else in the
+        # database can answer it (see option_subscription_check).
+        listed = verify_subscription(ctx, codes)
+        try:
+            store.record_subscription_check(session_day, args.code,
+                                            len(codes), listed)
+        except Exception as exc:                                # noqa: BLE001
+            log.warning("could not record the subscription check: %s", exc)
 
         stop = threading.Event()
         state["stop"] = stop

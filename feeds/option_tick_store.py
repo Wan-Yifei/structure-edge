@@ -247,6 +247,36 @@ CREATE TABLE IF NOT EXISTS option_band_volume (
     UNIQUE(session, code)
 );
 CREATE INDEX IF NOT EXISTS idx_obvol_session ON option_band_volume (session);
+
+-- How many contracts OpenD actually listed as subscribed, against how many
+-- were asked for. One row per underlying per session.
+--
+-- Written down rather than left in the log because the next morning's
+-- parameter advice needs it, and because nothing else in the database can
+-- answer it. The obvious proxies do not work: option_greeks has a row for
+-- every REQUESTED code whether or not the subscription landed, since
+-- sample_greeks reads a market snapshot and a snapshot needs no
+-- subscription at all (886 never-subscribed contracts were snapshotted on
+-- 2026-11-24 to prove it). Counting greeks therefore always equals the
+-- request and measures nothing -- it is the object under test answering for
+-- itself.
+--
+-- The distinction it buys: `asked 60, listed 48` is an account-wide quota
+-- that was over-committed, and the fix is to lower a per-code share.
+-- `asked 60, listed 60` with contracts in caught_nothing is a dropped
+-- subscription, and lowering the quota would do nothing at all. Without
+-- this row the two look identical from the database.
+--
+-- listed NULL means the subscription read itself failed, which is not the
+-- same as zero contracts listed.
+CREATE TABLE IF NOT EXISTS option_subscription_check (
+    session    TEXT    NOT NULL,
+    underlying TEXT    NOT NULL,
+    asked      INTEGER NOT NULL,
+    listed     INTEGER,
+    recorded   TEXT    NOT NULL,
+    UNIQUE(session, underlying)
+);
 """
 
 
@@ -434,6 +464,37 @@ class OptionTickStore:
             "VALUES (?,?,?,?,?,?)", data)
         self._con.commit()
         return cur.rowcount
+
+    @_locked
+    def record_subscription_check(self, session: str, underlying: str,
+                                  asked: int, listed: int | None) -> None:
+        """Note what was asked for and what OpenD listed. See the table.
+
+        `listed` None is stored as NULL and means the read failed; 0 means
+        the read succeeded and found nothing. Do not substitute one for the
+        other -- an empty subscription list is the loudest possible signal
+        and a failed read is no signal at all.
+        """
+        self._con.execute(
+            "INSERT OR REPLACE INTO option_subscription_check "
+            "(session, underlying, asked, listed, recorded) VALUES (?,?,?,?,?)",
+            (session, underlying, int(asked),
+             (None if listed is None else int(listed)), _ts_str(datetime.now())))
+        self._con.commit()
+
+    @_locked
+    def subscription_check_on(self, session: str,
+                              underlying: str) -> dict | None:
+        """That session's asked/listed pair, or None if it was never written
+        (a session collected before this existed, or one that never got
+        past selection)."""
+        row = self._con.execute(
+            "SELECT asked, listed FROM option_subscription_check "
+            "WHERE session = ? AND underlying = ?",
+            (session, underlying)).fetchone()
+        if row is None:
+            return None
+        return {"asked": row[0], "listed": row[1]}
 
     @_locked
     def band_volume_on(self, session: str) -> dict[str, dict]:
