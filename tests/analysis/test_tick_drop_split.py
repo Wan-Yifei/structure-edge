@@ -298,3 +298,46 @@ class TestSeqOutranksTheLabelWhenTheyDisagree:
         _classify_drops([_row(101), _row(102, push="CACHE")], st)
         assert st.get("session_replayed_dropped") == 1
         assert st.get("session_key_victim", 0) == 0
+
+
+class TestARepeatIsOnlyRefusedWhenTheKeyIsAlreadyThere:
+    """The case the whole split exists for, and the one mutation testing
+    found unguarded: a repeat whose key is NOT already present is STORED.
+
+    That is not hypothetical. 2026-11-24 23:52, the collector had just
+    restarted -- the previous process died at 23:22 -- and the CACHE row the
+    subscribe replayed was one nothing had stored, so SQLite kept it. The
+    table shows it with push_type='CACHE'. Counting it as refused is what
+    held the residual at -2 for a whole session, which max(0, ...) then
+    printed as a clean zero.
+    """
+
+    def test_a_cache_row_on_a_fresh_bucket_is_stored_not_refused(self):
+        st: dict = {}
+        _classify_drops([_row(101, push="CACHE")], st)
+        assert st.get("session_replayed_stored") == 1
+        assert st.get("session_replayed_dropped", 0) == 0
+
+    def test_a_cache_row_on_a_seen_key_is_refused(self):
+        st: dict = {}
+        _classify_drops([_row(101), _row(102, push="CACHE")], st)
+        assert st.get("session_replayed_dropped") == 1
+        assert st.get("session_replayed_stored", 0) == 0
+
+    def test_the_two_paths_are_both_reachable_in_one_batch(self):
+        """A BYDISCONN catch-up carries both at once: some of its rows are
+        already stored, some are not."""
+        st: dict = {}
+        _classify_drops([_row(101),
+                         _row(102, push="BYDISCONN"),
+                         _row(103, volume=7, push="BYDISCONN")], st)
+        assert st.get("session_replayed_dropped") == 1   # same key as 101
+        assert st.get("session_replayed_stored") == 1    # volume 7, unseen
+
+    def test_only_the_refused_one_leaves_the_residual(self):
+        st: dict = {}
+        _classify_drops([_row(101),
+                         _row(102, push="CACHE"),
+                         _row(103, volume=7, push="CACHE")], st)
+        st["session_dropped"] = 1        # SQLite refused exactly one of them
+        assert _drop_residual(st) == 0
