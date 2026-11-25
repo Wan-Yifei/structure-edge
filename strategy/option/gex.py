@@ -27,6 +27,8 @@ from zoneinfo import ZoneInfo
 # Run as a script, so the repo root is not on sys.path -- Python adds the
 # SCRIPT's directory, not the working directory.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
+from strategy.option.chain_range import (                      # noqa: E402
+    CHAIN_SPAN_DAYS, chunk_by_span)
 from core.market_calendar import (                             # noqa: E402
     CLOSE_FULL_ET, CLOSE_HALF_ET, market_close_et as _calendar_close,
     thanksgiving as _thanksgiving)
@@ -182,15 +184,64 @@ def fetch_option_data(ctx: OpenQuoteContext, code: str,
     are not in the sum.
     """
     coverage = {"expiries_requested": list(expiries), "expiries_ok": [],
-                "batches_ok": 0, "batches_total": 0}
+                "batches_ok": 0, "batches_total": 0,
+                # Rows a range answered with that nobody asked for, plus any
+                # whose strike_time is unreadable. Counted rather than left
+                # silent: dropping them is the one new way this fetch can
+                # lose a contract, and `strike_time` comes off a bare proto3
+                # field (quote_query.py:2138) that is "" when unset -- so a
+                # malformed row leaves the sum without anything saying so.
+                "rows_outside": 0}
     chain_frames = []
-    for expiry in expiries:
-        ret, df = ctx.get_option_chain(code, start=expiry, end=expiry)
+    want = set(expiries)
+    got: set[str] = set()
+    # Ranges, not one call per expiry -- see strategy.option.chain_range for
+    # the budget this used to blow. Five QQQ dailies cost five calls here and
+    # one now.
+    for chunk in chunk_by_span(sorted(want), CHAIN_SPAN_DAYS):
+        ret, df = ctx.get_option_chain(code, start=chunk[0], end=chunk[-1])
         if ret != RET_OK:
-            print(f"  Warning: chain fetch failed for {expiry}: {df}", file=sys.stderr, flush=True)
+            print(f"  Warning: chain fetch failed for {chunk[0]}..{chunk[-1]}:"
+                  f" {df}", file=sys.stderr, flush=True)
             continue
-        chain_frames.append(df[["code"]].copy())
-        coverage["expiries_ok"].append(expiry)
+        # `df is None` is the real guard here -- a RET_OK with no frame
+        # would take .empty with it. The `.empty` half is belt and braces:
+        # an empty frame falls through harmlessly, because `rows.empty`
+        # stops it before the column selection. Mutation testing confirmed
+        # no test distinguishes it; kept because the cost is a comparison
+        # and the alternative is reasoning about pandas on every read.
+        if df is None or getattr(df, "empty", False):
+            continue
+        # Which expiries came back is read from the ROWS, not credited to the
+        # whole chunk. A range answers for every expiry inside it, including
+        # ones nobody asked for, and crediting the chunk would report an
+        # expiry the chain never mentioned as covered -- turning the PARTIAL
+        # banner from "three expiries are missing from this sum" into
+        # silence, which is the failure it exists to prevent.
+        if "strike_time" in getattr(df, "columns", ()):
+            stamps = df["strike_time"].astype(str).str[:10]
+            inside = stamps.isin(want)
+            rows = df[inside]
+            coverage["rows_outside"] += int((~inside).sum())
+            got.update(stamps[inside].unique())
+        else:
+            # Nothing to attribute by. The rows still go into the sum, but
+            # no expiry is credited, so the banner shows PARTIAL. That is
+            # deliberate: crediting the whole chunk when we cannot tell which
+            # expiries answered is exactly the optimism this banner exists to
+            # prevent, and every real response carries strike_time --
+            # pick_contracts reads the expiry off the row for this reason.
+            rows = df
+        if not rows.empty:
+            chain_frames.append(rows[["code"]].copy())
+
+    # No intersection with `want` needed: `got` is filled only from rows
+    # that already passed isin(want), so it is a subset by
+    # construction. Mutation testing showed no test could tell the
+    # intersection from its absence, which is what dead code looks
+    # like -- removed rather than pinned with a test written to kill
+    # the mutation.
+    coverage["expiries_ok"] = sorted(got)
 
     if not chain_frames:
         raise RuntimeError("No option chain data returned for any expiry.")

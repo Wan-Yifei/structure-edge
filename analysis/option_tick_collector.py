@@ -50,7 +50,9 @@ import signal
 import sys
 import threading
 import time as time_mod
-from datetime import date, datetime, time, timedelta
+# No `date`: it went with _chunk_by_span to strategy.option.chain_range,
+# and what is left here only ever calls datetime.now(...).date().
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
@@ -58,6 +60,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from core import single_instance
 from core.market_calendar import (
     is_market_holiday, is_trading_day, market_close_et)
+# Shared with gex's wall fetch, which has the same budget problem. Its own
+# module because neither of us can take the other's imports -- gex pulls in
+# matplotlib and moomoo at module scope, and this file defers moomoo so the
+# scheduler can import it. chain_range is pure stdlib.
+from strategy.option.chain_range import (
+    CHAIN_SPAN_DAYS as _CHAIN_SPAN_DAYS, chunk_by_span as _chunk_by_span)
 from core.sdk_log import quiet_sdk_file_log
 from core.sdk_patches import patch_close_reason
 from feeds.option_tick_store import OptionTickStore
@@ -79,15 +87,6 @@ _CHECKPOINT_EVERY = 10       # watchdog ticks between WAL checkpoints
 _TELEMETRY_EVERY = 120  # overridden to 2 only in the smoke test below
 _MAX_CHAINS = 8              # expiries to collect -- NOT chain calls
 
-# Span of one get_option_chain call, in days. The API documents a 30-day
-# limit on start..end, so a 45-day window is two calls -- against a budget
-# of ten per thirty seconds that is account-wide, and therefore shared by
-# every underlying being collected at once.
-#
-# Chunked by SPAN, not by count: eight SOXL weeklies reach 49 days apart
-# while eight QQQ dailies span about eleven, so fixed-size slices would ask
-# for a range the API refuses for one and waste a call on the other.
-_CHAIN_SPAN_DAYS = 28
 
 _ET = ZoneInfo("America/New_York")
 # US equity options trade 09:30-16:00, with late prints to about 16:15. The
@@ -178,30 +177,6 @@ def _score_contracts(ctx, rows: list[dict]) -> tuple[list[dict], int]:
     return rows, unscored
 
 
-def _chunk_by_span(expiries: list[str], span_days: int) -> list[list[str]]:
-    """Group sorted expiry dates into runs no wider than `span_days`."""
-    out: list[list[str]] = []
-    for e in expiries:
-        # Skipped, not raised. The SDK substitutes a single space for a
-        # missing strikeTime (quote_query.py:3576 -- `optional` in the
-        # proto, unlike the distance field beside it) and
-        # get_near_expiry_dates appends it unchecked on its `dist` branch.
-        # The per-expiry loop this replaced asked OpenD for `start=' '`,
-        # got nothing back and carried on one expiry short; raising here
-        # would turn that into no session at all, since contracts are
-        # picked once per run.
-        try:
-            when = date.fromisoformat(e)
-        except ValueError:
-            log.warning("skipping malformed expiry %r from the ladder", e)
-            continue
-        if out and (when - date.fromisoformat(out[-1][0])).days <= span_days:
-            out[-1].append(e)
-        else:
-            out.append([e])
-    return out
-
-
 def pick_contracts(ctx, code: str, pct: float, quota: int = _QUOTA,
                    days: int = 45) -> tuple[list[dict], dict]:
     """Nearest expiry, strikes within +/-pct% of spot, capped at *quota*.
@@ -243,8 +218,9 @@ def pick_contracts(ctx, code: str, pct: float, quota: int = _QUOTA,
     # once on a synthetic ladder: "covered 5 of 6, MISSING ['2026-12-11']"
     # while the chain had answered for it.
     answered: set[str] = set()
-    # Ranges, not one call per expiry -- see _CHAIN_SPAN_DAYS for why the
-    # per-expiry version was expensive enough to matter.
+    # Ranges, not one call per expiry -- see strategy.option.chain_range for
+    # the budget the per-expiry version blew, and for why the span rather
+    # than a count decides where the chunks fall.
     for chunk in _chunk_by_span(expiries, _CHAIN_SPAN_DAYS):
         ret, chain = ctx.get_option_chain(code, start=chunk[0], end=chunk[-1])
         if ret != RET_OK or chain is None or chain.empty:
