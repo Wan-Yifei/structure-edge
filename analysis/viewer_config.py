@@ -75,10 +75,17 @@ DEFAULTS: dict[str, dict] = {
         "option_walls": True,
         "option_alerts": False,
         # Rank the walls on NET gamma per strike (calls + puts after they
-        # cancel) instead of each side alone. Off by default: every other
-        # GEX tool shows the separated view, and disagreeing with them
-        # silently is worse than a toggle.
-        "option_net_walls": False,
+        # cancel) instead of each side alone.
+        #
+        # ON by default since 2026-11-24, at his request. It was off for a
+        # defensible reason -- every other GEX tool shows the separated view,
+        # and disagreeing with them silently is worse than a toggle -- so the
+        # disagreement is now the deliberate one: what gets read beside the
+        # candles is where price is actually pinned, and a strike with a big
+        # call wall and an equally big put wall is not pinned at all. The
+        # separated view is still one click away, and the chart label says
+        # which is on ("Net Wall +/-" against "Call Wall"/"Put Wall").
+        "option_net_walls": True,
     },
     # Which sessions feed the volume profile, and how many trading days
     # the profile and the CVD window cover.
