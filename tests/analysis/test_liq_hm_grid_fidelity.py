@@ -322,6 +322,11 @@ def _marker_stub(min_vol: float):
         _simb_depth_spin=types.SimpleNamespace(value=lambda: 10),
         _ice_cb=off, _spoof_cb=off, _absorb_cb=off, _simb_cb=on,
         _absorb_ticks=[], _best_bid=10.00, _best_ask=10.01,
+        # The imbalance branch reuses per-column zones, so it reads a cache
+        # slot (filled on first use) and the newest column's timestamp, which
+        # is the one entry it must not keep. One column here, the same "T"
+        # the book and _build_bucket_to_idx below are tagged with.
+        _simb_cache=None, _col_ts=["T"],
         _clear_overlay_items=lambda: None,
         _build_bucket_to_idx=lambda: {"T": 0},
         _draw_simb_markers=lambda simbs: None,

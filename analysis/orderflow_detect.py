@@ -803,6 +803,104 @@ def detect_absorption(
     return results
 
 
+@dataclass
+class StackedImbalanceCache:
+    """Per-snapshot imbalance zones, kept between redraws.
+
+    detect_stacked_imbalance evaluates each snapshot on its own -- that is a
+    property of the algorithm, not an optimisation, and it is what makes a
+    cache sound: a snapshot's zones cannot change once its last level has
+    arrived.  Without one, every redraw regrouped the entire window; on a
+    240-column SOXL book that is ~280k entries and 140 ms offline (measured
+    around 3.5x that inside the running viewer, where it was the single
+    largest block of GUI time).
+
+    `zones` holds ts -> [(price_lo, price_hi, direction, mean_ratio)].  Note
+    what is NOT in it: bar_idx.  That comes from bucket_to_idx and shifts by
+    one every time a column rolls off, so caching it would pin markers to
+    x-positions the columns have already left -- the same symptom as the
+    coarsened-bucket bug _build_bucket_to_idx was written to fix.
+
+    `params` is the detector's own settings.  They come from spin boxes the
+    user turns, and a cache that outlived a change to them would make the
+    control look dead, which is worse than slow.
+    """
+
+    params: tuple | None = None
+    zones: dict = field(default_factory=dict)
+
+    def clear(self) -> None:
+        self.params = None
+        self.zones.clear()
+
+
+def _imbalance_zones(
+    bids: list[tuple[float, float]],
+    asks: list[tuple[float, float]],
+    min_levels: int,
+    imbalance_ratio: float,
+    max_depth: int,
+) -> list[tuple[float, float, str, float]]:
+    """One snapshot's stacked-imbalance zones, without a column index.
+
+    Split out of detect_stacked_imbalance so a result can be cached per
+    snapshot; the arithmetic is unchanged.  See that function for what the
+    ranks mean and why a short side is zero-filled rather than truncated.
+    """
+    EPS = 1e-9
+
+    bids = sorted(bids, key=lambda x: -x[0])   # best bid first
+    asks = sorted(asks, key=lambda x:  x[0])   # best ask first
+
+    n_ranks = min(max(len(bids), len(asks)), max_depth)
+    if n_ranks == 0:
+        return []
+
+    bid_vols   = [bids[i][1] if i < len(bids) else 0.0 for i in range(n_ranks)]
+    ask_vols   = [asks[i][1] if i < len(asks) else 0.0 for i in range(n_ranks)]
+    bid_prices = [bids[i][0] if i < len(bids) else None for i in range(n_ranks)]
+    ask_prices = [asks[i][0] if i < len(asks) else None for i in range(n_ranks)]
+
+    rank_dir: list[str | None] = []
+    rank_ratio: list[float]    = []
+    for bv, av in zip(bid_vols, ask_vols):
+        if bv >= av * imbalance_ratio and bv > EPS:
+            rank_dir.append("BID")
+            rank_ratio.append(bv / (av + EPS))
+        elif av >= bv * imbalance_ratio and av > EPS:
+            rank_dir.append("ASK")
+            rank_ratio.append(av / (bv + EPS))
+        else:
+            rank_dir.append(None)
+            rank_ratio.append(1.0)
+
+    zones = []
+    i = 0
+    while i < n_ranks:
+        d = rank_dir[i]
+        if d is None:
+            i += 1
+            continue
+
+        j = i + 1
+        while j < n_ranks and rank_dir[j] == d:
+            j += 1
+
+        if j - i >= min_levels:
+            mean_ratio = float(np.mean(rank_ratio[i:j]))
+            prices = (
+                [bid_prices[k] for k in range(i, j) if bid_prices[k] is not None]
+                if d == "BID"
+                else [ask_prices[k] for k in range(i, j) if ask_prices[k] is not None]
+            )
+            if prices:
+                zones.append((min(prices), max(prices), d, mean_ratio))
+
+        i = j
+
+    return zones
+
+
 def detect_stacked_imbalance(
     snaps: list[dict],
     bucket_to_idx: dict,
@@ -813,6 +911,8 @@ def detect_stacked_imbalance(
     imbalance_ratio: float = 3.0,
     min_vol: float = 0.0,
     max_depth: int = 10,
+    cache: StackedImbalanceCache | None = None,
+    live_ts=None,
 ) -> list[tuple]:
     """Detect stacked imbalance from order book snapshots.
 
@@ -845,77 +945,74 @@ def detect_stacked_imbalance(
         imbalance_ratio:  bid/ask (or ask/bid) threshold per level.
         min_vol:          Levels below this volume are treated as absent (0).
         max_depth:        Maximum depth ranks to analyse (top-of-book only).
+        cache:            Reused across calls; see StackedImbalanceCache.
+                          Omit it and every snapshot is regrouped, which is
+                          what every caller did before 2026-11-24.
+        live_ts:          The one timestamp still receiving levels — the
+                          caller's newest column.  REQUIRED whenever `cache`
+                          is passed and `snaps` can still grow, because it is
+                          the one entry a cache must not keep: every push
+                          inside a column is tagged with that column's
+                          timestamp (see the viewer's _on_push), so its row
+                          set is final only once the next column opens.  Pass
+                          the newest column's own timestamp, not the largest
+                          one seen: the viewer's clock correction is
+                          re-measured per push and can step backwards.
 
     Returns:
         List of (bar_idx, price_lo, price_hi, direction, mean_ratio).
         direction='BID': buyers dominating — zone spans bid-side prices.
         direction='ASK': sellers dominating — zone spans ask-side prices.
     """
+    if cache is None:
+        cache = StackedImbalanceCache()   # one pass, nothing retained
+
+    params = (min_levels, imbalance_ratio, min_vol, max_depth)
+    if cache.params != params:
+        cache.params = params
+        cache.zones.clear()
+
+    zones = cache.zones
+
     if not snaps:
+        # No book at all. Returning the cached zones for columns that still
+        # exist would be defensible, but the callers that pass no book pass
+        # none because they cleared it (a replay, a symbol change), so the
+        # cache is cleared with it rather than left to be served later.
+        zones.clear()
         return []
 
-    EPS = 1e-9
+    # The only snapshots regrouped are the ones not already evaluated, plus
+    # the live column, which was just evicted. Everything else costs one dict
+    # lookup -- which is the whole point, since this loop used to run over the
+    # entire window on every redraw.
+    zones.pop(live_ts, None)
 
-    by_ts: dict = defaultdict(lambda: {"BID": [], "ASK": []})
+    fresh: dict = defaultdict(lambda: {"BID": [], "ASK": []})
     for s in snaps:
+        ts = s["ts"]
+        if ts in zones:
+            continue
         vol = float(s["volume"])
         if vol < min_vol:
             continue
-        by_ts[s["ts"]][s["side"]].append((float(s["price"]), vol))
+        fresh[ts][s["side"]].append((float(s["price"]), vol))
+
+    for ts, sides in fresh.items():
+        zones[ts] = _imbalance_zones(sides["BID"], sides["ASK"],
+                                     min_levels, imbalance_ratio, max_depth)
 
     results = []
-    for ts, sides in by_ts.items():
+    for ts in list(zones):
         bar_idx = bucket_to_idx.get(ts, -1)
         if bar_idx < 0:
+            # Rolled off the grid. Dropping it here is what bounds the cache
+            # to the caller's column count without the caller having to say
+            # anything about its own window length.
+            del zones[ts]
             continue
-
-        bids = sorted(sides["BID"], key=lambda x: -x[0])   # best bid first
-        asks = sorted(sides["ASK"], key=lambda x:  x[0])   # best ask first
-
-        n_ranks = min(max(len(bids), len(asks)), max_depth)
-        if n_ranks == 0:
-            continue
-
-        bid_vols   = [bids[i][1] if i < len(bids) else 0.0 for i in range(n_ranks)]
-        ask_vols   = [asks[i][1] if i < len(asks) else 0.0 for i in range(n_ranks)]
-        bid_prices = [bids[i][0] if i < len(bids) else None for i in range(n_ranks)]
-        ask_prices = [asks[i][0] if i < len(asks) else None for i in range(n_ranks)]
-
-        rank_dir: list[str | None] = []
-        rank_ratio: list[float]    = []
-        for bv, av in zip(bid_vols, ask_vols):
-            if bv >= av * imbalance_ratio and bv > EPS:
-                rank_dir.append("BID")
-                rank_ratio.append(bv / (av + EPS))
-            elif av >= bv * imbalance_ratio and av > EPS:
-                rank_dir.append("ASK")
-                rank_ratio.append(av / (bv + EPS))
-            else:
-                rank_dir.append(None)
-                rank_ratio.append(1.0)
-
-        i = 0
-        while i < n_ranks:
-            d = rank_dir[i]
-            if d is None:
-                i += 1
-                continue
-
-            j = i + 1
-            while j < n_ranks and rank_dir[j] == d:
-                j += 1
-
-            if j - i >= min_levels:
-                mean_ratio = float(np.mean(rank_ratio[i:j]))
-                prices = (
-                    [bid_prices[k] for k in range(i, j) if bid_prices[k] is not None]
-                    if d == "BID"
-                    else [ask_prices[k] for k in range(i, j) if ask_prices[k] is not None]
-                )
-                if prices:
-                    results.append((bar_idx, min(prices), max(prices), d, mean_ratio))
-
-            i = j
+        for price_lo, price_hi, d, mean_ratio in zones[ts]:
+            results.append((bar_idx, price_lo, price_hi, d, mean_ratio))
 
     return results
 

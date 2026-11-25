@@ -214,6 +214,42 @@ _RANGE_CLOCK_PAD = timedelta(seconds=10)
 # for an hour at a 1 s bucket.
 _REFILL_DEBOUNCE_MS = 600
 
+# How long a render waits so a BURST of pushes costs one render, not one each.
+#
+# _on_push used to render on every push. The budget it was written against is
+# in _on_tick: "~3.3 pushes/s (measured)" -- which was the stale number, not
+# the feed: feeds.order_book_store already recorded 6.7 books/s at the RTH
+# peak. Re-measured 2026-11-24 from db/order_book.db, RTH 09:30-11:50, where
+# the two live symbols stored 60,454 snapshots (US.QQQ, 7.2/s) and 57,422
+# (US.SOXL, 6.8/s). Taken over the whole day instead -- overnight and
+# pre-market included, as the first version of this comment did -- the same
+# tables hold 236,379 and 229,060, which averages a misleading 5.6/s across
+# hours when there is nothing to push.
+#
+# The rate is only half of it. They arrive in BURSTS: the median gap between
+# two stored snapshots is 14 ms against 304 ms at p95, i.e. several books land
+# within a few milliseconds and then nothing for ~300 ms. Collapsing a burst
+# into one repaint is most of what this buys. The ceiling it sets -- 10
+# renders a second -- is still more than a grid whose columns are
+# Col(s) = 1 s wide can show.
+_RENDER_COALESCE_MS = 100
+
+# How long a marker redraw waits, for the same reason and a different cost.
+#
+# Here the call rate was never the problem: _redraw_orderflow_markers reruns
+# iceberg, spoof, stacked-imbalance and absorption detection FROM SCRATCH over
+# the whole _raw_snaps window, so one call is expensive. One Col(s) tick fires
+# it twice -- once from _on_tick, then again from _on_absorb_ready when the
+# tick's own _load_absorb_ticks worker returns -- and coalescing is what
+# removes the second full pass. py-spy on the live viewer, 3001 samples over
+# 25 s on 2026-11-24, put the detectors reached through this function at 14.2%
+# of the whole process, the largest single block.
+#
+# 250 ms is a quarter of a default column, so markers still re-anchor well
+# inside the roll they belong to, which is the invariant
+# tests/analysis/test_liq_hm_marker_refresh.py exists to guard.
+_MARKER_COALESCE_MS = 250
+
 
 def _clock_correction(svr_bid: float | None, svr_ask: float | None,
                       now: float) -> float:
@@ -711,6 +747,12 @@ class LiqHmWindow(QWidget):
         # (_needs_init gates the bulk fill, and a bare _push_column dies on
         # bin_size == 0 first), which is exactly why it is worth pinning.
         self._snap_seq: int = 0
+        # Stacked-imbalance zones already computed, one entry per column.
+        # Created on first use, because orderflow_detect is imported lazily
+        # here as it is everywhere else in this file, and DROPPED rather than
+        # emptied wherever _raw_snaps is -- so no reset path needs an import
+        # either. See StackedImbalanceCache for what it may and may not hold.
+        self._simb_cache = None
 
         # Best bid / ask from the most recent snapshot (盘口)
         self._best_bid: float | None = None
@@ -778,6 +820,15 @@ class LiqHmWindow(QWidget):
         self._refill_timer.timeout.connect(self._refill_after_rebuild)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_tick)
+        # Coalescing timers. Single-shot, and armed only when not already
+        # armed -- see _schedule_render for why the usual restart-on-every-
+        # call debounce would starve here.
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._render)
+        self._marker_timer = QTimer(self)
+        self._marker_timer.setSingleShot(True)
+        self._marker_timer.timeout.connect(self._redraw_orderflow_markers)
 
     # ── construction ───────────────────────────────────────────────────────────
 
@@ -1398,7 +1449,10 @@ class LiqHmWindow(QWidget):
                     "price": row["price"], "volume": row["volume"],
                 })
             self._latest_snap = rows
-        self._render()
+        # Scheduled, not immediate: the feed bursts, and painting the column
+        # above is what has to happen per push -- drawing the result of it
+        # does not. See _RENDER_COALESCE_MS.
+        self._schedule_render()
 
     def pin_timestamp(self, ts: datetime) -> None:
         """Move vertical crosshair to the column nearest *ts*."""
@@ -1439,6 +1493,12 @@ class LiqHmWindow(QWidget):
         # the column timer on top of whatever fill is in flight -- the state
         # the stop in _maybe_init_price_range exists to avoid.
         self._refill_timer.stop()
+        # Armed against the grid that is being thrown away: _render would
+        # repaint from arrays this is about to reallocate, and a marker pass
+        # would run the detectors over snapshots that no longer belong to the
+        # code being shown.
+        self._render_timer.stop()
+        self._marker_timer.stop()
         self._push_ok = False
         max_cols = self._max_cols_spin.value()
         n_price  = self._n_price_spin.value()
@@ -1450,6 +1510,7 @@ class LiqHmWindow(QWidget):
         # every push in it, so without this the detectors cannot tell which
         # book came first and fall back to sorting by volume.
         self._snap_seq    = 0
+        self._simb_cache  = None
         self._mid_prices  = []
         self._latest_snap = []
         self._last_snap_ts = None
@@ -1591,9 +1652,16 @@ class LiqHmWindow(QWidget):
                 # helping because it only rescales the view).
                 #
                 # Here rather than in _on_push: a push does not move any
-                # column, and at ~3.3 pushes/s (measured) redrawing markers and
-                # re-querying absorb ticks on each one would be wasted work.
-                self._redraw_orderflow_markers()
+                # column, so redrawing markers and re-querying absorb ticks on
+                # each one would be wasted work. The rate this reasoning was
+                # written against, "~3.3 pushes/s (measured)", is now 6.8-7.2/s
+                # -- see _RENDER_COALESCE_MS -- which only strengthens it.
+                #
+                # Scheduled rather than immediate because _load_absorb_ticks
+                # below comes back into _on_absorb_ready, which asks for a
+                # redraw again: this tick wants one pass over the detectors,
+                # not two.
+                self._schedule_orderflow_redraw()
                 self._load_absorb_ticks()
                 return
         if self._worker is not None and self._worker.isRunning():
@@ -1810,6 +1878,7 @@ class LiqHmWindow(QWidget):
         self._col_ts         = []
         self._raw_snaps      = []
         self._snap_seq       = 0
+        self._simb_cache     = None
         self._mid_prices     = []
         self._absorb_ticks   = []
         self._absorb_last_ts = None
@@ -1989,7 +2058,46 @@ class LiqHmWindow(QWidget):
             self._timer.start(self._col_secs_spin.value() * 1000)
             self._on_tick()
 
+    def _schedule_render(self) -> None:
+        """Ask for a render soon, so a burst of pushes costs one.
+
+        Armed only when it is not already armed, which bounds the wait at
+        _RENDER_COALESCE_MS from the FIRST push of a burst. Restarting the
+        timer on every call -- the usual debounce -- would starve outright:
+        pushes arrive ~140 ms apart on average and ~14 ms apart inside a
+        burst, so the deadline would keep being pushed back and the grid
+        would stop repainting exactly while the feed was busiest.
+        """
+        if not self._render_timer.isActive():
+            self._render_timer.start(_RENDER_COALESCE_MS)
+
+    def _schedule_orderflow_redraw(self) -> None:
+        """Ask for a marker redraw soon, collapsing duplicates into one.
+
+        Same arming rule and the same reason as _schedule_render.
+
+        Used by _on_tick and _on_absorb_ready, the pair that fire together
+        on one column tick. Everything else still calls
+        _redraw_orderflow_markers directly, for two different reasons:
+        a control a user just moved (_on_controls_changed,
+        _on_absorb_changed, _reset_view) would read as broken answering a
+        quarter second late, while _on_snap_ready and _on_bulk_ready are
+        automatic but deliberately left alone -- the first is the DB-poll
+        fallback whose exact redraw-per-roll count
+        test_liq_hm_marker_refresh.py guards against a bug reported twice,
+        and the second runs once per bulk fill. Those synchronous calls do not
+        cancel a redraw already armed, so a user action during a pending one
+        costs at most one extra pass; the cancel is not put inside
+        _redraw_orderflow_markers because test_liq_hm_grid_fidelity.py calls
+        that function unbound on a SimpleNamespace holding only the
+        attributes it touches, where self._marker_timer does not exist.
+        """
+        if not self._marker_timer.isActive():
+            self._marker_timer.start(_MARKER_COALESCE_MS)
+
     def _render(self) -> None:
+        # Whoever asked for this one, a scheduled render is now redundant.
+        self._render_timer.stop()
         n = len(self._col_ts)
         if n == 0 or self._bin_size == 0.0:
             return
@@ -2215,7 +2323,10 @@ class LiqHmWindow(QWidget):
             self._draw_spoof_markers(spoofs)
 
         if has_book and self._simb_cb.isChecked():
-            from analysis.orderflow_detect import detect_stacked_imbalance
+            from analysis.orderflow_detect import (
+                StackedImbalanceCache, detect_stacked_imbalance)
+            if self._simb_cache is None:
+                self._simb_cache = StackedImbalanceCache()
             simbs = detect_stacked_imbalance(
                 self._raw_snaps,
                 bucket_to_idx, self._bin_size, self._price_min,
@@ -2246,6 +2357,13 @@ class LiqHmWindow(QWidget):
                 # Every level participates here at its real size.
                 min_vol=0.0,
                 max_depth=self._simb_depth_spin.value(),
+                cache=self._simb_cache,
+                # The newest column, and only it, is still taking pushes --
+                # they all carry its timestamp. Anything older can be reused.
+                # Taken by position, not as max(_col_ts): _clock_corr is
+                # re-measured on every push, so a column's stamp can step
+                # backwards and the newest one need not be the largest.
+                live_ts=self._col_ts[-1] if self._col_ts else None,
             )
             self._draw_simb_markers(simbs)
 
@@ -2480,7 +2598,10 @@ class LiqHmWindow(QWidget):
                 cutoff = self._col_ts[0]
                 self._absorb_ticks = [t for t in self._absorb_ticks
                                       if t["ts"] >= cutoff]
-        self._redraw_orderflow_markers()
+        # The other half of the pair _on_tick starts: coalesced so the
+        # worker returning does not buy a second full detection pass over the
+        # same window the tick already asked about.
+        self._schedule_orderflow_redraw()
         if self._absorb_reload_pending:
             self._load_absorb_ticks()
 
@@ -3133,6 +3254,7 @@ class LiqHmWindow(QWidget):
         # keeping the levels would cost ~145 dicts a column.
         self._raw_snaps = []
         self._snap_seq = 0
+        self._simb_cache = None
         self._absorb_ticks = []
         self._clear_overlay_items()
 
@@ -3236,6 +3358,8 @@ class LiqHmWindow(QWidget):
         # Otherwise a rebuild armed moments before the close starts a
         # database worker against a window that is tearing down.
         self._refill_timer.stop()
+        self._render_timer.stop()
+        self._marker_timer.stop()
         self._stop_push()
         for w in (self._worker, self._bulk_worker, self._absorb_worker):
             if w is not None:
@@ -3247,9 +3371,11 @@ class LiqHmWindow(QWidget):
 
 if __name__ == "__main__":
     from core.sdk_log import quiet_sdk_file_log
+    from core.sdk_patches import patch_close_reason
     # see core/sdk_log.py: a stale shared SDK log file wedges
     # the push thread and tears holes in the live chart
     quiet_sdk_file_log()
+    patch_close_reason()
     import sys
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
