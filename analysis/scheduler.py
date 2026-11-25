@@ -9,6 +9,7 @@ Run:  uv run analysis/scheduler.py
 """
 
 import json
+import logging
 import pathlib
 import sqlite3
 import subprocess
@@ -29,7 +30,17 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from core import single_instance            # noqa: E402
+from core.market_calendar import (        # noqa: E402
+    is_trading_day, market_close_et)
+# The collector's own post-close pad, so this window can be derived from it
+# rather than restated. Safe to import: option_tick_collector defers every
+# moomoo import into its functions.
+from analysis.option_tick_collector import (                    # noqa: E402
+    POST_CLOSE_PAD_MIN as _COLLECTOR_POST_CLOSE_PAD_MIN,
+    _QUOTA as _OPT_QUOTA_TOTAL,
+    lock_name as _opt_lock_name)
 from core.sdk_log import quiet_sdk_file_log
+from core.sdk_patches import patch_close_reason
 
 
 # ── Keeping collectors from outliving us ──────────────────────────────────
@@ -47,7 +58,34 @@ from core.sdk_log import quiet_sdk_file_log
 # How long a collector must survive for the start to count as successful.
 # Under this it never got past startup -- relaunching immediately only
 # repeats whatever killed it, which is the shape the refusal loop had.
+# A module logger, for the few places that cannot reach self._log --
+# _option_codes is a staticmethod and is called from the config read
+# path before any instance exists.
+log = logging.getLogger(__name__)
+
 _COLLECTOR_MIN_LIFE_S = 30
+
+#: Sentinel for "no fallback given", so that `fallback=None` can mean
+#: "return None rather than a default" -- which is what lets the save path
+#: refuse an unusable entry instead of persisting the default over it.
+_UNSET = object()
+
+#: What an option underlying looks like: MARKET.SYMBOL. Loose on the symbol
+#: (letters, digits and dots all occur) and strict on the shape, which is
+#: enough to reject the things people actually type -- a bare symbol, a
+#: sentence, a pasted quote.
+# US.SOXL, and US.BRK.B for a class share. NOT `[A-Z0-9.]+` for the
+# symbol: that accepted "US.." and "US....." -- a shape check that passes
+# a symbol with no characters in it, which then becomes a lock file named
+# option_tick_collector_US__ and a code OpenD cannot resolve.
+_CODE_RE = __import__("re").compile(
+    r"^[A-Z]{2}\.[A-Z0-9]+(\.[A-Z0-9]+)*$")
+
+# How long _kill_opt waits for ALL option collectors together. It was
+# 10 seconds per child plus a 5-second terminate, serially, so N
+# symbols froze the Tk thread for up to N x 20 -- while the children
+# were shutting down in parallel anyway.
+_OPT_STOP_GRACE_S = 15
 
 # Pure ctypes: pywin32 is not a dependency here and should not become one
 # for twenty lines.
@@ -576,8 +614,16 @@ class SchedulerApp(tk.Tk):
         self._holdout_proc: subprocess.Popen | None = None
         self._last_drill_minute: tuple | None = None
         self._drill_proc: subprocess.Popen | None = None
-        self._opt_proc: subprocess.Popen | None = None
+        # One per underlying. Was a single slot, which silently meant the
+        # second symbol's process was never tracked, never tailed and never
+        # stopped.
+        self._opt_procs: dict[str, subprocess.Popen] = {}
         self._last_opt_reconcile_minute: tuple | None = None
+        # Which symbols have already been reconciled today, and for which
+        # day. Per SYMBOL, because the minute claim below is what made a
+        # failed Popen permanent: the cron matches one minute a day, so a
+        # symbol that failed to launch inside it was never retried.
+        self._opt_reconciled_on: tuple[object, set] = (None, set())
         self._opt_reconcile_proc: subprocess.Popen | None = None
         # Declared here rather than guarded with hasattr() at each use.
         # hasattr on a Tk subclass goes through Misc.__getattr__, which
@@ -671,10 +717,20 @@ class SchedulerApp(tk.Tk):
     # for those late prints.
     _DEFAULT_OPTION = {
         "enabled":       False,   # OFF until a watched session proves it out
-        "code":          "US.SOXL",
+        # A LIST. `code` is still read (see _option_codes) so an existing
+        # config keeps working, but everything written from here on is
+        # `codes`, because one process per underlying is the shape the
+        # account-wide subscription quota forces anyway.
+        "codes":         ["US.SOXL"],
         "start":         "09:15",
         "end":           "16:25",
+        # Both accept a number (every code) or a {code: value} map.
+        # See _option_pct and _option_quotas. Empty quota means "divide the
+        # account-wide budget evenly", which is the only safe default: the
+        # budget is account-wide, so a per-code DEFAULT that each collector
+        # applied on its own would over-subscribe as soon as there were two.
         "pct":           80.0,
+        "quota":         {},
         "reconcile_cron": "50 16 * * 1-5",
     }
 
@@ -745,16 +801,7 @@ class SchedulerApp(tk.Tk):
         self.cfg["autostart"]          = bool(self.autostart_var.get())
 
         if self.opt_enabled_var is not None:
-            # Merged onto the defaults, not written field by field: a config
-            # file from before this panel existed has no option_window key,
-            # and reconcile_cron is not on the panel at all.
-            opt = dict(self._DEFAULT_OPTION)
-            opt.update(self.cfg.get("option_window") or {})
-            opt["enabled"] = bool(self.opt_enabled_var.get())
-            opt["code"] = self.opt_code_var.get().strip() or "US.SOXL"
-            opt["start"] = self.opt_start_var.get().strip() or "09:15"
-            opt["end"] = self.opt_end_var.get().strip() or "16:25"
-            self.cfg["option_window"] = opt
+            self.cfg["option_window"] = self._option_config_from_panel()
         # Remote backup
         rb = self.cfg.setdefault("remote_backup", {})
         rb["enabled"]          = bool(self.backup_enabled_var.get())
@@ -899,10 +946,12 @@ class SchedulerApp(tk.Tk):
             font=("Helvetica", 9), command=self._save_config,
         ).pack(side=tk.LEFT, padx=8, pady=4)
 
-        self.opt_code_var = tk.StringVar(value=cfg.get("code", "US.SOXL"))
+        # Comma-separated, through the same normaliser the save path uses.
+        self.opt_code_var = tk.StringVar(
+            value=", ".join(self._option_codes(cfg)))
         self.opt_start_var = tk.StringVar(value=cfg.get("start", "09:15"))
         self.opt_end_var = tk.StringVar(value=cfg.get("end", "16:25"))
-        for label, var, width in (("Code:", self.opt_code_var, 10),
+        for label, var, width in (("Codes:", self.opt_code_var, 24),
                                   ("Start:", self.opt_start_var, 6),
                                   ("End:", self.opt_end_var, 6)):
             tk.Label(frame, text=label, bg=BG_DARK, fg=FG,
@@ -916,6 +965,196 @@ class SchedulerApp(tk.Tk):
                                        font=("Helvetica", 8))
         self.opt_status_lbl.pack(side=tk.LEFT, padx=(14, 4))
 
+    def _option_config_from_panel(self) -> dict:
+        """Build option_window from the panel. Its own method so it can be
+        tested: the save path is where the symbol-switch bug lived, and a
+        test that re-implemented this branch would have killed nothing.
+
+        Merged onto the defaults rather than written field by field: a
+        config from before this panel existed has no option_window key, and
+        reconcile_cron is not on the panel at all.
+        """
+        opt = dict(self._DEFAULT_OPTION)
+        opt.update(self.cfg.get("option_window") or {})
+        opt["enabled"] = bool(self.opt_enabled_var.get())
+
+        # Through the normaliser, written as `codes`, and `code` dropped so
+        # the two spellings cannot drift apart in a file that has both.
+        #
+        # An unusable entry is REFUSED, not normalised. The normaliser falls
+        # back to the default so the collector can never silently collect
+        # nothing -- but applying that fallback HERE would write the default
+        # over a real config, which is this change's own bug in new clothes:
+        # clear the box, press Start, and the symbol changes.
+        typed = self._option_codes({"codes": self.opt_code_var.get()},
+                                   fallback=None)
+        if typed:
+            opt["codes"] = typed
+        else:
+            kept = self._option_codes(self.cfg.get("option_window") or {})
+            self._log(f"Option codes {self.opt_code_var.get()!r} are not "
+                      f"usable — keeping {', '.join(kept)}")
+            # The box must stop showing something that was not saved.
+            self.opt_code_var.set(", ".join(kept))
+            opt["codes"] = kept
+        opt.pop("code", None)
+
+        opt["start"] = self.opt_start_var.get().strip() or "09:15"
+        opt["end"] = self.opt_end_var.get().strip() or "16:25"
+        return opt
+
+    @staticmethod
+    def _option_codes(cfg: dict, fallback=_UNSET) -> list[str]:
+        """The underlyings to collect, from either config spelling.
+
+        ONE function for reading and for writing. The panel used to read
+        `cfg.get("code", "US.SOXL")` into its entry while save wrote the
+        entry back, so a config lacking that key showed the default and
+        then PERSISTED it on the next save -- a symbol switch caused by
+        pressing a button that says nothing about symbols.
+
+        Accepts a `codes` list, a `code` string, or a comma/semicolon
+        separated string from the entry box. Normalises case, strips
+        blanks, and de-duplicates while keeping order -- two copies of one
+        symbol would mean two collectors fighting over the same lock.
+        """
+        raw = cfg.get("codes")
+        if not raw:
+            # `not raw`, not `is None`. A hand-edited config holding BOTH
+            # spellings with an empty list -- {"codes": [], "code": "US.QQQ"}
+            # -- never looked at `code` and fell straight through to the
+            # default, switching the symbol silently. That is the bug this
+            # whole function exists to remove, surviving inside it.
+            raw = cfg.get("code")
+        if isinstance(raw, str):
+            # Spaces separate too. The label says "Codes:", so typing
+            # "US.SOXL US.QQQ" is the natural thing to do, and treating it
+            # as ONE code produced a junk symbol and a "running 0/1".
+            raw = raw.replace(";", ",").replace(" ", ",").split(",")
+        out: list[str] = []
+        for item in (raw or []):
+            code = str(item).strip().upper().strip("'\"")
+            if not code:
+                continue
+            if not _CODE_RE.match(code):
+                # Dropped loudly. Silently accepting it produces a
+                # collector that asks OpenD for a symbol that cannot
+                # exist; silently dropping it produces a shorter list
+                # nobody ordered.
+                log.warning("ignoring unusable option code %r", code)
+                continue
+            if code not in out:
+                out.append(code)
+        if out:
+            return out
+        if fallback is not _UNSET:
+            return fallback
+        # The READ side falls back rather than returning empty: an empty
+        # list reads as "collect nothing", and silently collecting nothing
+        # is the failure this whole area keeps producing. The SAVE side
+        # passes fallback=None so it can refuse instead of persisting a
+        # default over a real config.
+        return list(SchedulerApp._DEFAULT_OPTION["codes"])
+
+    @staticmethod
+    def _option_quotas(cfg: dict, codes: list[str]) -> dict[str, int]:
+        """How many contracts each underlying may subscribe to.
+
+        The subscription quota is ACCOUNT-WIDE, so two collectors are two
+        claims on one budget and nothing at runtime divides it for them:
+        `option_used_quota` is not a contract count (measured -- see
+        log_telemetry in the collector), so it cannot be read and split.
+        A static division is therefore the only honest mechanism, and this
+        is where it happens.
+
+        `quota` accepts either shape:
+          * a MAP {code: n} -- explicit shares. Codes left out of the map
+            divide what is left over, evenly.
+          * a NUMBER -- the account budget to divide, replacing the
+            collector's own figure. Not "this many each": that spelling is
+            exactly the bug this function exists to prevent.
+
+        Over-subscription is clamped proportionally rather than refused, and
+        said out loud both times. Refusing would mean collecting nothing
+        from a typo, and silence would mean the panel shows numbers the
+        account never granted. Note that the clamp only makes the CONFIG
+        add up -- what was actually taken is read back by the collector's
+        verify_subscription right after it subscribes.
+        """
+        raw = cfg.get("quota")
+        budget = _OPT_QUOTA_TOTAL
+        explicit: dict[str, int] = {}
+        if isinstance(raw, dict):
+            for code in codes:
+                v = raw.get(code)
+                if v is None:
+                    continue
+                try:
+                    explicit[code] = max(1, int(v))
+                except (TypeError, ValueError):
+                    log.warning("option quota for %s is not a number: %r",
+                                code, v)
+        elif raw is not None:
+            try:
+                budget = max(1, int(raw))
+            except (TypeError, ValueError):
+                log.warning("option quota budget is not a number: %r", raw)
+
+        out = dict(explicit)
+        rest = [c for c in codes if c not in out]
+        if rest:
+            left = budget - sum(out.values())
+            if left < len(rest):
+                log.warning("option quota: %d left for %d underlying(s) with "
+                            "no share of their own; giving each 1",
+                            left, len(rest))
+            share = max(1, left // len(rest))
+            for code in rest:
+                out[code] = share
+
+        total = sum(out.values())
+        if total > budget:
+            log.warning("option quotas add up to %d against an account "
+                        "budget of %d -- scaling them down", total, budget)
+            scaled = {c: max(1, n * budget // total) for c, n in out.items()}
+            log.warning("option quotas applied: %s",
+                        ", ".join(f"{c}={scaled[c]} (asked {out[c]})"
+                                  for c in codes))
+            out = scaled
+        return out
+
+    @staticmethod
+    def _option_pct(cfg: dict, codes: list[str]) -> dict[str, float]:
+        """The moneyness pre-filter, per underlying.
+
+        Per-code because the right width is a property of the underlying,
+        not of the session: on a $600 index nearly all of the
+        delta-weighted flow sits within a few percent of spot, while a 3x
+        semiconductor ETF needs a wide window for a different reason --
+        selection is centred on `last_price`, which is the previous REGULAR
+        session's close, and SOXL has been 24% away from it at 09:15.
+
+        A number applies to every code, which is what a single `pct` meant
+        before this and stays the default.
+        """
+        raw = cfg.get("pct", 80.0)
+        if isinstance(raw, dict):
+            out = {}
+            for code in codes:
+                v = raw.get(code, 80.0)
+                try:
+                    out[code] = float(v)
+                except (TypeError, ValueError):
+                    log.warning("option pct for %s is not a number: %r",
+                                code, v)
+                    out[code] = 80.0
+            return out
+        try:
+            return {c: float(raw) for c in codes}
+        except (TypeError, ValueError):
+            log.warning("option pct is not a number: %r", raw)
+            return {c: 80.0 for c in codes}
+
     @staticmethod
     def _hhmm(text: str, fallback: str) -> time:
         try:
@@ -924,6 +1163,13 @@ class SchedulerApp(tk.Tk):
         except Exception:                                        # noqa: BLE001
             h, m = fallback.split(":")
             return time(int(h), int(m))
+
+    # DERIVED from the collector's pad, not a second literal beside it.
+    # The window must outlast the collector's own sampling window or the
+    # watchdog kills it mid-sample, and a drift between two independent
+    # numbers is exactly the kind of thing a test catches only if someone
+    # remembers to keep the test.
+    _POST_CLOSE_PAD_MIN = _COLLECTOR_POST_CLOSE_PAD_MIN + 5
 
     def _option_window_active(self, et: datetime) -> bool:
         """Is the option window open right now?
@@ -940,10 +1186,22 @@ class SchedulerApp(tk.Tk):
         cfg = self.cfg.get("option_window", self._DEFAULT_OPTION)
         if not cfg.get("enabled", False):
             return False
-        if et.weekday() >= 5:
+        # Full closures, not just weekends. A holiday used to launch the
+        # collector at 09:15, spend chain and snapshot calls against an
+        # account-wide limit, and end with a 16:50 reconcile reporting every
+        # contract as uncollected -- the one detector for a dropped
+        # subscription, spent on a day the exchange was shut.
+        if not is_trading_day(et.date()):
             return False
         start = self._hhmm(cfg.get("start"), "09:15")
         end = self._hhmm(cfg.get("end"), "16:25")
+        # The configured end is a full-session figure. Clamp it to the
+        # actual close so a 13:00 half session stops at 13:25 rather than
+        # holding 200 subscriptions over three dead hours; clamping rather
+        # than replacing keeps an end set EARLIER than the close honoured.
+        half_end = (datetime.combine(et.date(), market_close_et(et.date()))
+                    + timedelta(minutes=self._POST_CLOSE_PAD_MIN)).time()
+        end = min(end, half_end)
         return start <= et.time() <= end
 
     def _build_stocks(self):
@@ -1151,34 +1409,72 @@ class SchedulerApp(tk.Tk):
         # mean everything is stopped, or Stop would leave a collector
         # running that nothing on screen accounts for.
         active = self._collector_running and self._option_window_active(et)
-        running = self._opt_proc is not None and self._opt_proc.poll() is None
+        codes = self._option_codes(self.cfg.get("option_window",
+                                                self._DEFAULT_OPTION))
 
-        if active and not running:
-            if self._opt_proc is not None:          # exited on its own
-                rc = self._opt_proc.returncode
-                self._opt_proc = None
-                if rc == single_instance.EXIT_ALREADY_RUNNING:
-                    # Expected while the Windows scheduled task still runs
-                    # the same collector: whoever got the lock first owns
-                    # the session, and the loser cost one lock attempt.
-                    self._log("[opt] another collector holds the lock — "
-                              "leaving it alone")
-                    if self.opt_status_lbl is not None:
-                        self.opt_status_lbl.config(text="external collector")
-                    return
-                if not self._died_young("opt"):
-                    self._log(f"[opt] collector exited (rc={rc}) — restarting")
-            self._launch_opt()
-        elif running and not active:
-            self._log("[opt] window closed — stopping collector")
+        if active:
+            for code in codes:
+                # `continue`, never `return`. Every branch below used to
+                # return, which was correct for one symbol and abandons
+                # every later symbol the moment the first one is refused,
+                # dies young or is backed off.
+                proc = self._opt_procs.get(code)
+                if proc is not None and proc.poll() is None:
+                    # Clear the escalation once it has survived startup.
+                    # The option path had NO clearing point anywhere, so
+                    # three refusals at 09:15 still cost 64 seconds after a
+                    # crash at 15:00. "tick" and "ob" are cleared here too
+                    # -- in the watchdog, not in their launch -- because a
+                    # spawn is not yet a survival.
+                    if not self._died_young(f"opt:{code}"):
+                        self._collector_started(f"opt:{code}")
+                    continue
+                key = f"opt:{code}"
+                if proc is not None:                   # exited on its own
+                    rc = proc.returncode
+                    self._opt_procs.pop(code, None)
+                    if rc == single_instance.EXIT_ALREADY_RUNNING:
+                        # Expected while the Windows scheduled task still
+                        # runs the same collector: whoever got the lock
+                        # first owns the session, and the loser cost one
+                        # lock attempt.
+                        self._log(f"[opt {code}] another collector holds the "
+                                  f"lock — leaving it alone")
+                        self._collector_failed(
+                            key, f"Option collector ({code})",
+                            _opt_lock_name(code), "refused")
+                        continue
+                    if self._died_young(key):
+                        # Recorded nowhere before: the option path skipped
+                        # _collector_failed entirely, so every relaunch was
+                        # "attempt 1" and the next tick -- about a second
+                        # later -- tried again.
+                        self._collector_failed(
+                            key, f"Option collector ({code})",
+                            _opt_lock_name(code), "died_young")
+                    else:
+                        self._log(f"[opt {code}] collector exited (rc={rc}) "
+                                  f"— restarting")
+                if not self._collector_backoff_ok(key):
+                    continue
+                self._launch_opt(code)
+            # A symbol dropped from the config mid-session is stopped, or it
+            # would keep its 200 subscriptions booked for the rest of the day.
+            if (stale := [c for c in self._opt_procs if c not in codes]):
+                self._log(f"[opt] no longer configured: "
+                          f"{', '.join(sorted(stale))} — stopping")
+                self._kill_opt(stale)
+        elif self._opt_procs:
+            self._log("[opt] window closed — stopping collectors")
             self._kill_opt()
 
         if self.opt_status_lbl is not None:
             cfg = self.cfg.get("option_window", self._DEFAULT_OPTION)
             if not cfg.get("enabled", False):
                 txt = "off"
-            elif self._opt_proc is not None and self._opt_proc.poll() is None:
-                txt = f"running pid {self._opt_proc.pid}"
+            elif (live := [c for c, p in sorted(self._opt_procs.items())
+                           if p.poll() is None]):
+                txt = f"running {len(live)}/{len(codes)}: {', '.join(live)}"
             else:
                 txt = "in window, not running" if active else "outside window"
             self.opt_status_lbl.config(text=txt)
@@ -1481,22 +1777,33 @@ class SchedulerApp(tk.Tk):
         self._log(f"OB collector PID {self._ob_proc.pid} started")
         threading.Thread(target=self._tail_ob_proc, daemon=True).start()
 
-    def _launch_opt(self):
-        """Start option_tick_collector.py for the configured underlying."""
+    def _launch_opt(self, code: str):
+        """Start option_tick_collector.py for ONE underlying."""
         cfg = self.cfg.get("option_window", self._DEFAULT_OPTION)
         if not cfg.get("enabled", False):
             return
-        if self._opt_proc is not None and self._opt_proc.poll() is None:
+        live = self._opt_procs.get(code)
+        if live is not None and live.poll() is None:
             return
         script = pathlib.Path(__file__).parent / "option_tick_collector.py"
         if not script.exists():
             return
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        # Both are computed over the WHOLE code list, not for this one code:
+        # a share of an account-wide budget is only defined against the
+        # others claiming it, so launching one collector still needs to know
+        # who else is configured.
+        codes = self._option_codes(cfg)
+        if code not in codes:
+            codes = codes + [code]
+        quota = self._option_quotas(cfg, codes)[code]
+        pct = self._option_pct(cfg, codes)[code]
         cmd = [sys.executable, str(script),
-               "--code", str(cfg.get("code", "US.SOXL")),
-               "--pct", str(cfg.get("pct", 80.0))]
+               "--code", code,
+               "--pct", str(pct),
+               "--quota", str(quota)]
         try:
-            self._opt_proc = subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, env=env,
                 # MANDATORY, not an optimisation. _kill_opt stops this child
@@ -1510,18 +1817,26 @@ class SchedulerApp(tk.Tk):
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             )
         except Exception as exc:                                 # noqa: BLE001
-            self._log(f"Failed to start option collector: {exc}")
+            self._log(f"Failed to start option collector for {code}: {exc}")
             return
-        _kill_with_me(self._opt_proc.pid)
-        self._launched_at["opt"] = time_mod.monotonic()
-        self._log(f"Option collector PID {self._opt_proc.pid} started "
-                  f"({cfg.get('code')})")
-        threading.Thread(target=self._tail_opt_proc, daemon=True).start()
+        self._opt_procs[code] = proc
+        _kill_with_me(proc.pid)
+        self._launched_at[f"opt:{code}"] = time_mod.monotonic()
+        # NOT _collector_started: Popen returning means the process spawned,
+        # not that it lived. A collector refused by the lock takes about
+        # eight seconds to find that out, and clearing the escalation on a
+        # spawn made every round "attempt 1" -- see the same note on "ob".
+        self._log(f"Option collector PID {proc.pid} started ({code})")
+        threading.Thread(target=self._tail_opt_proc,
+                         args=(proc, code), daemon=True).start()
 
-    def _tail_opt_proc(self):
-        proc = self._opt_proc
+    def _tail_opt_proc(self, proc=None, code: str = ""):
+        """Tail ONE collector process. See _tail_opt_reconcile on `proc`."""
+        if proc is None:
+            proc = next(iter(self._opt_procs.values()), None)
         if proc is None or proc.stdout is None:
             return
+        tag = f"opt {code}" if code else "opt"
         try:
             for line in proc.stdout:
                 # self.after(0, ...), never self._log() directly: _log writes
@@ -1535,22 +1850,31 @@ class SchedulerApp(tk.Tk):
                 # DATA RECEIVED, "telemetry: subscribed N of 200", the greeks
                 # lag. Losing it silently means running the session and not
                 # knowing whether it worked.
-                self.after(0, self._log, f"[opt] {line.rstrip()}")
+                self.after(0, self._log, f"[{tag}] {line.rstrip()}")
         except Exception:                                        # noqa: BLE001
             pass
 
-    def _tail_opt_reconcile(self):
-        proc = self._opt_reconcile_proc
+    def _tail_opt_reconcile(self, proc=None, code: str = ""):
+        """Tail ONE reconcile process.
+
+        `proc` is a parameter because reading it off `self` is a race that
+        is certain, not merely possible: start two reconciles in the same
+        tick and both threads read the second one, so the first symbol's
+        output disappears completely. It defaults to the attribute so the
+        single-process call site keeps working.
+        """
+        proc = proc if proc is not None else self._opt_reconcile_proc
         if proc is None or proc.stdout is None:
             return
+        tag = f"opt-reconcile {code}" if code else "opt-reconcile"
         try:
             for line in proc.stdout:
-                self.after(0, self._log, f"[opt-reconcile] {line.rstrip()}")
+                self.after(0, self._log, f"[{tag}] {line.rstrip()}")
         except Exception:                                        # noqa: BLE001
             pass
 
-    def _kill_opt(self):
-        """Stop it in a way that reaches its cleanup.
+    def _kill_opt(self, codes=None):
+        """Stop the named collectors, or all of them, reaching their cleanup.
 
         terminate() is TerminateProcess on Windows: no handler, no `finally`,
         so the collector's unsubscribe, reconcile, prune and WAL checkpoint
@@ -1562,25 +1886,43 @@ class SchedulerApp(tk.Tk):
         skips its cleanup, and the 16:50 reconcile runs as its own process
         either way.
         """
-        proc = self._opt_proc
-        self._opt_proc = None
-        if proc is None or proc.poll() is not None:
+        want = list(codes) if codes is not None else list(self._opt_procs)
+        procs = [(c, self._opt_procs.pop(c))
+                 for c in want if c in self._opt_procs]
+        procs = [(c, p) for c, p in procs if p.poll() is None]
+        if not procs:
             return
-        try:
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-            proc.wait(timeout=10)
-            self._log("Option collector stopped cleanly")
-            return
-        except Exception as exc:                                 # noqa: BLE001
-            self._log(f"Option collector did not stop on CTRL_BREAK ({exc}) "
-                      f"— terminating; its cleanup will be skipped")
-        for step in (proc.terminate, proc.kill):
+
+        # Signals first, waits after, against ONE deadline. Waiting for each
+        # child in turn cost up to 20 seconds EACH, all of it on the Tk
+        # thread -- two symbols froze the window for forty seconds, and the
+        # children were already shutting down in parallel the whole time.
+        for code, proc in procs:
             try:
-                step()
-                proc.wait(timeout=5)
-                return
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+            except Exception as exc:                             # noqa: BLE001
+                self._log(f"Option collector ({code}): CTRL_BREAK failed "
+                          f"({exc})")
+
+        deadline = time_mod.monotonic() + _OPT_STOP_GRACE_S
+        stubborn = []
+        for code, proc in procs:
+            try:
+                proc.wait(timeout=max(0.1, deadline - time_mod.monotonic()))
+                self._log(f"Option collector ({code}) stopped cleanly")
             except Exception:                                    # noqa: BLE001
-                continue
+                stubborn.append((code, proc))
+
+        for code, proc in stubborn:
+            self._log(f"Option collector ({code}) did not stop on CTRL_BREAK "
+                      f"— terminating; its cleanup will be skipped")
+            for step in (proc.terminate, proc.kill):
+                try:
+                    step()
+                    proc.wait(timeout=5)
+                    break
+                except Exception:                                # noqa: BLE001
+                    continue
 
     def _launch_collector(self):
         """Start both collectors. Kept for the callers that want both."""
@@ -1681,7 +2023,7 @@ class SchedulerApp(tk.Tk):
     def _check_option_reconcile_cron(self, et: datetime):
         """Reconcile the option tape after the close, as its own process.
 
-        Deliberately independent of self._opt_proc. The failure this check
+        Deliberately independent of self._opt_procs. The failure this check
         exists to catch is a collector that died, was killed, or never
         started -- making it conditional on a live collector would switch it
         off in exactly those cases.
@@ -1692,6 +2034,15 @@ class SchedulerApp(tk.Tk):
         """
         cfg = self.cfg.get("option_window", self._DEFAULT_OPTION)
         if not cfg.get("enabled", False):
+            return
+        # A cron's dow field knows about weekends and nothing else, so this
+        # fired at 16:50 on a full closure and asked the collector to
+        # reconcile a day that never happened. The answer is not a wrong
+        # number -- subscribed_on comes back empty and the run exits 5 with
+        # "was the collector running that day?" -- but it is still a false
+        # alarm, and it spends the credibility of the one check that can
+        # catch real under-collection.
+        if not is_trading_day(et.date()):
             return
         cron = str(cfg.get("reconcile_cron", "")).strip()
         parts = cron.split()
@@ -1705,21 +2056,59 @@ class SchedulerApp(tk.Tk):
                     self._cron_field_match(dow_f, cron_dow)):
                 return
             cur_min = (et.year, et.month, et.day, et.hour, et.minute)
-            if cur_min == self._last_opt_reconcile_minute:
+            script = pathlib.Path(__file__).parent / "option_tick_collector.py"
+            codes = self._option_codes(cfg)
+            # Claimed per SYMBOL and per DAY, not per minute. The minute
+            # claim ran before the loop, so a symbol whose Popen raised was
+            # never retried -- the cron matches one minute a day, and the
+            # minute was already spent. Now a launched symbol is recorded
+            # and skipped while a failed one is attempted again on the next
+            # tick, which is still inside the matching minute.
+            day, done = self._opt_reconciled_on
+            if day != et.date():
+                day, done = et.date(), set()
+                self._opt_reconciled_on = (day, done)
+            pending = [c for c in codes if c not in done]
+            if not pending:
+                # Everything already launched this day. Without this the
+                # "cron matched" line below would print once a second for
+                # the rest of the matching minute.
                 return
             self._last_opt_reconcile_minute = cur_min
-            script = pathlib.Path(__file__).parent / "option_tick_collector.py"
-            cmd = [sys.executable, str(script),
-                   "--code", str(cfg.get("code", "US.SOXL")),
-                   "--reconcile-only",
-                   "--session", et.strftime("%Y-%m-%d")]
-            self._log(f"[opt] Reconcile cron matched ({cron})")
-            self._opt_reconcile_proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"})
-            threading.Thread(target=self._tail_opt_reconcile,
-                             daemon=True).start()
+            self._log(f"[opt] Reconcile cron matched ({cron}) for "
+                      f"{', '.join(pending)}")
+            for code in pending:
+                cmd = [sys.executable, str(script),
+                       "--code", code,
+                       "--reconcile-only",
+                       "--session", et.strftime("%Y-%m-%d")]
+                # Each symbol gets its own try. The enclosing one catches
+                # everything and this loop sits inside it, so one failing
+                # Popen used to abandon every later symbol -- and because
+                # the minute is claimed BEFORE the loop and the cron
+                # matches one minute a day, those symbols went unreconciled
+                # for the whole session rather than being retried.
+                #
+                # Each process is handed to its own tail thread. The
+                # attribute keeps only the last, which is why the thread
+                # must not read it: N reconciles in one tick left every
+                # thread tailing the Nth, and the earlier symbols' coverage
+                # ratio -- the whole output of this run -- disappeared.
+                try:
+                    proc = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1,
+                        env={**os.environ, "PYTHONUNBUFFERED": "1"})
+                    self._opt_reconcile_proc = proc
+                    # Recorded only once Popen RETURNED. Recording before
+                    # the call is what the minute claim did.
+                    done.add(code)
+                    threading.Thread(target=self._tail_opt_reconcile,
+                                     args=(proc, code), daemon=True).start()
+                except Exception as exc:                     # noqa: BLE001
+                    self._log(f"[opt-reconcile {code}] failed to start: "
+                              f"{exc} — the other symbols still run")
+                    continue
         except Exception as exc:                                 # noqa: BLE001
             self._log(f"[opt] Reconcile cron error: {exc}")
 
@@ -2170,6 +2559,12 @@ class SchedulerApp(tk.Tk):
         if self._tick_job:
             self.after_cancel(self._tick_job)
         self._kill_collector()
+        # The option collector was left to the job object, which hard-kills
+        # it -- skipping CTRL_BREAK and therefore skipping unsubscribe, so
+        # 200 contracts stay booked against the account quota until OpenD
+        # notices the socket is gone. _kill_opt is the path that reaches
+        # its cleanup.
+        self._kill_opt()
         self.destroy()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -2205,6 +2600,7 @@ def main(argv=None):  # argv accepted for uniform main.py dispatch, not used
     # at 6.6 s, long enough to drop K-line pushes and tear a hole in
     # the live chart. Detach it before any context is opened.
     quiet_sdk_file_log()
+    patch_close_reason()
     app = SchedulerApp()
     app.mainloop()
 

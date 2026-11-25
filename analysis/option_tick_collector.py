@@ -50,13 +50,16 @@ import signal
 import sys
 import threading
 import time as time_mod
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from core import single_instance
+from core.market_calendar import (
+    is_market_holiday, is_trading_day, market_close_et)
 from core.sdk_log import quiet_sdk_file_log
+from core.sdk_patches import patch_close_reason
 from feeds.option_tick_store import OptionTickStore
 
 logging.basicConfig(
@@ -93,14 +96,44 @@ _ET = ZoneInfo("America/New_York")
 # heartbeat alone writes ~41,000 greeks rows a night, every one of them
 # carrying a `spot` that is yesterday's close.
 _SESSION_OPEN_ET = time(9, 20)
-_SESSION_CLOSE_ET = time(16, 20)
+# Minutes past the close to keep sampling. The last greeks of the day are
+# worth having, and the close itself is not a clean edge.
+#
+# Public, because the scheduler derives its own window from it. The two used
+# to be independent literals kept in step by a test -- which worked, but a
+# test is a guard and this is a definition.
+POST_CLOSE_PAD_MIN = 20
+_POST_CLOSE_PAD_MIN = POST_CLOSE_PAD_MIN      # retained for older callers
+
+
+def _session_end_et(day=None) -> time:
+    """When greeks sampling stops: the exchange close plus the pad.
+
+    Its own function so the log line and in_session cannot disagree about
+    the window. They did: the log said a fixed "09:20-16:20" while
+    in_session derived 13:20 on a half session.
+    """
+    day = day or datetime.now(_ET).date()
+    close = datetime.combine(day, market_close_et(day))
+    return (close + timedelta(minutes=POST_CLOSE_PAD_MIN)).time()
 
 
 def in_session(now=None) -> bool:
+    """Should greeks be sampled right now.
+
+    Full closures are the reason this is not a weekday test. A holiday used
+    to read as an ordinary session: the collector started, raised its "NO
+    PRINTS in 3 minutes" alarm against a shut exchange, and wrote a
+    session's worth of greeks rows carrying the previous day's spot.
+
+    The end of the window is DERIVED from the exchange close rather than
+    fixed at 16:20, so a 13:00 half session stops at 13:20 instead of
+    sampling three dead hours. 2026-11-27 is one.
+    """
     now = now or datetime.now(_ET)
-    if now.weekday() >= 5:
+    if not is_trading_day(now.date()):
         return False
-    return _SESSION_OPEN_ET <= now.time() <= _SESSION_CLOSE_ET
+    return _SESSION_OPEN_ET <= now.time() <= _session_end_et(now.date())
 
 # A greeks row is written only when something actually moved. Writing all 200
 # contracts every 5 s would be 936k rows a session, about 75 MB/day and
@@ -269,6 +302,17 @@ def pick_contracts(ctx, code: str, pct: float, quota: int = _QUOTA,
     scored, unscored = _score_contracts(ctx, rows)
     scored.sort(key=lambda r: -r["_score"])
     dropped = max(0, len(scored) - quota)
+    # Captured HERE, before the pop two lines down and before `rows` is
+    # re-sorted by strike: after that the scores are gone from the dicts and
+    # nothing in the process ever sees them again. They come from a chain
+    # snapshot that is not re-fetchable, so a selection not recorded now can
+    # never be graded -- see the option_candidates table.
+    picked = {r["code"] for r in scored[:quota]}
+    candidates = [{"code": r["code"], "rank": i + 1, "score": r.get("_score"),
+                   "expiry": r.get("expiry"), "strike": r.get("strike"),
+                   "opt_type": r.get("opt_type"),
+                   "picked": r["code"] in picked}
+                  for i, r in enumerate(scored)]
     rows = scored[:quota]
     for r in rows:
         r.pop("_score", None)
@@ -293,6 +337,7 @@ def pick_contracts(ctx, code: str, pct: float, quota: int = _QUOTA,
         per_expiry[r["expiry"]] = per_expiry.get(r["expiry"], 0) + 1
     info = {"spot": spot, "expiries": expiries, "per_expiry": per_expiry,
             "candidates": len(scored), "unscored": unscored,
+            "scored": candidates,
             "window": (lo, hi), "dropped_for_quota": dropped,
             "extended": ext, "extended_outside": outside}
     return rows, info
@@ -527,8 +572,129 @@ def sample_greeks(ctx, codes: list[str], underlying: str, store: OptionTickStore
     return n
 
 
+def _feed_volumes(ctx, codes: list[str],
+                  session: str) -> tuple[dict[str, int | None], int, dict]:
+    """The broker's own daily volume per contract, for *session*.
+
+    Split out of reconcile so the band pass can reuse it rather than
+    restate the wrong-day rule, which is the subtle part: `volume` is the
+    LAST SESSION's total, not the session being asked about. Run on a
+    Sunday against today's date it reports Friday's 251,263 contracts
+    against an empty table and calls the result 0% coverage -- an alarming
+    number about nothing. The contract's own update_time says which day the
+    figure is for; when they disagree there is no comparison to make, and
+    "unknown" is the honest answer.
+
+    Returns (volume by code, how many were stamped another day, the other
+    fields the same response already carried). The third value is additive --
+    the two existing callers ignore it -- and exists because delta and open
+    interest arrive in this very response: reading them here is free, and
+    asking for them separately would double the call count of the band pass.
+    """
+    from moomoo import RET_OK
+
+    feed: dict[str, int | None] = {}
+    wrong_day = 0
+    extra: dict[str, dict] = {}
+    for i in range(0, len(codes), 200):
+        ret, snap = ctx.get_market_snapshot(codes[i:i + 200])
+        if ret != RET_OK or snap is None or snap.empty:
+            log.warning("volume snapshot failed: %s", str(snap)[:100])
+            continue
+        for _, r in snap.iterrows():
+            upd = str(r.get("update_time") or "")[:10]
+            if upd and upd != session:
+                feed[r["code"]] = None
+                wrong_day += 1
+            else:
+                feed[r["code"]] = _i(r.get("volume"))
+            # Kept even for a wrong-day row: the VOLUME is what that rule
+            # invalidates, and a delta read is not a claim about any
+            # session's trading.
+            extra[r["code"]] = {
+                "delta_close": _f(r.get("option_delta")),
+                "oi_close": _i(r.get("option_open_interest"))}
+    return feed, wrong_day, extra
+
+
+def _band_coverage(ctx, store: OptionTickStore, session: str,
+                   underlying: str | None, our_vol: int) -> dict | None:
+    """Our volume against the whole candidate BAND, not just what we took.
+
+    The headline ratio divides by the feed's volume for the contracts we
+    SUBSCRIBED to, which is our own selection scoring itself. It cannot see
+    a bad selection, and worse, it improves when the selection gets worse:
+    fewer contracts means the survivors are the active ones, so the ratio
+    walks toward 100% while real coverage falls. On 2026-11-24 the
+    subscribed set reconciled at 100.0% while holding 62.4% of the
+    candidate band's volume -- and that gap is about to be the normal case,
+    because an account-wide quota divided between two underlyings is a
+    smaller selection on both.
+
+    Needs the recorded candidate list, so it answers None for any session
+    collected before option_candidates existed, and for one where the
+    selection was never written.
+
+    Returns {contracts, feed_vol, ratio, unknown, missed} where `missed`
+    names the biggest-volume contracts the ranking passed over -- the
+    diagnostic that found a single unsubscribed SOXL strike carrying 13% of
+    a day's band volume.
+    """
+    if underlying is None:
+        return None
+    cands = store.candidates_on(session, underlying)
+    if not cands:
+        return None
+
+    codes = [c["code"] for c in cands]
+    feed, _wrong, extra = _feed_volumes(ctx, codes, session)
+    known = [(c, feed.get(c["code"])) for c in cands
+             if feed.get(c["code"]) is not None]
+    band_vol = sum(v for _c, v in known)
+    picked_vol = sum(v for c, v in known if c["picked"])
+    missed = sorted(((v, c["code"], c["rank"]) for c, v in known
+                     if not c["picked"]), reverse=True)[:5]
+
+    # Written here because here is where the data is: the snapshot above has
+    # already been paid for, and before this the per-contract figures were
+    # summed and discarded. See option_band_volume for what the pairing with
+    # option_candidates buys.
+    #
+    # Its own try: _log_reconcile wraps this whole call and returns None on
+    # any exception, so a failed write would take the coverage report down
+    # with it -- and the report is the part somebody reads tonight.
+    try:
+        n = store.record_band_volume(session, [
+            {"code": c["code"],
+             # Absent from `feed` entirely (the snapshot never answered) and
+             # present-but-None (stamped another day) are both unknown; 0 is
+             # a contract that did not trade. Do not collapse them.
+             "feed_vol": feed.get(c["code"]),
+             **(extra.get(c["code"]) or {})}
+            for c in cands])
+        log.info("recorded %d band volumes for %s", n, underlying)
+    except Exception as exc:                                    # noqa: BLE001
+        log.warning("could not record band volumes: %s", exc)
+
+    return {
+        "contracts": len(cands),
+        "picked": sum(1 for c in cands if c["picked"]),
+        "feed_vol": band_vol,
+        # What the SELECTION reached, before any question of whether the
+        # subscriptions delivered. picked_vol/band_vol grades the ranking;
+        # our_vol/picked_vol grades the subscriptions; the two were previously
+        # tangled in one number that could not separate them.
+        "picked_feed_vol": picked_vol,
+        "selection_ratio": (picked_vol / band_vol) if band_vol else None,
+        "unknown": len(cands) - len(known),
+        "ratio": (our_vol / band_vol) if band_vol else None,
+        "missed": [(code, vol, rank) for vol, code, rank in missed],
+    }
+
+
 def reconcile(ctx, codes: list[str], store: OptionTickStore,
-              session: str | None = None) -> dict:  # noqa: C901
+              session: str | None = None,
+              underlying: str | None = None) -> dict:  # noqa: C901
     """Compare what we stored against the broker's own daily volume.
 
     The one check that can catch under-collection while it still matters.
@@ -546,28 +712,9 @@ def reconcile(ctx, codes: list[str], store: OptionTickStore,
 
     session = session or datetime.now(_ET).strftime("%Y-%m-%d")
     ours = store.our_volume_for(session, codes)
+    underlying = underlying or _underlying_of(codes)
 
-    feed: dict[str, int | None] = {}
-    wrong_day = 0
-    for i in range(0, len(codes), 200):
-        ret, snap = ctx.get_market_snapshot(codes[i:i + 200])
-        if ret != RET_OK or snap is None or snap.empty:
-            log.warning("reconcile snapshot failed: %s", str(snap)[:100])
-            continue
-        for _, r in snap.iterrows():
-            # `volume` is the LAST SESSION's total, not the session being
-            # asked about. Run on a Sunday against today's date it reports
-            # Friday's 251,263 contracts against an empty table and calls
-            # the result 0% coverage -- an alarming number about nothing.
-            # The contract's own update_time says which day the figure is
-            # for; when they disagree there is no comparison to make, and
-            # "unknown" is the honest answer.
-            upd = str(r.get("update_time") or "")[:10]
-            if upd and upd != session:
-                feed[r["code"]] = None
-                wrong_day += 1
-            else:
-                feed[r["code"]] = _i(r.get("volume"))
+    feed, wrong_day, _extra = _feed_volumes(ctx, codes, session)
 
     firsts = store.first_ts_for(session, codes)
     rows = []
@@ -577,8 +724,24 @@ def reconcile(ctx, codes: list[str], store: OptionTickStore,
                      "our_vol": v, "our_ticks": n,
                      "first_ts": firsts.get(c)})
     store.record_coverage(session, rows)
-    summary = store.coverage_summary(session)
+    # Summed from `rows`, NOT read back with coverage_summary(session).
+    # `rows` is already scoped to this underlying; the table is not, and
+    # reading it back mixed both symbols into one ratio -- QQQ's true 25%
+    # printed as 62.5% -- with the value depending on which of the two
+    # reconciles happened to write first. The numbers are already here.
+    feed_known = [r for r in rows if r["feed_vol"] is not None]
+    feed_total = sum(r["feed_vol"] for r in feed_known)
+    our_total = sum(r["our_vol"] for r in rows)
+    summary = {
+        "contracts": len(rows),
+        "feed_vol": feed_total,
+        "our_vol": our_total,
+        "our_ticks": sum(r["our_ticks"] for r in rows),
+        "feed_vol_unknown": len(rows) - len(feed_known),
+        "ratio": (our_total / feed_total) if feed_total else None,
+    }
     summary["session"] = session
+    summary["underlying"] = underlying
     # When the tape actually starts. The ratio above divides by the feed's
     # figure for the WHOLE session, so a collector that went live late
     # reports the time before it was subscribed as volume it lost. Carried
@@ -595,6 +758,10 @@ def reconcile(ctx, codes: list[str], store: OptionTickStore,
     summary["caught_nothing"] = sum(
         1 for r in rows if r["feed_vol"] and r["our_vol"] == 0)
     summary["wrong_day"] = wrong_day
+    # Scored against the band we chose FROM, not the set we chose. See
+    # _band_coverage for why the ratio above cannot stand on its own.
+    summary["band"] = _band_coverage(ctx, store, session, underlying,
+                                     our_total)
     return summary
 
 
@@ -702,6 +869,53 @@ def wait_interruptible(stop: threading.Event, secs: float,
         stop.wait(min(slice_s, left))
 
 
+def verify_subscription(ctx, codes: list[str]) -> int | None:
+    """How many of *codes* OpenD lists as subscribed, read right now.
+
+    subscribe() returning RET_OK does not mean the subscriptions landed --
+    the first 22 minutes of 2026-11-23 are the recorded case, and the
+    re-subscribe path below exists for it. log_telemetry already carries
+    this same comparison, but it first runs when `sweeps` reaches
+    _TELEMETRY_EVERY, about 30 minutes in at the default sweep, and a
+    shortfall at the open is worth knowing at the open.
+
+    It matters more now than it did with one underlying: with the
+    account-wide quota divided between two collectors, a short subscription
+    is the expected shape of asking for more contracts than are left, and
+    nothing else reports it. The quota fields cannot: option_used_quota is
+    not a contract count (see log_telemetry), so the subscription LIST is
+    the only honest read of what was actually taken.
+
+    Returns the count, or None when the read itself failed -- which is not
+    the same as zero and must not be logged as one.
+    """
+    from moomoo import RET_OK
+    try:
+        ret, sub = ctx.query_subscription()
+        if ret != RET_OK or not isinstance(sub, dict):
+            log.warning("subscription read failed, cannot verify: %s",
+                        str(sub)[:100])
+            return None
+        lst = sub.get("sub_list") or {}
+        live = len({c for v in lst.values() for c in (v or [])
+                    if isinstance(c, str)} & set(codes))
+    except Exception as exc:                                    # noqa: BLE001
+        log.warning("subscription read failed, cannot verify: %s", exc)
+        return None
+
+    if live < len(codes):
+        log.warning(
+            "only %d of %d contracts are in the subscription list right "
+            "after subscribing -- %d short. With the account-wide quota "
+            "divided between underlyings, this is what asking for more "
+            "than is left looks like; lower this collector's --quota or "
+            "the other one's.", live, len(codes), len(codes) - live)
+    else:
+        log.info("subscription verified: %d of %d contracts listed",
+                 live, len(codes))
+    return live
+
+
 def log_telemetry(ctx, codes: list[str], last_greeks: dict, state: dict) -> None:
     """The four things a first live session has to answer. Never fatal.
 
@@ -732,14 +946,57 @@ def log_telemetry(ctx, codes: list[str], last_greeks: dict, state: dict) -> None
             lst = (sub.get("sub_list") or {}) if isinstance(sub, dict) else {}
             tick_subs = {c for v in lst.values() for c in (v or [])
                          if isinstance(c, str)}
-            live = len(tick_subs & set(codes)) if tick_subs else None
+            # Unconditional. `if tick_subs else None` printed "? of 200"
+            # for an EMPTY subscription list -- the loudest possible signal,
+            # every contract gone, which is the 210->60 shape this line
+            # exists to catch -- and suppressed the shortfall warning below
+            # with it. A read that failed raises and is caught; an empty
+            # list is an answer, not a missing one.
+            live = len(tick_subs & set(codes))
+            # total_used/remain are the ACCOUNT-WIDE subscription quota,
+            # a different budget from option_used/option_remain. own_used is
+            # this connection's share, so the difference is everyone else's
+            # -- which on a two-underlying day separates "the other
+            # collector took the quota" from "this is a stale read".
+            #
+            # NOT conn_sub_list. query_subscription builds a fresh dict of
+            # eight keys and only ITERATES conn_sub_list to derive own_used
+            # (open_quote_context.py:1199-1228), so reading it back gave a
+            # constant zero dressed up as a measurement.
+            total = sub.get("total_used")
+            mine = sub.get("own_used")
+            theirs = (total - mine) if (total is not None
+                                        and mine is not None) else None
             log.info("telemetry: subscribed %s of %d requested  "
-                     "option_used=%s option_remain=%s",
+                     "option_used=%s option_remain=%s  "
+                     "total_used=%s remain=%s  ours=%s others=%s",
                      live if live is not None else "?", len(codes),
-                     sub.get("option_used_quota"), sub.get("option_remain_quota"))
-            if live is not None and live < len(codes):
-                log.warning("telemetry: %d requested contracts are NOT in the "
-                            "subscription list", len(codes) - live)
+                     sub.get("option_used_quota"),
+                     sub.get("option_remain_quota"),
+                     total, sub.get("remain"), mine,
+                     theirs if theirs is not None else "?")
+            # NOT a warning on theirs > 0. The tick and order-book
+            # collectors connect to this same OpenD (127.0.0.1:11111) and
+            # their subscriptions count toward total_used but not toward
+            # this connection's own_used, so `theirs` is non-zero in every
+            # normal session -- and the two option collectors each count the
+            # other's 200 contracts. Warning on it would fire ~28 times a
+            # day saying nothing, in the one subsystem whose log the first
+            # live session asks the operator to read.
+            #
+            # The unit of total_used is also still unknown: whether a
+            # TICKER subscription on an option contract costs one slot or
+            # some other number is not in the proto, so `others` is a
+            # number to watch, not one to act on. It stays on the INFO line.
+            if theirs is not None and theirs < 0:
+                log.warning("telemetry: own_used (%s) exceeds total_used "
+                            "(%s), which cannot happen in one response -- "
+                            "treat these quota figures as unreliable",
+                            mine, total)
+            if live < len(codes):
+                log.warning("telemetry: %d of %d requested contracts are NOT "
+                            "in the subscription list", len(codes) - live,
+                            len(codes))
     except Exception as exc:                                    # noqa: BLE001
         log.warning("telemetry: subscription read failed: %s", exc)
 
@@ -777,11 +1034,40 @@ def log_telemetry(ctx, codes: list[str], last_greeks: dict, state: dict) -> None
              state.get("handler_errors", 0))
 
 
+def _underlying_of(codes: list[str]) -> str | None:
+    """The symbol a list of option codes belongs to, or None if mixed.
+
+    Only for LABELLING a log line. An option code is
+    <market>.<symbol><yymmdd><C|P><strike>, so the symbol is the leading
+    letters after the market prefix. Scoping is done by the caller, which
+    knows the symbol for certain; this exists so a reconcile started by
+    hand still names what it reconciled rather than printing a number that
+    could belong to either collector.
+    """
+    seen = set()
+    for c in codes:
+        market, dot, rest = c.partition(".")
+        if not dot:
+            return None
+        sym = ""
+        for ch in rest:
+            if not ch.isalpha():
+                break
+            sym += ch
+        if not sym:
+            return None
+        seen.add(f"{market}.{sym}")
+        if len(seen) > 1:
+            return None
+    return next(iter(seen), None)
+
+
 def _log_reconcile(ctx, codes: list[str], store: OptionTickStore,
-                   session: str | None = None) -> dict | None:
+                   session: str | None = None,
+                   underlying: str | None = None) -> dict | None:
     """Reconcile and say the result out loud. Never fatal."""
     try:
-        s = reconcile(ctx, codes, store, session)
+        s = reconcile(ctx, codes, store, session, underlying)
     except Exception as exc:                                    # noqa: BLE001
         log.exception("reconcile failed: %s", exc)
         return None
@@ -790,22 +1076,56 @@ def _log_reconcile(ctx, codes: list[str], store: OptionTickStore,
             "coverage %s: NOT COMPARABLE -- the feed's volume for %d of %d "
             "contracts is stamped a different day, so there is nothing to "
             "check against. Run this after the close of the session being "
-            "reconciled.", s["session"], s["wrong_day"], s["contracts"])
+            "reconciled.", f"{s.get('underlying') or '?'} {s['session']}",
+            s["wrong_day"], s["contracts"])
         return s
     pct = f"{s['ratio'] * 100:.1f}%" if s["ratio"] is not None else "n/a"
     # "WHOLE-SESSION", and the time we went live, because the ratio divides
     # by the feed's figure for the entire day. If the collector started
     # late, this number counts the time before it was subscribed as data it
-    # lost -- which is exactly how 2026-11-23 read 83.5% while every
-    # contract whose whole tape fell inside the live window matched the
-    # feed exactly.
+    # lost -- which is exactly how 2026-11-23 read 78.6% (279,295 / 355,460,
+    # read back from option_coverage) while every contract whose whole tape
+    # fell inside the live window matched the feed exactly.
     live = s.get("live_from") or "unknown"
-    log.info("coverage %s: %s of the feed's WHOLE-SESSION volume (%s of %s "
-             "contracts over %d prints, %d contracts with no feed figure) "
-             "-- our tape starts %s; anything the feed counted before that "
-             "is in this ratio too",
-             s["session"], pct, f"{s['our_vol']:,}", f"{s['feed_vol']:,}",
+    # The symbol is IN the line. Two collectors reconcile in the same
+    # minute and both lines used to read "coverage 2026-11-24: ...", which
+    # is how a figure for one symbol gets quoted as the day's coverage.
+    log.info("coverage %s %s: %s of the feed's WHOLE-SESSION volume (%s of "
+             "%s contracts over %d prints, %d contracts with no feed "
+             "figure) -- our tape starts %s; anything the feed counted "
+             "before that is in this ratio too",
+             s.get("underlying") or "?", s["session"], pct,
+             f"{s['our_vol']:,}", f"{s['feed_vol']:,}",
              s["our_ticks"], s["feed_vol_unknown"], live)
+    band = s.get("band")
+    if band is None:
+        log.info("band coverage: not available -- no scored candidate list "
+                 "was recorded for this session, so the only denominator "
+                 "is our own selection")
+    else:
+        bpct = (f"{band['ratio'] * 100:.1f}%"
+                if band["ratio"] is not None else "n/a")
+        # The number that can actually fall when the selection gets worse.
+        # Read it, not the one above: the one above rises.
+        log.info("band coverage %s %s: %s of the CANDIDATE BAND's volume "
+                 "(%s of %s contracts over the %d we subscribed to, %d with "
+                 "no feed figure)",
+                 s.get("underlying") or "?", s["session"], bpct,
+                 f"{s['our_vol']:,}", f"{band['feed_vol']:,}",
+                 band["picked"], band["unknown"])
+        # The decomposition. One number cannot say whether a low band
+        # coverage is a bad selection or a dropped subscription, and the two
+        # call for opposite responses.
+        if band["selection_ratio"] is not None:
+            got = (s["our_vol"] / band["picked_feed_vol"]
+                   if band["picked_feed_vol"] else None)
+            log.info("  of which: the selection reached %.1f%% of the band, "
+                     "and the subscriptions delivered %s of that",
+                     band["selection_ratio"] * 100,
+                     f"{got * 100:.1f}%" if got is not None else "n/a")
+        for code, vol, rank in band["missed"]:
+            log.warning("  passed over %s: %s contracts, ranked %d of %d",
+                        code, f"{vol:,}", rank, band["contracts"])
     if s["caught_nothing"]:
         log.warning("%d contracts traded per the feed and we caught NOTHING "
                     "-- that is the shape of a dropped subscription",
@@ -813,6 +1133,20 @@ def _log_reconcile(ctx, codes: list[str], store: OptionTickStore,
     for code, ours, theirs in s["worst"]:
         log.warning("  short on %s: %s of %s", code, f"{ours:,}", f"{theirs:,}")
     return s
+
+
+def lock_name(code: str) -> str:
+    """The single-instance lock name for one underlying's collector.
+
+    Exported because the scheduler has to ask single_instance.holder() the
+    SAME name to report the PID holding it, and it was asking a different
+    one -- "option_collector_US.SOXL" against this process's
+    "option_tick_collector_US_SOXL". holder() therefore always returned
+    None, and the refusal message named a lock file that does not exist
+    while telling the operator to stop a process it could not identify.
+    One function, two callers, the way POST_CLOSE_PAD_MIN is shared.
+    """
+    return f"option_tick_collector_{code.replace('.', '_')}"
 
 
 def _parse_args(argv=None):
@@ -824,6 +1158,14 @@ def _parse_args(argv=None):
     # the quota is what actually bounds the set.
     p.add_argument("--pct", type=float, default=80.0,
                    help="pre-filter: strikes within +/-PCT%% of spot (default 80)")
+    # The quota is ACCOUNT-WIDE, so collecting two underlyings at once means
+    # dividing it -- the scheduler passes each collector its share. Left at
+    # the default, one collector asks for the whole account budget, which is
+    # correct for one underlying and wrong for two.
+    p.add_argument("--quota", type=int, default=_QUOTA,
+                   help=f"subscribe at most QUOTA contracts (default "
+                        f"{_QUOTA}, the WHOLE account-wide limit -- divide "
+                        f"it when collecting more than one underlying)")
     p.add_argument("--no-backfill", action="store_true",
                    help="skip the get_rt_ticker catch-up after subscribing")
     p.add_argument("--days", type=int, default=45,
@@ -834,7 +1176,8 @@ def _parse_args(argv=None):
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=11111)
     p.add_argument("--always", action="store_true",
-                   help="sample greeks outside 09:20-16:20 ET too (testing)")
+                   help="ignore the session window and the holiday calendar "
+                        "(testing)")
     p.add_argument("--reconcile-only", action="store_true",
                    help="reconcile a session already collected, then exit")
     p.add_argument("--session", default=None,
@@ -846,7 +1189,32 @@ def _parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = _parse_args(argv)
+    # SQLite's = is case sensitive on TEXT and pick_contracts stores
+    # args.code verbatim as `underlying`, so `--code us.soxl` writes rows
+    # that subscribed_on("US.SOXL") cannot see. The scheduler's own
+    # normaliser upper-cases, so this only ever bit a hand-typed run --
+    # which is exactly what the first live session is.
+    args.code = args.code.strip().upper()
     quiet_sdk_file_log()
+    patch_close_reason()
+
+    # Before the context, the lock and pick_contracts -- not inside the
+    # sampling loop. in_session guards only the loop, so a hand-started
+    # collector (scripts/launch_option_collector.bat is the documented
+    # first-session move) still took the single-instance lock, spent
+    # get_option_chain calls against an account-wide 10-per-30s budget and
+    # subscribed 200 contracts before idling all day on a shut exchange.
+    #
+    # --reconcile-only is exempt: reconciling LAST Wednesday's tape on a
+    # holiday is a reasonable thing to ask for, and it touches no quota.
+    if not args.reconcile_only and not args.always:
+        today = datetime.now(_ET).date()
+        if not is_trading_day(today):
+            log.error("%s is not a trading session (%s) -- refusing to start. "
+                      "Pass --always to collect anyway.", today,
+                      "exchange holiday" if is_market_holiday(today)
+                      else "weekend")
+            return 7
 
     from moomoo import OpenQuoteContext, RET_OK, SubType
 
@@ -867,14 +1235,45 @@ def main(argv=None) -> int:
             # tape against contracts today never subscribed to puts every one
             # of them in `caught_nothing` -- the single detector for a dropped
             # subscription, drowned in false positives and then ignored.
-            codes = store.subscribed_on(session)
+            # Filtered by underlying. The error message below has always
+            # named args.code while the query ignored it, and with a second
+            # symbol in the same database that mismatch stops being cosmetic:
+            # every contract of the OTHER symbol scores as uncollected under
+            # this one's name.
+            codes = store.subscribed_on(session, args.code)
+            # Unconditional, not only on the empty branch. A PARTIAL orphan
+            # -- 200 subscribed, 50 with no contract row -- returns 150
+            # codes and looks exactly like a quiet symbol, which is the
+            # failure the filter's INNER JOIN can create and the one thing
+            # the first version of this fix did not cover.
+            if (orphans := store.orphans_on(session)):
+                # NOT filtered by underlying, and it cannot be: an orphan is
+                # a subscription with no contract row, and the contract row
+                # is the only place the underlying is written. So the count
+                # is session-wide and may belong to the OTHER symbol -- said
+                # here, because "short by at most that many" is false for an
+                # orphan of a symbol this reconcile never looked at.
+                log.warning(
+                    "%d subscription rows on %s have no option_contracts "
+                    "row and are in NO reconcile. Which symbol they belong "
+                    "to is unknowable (the contract row is where the "
+                    "underlying is recorded), so this count is session-wide "
+                    "-- %s's own total is short by at most that many",
+                    orphans, session, args.code)
             if not codes:
+                present = store.underlyings_on(session)
                 log.error("nothing recorded as subscribed for %s on %s in %s "
-                          "-- was the collector running that day?",
-                          args.code, session, args.db)
+                          "-- was the collector running that day? "
+                          "(that session does hold: %s)",
+                          args.code, session, args.db,
+                          ", ".join(f"{k}={v}"
+                                    for k, v in sorted(present.items()))
+                          or "nothing at all")
+                store.close()
                 return 5
-            log.info("reconciling %s over %d recorded contracts", session, len(codes))
-            s = _log_reconcile(ctx, codes, store, session)
+            log.info("reconciling %s for %s over %d recorded contracts",
+                     session, args.code, len(codes))
+            s = _log_reconcile(ctx, codes, store, session, args.code)
             store.close()
             return 0 if s else 5
 
@@ -889,7 +1288,7 @@ def main(argv=None) -> int:
         # is running. Taking the lock here would have made the one case it
         # is for the one case it refuses.
         lock = None
-        name = f"option_tick_collector_{args.code.replace('.', '_')}"
+        name = lock_name(args.code)
         try:
             if not args.dry_run:
                 lock = single_instance.acquire(name, wait_s=8.0)
@@ -897,13 +1296,14 @@ def main(argv=None) -> int:
             log.error("%s", exc)
             return single_instance.EXIT_ALREADY_RUNNING
 
-        contracts, info = pick_contracts(ctx, args.code, args.pct, days=args.days)
+        contracts, info = pick_contracts(ctx, args.code, args.pct,
+                                         quota=args.quota, days=args.days)
         log.info("%s spot $%.2f  window $%.2f-$%.2f  expiries %s",
                  args.code, info["spot"], *info["window"], info["expiries"])
         log.info("selected %d of %d candidates (%d dropped for the %d quota, "
                  "%d had no greeks to score)",
                  len(contracts), info["candidates"], info["dropped_for_quota"],
-                 _QUOTA, info["unscored"])
+                 args.quota, info["unscored"])
         log.info("per expiry: %s",
                  "  ".join(f"{k}={v}" for k, v in sorted(info["per_expiry"].items())))
         if info["extended"]:
@@ -936,7 +1336,15 @@ def main(argv=None) -> int:
         store = OptionTickStore(args.db)
         store.upsert_contracts(contracts)
         session_day = datetime.now(_ET).strftime("%Y-%m-%d")
-        store.record_subscriptions(session_day, [c["code"] for c in contracts])
+        store.record_subscriptions(session_day,
+                                   [c["code"] for c in contracts])
+        # The ones NOT taken, with the score that passed them over. Without
+        # this the reconcile can only ever score us against our own
+        # selection, where a narrower selection reads as better coverage.
+        n_cand = store.record_candidates(session_day, args.code,
+                                         info["scored"])
+        log.info("recorded %d scored candidates (%d picked)",
+                 n_cand, sum(1 for c in info["scored"] if c["picked"]))
         codes = [c["code"] for c in contracts]
 
         state: dict = {"last_tick_time": None, "first_tick_done": False,
@@ -954,6 +1362,10 @@ def main(argv=None) -> int:
             log.error("subscribe failed: %s", msg)
             return 4
         log.info("subscribed TICKER on %d contracts", len(codes))
+        # Read back immediately rather than waiting for the first telemetry
+        # sweep: a quota shortfall shows up here, and it is the one failure
+        # a divided quota introduces.
+        verify_subscription(ctx, codes)
 
         stop = threading.Event()
         state["stop"] = stop
@@ -986,8 +1398,15 @@ def main(argv=None) -> int:
             while not stop.is_set():
                 if not args.always and not in_session():
                     if not idle_logged:
-                        log.info("outside 09:20-16:20 ET -- sampler idle "
-                                 "(TICKER stays subscribed)")
+                        # The window is DERIVED, so state the one in force
+                        # today. A fixed "09:20-16:20" reported a window
+                        # that is wrong on every half session -- and a
+                        # second copy of this window is what let the
+                        # holiday gap live as long as it did.
+                        log.info("outside %s-%s ET -- sampler idle "
+                                 "(TICKER stays subscribed)",
+                                 _SESSION_OPEN_ET.strftime("%H:%M"),
+                                 _session_end_et().strftime("%H:%M"))
                         idle_logged = True
                     wait_interruptible(stop, 60)
                     continue
@@ -1015,7 +1434,7 @@ def main(argv=None) -> int:
             log.info("session totals: %d ticks, %d greeks rows, %d snapshot "
                      "failures, %d handler errors", t, g,
                      state.get("snap_fail", 0), state.get("handler_errors", 0))
-            _log_reconcile(ctx, codes, store)
+            _log_reconcile(ctx, codes, store, None, args.code)
             pt, pg = store.prune_before(_RETENTION_DAYS)
             if pt or pg:
                 log.info("pruned %d ticks / %d greeks older than %d days "

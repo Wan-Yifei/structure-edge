@@ -39,6 +39,11 @@ from typing import Iterable
 
 _DEFAULT_DB = pathlib.Path(__file__).parent.parent / "db" / "option_ticks.db"
 
+#: Key under which underlyings_on reports subscriptions that join to no
+#: option_contracts row. Named rather than "", which every caller then has
+#: to remember is not a symbol.
+ORPHAN_KEY = "<no contract row>"
+
 _SETUP_SQL = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -133,8 +138,11 @@ CREATE TABLE IF NOT EXISTS option_coverage (
     checked_at TEXT    NOT NULL,
     -- Our first stored print for this contract that session. feed_vol is
     -- the WHOLE session's volume, so without this the ratio cannot be told
-    -- apart from "we were late": 2026-11-23 read 83.5% purely because the
-    -- collector only went live at 09:39:29, and nothing stored said so.
+    -- apart from "we were late". On 2026-11-23 it was both: the day read
+    -- 279,295/355,460 = 78.6% over all 261 contracts, or 279,295/334,294 =
+    -- 83.5% over the 198 we captured anything from, and the collector went
+    -- live late besides. This column is NULL for that session -- it was
+    -- added afterwards -- so the lateness is not recoverable from here.
     first_ts   TEXT,
     UNIQUE(session, code)
 );
@@ -162,6 +170,83 @@ CREATE TABLE IF NOT EXISTS option_subscriptions (
     UNIQUE(session, code)
 );
 CREATE INDEX IF NOT EXISTS idx_osub_session ON option_subscriptions (session);
+
+-- Every contract the selection CONSIDERED, not just the ones it took.
+--
+-- The subscribed set answers "did we store what we subscribed to". It
+-- cannot answer "was the selection any good", because a contract the
+-- ranking passed over leaves no trace anywhere: it is not subscribed, so
+-- it has no ticks, no greeks and no coverage row, and the reconcile's
+-- denominator is the subscribed set -- so a worse selection reads as
+-- BETTER coverage. On 2026-11-24 that gap was 62.4% of the candidate
+-- band's volume reported as 100.0%.
+--
+-- The scores cannot be reconstructed afterwards either. They come from a
+-- chain snapshot taken at 09:15 and the chain is not re-fetchable, so a
+-- selection not written down here is a selection nobody can ever grade.
+--
+-- rank is 1-based over the scored candidates, descending by score;
+-- `picked` is whether it made the quota cut. One row per contract per
+-- session, around 800 for SOXL and 3,200 for QQQ at the configured
+-- pre-filter widths.
+CREATE TABLE IF NOT EXISTS option_candidates (
+    session    TEXT    NOT NULL,
+    underlying TEXT    NOT NULL,
+    code       TEXT    NOT NULL,
+    rank       INTEGER NOT NULL,
+    score      REAL,
+    expiry     TEXT,
+    strike     REAL,
+    opt_type   TEXT,
+    picked     INTEGER NOT NULL,
+    recorded   TEXT    NOT NULL,
+    UNIQUE(session, code)
+);
+CREATE INDEX IF NOT EXISTS idx_ocand_session
+    ON option_candidates (session, underlying);
+
+-- What each candidate actually did, read once after the close.
+--
+-- Its partner is option_candidates: that table is the INTENT (the score, the
+-- rank, whether it made the cut, written at 09:15), this one is the OUTCOME
+-- (the volume it really traded, read at 16:50). Join them on (session, code)
+-- and every session yields a complete "score against realised volume"
+-- dataset -- which is what lets a different ranking be graded offline,
+-- without touching a live selection or spending one extra API call. The
+-- reconcile's band pass already snapshots every candidate; before this table
+-- it kept the total and threw the per-contract figures away.
+--
+-- Deliberately NOT columns on option_candidates. That row is written with
+-- INSERT OR REPLACE at selection time, so a collector re-run after the close
+-- -- which happens, 2026-11-23 re-picked mid-session -- would blank these.
+-- Two writers, two times, two meanings.
+--
+-- feed_vol NULL means UNKNOWN, 0 means it did not trade. The snapshot can
+-- fail, and a figure stamped another day is dropped by the same wrong-day
+-- rule the reconcile uses, so the two have to stay distinguishable: folding
+-- them together turns "we could not read it" into "nothing happened there".
+--
+-- delta_close and oi_close are read at the same moment, from the same
+-- response, and are named for it: the indicator weights a print by the delta
+-- at the TIME OF THE PRINT, and the close is only a proxy for that. Good
+-- enough to RANK contracts against each other, not to state what share of
+-- the signal was captured.
+--
+-- SCOPE, which a later reader will otherwise over-claim: the candidate band
+-- is already cut twice before it reaches here -- by the +/-pct pre-filter
+-- and by _MAX_CHAINS, which truncates the expiry list before the candidates
+-- are built at all. So this grades RANKINGS within that band. It cannot
+-- grade the band width, and it cannot grade the expiry cap.
+CREATE TABLE IF NOT EXISTS option_band_volume (
+    session    TEXT NOT NULL,
+    code       TEXT NOT NULL,
+    feed_vol   INTEGER,
+    delta_close REAL,
+    oi_close   INTEGER,
+    recorded   TEXT NOT NULL,
+    UNIQUE(session, code)
+);
+CREATE INDEX IF NOT EXISTS idx_obvol_session ON option_band_volume (session);
 """
 
 
@@ -292,11 +377,171 @@ class OptionTickStore:
         return cur.rowcount
 
     @_locked
-    def subscribed_on(self, session: str) -> list[str]:
-        """Codes subscribed that day, for reconciliation to score against."""
+    def record_candidates(self, session: str, underlying: str,
+                          rows: Iterable[dict]) -> int:
+        """Write the whole scored candidate list for one day's selection.
+
+        INSERT OR REPLACE, not OR IGNORE: a collector restarted mid-session
+        re-picks, and the second selection is the one that produced the
+        session's data. OR IGNORE would keep the first list and quietly
+        describe a selection that was replaced -- which is what happened on
+        2026-11-23, where 09:15 and 09:39 each picked a set.
+
+        Each row needs code/rank/picked; score, expiry, strike and opt_type
+        are recorded when present.
+        """
+        now = _ts_str(datetime.now())
+        data = [(session, underlying, r["code"], int(r["rank"]),
+                 (None if r.get("score") is None else float(r["score"])),
+                 r.get("expiry"),
+                 (None if r.get("strike") is None else float(r["strike"])),
+                 r.get("opt_type"), int(bool(r.get("picked"))), now)
+                for r in rows]
+        if not data:
+            return 0
+        cur = self._con.executemany(
+            "INSERT OR REPLACE INTO option_candidates "
+            "(session, underlying, code, rank, score, expiry, strike, "
+            " opt_type, picked, recorded) VALUES (?,?,?,?,?,?,?,?,?,?)", data)
+        self._con.commit()
+        return cur.rowcount
+
+    @_locked
+    def record_band_volume(self, session: str, rows: Iterable[dict]) -> int:
+        """Write what each candidate actually traded. See option_band_volume.
+
+        `feed_vol` absent or None is stored as NULL and means unknown; 0 is
+        stored as 0 and means it did not trade. The caller must not
+        substitute one for the other.
+        """
+        now = _ts_str(datetime.now())
+        data = []
+        for r in rows:
+            vol = r.get("feed_vol")
+            delta = r.get("delta_close")
+            oi = r.get("oi_close")
+            data.append((
+                session, r["code"],
+                (None if vol is None else int(vol)),
+                (None if delta is None else float(delta)),
+                (None if oi is None else int(oi)),
+                now))
+        if not data:
+            return 0
+        cur = self._con.executemany(
+            "INSERT OR REPLACE INTO option_band_volume "
+            "(session, code, feed_vol, delta_close, oi_close, recorded) "
+            "VALUES (?,?,?,?,?,?)", data)
+        self._con.commit()
+        return cur.rowcount
+
+    @_locked
+    def band_volume_on(self, session: str) -> dict[str, dict]:
+        """That session's realised band volumes, by code."""
+        cur = self._con.execute(
+            "SELECT code, feed_vol, delta_close, oi_close "
+            "FROM option_band_volume WHERE session = ?", (session,))
+        return {r[0]: {"feed_vol": r[1], "delta_close": r[2],
+                       "oi_close": r[3]} for r in cur.fetchall()}
+
+    @_locked
+    def candidates_on(self, session: str,
+                      underlying: str) -> list[dict]:
+        """That day's scored candidate list, best-ranked first.
+
+        `underlying` is REQUIRED for the same reason subscribed_on requires
+        it: two underlyings share this table, and a reconcile that scored a
+        band against both symbols' candidates would be comparing nothing in
+        particular.
+        """
+        cur = self._con.execute(
+            "SELECT code, rank, score, expiry, strike, opt_type, picked "
+            "FROM option_candidates WHERE session = ? AND underlying = ? "
+            "ORDER BY rank", (session, underlying))
+        return [{"code": r[0], "rank": r[1], "score": r[2], "expiry": r[3],
+                 "strike": r[4], "opt_type": r[5], "picked": bool(r[6])}
+                for r in cur.fetchall()]
+
+    @_locked
+    def subscribed_on(self, session: str, underlying: str) -> list[str]:
+        """Codes subscribed that day, for reconciliation to score against.
+
+        `underlying` is REQUIRED. Leaving it optional would have kept
+        exactly the hole this fixes: the collector's bug was a missing
+        argument, and a default would hand the same trap to the next
+        caller. Use `all_subscribed_on` to ask about a whole day on purpose.
+
+        Without the filter, the answer is every contract from every symbol
+        collected that day, so a reconcile run under one symbol's name
+        scores another's contracts -- all of which read as uncollected and
+        fill `caught_nothing`, the only POST-HOC detector for a dropped
+        subscription. (log_telemetry compares OpenD's own subscription list
+        against the requested codes while the session runs, so it is not
+        the only detector; it is the only one that works after the fact.)
+
+        The underlying comes from option_contracts rather than from a column
+        here, and the join is total rather than lucky: upsert_contracts runs
+        on the same list immediately before record_subscriptions, so a
+        subscribed code without a contract row cannot be produced. A code
+        belongs to one underlying for life, and option_contracts is INSERT
+        OR IGNORE on the code, so the value never changes under a session.
+        """
         return [r[0] for r in self._con.execute(
-            "SELECT code FROM option_subscriptions WHERE session = ? ORDER BY code",
-            (session,))]
+            "SELECT s.code FROM option_subscriptions s "
+            "JOIN option_contracts c ON c.code = s.code "
+            "WHERE s.session = ? AND c.underlying = ? ORDER BY s.code",
+            (session, underlying))]
+
+    @_locked
+    def all_subscribed_on(self, session: str) -> list[str]:
+        """Every contract subscribed that day, whatever the symbol.
+
+        Separate from `subscribed_on` so that asking for a whole day is a
+        deliberate act with its own name, rather than something you get by
+        forgetting an argument.
+        """
+        return [r[0] for r in self._con.execute(
+            "SELECT code FROM option_subscriptions WHERE session = ? "
+            "ORDER BY code", (session,))]
+
+    @_locked
+    def underlyings_on(self, session: str) -> dict[str, int]:
+        """Which symbols were collected that day, and how many contracts each.
+
+        A subscription with no contract row is counted separately under
+        ORPHAN_KEY, because subscribed_on's INNER JOIN drops it and "fewer
+        rows" is the same shape as "this symbol was quiet".
+        """
+        out = {r[0]: r[1] for r in self._con.execute(
+            "SELECT c.underlying, COUNT(*) FROM option_subscriptions s "
+            "JOIN option_contracts c ON c.code = s.code "
+            "WHERE s.session = ? GROUP BY c.underlying", (session,))}
+        if (n := self.orphans_on(session)):
+            # A named key, not "". An empty string reads as a symbol whose
+            # name happens to be blank: every caller then has to remember to
+            # skip it, and one of this class's own tests had to write
+            # `if k` to get a sane total.
+            out[ORPHAN_KEY] = n
+        return out
+
+    @_locked
+    def orphans_on(self, session: str) -> int:
+        """Subscriptions that day with no option_contracts row.
+
+        Its own method because the reconcile path has to be able to ask
+        WITHOUT going through the empty-set branch. subscribed_on uses an
+        INNER JOIN, so an orphan is dropped from the answer, and "fifty
+        fewer codes" has the same shape as "this symbol was quiet".
+
+        The collector cannot produce one -- upsert_contracts runs on the
+        same list immediately before record_subscriptions -- but that is a
+        convention held up by a single call site, not a foreign key.
+        """
+        row = self._con.execute(
+            "SELECT COUNT(*) FROM option_subscriptions s "
+            "LEFT JOIN option_contracts c ON c.code = s.code "
+            "WHERE s.session = ? AND c.code IS NULL", (session,)).fetchone()
+        return int(row[0]) if row else 0
 
     @_locked
     def our_volume_for(self, session: str, codes: list[str]) -> dict[str, tuple[int, int]]:
@@ -338,8 +583,23 @@ class OptionTickStore:
         """Earliest stored print per contract for one session.
 
         Reconcile divides by the feed's WHOLE-SESSION volume, so without
-        this a late start cannot be told from data loss. 2026-11-23 read
-        83.5% entirely because the tape began at 09:39:29.
+        this a late start cannot be told from data loss.
+
+        Both published figures for 2026-11-23 are the same numerator over
+        different denominators, and neither is the "correct" one:
+
+            279,295 / 355,460 = 78.6%   all 261 subscribed contracts
+            279,295 / 334,294 = 83.5%   the 198 we captured anything from
+
+        The 21,166-share gap is exactly the feed volume of the 61 contracts
+        we caught nothing from. Quote whichever, with its denominator.
+
+        What CANNOT be read off option_coverage for that session is when the
+        tape began: first_ts is NULL on all 261 rows, because the column
+        postdates the session it was added to describe. The 09:39:29 figure
+        comes from option_ticks, where it is also approximate -- MIN(ts) is
+        09:30:05.962 and the prints before 09:39:29 are 141 of them for 570
+        contracts, 0.2% of the day.
         """
         found: dict[str, str] = {}
         for i in range(0, len(codes), 500):
@@ -370,11 +630,34 @@ class OptionTickStore:
         return cur.rowcount
 
     @_locked
-    def coverage_summary(self, session: str) -> dict:
+    def coverage_summary(self, session: str, underlying: str | None) -> dict:
+        """Coverage totals for one session, for ONE underlying or for all.
+
+        `underlying` is REQUIRED, with None meaning "every symbol that day",
+        because the version that took only a session answered a question
+        nobody was asking: with two collectors writing one table, the
+        reconcile for QQQ read SOXL's rows as well and printed 62.5% where
+        the truth was 25% -- the value depending on which process wrote
+        first. A caller must now say which it wants.
+
+        option_coverage has no underlying column of its own; the symbol
+        lives on option_contracts, so this joins the same way subscribed_on
+        does. A coverage row whose contract row is missing is therefore
+        dropped from a filtered answer and kept in an unfiltered one.
+        """
+        where = "WHERE v.session = ?"
+        params: tuple = (session,)
+        if underlying is not None:
+            where += " AND c.underlying = ?"
+            params = (session, underlying)
         row = self._con.execute(
-            "SELECT COUNT(*), SUM(feed_vol), SUM(our_vol), SUM(our_ticks), "
-            "       SUM(CASE WHEN feed_vol IS NULL THEN 1 ELSE 0 END) "
-            "FROM option_coverage WHERE session = ?", (session,)).fetchone()
+            "SELECT COUNT(*), SUM(v.feed_vol), SUM(v.our_vol), "
+            "       SUM(v.our_ticks), "
+            "       SUM(CASE WHEN v.feed_vol IS NULL THEN 1 ELSE 0 END) "
+            "FROM option_coverage v "
+            + ("JOIN option_contracts c ON c.code = v.code "
+               if underlying is not None else "")
+            + where, params).fetchone()
         n, feed, ours, ticks, unknown = row
         return {"contracts": n or 0, "feed_vol": feed or 0, "our_vol": ours or 0,
                 "our_ticks": ticks or 0, "feed_vol_unknown": unknown or 0,

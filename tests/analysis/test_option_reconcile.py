@@ -132,7 +132,12 @@ class TestItIsRecordedNotJustLogged:
             "SELECT COUNT(*) FROM option_coverage WHERE session = ?",
             (SESSION,)).fetchone()[0]
         assert n == len(CODES)
-        assert store.coverage_summary(SESSION)["our_vol"] == 10
+        # None, explicitly: "every symbol that day". The argument is
+        # required because the un-scoped answer was being used where a
+        # per-symbol one was meant, and with two collectors writing one
+        # table it mixed both -- 25% printed as 62.5%, with the value
+        # depending on which process wrote first.
+        assert store.coverage_summary(SESSION, None)["our_vol"] == 10
 
     def test_a_failed_snapshot_does_not_invent_coverage(self, store):
         _store_ticks(store, CODES[0], [30])
