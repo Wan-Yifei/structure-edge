@@ -320,7 +320,14 @@ MAX_COLS_DEF = 240   # columns kept in memory  (4 min at 1 s/col -- raise via
                       # lookback at the cost of a wider/denser grid)
 _NEAR_TOUCH_MIN_LEVELS = 5    # always keep at least this many levels/side,
                               # even if the very first gap looks large
-_NEAR_TOUCH_MAX_LEVELS = 60   # hard cap (a full L2 snapshot's per-side depth)
+_NEAR_TOUCH_MAX_LEVELS = 60   # hard cap. The comment here used to call this
+                              # "a full L2 snapshot's per-side depth", which
+                              # it is not: measured over 64,020 one-sided
+                              # calls, 87.3% arrive with more than 60 levels
+                              # and QQQ runs a median of 96 a side (max 115).
+                              # So this clamps almost always, and the cutoff
+                              # search below it only decides anything on the
+                              # books that stop short of 60 on their own.
 _NEAR_TOUCH_MAD_MULT   = 8.0  # gap must exceed median + this many MADs to
                               # count as an outlier -- generous on purpose,
                               # this only needs to catch a level that's
@@ -597,22 +604,78 @@ def _near_touch_cutoff(
     mean/stddev) because a single huge outlier gap would otherwise blow out
     the very average it's being compared against.
 
-    O(n) on <=60 levels, called only when the price band is first set or
-    rebuilt (not on every tick) -- negligible cost either way.
+    HOW OFTEN AND HOW BIG. This docstring used to say "O(n) on <=60 levels,
+    called only when the price band is first set or rebuilt (not on every
+    tick) -- negligible cost either way". All four claims were wrong, and
+    they are why the function went unexamined:
+
+      * It runs on EVERY push. _maybe_init_price_range calls it twice (one
+        side each) before any of its own conditions are tested, and _on_push
+        calls that unconditionally -- about 6.5 times a second.
+      * 87.3% of one-sided calls arrive with more than max_keep levels
+        (64,020 calls, US.QQQ and US.SOXL, six days). QQQ runs a median of
+        96 levels a side, up to 115.
+      * The loop is O(n^2) -- each iteration re-examines every gap so far.
+        It measures near-linear up to n=320 though, so the quadratic term is
+        not what cost anything in this range.
+      * It was 3.4-3.9 ms per push, 1.6-1.8% of a core at QQQ's push rate.
+        Not negligible. Almost all of it was np.median's per-call overhead,
+        repeated ~82 times a push over arrays of at most 115 elements.
+
+    TWO SHORTCUTS, BOTH EXACT. Neither changes which levels are kept; see
+    tests/analysis/test_near_touch_cutoff.py, which holds the old
+    implementation as an oracle and compares against it.
+
+      * `threshold >= med` always (gaps are absolute, so med >= 0; with
+        mad > 0 the threshold adds a non-negative term, and with mad == 0 it
+        is max(med*5, 0.05)). A gap no larger than the median therefore
+        cannot break, and the second median -- the MAD -- need not be
+        computed at all. That skips it on 74% of iterations. The guard on
+        mad_mult only matters for a negative multiplier, which no caller
+        passes but which would invert the inequality.
+      * Once `keep` reaches max_keep the answer is fixed: keep never
+        decreases and the return value is clamped to it either way. 47.5%
+        of calls get there.
+
+    Holding the gaps sorted makes the median a lookup rather than a
+    partition. Together: 3.4-3.9 ms per push down to 0.084.
+
+    WHAT THE RULE ACTUALLY IS, IN PRODUCTION. On a one-cent grid the gap
+    multiset is dominated by 0.01, so `mad` is zero on 93.3% of iterations
+    and the branch that decides 64.7% of breaks is the fallback,
+    `gap > max(5 * median_gap, $0.05)`. Turning mad_mult does nothing most
+    of the time -- worth knowing before tuning it.
+
+    Input is prices: positive and finite. With a NaN among an odd number of
+    gaps np.median forces NaN through while a sort does not, so the oracle
+    in the test file and this implementation are only claimed to agree on
+    finite input.
     """
     n = len(prices_from_touch)
     if n <= min_keep:
         return prices_from_touch
-    gaps = np.abs(np.diff(prices_from_touch))
+    gaps = [abs(b - a) for a, b in zip(prices_from_touch,
+                                       prices_from_touch[1:])]
     keep = min_keep
-    for i in range(min_keep - 1, len(gaps)):
-        history = gaps[:i + 1]
-        med = float(np.median(history))
-        mad = float(np.median(np.abs(history - med)))
-        threshold = med + mad_mult * mad if mad > 0 else max(med * 5.0, 0.05)
-        if gaps[i] > threshold:
-            break
-        keep = i + 2   # i+1 gaps examined so far -> i+2 prices included
+    if keep < max_keep:
+        hist = sorted(gaps[:min_keep - 1])
+        for i in range(min_keep - 1, len(gaps)):
+            gap = gaps[i]
+            bisect.insort(hist, gap)
+            k = len(hist)
+            med = (hist[k // 2] if k % 2
+                   else (hist[k // 2 - 1] + hist[k // 2]) / 2)
+            if gap > med or mad_mult < 0.0:
+                devs = sorted([abs(x - med) for x in hist])
+                mad = (devs[k // 2] if k % 2
+                       else (devs[k // 2 - 1] + devs[k // 2]) / 2)
+                threshold = (med + mad_mult * mad if mad > 0
+                             else max(med * 5.0, 0.05))
+                if gap > threshold:
+                    break
+            keep = i + 2   # i+1 gaps examined so far -> i+2 prices included
+            if keep >= max_keep:
+                break
     return prices_from_touch[:min(keep, max_keep)]
 
 
