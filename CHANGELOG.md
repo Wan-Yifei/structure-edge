@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.104.3 - 删掉从未接上过的档位归因 (2026-11-26)
+
+patch 级。纯删除,没有行为变化 —— 这段代码在生产路径上一个调用者都没有,
+而且**从来没有过**。
+
+### 删了什么
+
+`analysis/orderflow_detect.py` 的 `── Level-change attribution ──` 整段:
+`_PRICE_DECIMALS`、`LevelEpisode`、`FlowAudit`、`attribute_level_flow`,
+共 394 行(文件 1222 → 828)。连带 `tests/analysis/test_level_flow.py`
+整文件 306 行 / 25 个测试,以及只在被删函数里用到的 `timedelta` import。
+
+### 凭什么确定它是死的
+
+- **生产侧 0 引用。**`liq_hm_window.py` 和 `dom_window.py` 确实 lazy-import
+  `orderflow_detect`,但进口的是五个 `detect_*`,没有一处碰这三样。
+- **从来没接上过,不是后来被摘掉的。**`git log --all -S 'attribute_level_flow'`
+  在所有分支上只有引入它的那一个 commit(`eb62574`, 2026-11-04),
+  commit message 自己写着「暂无生产调用方」;`git log -L` 显示引入之后
+  这段代码一次都没被改过。
+- 没有 `__all__`、没有字符串形式的动态分发、没有模块级副作用,
+  `LevelEpisode` / `FlowAudit` 只被 `attribute_level_flow` 使用。
+
+### 它本来是干什么的,以及怎么拿回来
+
+对每一对相邻快照,把每个价位显示量的变化按 `dv = added - cancelled - traded`
+拆成三份,并把整条 tape 的成交量分进六个互斥桶做配平审计。它处理了三件现有
+`detect_*` 都不处理的事:本机钟相对 tape 的滞后、feed 停顿不归因、次毫分价
+成交排除而非四舍五入到最近档。
+
+它是 `detect_icebergs` / `detect_spoofs` 那条路线的下一步 —— 没有它,
+「撤单后重挂」和「被吃掉后补单」分不开。
+
+**要拿回来:`git show eb62574`**,包括那段注释里几组只有重跑才能得到的实测数
+(错位对齐后带成交的档位 2414 → 约 500;20 分钟窗口未解释项 115M 对 5.5M tape;
+stride 32 把 (added+cancelled)/traded 从 127 压到 34;`traded > max_displayed`
+判据在 8 个窗口全部 p ≥ 0.18)。
+
+### 接回去的前置条件现在差多少
+
+v0.84.0 的条目写着需要「一个能过零假设的判据,以及约 12 个交易日的盘口数据」。
+`db/order_book.db` 现在 QQQ 只有 **3 个完整交易日**(2026-11-23 ~ 11-25),
+还差九个,约两周。所以这不是「马上要用却删早了」。
+
+全量套件 2616 passed / 6 skipped(正好少了那 25 个)。
+
 ## v0.104.2 - 盘口缓冲按列持有:每秒省下的 172 毫秒 (2026-11-26)
 
 patch 级。检测器输出不变;裁剪边界有一处变化,而且新的是修正(见下)。
