@@ -1,5 +1,129 @@
 # Changelog
 
+## v0.104.1 - 两个 abort,同一个上游:窗口被 GC 而不是被 Qt 销毁 (2026-11-25)
+
+patch 级。全量套件的非确定性 `Fatal Python error: Aborted`,以及实盘侧同一条路径。
+
+### 真因,一条命令就看见了
+
+```
+InfiniteLine.py:336 boundingRect
+InfiniteLine.py:322 _computeBoundingRect
+    vs = self.getViewBox().size()
+AttributeError: 'NoneType' object has no attribute 'size'
+Fatal Python error: Aborted
+```
+
+一个 `close()` 了但**等 GC 回收**的窗口,回收环内 ViewBox 先于它的十字光标线被
+终结。`GraphicsItem.viewRect():158` **先返 `_cachedView` 再问 `getViewBox()`**,
+所以 `_computeBoundingRect` 顶部那个 `if vr is None` 守卫打不着;第 322 行无守卫
+就炸。`boundingRect` 是 C++ 虚函数,异常出不去 → PyQt6 `qFatal` → abort。
+**回收环内终结顺序任意,这就是非确定性的全部来源。**
+
+上游不会修:PyPI 最新就是 0.14.0(2025-11-16),master 上仍然没有 None 检查,
+也没搜到已报 issue。
+
+### 我上一条结论整条撤回,而且是我自己没做那一步造成的
+
+TODO 里原来写着「不是代码问题,是套件总规模」「规模继续长,概率跟着长」。**撤回。**
+
+`--capture=no` 我**写进了「下一步该怎么查」,然后没查就把结论发出去了** ——
+Qt 一直在说话,是 pytest 默认的 `--capture=fd` 把 traceback 吃掉的。
+
+连带错的还有三条:
+- **「GDI 没耗尽」量错了对象。** 全套件跑在 `QT_QPA_PLATFORM=offscreen` 下
+  (69 个测试文件设了它),根本不创建原生窗口。
+- **「整个套件里唯一 `show()` 一个 MultiVPWindow 的地方」是错的** —— 实测
+  29 处 `.show()` / 18 个文件,光这两个 multi_vp 文件里就有 4 处。
+- **那张「台阶」表是在跨时段比漂移的基线。** 那个「0/6 干净」的配置重测是
+  8/8 全崩。台阶不存在。
+
+### 第二个故障,这个仓库早就记过
+
+第一版只上了产品侧补丁,结果**进程照样崩,但不再有任何 Python traceback**。
+对照(`MOOMOO_NO_PG_PATCH=1`)→ `AttributeError` 回来。所以有第二个故障,
+之前被第一个抢先杀掉。
+
+它就写在 `tests/analysis/test_absorption_marker.py:88`:窗口已被 GC 而 Qt
+还握着它们的 deleteLater 事件,投递时回调到**没有 Python 线程状态**的 wrapper,
+`PyEval_SaveThread ... the GIL is released`,实测 3/3。
+**我那次 `--capture=no` 的输出里就有这一条,我看到了没读进去。**
+
+两个故障**上游是同一件事**:窗口被 GC 回收,而不是被 Qt 销毁。
+
+### 修法两条,各修各的
+
+**`analysis/pg_patches.py`(新)** —— 补 `pg.InfiniteLine._computeBoundingRect`。
+
+- 补**内层**不补外层 `boundingRect`:后者有 `if self._boundingRect is None`
+  快路径,包在外面会给每次绘制加一次 `getViewBox()`。
+- **打库类而不是子类**:`LinearRegionItem.py:108` 内部自己构造 `InfiniteLine`,
+  本项目有 5 个 LinearRegionItem —— 子类方案会整个漏掉那批,还是 ~50 个调用点的
+  更大改动。五个窗口模块各加一行 import。
+- 失败时返回**上一次算出的矩形**而不是空矩形。
+- 两个 except 分支加 `SWALLOWED` 计数器 + 每类一次的 warning。实测:**viewbox
+  活着时,一个无关的 AttributeError 会返回一个看起来完全健康的矩形,没人会发现**。
+
+**`tests/analysis/qt_window_teardown.py`(新)** —— `destroy_window()`:
+`WA_DeleteOnClose` + `close()` + `processEvents()`,给两个 multi_vp 文件的
+12 处 `close()`。外加目录级 `conftest.py` 管 `QT_QPA_PLATFORM`(覆盖 18 个文件,
+不再每个文件各写一份;那两个缺它的文件单独跑从 `1 failed, 23 passed` 变成
+`24 passed`)。
+
+### 归因:别把功劳记错地方
+
+2×2 交叉(同一时间窗、ABCD 交替,各 4 次):
+
+| 臂 | 护栏 | `destroy_window` | abort |
+|---|---|---|---|
+| A | 开 | 开 | 0/4 |
+| B | **关** | 开 | 0/4 |
+| C | 开 | **关** | 3/4 |
+| D | 关 | 关 | 1/4 |
+
+- `destroy_window` 开 **0/8** vs 关 **4/8**,Fisher 双侧 **p = 0.077**
+- 护栏 开 3/8 vs 关 1/8,**p = 0.57 —— 套件里测不出护栏有保护作用**
+
+**把套件救出来的是 `destroy_window`,不是 pyqtgraph 护栏。** 护栏的依据是
+机制 + 它自己的单元测试 + 「实盘确实把窗口留给 GC」(实测:不加
+`WA_DeleteOnClose` 的 `close()` 之后 `sip.isdeleted(w)` 是 False)。
+那是**有机制支持**,不是**被实测证实**。
+
+### 不能写的数字
+
+**「修前 ~100% 崩 → 修后 0%」不成立。** 最接近修前的那一臂只崩 1/4;
+11/11 vs 1/4 的 Fisher p = 0.0088 —— 那个 ~100% 绑在一棵已经不存在的树上。
+
+能写的:**24 次全量零 abort(含 7 种打乱的模块顺序),残留崩溃率 95% 上界约 12%**。
+要声称 <5% 需要 59 次。
+
+### 两条推理都没能复现,所以注释里一条都没写
+
+`_last_known` 返回旧矩形,我原来的理由是「静默改 boundingRect 会在 BSP 索引里
+留下陈旧条目」。**我自己用 `NoIndex` 当真值对照实测:放大和缩小两个方向都不说谎。**
+复核时给出的替代理由(「放大才是危险方向」)**我同样复现不出来**。
+
+所以注释改成诚实的:返回 `_bounds` 让上报的几何**根本没变过**,理由是「绕开这个
+问题」,不是「修了一个已证实的损坏」—— 并把两次失败的推理都写进去,免得第三个人
+再推一遍。
+
+### 变异测试:第一轮 6 个活 3 个
+
+活下来的 P2 **又是我写的测试结构上不可能失败**:
+`healthy = ln.boundingRect()` 返回的是 `_bounds` **本体**,我改返回值时 `healthy`
+跟着变,断言永远成立。这是这一天里第三次栽在同一个坑上。
+
+另外两个:RuntimeError 分支没人断计数器;去掉 `getViewBox()` 预检也全绿(因为
+`except AttributeError` 会兜住)—— 但预检有真实作用,**它让已知的那个 bug 走静默
+路径,而不是被当成意外故障记进计数器**,补测试钉住了这一点。
+
+补完后 **6 个全杀**。
+
+### 测试
+
+2615 → **2622 passed / 6 skipped**(`test_pg_patches.py` 19 条)。
+
+
 ## v0.104.0 - 对账把两个不同的集合当成了一个比值 (2026-11-25)
 
 minor 级。表结构变了(候选表按选取轮次存),带级覆盖率的旧序列作废。

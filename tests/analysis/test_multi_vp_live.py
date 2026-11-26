@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from qt_window_teardown import destroy_window
+
 ROOT = pathlib.Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -36,6 +38,7 @@ def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
     # No processEvents() at teardown -- see test_absorption_marker.py
+
 
 
 def _session(day, base, n=390, start="09:31", amp=1.5):
@@ -87,7 +90,7 @@ def live(qapp, monkeypatch):
     w._days.blockSignals(False)
     w.reload()
     yield w, today, past, calls, TODAY
-    w.close()
+    destroy_window(w)
 
 
 class TestTheBoundary:
@@ -128,7 +131,7 @@ class TestTheLiveSessionIsLetInEarly:
         try:
             assert [d for d, _ in w._sessions()] == [good]
         finally:
-            w.close()
+            destroy_window(w)
 
     def test_the_floor_for_today_is_the_constant(self, qapp, monkeypatch):
         from analysis.multi_vp_window import MultiVPWindow, LIVE_MIN_BARS
@@ -142,7 +145,7 @@ class TestTheLiveSessionIsLetInEarly:
         try:
             assert w._sessions() == []
         finally:
-            w.close()
+            destroy_window(w)
 
 
 class TestItIsDrawnAsUnfinished:
@@ -174,7 +177,7 @@ class TestItIsDrawnAsUnfinished:
             assert w._live_day is None
             assert "in progress" not in w._status.text()
         finally:
-            w.close()
+            destroy_window(w)
 
 
 class TestTheFetchIsNotRepeated:
@@ -290,7 +293,7 @@ class TestRthIsOffByDefault:
         try:
             assert w._rth.isChecked() is False
         finally:
-            w.close()
+            destroy_window(w)
 
     def test_an_overnight_only_session_shows_with_rth_off(self, qapp,
                                                           monkeypatch):
@@ -326,7 +329,7 @@ class TestRthIsOffByDefault:
                 f"RTH on 时今天没有盘中数据，不该出现: {days}")
             assert w._live_day is None
         finally:
-            w.close()
+            destroy_window(w)
 
 class TestTheTickActuallyGetsNewBars:
     """The panel refreshed every 30s and showed the same bars all day.

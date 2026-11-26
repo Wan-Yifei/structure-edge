@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from qt_window_teardown import destroy_window
+
 ROOT = pathlib.Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -25,6 +27,7 @@ def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
     # No processEvents() at teardown -- see test_absorption_marker.py
+
 
 
 def _session(day, base, n=390, amp=1.5):
@@ -59,7 +62,7 @@ def win(qapp, monkeypatch):
     w._days.blockSignals(False)
     w.reload()
     yield w, days
-    w.close()
+    destroy_window(w)
 
 
 def kinds(w):
@@ -147,7 +150,7 @@ class TestEmptyInput:
         w.reload()
         assert "no sessions" in w._status.text()
         assert not w._items
-        w.close()
+        destroy_window(w)
 
     def test_a_stub_session_is_skipped(self, qapp, monkeypatch):
         """A holiday half-hour is not a session; its one-bar value area
@@ -162,7 +165,7 @@ class TestEmptyInput:
         w = MultiVPWindow()
         w.reload()
         assert [d for d, _ in w._sessions()] == ["2026-10-20"]
-        w.close()
+        destroy_window(w)
 
 
 class TestTradingDayBoundary:
@@ -201,7 +204,7 @@ class TestTradingDayBoundary:
             f"20:00 之后应归入次日，实得 {days}")
         n = len(w._sessions()[0][1])
         assert n == 440, f"该交易日应有 440 根，实得 {n}"
-        w.close()
+        destroy_window(w)
 
     def test_rth_view_is_unaffected(self, qapp, monkeypatch):
         """The default view must not move: 09:30-16:00 is the same session
@@ -215,7 +218,7 @@ class TestTradingDayBoundary:
         w.reload()
         days = [d for d, _ in w._sessions()]
         assert days == ["2026-10-21"]
-        w.close()
+        destroy_window(w)
 
 
 class TestSharedGrid:
@@ -310,7 +313,7 @@ class TestLabelPlacement:
         gap = (y1 - y0) * (11.0 / max(vb.height(), 1))
         for a, b in zip(ys, ys[1:]):
             assert b - a >= gap * 0.99, f"标签仍然重叠：{a} 与 {b}"
-        w.close()
+        destroy_window(w)
 
     def test_a_clear_label_stays_on_its_level(self, win):
         """Only the crowded ones move. Spacing all three evenly would put

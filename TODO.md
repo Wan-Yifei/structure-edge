@@ -414,61 +414,64 @@ data.sqlite`，值是 snappy 压缩的 UTF-8（`data` 表的
 
 ---
 
-## 套件跑满就有概率崩在 `w.show()`（2026-11-25 发现，机制未知）
+## 另外 16 个 Qt 测试文件仍把窗口留给 GC
 
-`tests/analysis/test_multi_vp_window.py::test_crowded_labels_are_pushed_apart`
-在全量套件里会**非确定地** `Fatal Python error: Aborted`，三次崩的都是同一行 ——
-`w.show()`，整个套件里唯一真正显示一个 `MultiVPWindow` 的地方。
+v0.104.1 修掉的两个 abort,上游都是同一件事:窗口 `close()` 了但没被销毁,
+等垃圾回收在随机时刻动手。`destroy_window()` 只给了
+`test_multi_vp_window.py` 和 `test_multi_vp_live.py`。
 
-### 已经排除的
+全套件 18 个文件有 `.show()`,**其余 16 个仍然是 `show()` + `close()`**:
 
-- **不是某次代码改动。** 同一棵树、同一个确定顺序（套件里没有 pytest-randomly，
-  是字母序），既通过又 abort。确定性的代码造不出非确定的失败。
-- **不是某条测试的内容。** v0.104.0 新增 16 条，按字母序 4 条在它之前、12 条在
-  它之后。把**跑在后面**那 12 条去掉，abort 变成 3/3 —— 跑在后面的测试不可能让
-  已经跑过的测试崩，所以触发源不是测试身份。
-- **不是 GDI / 句柄耗尽。** 我先猜的是这个，实测否掉：崩的时候最高的进程 GDI 129、
-  全部 python 进程句柄合计 1,668，而上限是每进程 10,000 GDI / 每会话 65,536 句柄。
+```
+test_cvd_offex_label   test_cvd_range_anchor   test_dcvd
+test_dcvd_flow_gate    test_delta_label_pool   test_gui_window_smoke
+test_hover_coalesce    test_inverse_pair_price test_kline_push
+test_liq_hm_wall_labels test_opt_flow_view     test_profile_label_side
+test_redraw_timer      test_spin_fit           test_tag_fit
+test_window_tiling
+```
 
-### 剩下的只有总量
+两个故障的**前置条件在这 16 个文件里原封不动**。其中一个现在被
+`analysis/pg_patches.py` 挡住了(进程级补丁,不挑文件);
+**另一个(deleteLater 投给已被 GC 的 wrapper,
+`test_absorption_marker.py:88`)没有任何东西挡**。
 
-| 配置 | 测试数 | abort |
-|---|---|---|
-| 新增 16 条全去掉 | 2583 | **0 / 6** |
-| 只去掉跑在后面的 12 条 | 2587 | 3 / 3 |
-| 只去掉跑在前面的 4 条 | 2595 | 2 / 3 |
-| 全带上 | 2599 | 5 / 10 |
-| 自审又加 6 条之后 | 2605 | **0 / 3**（全 abort） |
+### 为什么不现在推广
 
-2583 和 2587 之间有个台阶，而两组各自都不是必要条件 —— 只有都去掉才干净。
-这个形状只和**套件总规模**一致，和哪几条无关。规模继续长，概率跟着长：
-2599 时还有一半能过，2605 时三次全崩。
+24 次全量零 abort,其中 7 次是打乱模块顺序跑的 —— 没有证据说这 16 个文件**正在**
+出问题。推广是预防,不是修复,而预防性地动 16 个文件会把一次本来可以干净复核的
+提交变成一次大面积改写。
 
-### 那个文件本身没坏
+### 什么时候该做
 
-| 跑什么 | 条数 | 结果 |
-|---|---|---|
-| 全量**排除**它 | 2579 | 干净 |
-| `tests/analysis/`（**含**它） | 1666 | 干净 |
-| 全量 | 2605 | 0 / 3 |
+出现下面任何一条:
+- 这 16 个文件里有一个开始非确定地崩;
+- 有人给这些文件加新的窗口测试(那时顺手把整个文件改掉比以后再来便宜);
+- 想把残留崩溃率的上界从 12% 压下去 —— 推广之后再跑一轮才有意义。
 
-它在 1,666 条的上下文里跑得好好的，其余 2,579 条也跑得好好的 ——
-**只有全量规模下的组合会崩**。
+记于 2026-11-25。
 
-### 为什么现在不修
+---
 
-机制不知道，而能想到的「修法」都是在遮它：给那条测试加 `xfail`、让它单独进程跑、
-或者 `skip` 掉。在不知道 `show()` 为什么失败之前，这三种都是把一个可能真实的
-Qt 生命周期问题变成静默。而它**不挡任何东西** —— 同一棵树重跑就过，CI 侧也还没有。
+## `test_order_book_collector` 在非默认模块顺序下失败
 
-### 下一步该怎么查
+`TestMakeHandlerPartialUpdateMerge` 的三条:
 
-1. 崩的时候 Python 没有留下 Qt 自己的消息。装 `faulthandler` 之外，开
-   `QT_LOGGING_RULES=qt.*=true` 或 `QT_FATAL_WARNINGS=0` 再跑，看 Qt 说了什么。
-2. 这个文件**单独跑会以另一种方式失败**（离屏 VAH 探针量到 0px），全量跑才通过 ——
-   说明它依赖前面某个 Qt 测试把平台/字体预热好。先搞清楚这个依赖是什么，
-   `w.show()` 为什么失败可能就跟着清楚了。
-3. 换一台机器或一个干净会话跑同一棵树，看台阶还在不在。
+```
+test_ask_only_push_carries_forward_last_known_bids
+test_bid_only_push_carries_forward_last_known_asks
+test_merge_cache_is_per_code
+```
 
-发现于 2026-11-25，v0.104.0 的对账集合修复过程中（那次改动本身与它无关，
-见上面「不是某次代码改动」）。
+默认(字母序)全绿;把**模块顺序**打乱之后,3 个种子里稳定失败。看起来是 handler
+的 merge cache 跨模块没有重置 —— 也就是说这三条现在是靠「前面没人碰过那个
+cache」通过的。
+
+**和 v0.104.1 那次 Qt 修复无关**,是复核那次修复时打乱顺序跑出来的副产品。
+
+要点:**失败的是测试还是被测代码,目前不知道**。如果 cache 真的是进程级且不该
+是,那是生产 bug;如果只是测试没隔离,那是测试 bug。先别假设是后者。
+
+记于 2026-11-25。
+
+。

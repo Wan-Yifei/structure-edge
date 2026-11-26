@@ -26,6 +26,10 @@ from datetime import timedelta
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
+# Must follow the pyqtgraph import and precede any scene construction:
+# patches a 0.14.0 bug where a garbage-collected InfiniteLine aborts the
+# process from inside a C++ virtual. See analysis/pg_patches.py.
+from analysis import pg_patches as _pg_patches  # noqa: F401
 
 from analysis.qt_widgets import fit_all_spins
 from PyQt6.QtCore import Qt, QTimer
