@@ -198,6 +198,35 @@ class TestMakeHandler(unittest.TestCase):
 
 # ── _make_handler partial-push merge (bid/ask carry-forward) ──────────────────
 
+class _FakeClock:
+    """Stands in for the `time` MODULE inside the collector's namespace.
+
+    Patched with patch.object(self._obc, "time", ...) so the
+    real time module keeps working. Patching
+    "analysis.order_book_collector.time.time" instead reaches through to
+    the real module and replaces the process-wide clock -- which logging
+    uses for every record's timestamp, so an emitted log line silently
+    consumed one of the scripted values.
+
+    Extra calls return the last value rather than raising: a test about
+    the merge cache should fail on the merge cache, not on how many times
+    something asked what time it is.
+    """
+
+    def __init__(self, values):
+        self._values = list(values)
+        self._i = 0
+
+    def time(self):
+        v = self._values[min(self._i, len(self._values) - 1)]
+        self._i += 1
+        return v
+
+    def __getattr__(self, name):          # sleep(), monotonic(), ...
+        import time as _real
+        return getattr(_real, name)
+
+
 class TestMakeHandlerPartialUpdateMerge(unittest.TestCase):
     """ORDER_BOOK pushes can be partial: Qot_GetOrderBook.proto documents
     svrRecvTimeBid/svrRecvTimeAsk as separate fields precisely because a push
@@ -219,7 +248,9 @@ class TestMakeHandlerPartialUpdateMerge(unittest.TestCase):
         self._moomoo_mock.OrderBookHandlerBase = FakeBase
         self._patcher = patch.dict(sys.modules, {"moomoo": self._moomoo_mock})
         self._patcher.start()
+        from analysis import order_book_collector
         from analysis.order_book_collector import _make_handler
+        self._obc = order_book_collector
         self._make_handler = _make_handler
 
     def tearDown(self):
@@ -236,7 +267,8 @@ class TestMakeHandlerPartialUpdateMerge(unittest.TestCase):
         HandlerClass = self._make_handler(store, state)
         h = HandlerClass()
 
-        with patch("analysis.order_book_collector.time.time", side_effect=[100.0, 110.0]):
+        with patch.object(self._obc, "time",
+                              _FakeClock([100.0, 110.0])):
             h.on_recv_rsp({"code": "US.SOXL",
                           "Bid": [{"price": 100.0, "volume": 500}],
                           "Ask": [{"price": 101.0, "volume": 300}]})
@@ -256,7 +288,8 @@ class TestMakeHandlerPartialUpdateMerge(unittest.TestCase):
         HandlerClass = self._make_handler(store, state)
         h = HandlerClass()
 
-        with patch("analysis.order_book_collector.time.time", side_effect=[100.0, 110.0]):
+        with patch.object(self._obc, "time",
+                              _FakeClock([100.0, 110.0])):
             h.on_recv_rsp({"code": "US.SOXL",
                           "Bid": [{"price": 100.0, "volume": 500}],
                           "Ask": [{"price": 101.0, "volume": 300}]})
@@ -274,7 +307,8 @@ class TestMakeHandlerPartialUpdateMerge(unittest.TestCase):
         HandlerClass = self._make_handler(store, state)
         h = HandlerClass()
 
-        with patch("analysis.order_book_collector.time.time", side_effect=[100.0, 110.0]):
+        with patch.object(self._obc, "time",
+                              _FakeClock([100.0, 110.0])):
             h.on_recv_rsp({"code": "US.SOXL",
                           "Bid": [{"price": 100.0, "volume": 500}], "Ask": []})
             # A different code's partial push must not pull in SOXL's cached bids.
