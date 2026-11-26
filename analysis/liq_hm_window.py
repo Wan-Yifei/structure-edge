@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import bisect
 import math
+from collections import deque
+from itertools import chain
 import pathlib
 import sqlite3
 import sys
@@ -741,9 +743,33 @@ class LiqHmWindow(QWidget):
         self._ask_grid = np.zeros((MAX_COLS_DEF, N_PRICE), dtype=np.float64)
         self._col_ts:  list[datetime] = []
 
-        # Raw snapshot buffer for iceberg / spoof detection
-        # Each entry: {ts, seq, side, price, volume}
-        self._raw_snaps: list[dict] = []
+        # Raw snapshot buffer for iceberg / spoof / imbalance detection,
+        # held ONE LIST PER COLUMN rather than as one flat list of rows.
+        # Each row is still {ts, seq, side, price, volume}.
+        #
+        # Why per column. The flat list was trimmed by rebuilding it --
+        # `[s for s in self._raw_snaps if s["ts"] >= cutoff]` -- once per
+        # column roll, which at Col(s)=1 is once a second over ~840k rows
+        # (720 columns x ~1,170 rows on QQQ): 63 ms of GUI thread per second
+        # spent copying a list to drop its oldest 0.1%. Grouped by column the
+        # same trim is a popleft. The second reader paying for the flat shape
+        # was detect_stacked_imbalance, which walks every row on every redraw
+        # to find the few that are not already in its per-column cache --
+        # 43 ms a pass against 0.1 ms when whole columns can be skipped.
+        #
+        # One entry per column, ALWAYS, including columns that record no rows
+        # (see _push_column's is_fill). That is what keeps index i here the
+        # same column as index i in _col_ts, so the two can be popped
+        # together and never drift. Everything that writes _col_ts must write
+        # here too -- including _load_history, which appends to _col_ts
+        # directly instead of going through _push_column.
+        self._snap_cols: deque[list[dict]] = deque()
+        # Rows currently held, maintained incrementally. `has_book` asks
+        # whether there is a book at all, and len(self._snap_cols) is the
+        # wrong answer to that: a replay fills _col_ts with columns that
+        # deliberately record nothing, so the deque is non-empty while the
+        # book is empty.
+        self._snap_rows: int = 0
         # Arrival order within a column, since every push in one shares that
         # column's timestamp. Initialised here as well as in _reset_grid:
         # __init__ never calls _reset_grid, so a future append path that runs
@@ -1446,12 +1472,17 @@ class LiqHmWindow(QWidget):
             # sees every refresh the feed reports" -- it saw them sorted by
             # size instead.
             ts = self._col_ts[-1]
+            # Into the column already open, which _push_column guarantees
+            # exists here: _col_ts is non-empty on this branch and the two
+            # are appended together.
+            here = self._snap_cols[-1]
             for row in rows:
                 self._snap_seq += 1
-                self._raw_snaps.append({
+                here.append({
                     "ts": ts, "seq": self._snap_seq, "side": row["side"],
                     "price": row["price"], "volume": row["volume"],
                 })
+            self._snap_rows += len(rows)
             self._latest_snap = rows
         # Scheduled, not immediate: the feed bursts, and painting the column
         # above is what has to happen per push -- drawing the result of it
@@ -1509,7 +1540,8 @@ class LiqHmWindow(QWidget):
         self._bid_grid  = np.zeros((max_cols, n_price), dtype=np.float64)
         self._ask_grid  = np.zeros((max_cols, n_price), dtype=np.float64)
         self._col_ts      = []
-        self._raw_snaps   = []
+        self._snap_cols   = deque()
+        self._snap_rows   = 0
         # Arrival order inside a column. The column timestamp is shared by
         # every push in it, so without this the detectors cannot tell which
         # book came first and fall back to sorting by volume.
@@ -1880,7 +1912,8 @@ class LiqHmWindow(QWidget):
         self._bid_grid[:]    = 0.0
         self._ask_grid[:]    = 0.0
         self._col_ts         = []
-        self._raw_snaps      = []
+        self._snap_cols      = deque()
+        self._snap_rows      = 0
         self._snap_seq       = 0
         self._simb_cache     = None
         self._mid_prices     = []
@@ -1993,10 +2026,24 @@ class LiqHmWindow(QWidget):
             self._col_ts.pop(0)
             if self._mid_prices:
                 self._mid_prices.pop(0)
-            # Trim raw_snaps to match the new oldest column time
-            if self._col_ts:
-                cutoff = self._col_ts[0]
-                self._raw_snaps = [s for s in self._raw_snaps if s["ts"] >= cutoff]
+            # Drop the column's rows with the column. One popleft, where the
+            # flat buffer rebuilt the whole list on every roll -- see the
+            # note on _snap_cols. Popped unconditionally and paired with the
+            # _col_ts.pop above rather than filtered by timestamp: a fill
+            # column can carry the PREVIOUS column's timestamp (_on_snap_ready
+            # repeats the last book under its own stamp when nothing changed),
+            # so a cutoff comparison does not identify one column.
+            #
+            # Unconditional, and that is the point: `if self._snap_cols:`
+            # would let a deque that had fallen out of step with _col_ts keep
+            # running, popping the wrong column from here on with nothing
+            # said. The invariant is supposed to hold on every path, so the
+            # failure mode worth having is the loud one.
+            assert len(self._snap_cols) == len(self._col_ts) + 1, (
+                f"{len(self._snap_cols)} snapshot columns against "
+                f"{len(self._col_ts)} grid columns: something wrote _col_ts "
+                f"without writing _snap_cols")
+            self._snap_rows -= len(self._snap_cols.popleft())
 
         col    = len(self._col_ts)
         # _clock_corr, not a bare now(): a column with no stamp of its own
@@ -2009,16 +2056,23 @@ class LiqHmWindow(QWidget):
         self._col_ts.append(col_ts)
         self._mid_prices.append(self._paint_column(col, snap))
 
+        # Appended even for a fill column, which leaves it empty. The slot
+        # has to exist either way: _snap_cols[i] is _col_ts[i], and that is
+        # what lets the trim above pop the two together.
+        rows: list[dict] = []
+        self._snap_cols.append(rows)
+
         if not is_fill:
             for row in snap:
                 self._snap_seq += 1
-                self._raw_snaps.append({
+                rows.append({
                     "ts":     col_ts,
                     "seq":    self._snap_seq,
                     "side":   row["side"],
                     "price":  row["price"],
                     "volume": row["volume"],
                 })
+            self._snap_rows += len(rows)
             self._latest_snap = snap   # cache for depth-to-cursor calculation
 
     def _on_bulk_ready(self, snapshots: list) -> None:
@@ -2284,15 +2338,40 @@ class LiqHmWindow(QWidget):
         """
         return {ts: i for i, ts in enumerate(self._col_ts)}
 
+    def _flat_snaps(self) -> list[dict]:
+        """Every recorded book row, oldest column first, in arrival order.
+
+        For the two detectors that cannot skip work by column: both walk a
+        level's whole history, and detect_spoofs iterates its argument four
+        separate times, so neither can take a generator.
+
+        This is a real cost -- measured at 25.9 ms on a 894k-row window --
+        and it is only paid when the Iceberg or Spoof box is ticked. Both
+        are off by default, and both already cost far more than this inside
+        the detector itself: 660 ms and 2,314 ms on the same window, so the
+        two copies built here are 1.7% of what they feed.
+
+        That ratio is what makes calling it twice acceptable, and it is the
+        first thing that stops being true if the per-column rows become
+        arrays: this would turn from copying pointers into rebuilding
+        dicts. Merge the two calls then, not now.
+        """
+        return list(chain.from_iterable(self._snap_cols))
+
     def _redraw_orderflow_markers(self) -> None:
         self._clear_overlay_items()
         if self._bin_size == 0.0:
             return
-        # Iceberg, spoof and imbalance all read _raw_snaps; aggressor bubbles
-        # read ticks and do not. Bailing out on an empty _raw_snaps used to
-        # take the bubbles with it, which is why a replay -- where _raw_snaps
+        # Iceberg, spoof and imbalance all read the book buffer; aggressor
+        # bubbles read ticks and do not. Bailing out on an empty book used to
+        # take the bubbles with it, which is why a replay -- where the buffer
         # is deliberately empty on purpose -- detected bubbles and drew none.
-        has_book = bool(self._raw_snaps)
+        #
+        # The row count, not `bool(self._snap_cols)`: a replay holds one
+        # empty list per replayed column, so the deque is full while the book
+        # is empty and the deque's truth value would turn all three of these
+        # back on over exactly the columns they are meant to skip.
+        has_book = self._snap_rows > 0
 
         bucket_to_idx = self._build_bucket_to_idx()
         min_vol = self._min_vol_spin.value()
@@ -2305,7 +2384,7 @@ class LiqHmWindow(QWidget):
         if has_book and self._ice_cb.isChecked():
             from analysis.orderflow_detect import detect_icebergs
             icebergs = detect_icebergs(
-                self._raw_snaps, bucket_to_idx, self._bin_size, self._price_min,
+                self._flat_snaps(), bucket_to_idx, self._bin_size, self._price_min,
                 n_price,
                 min_refreshes=self._ice_min_ref_spin.value(),
                 vol_threshold=min_vol,
@@ -2318,7 +2397,7 @@ class LiqHmWindow(QWidget):
         if has_book and self._spoof_cb.isChecked():
             from analysis.orderflow_detect import detect_spoofs
             spoofs = detect_spoofs(
-                self._raw_snaps,
+                self._flat_snaps(),
                 bucket_to_idx, self._bin_size, self._price_min,
                 n_price,
                 min_vol=float(min_vol),   # 0 → auto median of latest snapshot
@@ -2332,9 +2411,14 @@ class LiqHmWindow(QWidget):
             if self._simb_cache is None:
                 self._simb_cache = StackedImbalanceCache()
             simbs = detect_stacked_imbalance(
-                self._raw_snaps,
+                # None, and the columns instead: this is the one reader that
+                # can skip whole columns it has already evaluated, so handing
+                # it a flattened list would put back the full-window walk the
+                # per-column cache exists to avoid.
+                None,
                 bucket_to_idx, self._bin_size, self._price_min,
                 n_price,
+                snap_cols=self._snap_cols,
                 min_levels=self._simb_levels_spin.value(),
                 imbalance_ratio=self._simb_ratio_spin.value(),
                 # Deliberately NOT min_vol. That spinbox is the heatmap's
@@ -3252,11 +3336,21 @@ class LiqHmWindow(QWidget):
         self._ask_grid = np.zeros((n, n_price), dtype=np.float64)
         self._col_ts = []
         self._mid_prices = []
-        # Skipped on purpose: _raw_snaps feeds iceberg/spoof/imbalance, which
-        # look for a level refreshing between consecutive books. Consecutive
-        # here are a bucket apart, so the signal is not there to find, and
-        # keeping the levels would cost ~145 dicts a column.
-        self._raw_snaps = []
+        # Emptied on purpose: the book buffer feeds iceberg/spoof/imbalance,
+        # which look for a level refreshing between consecutive books.
+        # Consecutive here are a bucket apart, so the signal is not there to
+        # find, and keeping the levels would cost ~145 dicts a column.
+        #
+        # The deque is refilled with one EMPTY list per column in the loop
+        # below, because this is the one place that appends to _col_ts
+        # without going through _push_column. Leaving it empty here would
+        # leave len(_snap_cols) == 0 against len(_col_ts) == n for the whole
+        # replay -- which breaks nothing while the replay runs (_on_push is
+        # gated off by _hist_secs and the column timer is stopped) and then
+        # has the trim popping the wrong column later. _snap_rows stays 0,
+        # which is what keeps has_book False.
+        self._snap_cols = deque()
+        self._snap_rows = 0
         self._snap_seq = 0
         self._simb_cache = None
         self._absorb_ticks = []
@@ -3264,6 +3358,7 @@ class LiqHmWindow(QWidget):
 
         for i, snap in enumerate(snaps):
             self._col_ts.append(snap[0]["ts"])
+            self._snap_cols.append([])
             self._mid_prices.append(self._paint_column(i, snap))
 
         self._render()

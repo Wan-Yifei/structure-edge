@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import bisect as _bisect
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -902,7 +903,7 @@ def _imbalance_zones(
 
 
 def detect_stacked_imbalance(
-    snaps: list[dict],
+    snaps: list[dict] | None,
     bucket_to_idx: dict,
     bin_size: float,
     price_min: float,
@@ -913,6 +914,7 @@ def detect_stacked_imbalance(
     max_depth: int = 10,
     cache: StackedImbalanceCache | None = None,
     live_ts=None,
+    snap_cols: Iterable[list[dict]] | None = None,
 ) -> list[tuple]:
     """Detect stacked imbalance from order book snapshots.
 
@@ -964,6 +966,14 @@ def detect_stacked_imbalance(
         direction='BID': buyers dominating — zone spans bid-side prices.
         direction='ASK': sellers dominating — zone spans ask-side prices.
     """
+    # Exactly one of the two. They are not merged on purpose: `snaps` is a
+    # flat row list and `snap_cols` groups the same rows by column, so
+    # accepting both would mean silently picking one and leaving the caller
+    # to find out which from the timings.
+    if (snaps is None) == (snap_cols is None):
+        raise ValueError(
+            "pass snaps or snap_cols, not both and not neither")
+
     if cache is None:
         cache = StackedImbalanceCache()   # one pass, nothing retained
 
@@ -974,7 +984,11 @@ def detect_stacked_imbalance(
 
     zones = cache.zones
 
-    if not snaps:
+    # Zero ROWS, not zero columns. A caller passing `snap_cols` can hold one
+    # empty list per column -- that is what a replay looks like -- and asking
+    # the container whether it is empty would answer "no" and skip the
+    # cache-clearing below.
+    if not (any(snap_cols) if snap_cols is not None else snaps):
         # No book at all. Returning the cached zones for columns that still
         # exist would be defensible, but the callers that pass no book pass
         # none because they cleared it (a replay, a symbol change), so the
@@ -989,14 +1003,43 @@ def detect_stacked_imbalance(
     zones.pop(live_ts, None)
 
     fresh: dict = defaultdict(lambda: {"BID": [], "ASK": []})
-    for s in snaps:
-        ts = s["ts"]
-        if ts in zones:
-            continue
-        vol = float(s["volume"])
-        if vol < min_vol:
-            continue
-        fresh[ts][s["side"]].append((float(s["price"]), vol))
+    if snap_cols is not None:
+        # Grouped by column, so an already-evaluated column costs one dict
+        # lookup instead of one per row. At 720 columns of ~1,170 rows that
+        # is the difference between ~840k lookups a redraw and ~720.
+        #
+        # Still keyed by TIMESTAMP, not by column index, and that is not
+        # interchangeable: two columns can carry the same timestamp (the
+        # viewer repeats the last book under the previous column's stamp when
+        # the feed has not moved), and this detector evaluates a SNAPSHOT.
+        # Keying by column would split such a pair into two half-books and
+        # change both the zone count and the ratios.
+        for col in snap_cols:
+            if not col:
+                continue
+            ts = col[0]["ts"]
+            if ts in zones:
+                continue
+            for s in col:
+                vol = float(s["volume"])
+                if vol < min_vol:
+                    continue
+                # fresh[ts] and not a bucket hoisted out of the loop: a
+                # column whose every row is under min_vol must not create an
+                # entry at all, or it would be cached as "evaluated, no
+                # zones" where the flat path leaves it unevaluated. Same
+                # output, different cache -- and the point of this branch is
+                # to be indistinguishable from the other one.
+                fresh[ts][s["side"]].append((float(s["price"]), vol))
+    else:
+        for s in snaps:
+            ts = s["ts"]
+            if ts in zones:
+                continue
+            vol = float(s["volume"])
+            if vol < min_vol:
+                continue
+            fresh[ts][s["side"]].append((float(s["price"]), vol))
 
     for ts, sides in fresh.items():
         zones[ts] = _imbalance_zones(sides["BID"], sides["ASK"],

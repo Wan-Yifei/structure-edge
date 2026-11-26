@@ -19,6 +19,7 @@ from __future__ import annotations
 import pathlib
 import sys
 import types
+from collections import deque
 import unittest
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -78,7 +79,8 @@ def _stub(corr: float) -> types.SimpleNamespace:
     s = types.SimpleNamespace(
         _max_cols_spin=types.SimpleNamespace(value=lambda: 10),
         _min_vol_spin=types.SimpleNamespace(value=lambda: 0),
-        _col_ts=[], _mid_prices=[], _raw_snaps=[], _latest_snap=None,
+        _col_ts=[], _mid_prices=[], _latest_snap=None,
+        _snap_cols=deque(), _snap_rows=0,
         _snap_seq=0, _clock_corr=corr,
         _price_min=9.0, _price_max=11.0, _bin_size=0.01,
         _best_bid=None, _best_ask=None,
@@ -132,13 +134,14 @@ class TestUnstampedColumnsUseTheCorrection(unittest.TestCase):
         self.assertEqual(stub._col_ts, [ts])
 
     def test_the_recorded_snapshot_carries_the_same_stamp_as_the_column(self):
-        """_raw_snaps feeds the iceberg and spoof detectors, which bucket by
-        time; a column on one clock and its rows on another would split a
-        single book across two buckets."""
+        """The book buffer feeds the iceberg and spoof detectors, which
+        bucket by time; a column on one clock and its rows on another
+        would split a single book across two buckets."""
         stub = _stub(-1.5)
         LiqHmWindow._push_column(stub, SNAP)
-        self.assertTrue(stub._raw_snaps)
-        for row in stub._raw_snaps:
+        rows = [r for col in stub._snap_cols for r in col]
+        self.assertTrue(rows)
+        for row in rows:
             self.assertEqual(row["ts"], stub._col_ts[0])
 
 

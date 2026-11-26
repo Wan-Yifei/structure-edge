@@ -21,6 +21,7 @@ import sys
 from datetime import datetime
 
 import numpy as np
+from collections import deque
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
@@ -183,14 +184,16 @@ class TestClearColumns:
         nothing once columns renumber from 0."""
         win._col_ts = [1, 2, 3]
         win._mid_prices = [1.0, 2.0, 3.0]
-        win._raw_snaps = [{"ts": 1}]
+        win._snap_cols = deque([[{"ts": 1}]])
+        win._snap_rows = 1
         win._absorb_ticks = [{"col": 2}]
         win._snap_seq = 7
         win._bid_grid[:] = 1.0
         win._clear_columns()
         assert win._col_ts == []
         assert win._mid_prices == []
-        assert win._raw_snaps == []
+        assert list(win._snap_cols) == []
+        assert win._snap_rows == 0
         assert win._absorb_ticks == []
         assert win._snap_seq == 0
         assert not np.any(win._bid_grid)

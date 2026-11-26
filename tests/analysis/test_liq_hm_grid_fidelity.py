@@ -40,6 +40,7 @@ import os
 import pathlib
 import sys
 import types
+from collections import deque
 import unittest
 
 import numpy as np
@@ -307,7 +308,9 @@ def _marker_stub(min_vol: float):
     on  = types.SimpleNamespace(isChecked=lambda: True)
     s = types.SimpleNamespace(
         _bin_size=0.03, _price_min=10.0,
-        _raw_snaps=_book([("BID", 10.00, 900), ("ASK", 10.01, 100)]),
+        _snap_cols=deque(
+            [_book([("BID", 10.00, 900), ("ASK", 10.01, 100)])]),
+        _snap_rows=2,
         _min_vol_spin=types.SimpleNamespace(value=lambda: min_vol),
         _n_price_spin=types.SimpleNamespace(value=lambda: 100),
         # The detectors take the GRID's width, not the control's value: it

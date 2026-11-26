@@ -126,14 +126,14 @@ class TestABurstOfPushesCostsOneRender:
 
     def test_every_push_still_reaches_the_data(self, win, monkeypatch):
         """The premise. Coalescing the DRAWING must not coalesce the
-        recording -- the detectors read _raw_snaps, and a push dropped from
+        recording -- the detectors read the book buffer, and a push dropped
         it is a book the feed reported and nothing can recover."""
         win._on_snap_ready(_snap(T0))
         spy = _Spy(win, monkeypatch)
-        before = len(win._raw_snaps)
+        before = win._snap_rows
         for i in range(10):
             win._on_push("US.SOXL", _rows(141.0 + 0.01 * i), time.time())
-        assert len(win._raw_snaps) == before + 10 * len(_rows())
+        assert win._snap_rows == before + 10 * len(_rows())
         assert spy.renders == 0
 
 
