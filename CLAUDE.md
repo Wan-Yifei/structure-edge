@@ -9,7 +9,8 @@
 ## Code style
 
 - All code **comments and docstrings must be in English** (no Chinese in source files)
-- Commit messages may be in English or Chinese
+- **Commit messages and PR descriptions are in English.** This covers git only —
+  `CHANGELOG.md`, `TODO.md` and the design notes under `doc/` stay in Chinese
 
 ---
 
