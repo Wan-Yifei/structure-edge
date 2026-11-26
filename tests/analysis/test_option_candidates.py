@@ -158,15 +158,43 @@ class TestItRoundTripsThroughTheStore:
         assert [c["code"] for c in back] == [c["code"] for c in info["scored"]]
         assert sum(c["picked"] for c in back) == 2
 
-    def test_a_restart_replaces_rather_than_keeps_the_first_list(
+    def test_a_restart_adds_a_round_rather_than_overwriting_the_first(
             self, picked, store):
-        """2026-11-23 picked twice, at 09:15 and 09:39. The second selection
-        is the one that produced the session's data, so INSERT OR IGNORE
-        would describe a selection that was replaced."""
+        """This asserted the opposite, on a premise the data refuted.
+
+        It said "the second selection is the one that produced the
+        session's data", which made overwriting the first round correct.
+        2026-11-25 measured it: the first QQQ round ran 09:15-15:40 and
+        produced 95.5% of the day's stored volume, the second produced
+        4.5%; SOXL was 93.4% against 6.6%. The replaced round is normally
+        the one that collected the day, and its scores -- which come from a
+        chain snapshot that cannot be re-fetched -- were being destroyed.
+
+        So both rounds are kept. candidates_on answers with the last one,
+        because a reconcile must divide by one band; all_candidates_on
+        answers with every one.
+        """
         _c, info = picked
-        store.record_candidates(SESSION, "US.SOXL", info["scored"])
+        # Explicit stamps, because datetime.now() does not tick between two
+        # calls on this machine -- measured, five in a row identical -- and
+        # a test that leans on the clock to tell two rounds apart would
+        # pass or fail by timer resolution. Production rounds are hours
+        # apart; these two say so.
+        store.record_candidates(SESSION, "US.SOXL", info["scored"],
+                                recorded=f"{SESSION} 09:15:04.000000")
         flipped = [{**c, "picked": not c["picked"]} for c in info["scored"]]
-        store.record_candidates(SESSION, "US.SOXL", flipped)
+        store.record_candidates(SESSION, "US.SOXL", flipped,
+                                recorded=f"{SESSION} 15:41:07.000000")
+
         back = store.candidates_on(SESSION, "US.SOXL")
+        assert len(back) == 6, "the last round, not a union of both"
         assert sum(c["picked"] for c in back) == 4, (
-            "the first selection was kept; a re-pick must overwrite it")
+            "candidates_on must answer with the LAST round")
+
+        every = store.all_candidates_on(SESSION, "US.SOXL")
+        assert len(every) == 12, "the first round was overwritten"
+        rounds = sorted({c["recorded"] for c in every})
+        assert len(rounds) == 2
+        first = [c for c in every if c["recorded"] == rounds[0]]
+        assert sum(c["picked"] for c in first) == 2, (
+            "the first round's own picks must survive the second round")

@@ -661,7 +661,9 @@ def _feed_volumes(ctx, codes: list[str],
 
 
 def _band_coverage(ctx, store: OptionTickStore, session: str,
-                   underlying: str | None, our_vol: int) -> dict | None:
+                   underlying: str | None,
+                   ours: dict[str, tuple[int, int]],
+                   subscribed: set[str]) -> dict | None:
     """Our volume against the whole candidate BAND, not just what we took.
 
     The headline ratio divides by the feed's volume for the contracts we
@@ -674,14 +676,61 @@ def _band_coverage(ctx, store: OptionTickStore, session: str,
     because an account-wide quota divided between two underlyings is a
     smaller selection on both.
 
+    THREE ratios, because one number cannot separate three questions and
+    the first version of this collapsed them into two sets that were not
+    the same set:
+
+      ranking_ratio  feed volume of the LAST round's picks / band volume.
+                     Grades the RANKING, and nothing else does. On a
+                     single-round day it equals taken_ratio.
+      taken_ratio    feed volume of what we SUBSCRIBED to / band volume.
+                     What we actually held. On 2026-11-25 these were 7.0%
+                     and 14.6% for QQQ, because two rounds' picks together
+                     are wider than a quota ever allows -- a divergence
+                     that is itself the fact worth printing.
+      delivered      our stored volume / feed volume of the subscribed set.
+                     Grades the COLLECTION. Both sides over the same set,
+                     which is what makes band_ratio = taken * delivered an
+                     identity rather than a coincidence.
+
+    `delivered` is NOT bounded by 100%. The feed's own snapshot disagrees
+    with the feed's own tape: on 2026-11-25 six of 230 subscribed contracts
+    reported more volume on the tape than the snapshot's settled total, by
+    50,075 contracts gross, the worst at 177.5%, concentrated on one expiry.
+    Our side was ruled out -- `seq` strictly increasing, no re-pushes, and
+    the ignore-seq duplicate share HIGHER on clean controls than on the
+    offenders, so those repeats are real split fills. So this reports the
+    excess and names the contracts instead of clamping; once the sets are
+    consistent, a figure over 100% is a data question, and that signal is
+    the only way to find out how often it happens.
+
+    `delivered` is also split by whether a contract was collected for the
+    whole session, because the snapshot's volume is a whole-session total
+    and a contract subscribed at 15:41 is being divided by a figure that
+    includes six hours it was not listening. On 2026-11-25 the QQQ split
+    was 104.2% over 47 contracts held all day against 51.9% over 13
+    subscribed at the re-pick -- a 98.0% blend of two opposite errors.
+
     Needs the recorded candidate list, so it answers None for any session
     collected before option_candidates existed, and for one where the
     selection was never written.
 
-    Returns {contracts, feed_vol, ratio, unknown, missed} where `missed`
-    names the biggest-volume contracts the ranking passed over -- the
-    diagnostic that found a single unsubscribed SOXL strike carrying 13% of
-    a day's band volume.
+    `subscribed` comes from the CALLER, not from a second read of
+    option_subscriptions: it is the same set the numerator `ours` was summed
+    over, and reading it again here would make two sources of truth for
+    "what we took" that can disagree. In the live path it is this process's
+    own contracts, so the band grades only what this process held, which is
+    what that run can honestly answer; the 16:50 --reconcile-only pass hands
+    in the whole day's set.
+
+    `missed` names the biggest-volume contracts we never subscribed to --
+    the diagnostic that found a single unsubscribed SOXL strike carrying
+    13% of a day's band volume. Keyed on the SUBSCRIBED set, not on
+    `picked`: on 2026-11-25 it named US.SOXL261127C45000, a contract
+    subscribed at 09:15 whose tape we captured at 99.5%, because the final
+    round had not re-picked it. This is the only post-hoc detector for a
+    dropped subscription, and a false positive in it costs more than a
+    wrong ratio.
     """
     if underlying is None:
         return None
@@ -689,14 +738,52 @@ def _band_coverage(ctx, store: OptionTickStore, session: str,
     if not cands:
         return None
 
-    codes = [c["code"] for c in cands]
-    feed, _wrong, extra = _feed_volumes(ctx, codes, session)
-    known = [(c, feed.get(c["code"])) for c in cands
+    # Every round's contracts get a realised-volume row, not just the last
+    # round's: those rows are the offline scoring dataset, and a contract
+    # that appeared only in an earlier round is exactly the one a re-pick
+    # has something to say about. One snapshot pass over the union.
+    all_cands = store.all_candidates_on(session, underlying)
+    snap_codes = sorted({c["code"] for c in all_cands} | subscribed)
+    feed, _wrong, extra = _feed_volumes(ctx, snap_codes, session)
+
+    known = [(c, feed[c["code"]]) for c in cands
              if feed.get(c["code"]) is not None]
     band_vol = sum(v for _c, v in known)
-    picked_vol = sum(v for c, v in known if c["picked"])
+    ranking_vol = sum(v for c, v in known if c["picked"])
+    taken_vol = sum(v for c, v in known if c["code"] in subscribed)
+    in_band = {c["code"] for c in cands}
+
+    # Subscribed but NOT in this band: counted, never divided away. The band
+    # is one round, so an earlier round's pick can sit outside it -- ten SOXL
+    # contracts carrying 4,434 of our volume did on 2026-11-25. Silently
+    # dropping them from the numerator while keeping them in the headline is
+    # how the 205% was built in the first place.
+    outside = sorted(subscribed - in_band,
+                     key=lambda c: -ours.get(c, (0, 0))[0])
+    outside_our = sum(ours.get(c, (0, 0))[0] for c in outside)
+
+    graded = [c["code"] for c in cands if c["code"] in subscribed]
+    our_graded = sum(ours.get(c, (0, 0))[0] for c in graded)
+    # Contracts the feed reports LESS volume for than we stored. Named, with
+    # the excess, because after this change that can no longer be a set error.
+    over = sorted(((ours.get(c, (0, 0))[0], feed[c], c) for c in graded
+                   if feed.get(c) is not None
+                   and ours.get(c, (0, 0))[0] > feed[c]), reverse=True)
+
     missed = sorted(((v, c["code"], c["rank"]) for c, v in known
-                     if not c["picked"]), reverse=True)[:5]
+                     if c["code"] not in subscribed), reverse=True)[:5]
+
+    # `missed` only sees the band being graded, so that `rank` means one
+    # thing. An EARLIER round's band can be wider -- on 2026-11-25 the
+    # 09:15 SOXL chain reached 2027-01-08 and the 15:41 one did not -- and
+    # a contract only it proposed is now invisible to the detector. Counted
+    # rather than left silent, the same rule as `outside` and the chain
+    # fix's rows_outside. Today it is small (QQQ 74 codes / 955 contracts,
+    # SOXL 156 / 29,419 against a smallest-named of 6,813) but that is a
+    # measurement of one day, not a property.
+    earlier_only = ({c["code"] for c in all_cands} - in_band) - subscribed
+    earlier_vol = sum(feed[c] for c in earlier_only
+                      if feed.get(c) is not None)
 
     # Written here because here is where the data is: the snapshot above has
     # already been paid for, and before this the per-contract figures were
@@ -708,31 +795,94 @@ def _band_coverage(ctx, store: OptionTickStore, session: str,
     # with it -- and the report is the part somebody reads tonight.
     try:
         n = store.record_band_volume(session, [
-            {"code": c["code"],
+            {"code": code,
              # Absent from `feed` entirely (the snapshot never answered) and
              # present-but-None (stamped another day) are both unknown; 0 is
              # a contract that did not trade. Do not collapse them.
-             "feed_vol": feed.get(c["code"]),
-             **(extra.get(c["code"]) or {})}
-            for c in cands])
+             "feed_vol": feed.get(code),
+             **(extra.get(code) or {})}
+            for code in snap_codes])
         log.info("recorded %d band volumes for %s", n, underlying)
     except Exception as exc:                                    # noqa: BLE001
         log.warning("could not record band volumes: %s", exc)
 
     return {
         "contracts": len(cands),
+        "rounds": len({c["recorded"] for c in all_cands}),
         "picked": sum(1 for c in cands if c["picked"]),
+        "subscribed": len(subscribed),
+        "graded": len(graded),
         "feed_vol": band_vol,
-        # What the SELECTION reached, before any question of whether the
-        # subscriptions delivered. picked_vol/band_vol grades the ranking;
-        # our_vol/picked_vol grades the subscriptions; the two were previously
-        # tangled in one number that could not separate them.
-        "picked_feed_vol": picked_vol,
-        "selection_ratio": (picked_vol / band_vol) if band_vol else None,
+        "ranking_feed_vol": ranking_vol,
+        "taken_feed_vol": taken_vol,
+        "ranking_ratio": (ranking_vol / band_vol) if band_vol else None,
+        "taken_ratio": (taken_vol / band_vol) if band_vol else None,
+        "delivered": (our_graded / taken_vol) if taken_vol else None,
+        "our_graded": our_graded,
         "unknown": len(cands) - len(known),
-        "ratio": (our_vol / band_vol) if band_vol else None,
+        "ratio": (our_graded / band_vol) if band_vol else None,
+        "outside": [(c, ours.get(c, (0, 0))[0]) for c in outside[:5]],
+        "outside_n": len(outside),
+        "outside_our_vol": outside_our,
+        "over_feed": [(c, o, f) for o, f, c in over[:5]],
+        "over_feed_n": len(over),
+        "over_feed_excess": sum(o - f for o, f, _c in over),
+        "earlier_band_n": len(earlier_only),
+        "earlier_band_vol": earlier_vol,
+        "window": _delivery_by_window(store, session, underlying, cands,
+                                      subscribed, feed, ours,
+                                      len({c["recorded"] for c in all_cands})),
         "missed": [(code, vol, rank) for vol, code, rank in missed],
     }
+
+
+def _delivery_by_window(store: OptionTickStore, session: str,
+                        underlying: str, cands: list[dict],
+                        subscribed: set[str], feed: dict,
+                        ours: dict[str, tuple[int, int]],
+                        rounds: int) -> dict | None:
+    """Split `delivered` by whether we listened to the whole session.
+
+    The denominator is the snapshot's WHOLE-SESSION volume, so the ratio
+    only means "did the subscription deliver" for a contract that was
+    subscribed for the whole session. For one picked up at 15:41 it means
+    "what share of the day fell in the last 45 minutes", which is a fact
+    about the market, not about us -- and blending the two produced the
+    98.0% that hid a 104.2% and a 51.9% on 2026-11-25.
+
+    `full` is approximated as "subscribed at the session's earliest
+    subscribe time AND still in the final round's picks". That is exact for
+    the two-round case and WRONG for three or more: a contract dropped by
+    round 2 and re-picked by round 3 reads as full. option_subscriptions is
+    INSERT OR IGNORE, so it keeps only the FIRST subscribe time and cannot
+    say whether a contract was re-confirmed -- telling the general case
+    apart needs a per-round subscription record, which is not here yet.
+    Stated rather than papered over, because the approximation gets worse
+    exactly when the day was messiest.
+
+    `rounds` is the count of SELECTIONS, taken from the candidate table.
+    The obvious shortcut -- counting distinct subscribe stamps -- is not
+    the same thing and fails in the direction that matters: a round whose
+    picks were all already subscribed adds no new stamp, so a three-round
+    day would report itself exact. A false "exact" is worse than a true
+    "approximate", so the flag reads the rounds.
+    """
+    stamps = store.subscribed_times_on(session, underlying)
+    if not stamps:
+        return None
+    earliest = min(stamps.values())
+    final = {c["code"] for c in cands if c["picked"]}
+    groups: dict[str, list[str]] = {"full": [], "partial": []}
+    for code in subscribed:
+        early = stamps.get(code) == earliest
+        groups["full" if (early and code in final) else "partial"].append(code)
+    out: dict = {"approximate": rounds > 2}
+    for name, sel in groups.items():
+        f = sum(feed[c] for c in sel if feed.get(c) is not None)
+        o = sum(ours.get(c, (0, 0))[0] for c in sel)
+        out[name] = {"n": len(sel), "our_vol": o, "feed_vol": f,
+                     "ratio": (o / f) if f else None}
+    return out
 
 
 def reconcile(ctx, codes: list[str], store: OptionTickStore,
@@ -803,8 +953,13 @@ def reconcile(ctx, codes: list[str], store: OptionTickStore,
     summary["wrong_day"] = wrong_day
     # Scored against the band we chose FROM, not the set we chose. See
     # _band_coverage for why the ratio above cannot stand on its own.
-    summary["band"] = _band_coverage(ctx, store, session, underlying,
-                                     our_total)
+    # Per-code volumes, not the total: the band has to divide our volume and
+    # the feed's over the SAME set of contracts, and the total is already
+    # summed over whatever `codes` happened to be. Handing it the total is
+    # what let a numerator over 73 subscribed codes be divided by a
+    # denominator over 60 picked ones, and print 205%.
+    summary["band"] = _band_coverage(ctx, store, session, underlying, ours,
+                                     set(codes))
     return summary
 
 
@@ -1139,7 +1294,16 @@ def calibration_advice(store: OptionTickStore, session: str,
     chk = store.subscription_check_on(session, underlying)
     band = summary.get("band") or {}
 
+    # Slots from the subscription check when it exists, because that is the
+    # quota as ASKED. Summing `picked` over candidates_on gave the sum of
+    # every round's picks while that reader returned a union: on 2026-11-25
+    # it printed "546 candidates for 150 slots (4x)" for SOXL on the same
+    # screen as "asked 140". candidates_on now returns one round, so the sum
+    # is a round's own cut -- kept as the fallback for a session with no
+    # check recorded, and for the no-selection branch below, which has to
+    # know that nothing was picked at all.
     picked = sum(1 for c in cands if c["picked"])
+    slots = chk["asked"] if chk and chk.get("asked") else picked
     if cands and not picked:
         # Unreachable from today's caller -- main returns before recording
         # when pick_contracts selects nothing -- and pinned anyway, because
@@ -1152,8 +1316,8 @@ def calibration_advice(store: OptionTickStore, session: str,
                    f"selected -- the ratio below is not computable and the "
                    f"session collected no tape")
     elif cands:
-        ratio = len(cands) / picked
-        out.append(f"  band      {len(cands):,} candidates for {picked} slots "
+        ratio = len(cands) / slots
+        out.append(f"  band      {len(cands):,} candidates for {slots} slots "
                    f"({ratio:.0f}x)")
         if ratio < 2:
             out.append(f"  -> the pre-filter is binding at {ratio:.1f}x; "
@@ -1185,11 +1349,15 @@ def calibration_advice(store: OptionTickStore, session: str,
                        f"delivering")
 
     if band.get("ratio") is not None:
-        sel = band.get("selection_ratio")
+        # The RANKING figure, which is the one a parameter change can move.
+        # `taken_ratio` answers a different question and is the wider of the
+        # two on a re-pick day, so advising from it would read a messier day
+        # as a better-aimed one.
+        rank_r = band.get("ranking_ratio")
         out.append(
             f"  coverage  band {band['ratio'] * 100:.1f}%"
-            + (f", of which selection {sel * 100:.1f}%" if sel is not None
-               else ""))
+            + (f", of which the ranking reached {rank_r * 100:.1f}%"
+               if rank_r is not None else ""))
 
     if not any(line.lstrip().startswith("->") for line in out):
         out.append("  -> no change proposed")
@@ -1241,25 +1409,91 @@ def _log_reconcile(ctx, codes: list[str], store: OptionTickStore,
                 if band["ratio"] is not None else "n/a")
         # The number that can actually fall when the selection gets worse.
         # Read it, not the one above: the one above rises.
+        #
+        # The counts are the SUBSCRIBED set and the band's own size. This
+        # line used to print band["picked"] under the words "we subscribed
+        # to", which on 2026-11-25 said "150 we subscribed to" for SOXL --
+        # against a quota of 140 and 157 actually subscribed, a number no
+        # round ever had.
         log.info("band coverage %s %s: %s of the CANDIDATE BAND's volume "
-                 "(%s of %s contracts over the %d we subscribed to, %d with "
-                 "no feed figure)",
+                 "(%s of %s contracts; band %d contracts over %d selection "
+                 "round(s), %d subscribed, %d graded, %d with no feed "
+                 "figure)",
                  s.get("underlying") or "?", s["session"], bpct,
-                 f"{s['our_vol']:,}", f"{band['feed_vol']:,}",
-                 band["picked"], band["unknown"])
+                 f"{band['our_graded']:,}", f"{band['feed_vol']:,}",
+                 band["contracts"], band["rounds"], band["subscribed"],
+                 band["graded"], band["unknown"])
         # The decomposition. One number cannot say whether a low band
         # coverage is a bad selection or a dropped subscription, and the two
-        # call for opposite responses.
-        if band["selection_ratio"] is not None:
-            got = (s["our_vol"] / band["picked_feed_vol"]
-                   if band["picked_feed_vol"] else None)
-            log.info("  of which: the selection reached %.1f%% of the band, "
-                     "and the subscriptions delivered %s of that",
-                     band["selection_ratio"] * 100,
-                     f"{got * 100:.1f}%" if got is not None else "n/a")
+        # call for opposite responses. band_ratio = taken * delivered is an
+        # identity here because both sides are over the graded set.
+        if band["taken_ratio"] is not None:
+            log.info("  of which: we held %.1f%% of the band and collected "
+                     "%s of what we held",
+                     band["taken_ratio"] * 100,
+                     f"{band['delivered'] * 100:.1f}%"
+                     if band["delivered"] is not None else "n/a")
+        # Kept alongside, never replaced by the line above: this is the only
+        # figure that grades the RANKING. The two are equal on a single-round
+        # day and diverge on a re-pick, where the subscribed set is the union
+        # of rounds and so wider than any quota ever allowed -- 7.0% against
+        # 14.6% for QQQ on 2026-11-25.
+        if band["ranking_ratio"] is not None:
+            taken = band["taken_ratio"]
+            same = (taken is not None
+                    and abs(band["ranking_ratio"] - taken) < 5e-4)
+            log.info("  the last round's own picks reached %.1f%% of the "
+                     "band%s", band["ranking_ratio"] * 100,
+                     "" if same else
+                     " -- lower than what we held because an earlier round "
+                     "picked contracts this one did not, and only the "
+                     "ranking figure is comparable across days")
+        win = band.get("window")
+        if win and win["full"]["ratio"] is not None \
+                and win["partial"]["n"]:
+            log.info("  collected, split by listening window: %.1f%% over "
+                     "%d held from the open, %s over %d subscribed later "
+                     "-- the feed's figure is a WHOLE-session total, so "
+                     "only the first is a statement about us%s",
+                     win["full"]["ratio"] * 100, win["full"]["n"],
+                     f"{win['partial']['ratio'] * 100:.1f}%"
+                     if win["partial"]["ratio"] is not None else "n/a",
+                     win["partial"]["n"],
+                     " (THREE OR MORE rounds: the split is approximate, "
+                     "see _delivery_by_window)" if win["approximate"] else "")
+        # Not clamped and not hidden. With the sets consistent, a figure over
+        # 100% is the feed's snapshot disagreeing with the feed's own tape,
+        # and this is the only measurement of how often that happens.
+        if band["over_feed_n"]:
+            log.warning("  %d contracts report MORE on the tape than the "
+                        "snapshot's settled total, by %s contracts gross "
+                        "-- our side is ruled out (seq strictly increasing, "
+                        "no re-pushes), so this is a feed disagreement",
+                        band["over_feed_n"], f"{band['over_feed_excess']:,}")
+            for code, o, f in band["over_feed"]:
+                log.warning("    %s: ours %s vs feed %s (%.1f%%)",
+                            code, f"{o:,}", f"{f:,}", o / f * 100 if f else 0)
+        # Counted, never divided away: the band is ONE round, so a contract
+        # an earlier round subscribed can sit outside it.
+        if band["outside_n"]:
+            log.warning("  %d subscribed contracts are OUTSIDE this band, "
+                        "carrying %s of our volume -- an earlier round "
+                        "picked them and the final round's band does not "
+                        "reach them, so they are in no ratio above",
+                        band["outside_n"], f"{band['outside_our_vol']:,}")
+            for code, vol in band["outside"]:
+                log.warning("    %s: %s contracts", code, f"{vol:,}")
         for code, vol, rank in band["missed"]:
             log.warning("  passed over %s: %s contracts, ranked %d of %d",
                         code, f"{vol:,}", rank, band["contracts"])
+        # The detector's own blind spot, counted so it is not silent: an
+        # earlier round's band can be wider than the one being graded, and
+        # a contract only it proposed is in no "passed over" line above.
+        if band["earlier_band_n"]:
+            log.info("  %d contracts sat in an EARLIER round's band only, "
+                     "carrying %s -- never subscribed, and outside the band "
+                     "graded here, so no 'passed over' line can reach them",
+                     band["earlier_band_n"], f"{band['earlier_band_vol']:,}")
     if s["caught_nothing"]:
         log.warning("%d contracts traded per the feed and we caught NOTHING "
                     "-- that is the shape of a dropped subscription",

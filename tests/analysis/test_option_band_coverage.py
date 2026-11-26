@@ -321,10 +321,15 @@ class TestTheDecomposition:
         _ticks(store, A, 1_000)
         s = reconcile(FakeSnapshot(BAND_VOL), [A], store, SESSION, UNDER)
         band = s["band"]
-        assert band["selection_ratio"] == pytest.approx(1_000 / 9_600)
-        assert band["picked_feed_vol"] == 1_000
+        assert band["ranking_ratio"] == pytest.approx(1_000 / 9_600)
+        assert band["ranking_feed_vol"] == 1_000
+        # One round, and we subscribed to exactly its picks, so the ranking
+        # and the held figure are the same number. They part only on a
+        # re-pick, which TestARepickSplitsTheRatios covers.
+        assert band["taken_feed_vol"] == band["ranking_feed_vol"]
         # Everything the selection reached, we stored.
-        assert s["our_vol"] == band["picked_feed_vol"]
+        assert band["our_graded"] == band["taken_feed_vol"]
+        assert band["delivered"] == pytest.approx(1.0)
 
     def test_a_good_selection_with_a_dropped_subscription(self, store):
         """The selection had the volume; we only stored part of it."""
@@ -333,9 +338,13 @@ class TestTheDecomposition:
         _ticks(store, C, 2_000)                 # of the feed's 8,000
         s = reconcile(FakeSnapshot(BAND_VOL), [A, C], store, SESSION, UNDER)
         band = s["band"]
-        assert band["selection_ratio"] == pytest.approx(9_000 / 9_600)
+        assert band["ranking_ratio"] == pytest.approx(9_000 / 9_600)
         assert s["our_vol"] == 3_000
         assert band["ratio"] == pytest.approx(3_000 / 9_600)
+        # band = held * collected, an identity now that both sides of the
+        # second factor are over the same contracts.
+        assert band["ratio"] == pytest.approx(
+            band["taken_ratio"] * band["delivered"])
 
 
 class TestTheBandIsOnlySnapshottedOnce:
@@ -355,3 +364,294 @@ class TestTheBandIsOnlySnapshottedOnce:
         assert band_calls, "the band was never snapshotted"
         assert max(len(a) for a in band_calls) <= 200, (
             f"asked for {max(len(a) for a in band_calls)} codes in one call")
+
+
+def _round(store, picked, when, order=(A, B, C, D)):
+    """One selection round, stamped so the rounds are distinguishable.
+
+    Explicit stamps because datetime.now() does not tick between two calls
+    on this machine -- measured, five consecutive calls identical -- so a
+    test leaning on the clock to separate rounds would pass by timer
+    resolution rather than by the code being right.
+    """
+    store.record_candidates(SESSION, UNDER, [
+        {"code": c, "rank": i + 1, "score": 1000.0 - 10 * i,
+         "expiry": "2026-11-27", "strike": 600.0 + i, "opt_type": "CALL",
+         "picked": c in picked}
+        for i, c in enumerate(order)], recorded=f"{SESSION} {when}")
+
+
+def _subscribe(store, pairs):
+    """Contract rows plus subscription stamps, for the window split.
+
+    Both are needed: subscribed_times_on joins option_contracts to find the
+    underlying, exactly as subscribed_on does.
+    """
+    store.upsert_contracts([
+        {"code": c, "underlying": UNDER, "expiry": "2026-11-27",
+         "strike": 600.0, "opt_type": "CALL"} for c, _t in pairs])
+    for code, when in pairs:
+        store.record_subscriptions(SESSION, [code])
+        store._con.execute(
+            "UPDATE option_subscriptions SET subscribed = ? "
+            "WHERE session = ? AND code = ?",
+            (f"{SESSION} {when}", SESSION, code))
+    store._con.commit()
+
+
+class TestARepickSplitsTheRatios:
+    """The subscribed set and the final round's picks are DIFFERENT sets.
+
+    Every case above makes them equal, which is how 2026-11-25 printed
+    "the subscriptions delivered 205.0%": the numerator was our volume over
+    the 73 contracts subscribed across two rounds, the denominator the feed
+    volume of the 60 the last round picked. A ratio over two different sets
+    is not wrong by a little, it is not a ratio.
+    """
+
+    def _two_rounds(self, store):
+        # Round 1 took A and C. Round 2 dropped C and took A and B. C stays
+        # subscribed and keeps collecting -- nothing unsubscribes it until
+        # the process that owned it dies.
+        _round(store, picked=[A, C], when="09:15:00.000000")
+        _round(store, picked=[A, B], when="15:41:00.000000")
+
+    def test_the_delivery_ratio_cannot_exceed_what_we_held(self, store):
+        self._two_rounds(store)
+        for code in (A, B, C):
+            _ticks(store, code, BAND_VOL[code])
+        band = reconcile(FakeSnapshot(BAND_VOL), [A, B, C], store, SESSION,
+                         UNDER)["band"]
+        # 9,500 held and all of it stored. The old arithmetic divided that
+        # same 9,500 by the 1,500 the last round picked.
+        assert band["taken_feed_vol"] == 9_500
+        assert band["our_graded"] == 9_500
+        assert band["delivered"] == pytest.approx(1.0)
+
+    def test_the_ranking_figure_stays_narrower_than_what_we_held(self, store):
+        self._two_rounds(store)
+        for code in (A, B, C):
+            _ticks(store, code, BAND_VOL[code])
+        band = reconcile(FakeSnapshot(BAND_VOL), [A, B, C], store, SESSION,
+                         UNDER)["band"]
+        # Both reported. Collapsing them leaves no figure that grades the
+        # RANKING, which is the only thing a --pct change moves.
+        assert band["ranking_feed_vol"] == 1_500        # A + B, round 2
+        assert band["taken_feed_vol"] == 9_500          # A + B + C
+        assert band["ranking_ratio"] < band["taken_ratio"]
+        assert band["rounds"] == 2
+
+    def test_the_identity_holds(self, store):
+        self._two_rounds(store)
+        _ticks(store, A, 1_000)
+        _ticks(store, C, 4_000)                     # of the feed's 8,000
+        band = reconcile(FakeSnapshot(BAND_VOL), [A, B, C], store, SESSION,
+                         UNDER)["band"]
+        assert band["ratio"] == pytest.approx(
+            band["taken_ratio"] * band["delivered"])
+
+    def test_a_contract_we_subscribed_is_never_called_passed_over(self, store):
+        """The bug that actually fired on 2026-11-25.
+
+        US.SOXL261127C45000 was subscribed at 09:15 and we captured 99.5%
+        of its tape, and the reconcile named it as a contract the ranking
+        passed over, because the final round had not re-picked it. This is
+        the only post-hoc detector for a dropped subscription, and a false
+        positive in it costs more than a wrong ratio.
+        """
+        self._two_rounds(store)
+        _ticks(store, C, 8_000)
+        band = reconcile(FakeSnapshot(BAND_VOL), [A, B, C], store, SESSION,
+                         UNDER)["band"]
+        named = [code for code, _v, _r in band["missed"]]
+        assert C not in named, (
+            "a contract we subscribed to, and collected, was reported as "
+            "one the ranking passed over")
+        assert D in named, "the genuinely unsubscribed contract is gone too"
+
+    def test_every_rounds_contracts_get_a_realised_volume_row(self, store):
+        """record_band_volume must iterate all rounds, not the last.
+
+        A contract only an earlier round proposed is exactly the one a
+        re-pick has something to say about, and those rows are the offline
+        scoring dataset.
+        """
+        _round(store, picked=[A], when="09:15:00.000000",
+               order=(A, B, C, D))
+        _round(store, picked=[A], when="15:41:00.000000", order=(A, B))
+        _ticks(store, A, 1_000)
+        reconcile(FakeSnapshot(BAND_VOL), [A], store, SESSION, UNDER)
+        rows = store.band_volume_on(SESSION)
+        assert set(rows) >= {A, B, C, D}, (
+            f"only {sorted(rows)} got a row; the first round's contracts "
+            f"lost their realised volume")
+
+
+class TestSubscribedOutsideTheBandIsCountedNotDropped:
+    """candidates_on answers with one round, so an earlier round's pick can
+    sit outside it. On 2026-11-25 ten SOXL contracts carrying 4,434 of our
+    volume did. Dividing them away while keeping them in the headline is
+    how the 205% was built."""
+
+    def _dropped_out_of_band(self, store):
+        _round(store, picked=[A, C], when="09:15:00.000000", order=(A, C))
+        _round(store, picked=[A], when="15:41:00.000000", order=(A, B))
+        _ticks(store, A, 1_000)
+        _ticks(store, C, 7_000)
+        return reconcile(FakeSnapshot(BAND_VOL), [A, C], store, SESSION,
+                         UNDER)["band"]
+
+    def test_they_are_counted_and_named(self, store):
+        band = self._dropped_out_of_band(store)
+        assert band["outside_n"] == 1
+        assert band["outside_our_vol"] == 7_000
+        assert band["outside"] == [(C, 7_000)]
+
+    def test_they_are_not_in_the_graded_numerator(self, store):
+        band = self._dropped_out_of_band(store)
+        # Graded over A alone; C has no row in this band to divide by.
+        assert band["graded"] == 1
+        assert band["our_graded"] == 1_000
+        assert band["delivered"] == pytest.approx(1.0)
+
+
+class TestTheFeedCanReportLessThanWeStored:
+    """Not clamped, not hidden. With the sets consistent, a figure over
+    100% is the snapshot disagreeing with the same broker's own tape -- six
+    of 230 subscribed contracts on 2026-11-25, 50,075 contracts gross, the
+    worst at 177.5%. This WARNING is the only measurement of how often that
+    happens, so it has to survive."""
+
+    def test_the_excess_is_named_and_totalled(self, store):
+        _candidates(store, picked=[A, B])
+        _ticks(store, A, 1_800)                 # the feed says 1,000
+        _ticks(store, B, 500)
+        band = reconcile(FakeSnapshot(BAND_VOL), [A, B], store, SESSION,
+                         UNDER)["band"]
+        assert band["over_feed_n"] == 1
+        assert band["over_feed_excess"] == 800
+        assert band["over_feed"] == [(A, 1_800, 1_000)]
+        # And it is NOT clamped away.
+        assert band["delivered"] > 1.0
+
+    def test_nothing_is_flagged_when_the_feed_is_ahead(self, store):
+        _candidates(store, picked=[A, B])
+        _ticks(store, A, 900)
+        band = reconcile(FakeSnapshot(BAND_VOL), [A, B], store, SESSION,
+                         UNDER)["band"]
+        assert band["over_feed_n"] == 0
+        assert band["over_feed_excess"] == 0
+
+
+class TestTheDeliveryRatioIsSplitByListeningWindow:
+    """The feed's figure is a WHOLE-session total, so the ratio only means
+    "did the subscription deliver" for a contract held all session. On
+    2026-11-25 blending the two printed 98.0% over a 104.2% and a 51.9%."""
+
+    def test_a_late_subscription_is_reported_separately(self, store):
+        _round(store, picked=[A, C], when="09:15:00.000000")
+        _round(store, picked=[A, B], when="15:41:00.000000")
+        _subscribe(store, [(A, "09:15:00.000000"), (C, "09:15:00.000000"),
+                           (B, "15:41:00.000000")])
+        _ticks(store, A, 1_000)
+        _ticks(store, B, 125)                   # of the feed's 500
+        _ticks(store, C, 8_000)
+        win = reconcile(FakeSnapshot(BAND_VOL), [A, B, C], store, SESSION,
+                        UNDER)["band"]["window"]
+        # Held from the open AND still picked by the final round: A only.
+        # C was subscribed at the open but dropped at the re-pick, B came
+        # in at the re-pick -- both are partial windows.
+        assert win["full"]["n"] == 1
+        assert win["full"]["ratio"] == pytest.approx(1.0)
+        assert win["partial"]["n"] == 2
+        assert win["partial"]["ratio"] == pytest.approx(8_125 / 8_500)
+        assert win["approximate"] is False
+
+    def test_three_rounds_say_the_split_is_approximate(self, store):
+        """subscribed_times_on keeps only the FIRST subscribe time, so a
+        contract dropped by round 2 and re-picked by round 3 reads as held
+        all session. Said out loud rather than papered over, because the
+        approximation is worst on the messiest days."""
+        _round(store, picked=[A], when="09:15:00.000000")
+        _round(store, picked=[B], when="12:00:00.000000")
+        _round(store, picked=[A, B], when="15:41:00.000000")
+        _subscribe(store, [(A, "09:15:00.000000"), (B, "12:00:00.000000"),
+                           (C, "15:41:00.000000")])
+        _ticks(store, A, 1_000)
+        band = reconcile(FakeSnapshot(BAND_VOL), [A, B, C], store, SESSION,
+                         UNDER)["band"]
+        assert band["window"]["approximate"] is True
+
+    def test_no_subscription_stamps_leaves_the_split_out(self, store):
+        """Every other test in this file passes `codes` without recording a
+        subscription, which is what a session collected before the stamps
+        existed looks like. The split must be absent, not zero."""
+        _candidates(store, picked=[A])
+        _ticks(store, A, 1_000)
+        band = reconcile(FakeSnapshot(BAND_VOL), [A], store, SESSION,
+                         UNDER)["band"]
+        assert band["window"] is None
+
+
+class TestTheDetectorsBlindSpotIsCounted:
+    """`missed` only sees the band being graded, so that `rank` means one
+    thing. An earlier round's band can be wider -- on 2026-11-25 the 09:15
+    SOXL chain reached 2027-01-08 and the 15:41 one did not -- and a
+    contract only it proposed is invisible to the detector. Counted rather
+    than silent, the same rule as `outside`."""
+
+    def _wider_first_round(self, store):
+        # Round 1's band reaches C and D; round 2's stops at B.
+        _round(store, picked=[A], when="09:15:00.000000", order=(A, B, C, D))
+        _round(store, picked=[A], when="15:41:00.000000", order=(A, B))
+        _ticks(store, A, 1_000)
+        return reconcile(FakeSnapshot(BAND_VOL), [A], store, SESSION,
+                         UNDER)["band"]
+
+    def test_the_earlier_rounds_own_contracts_are_counted(self, store):
+        band = self._wider_first_round(store)
+        # C (8,000) and D (100) are in round 1's band only and were never
+        # subscribed, so no "passed over" line can reach them.
+        assert band["earlier_band_n"] == 2
+        assert band["earlier_band_vol"] == 8_100
+
+    def test_they_are_not_silently_called_passed_over(self, store):
+        """They must not leak into `missed` either -- their rank belongs to
+        a different scoring than the one the band is graded against."""
+        band = self._wider_first_round(store)
+        named = [code for code, _v, _r in band["missed"]]
+        assert C not in named and D not in named
+        assert named == [B], named
+
+    def test_a_single_round_day_has_no_blind_spot(self, store):
+        _candidates(store, picked=[A])
+        _ticks(store, A, 1_000)
+        band = reconcile(FakeSnapshot(BAND_VOL), [A], store, SESSION,
+                         UNDER)["band"]
+        assert band["earlier_band_n"] == 0
+        assert band["earlier_band_vol"] == 0
+
+
+class TestTheApproximateFlagCountsRoundsNotStamps:
+    """Counting distinct subscribe stamps instead fails in the direction
+    that matters: a round whose picks were ALL already subscribed adds no
+    new stamp, because record_subscriptions is INSERT OR IGNORE. A false
+    "exact" is worse than a true "approximate"."""
+
+    def test_a_third_round_that_adds_no_subscription_still_reads_as_three(
+            self, store):
+        _round(store, picked=[A, B], when="09:15:00.000000")
+        _round(store, picked=[A], when="12:00:00.000000")
+        # Round 3 re-picks only contracts already subscribed at the open,
+        # so option_subscriptions gains nothing and the stamps show ONE
+        # distinct value.
+        _round(store, picked=[A, B], when="15:41:00.000000")
+        _subscribe(store, [(A, "09:15:00.000000"), (B, "09:15:00.000000")])
+        _ticks(store, A, 1_000)
+        band = reconcile(FakeSnapshot(BAND_VOL), [A, B], store, SESSION,
+                         UNDER)["band"]
+        assert band["rounds"] == 3
+        assert len({v for v in
+                    store.subscribed_times_on(SESSION, UNDER).values()}) == 1
+        assert band["window"]["approximate"] is True, (
+            "a three-round day reported its window split as exact")

@@ -32,10 +32,13 @@ from __future__ import annotations
 
 import pathlib
 import functools
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timedelta
 from typing import Iterable
+
+log = logging.getLogger(__name__)
 
 _DEFAULT_DB = pathlib.Path(__file__).parent.parent / "db" / "option_ticks.db"
 
@@ -187,8 +190,25 @@ CREATE INDEX IF NOT EXISTS idx_osub_session ON option_subscriptions (session);
 --
 -- rank is 1-based over the scored candidates, descending by score;
 -- `picked` is whether it made the quota cut. One row per contract per
--- session, around 800 for SOXL and 3,200 for QQQ at the configured
+-- SELECTION, around 800 for SOXL and 3,200 for QQQ at the configured
 -- pre-filter widths.
+--
+-- `recorded` is in the key, so a collector that re-picks mid-session adds
+-- a round rather than overwriting the first one. It was UNIQUE(session,
+-- code) with INSERT OR REPLACE, and on 2026-11-25 that left the 09:15
+-- selection as 74 rows with picked=0 on both symbols -- the table claimed
+-- that round had selected nothing, while it had in fact produced 95.5% of
+-- QQQ's stored volume and 93.4% of SOXL's. The pick SET survives the
+-- overwrite elsewhere (option_subscriptions.subscribed timestamps it, and
+-- the counts there were exactly the two quotas), but the SCORES and RANKS
+-- do not: they come from a chain snapshot that cannot be re-fetched, and
+-- they are the only reason this table exists.
+--
+-- Readers: candidates_on() answers with the LAST round, which is the one
+-- band that a single reconcile can divide by; all_candidates_on() answers
+-- with every round, which is what the offline scoring dataset needs and
+-- what record_band_volume must iterate so no round's contracts lose their
+-- realised volume.
 CREATE TABLE IF NOT EXISTS option_candidates (
     session    TEXT    NOT NULL,
     underlying TEXT    NOT NULL,
@@ -200,7 +220,7 @@ CREATE TABLE IF NOT EXISTS option_candidates (
     opt_type   TEXT,
     picked     INTEGER NOT NULL,
     recorded   TEXT    NOT NULL,
-    UNIQUE(session, code)
+    UNIQUE(session, code, recorded)
 );
 CREATE INDEX IF NOT EXISTS idx_ocand_session
     ON option_candidates (session, underlying);
@@ -408,19 +428,44 @@ class OptionTickStore:
 
     @_locked
     def record_candidates(self, session: str, underlying: str,
-                          rows: Iterable[dict]) -> int:
+                          rows: Iterable[dict],
+                          recorded: str | datetime | None = None) -> int:
         """Write the whole scored candidate list for one day's selection.
 
-        INSERT OR REPLACE, not OR IGNORE: a collector restarted mid-session
-        re-picks, and the second selection is the one that produced the
-        session's data. OR IGNORE would keep the first list and quietly
-        describe a selection that was replaced -- which is what happened on
-        2026-11-23, where 09:15 and 09:39 each picked a set.
+        One round per call, keyed by `recorded`, so a collector restarted
+        mid-session ADDS a selection instead of replacing one.
+
+        `recorded` identifies the round and defaults to now. It is a
+        parameter because the clock cannot be trusted to separate two
+        calls: on this machine five consecutive datetime.now() calls
+        returned the identical microsecond, so two rounds written inside
+        the timer's resolution would collapse into one under the key. Real
+        rounds are minutes apart (09:15 and 15:41 on 2026-11-25), so the
+        default is safe in production; a caller writing two rounds back to
+        back must pass distinct stamps or it is writing one.
+
+        This was INSERT OR REPLACE on UNIQUE(session, code), justified as
+        "the second selection is the one that produced the session's data".
+        2026-11-25 falsifies that: the first QQQ selection ran 09:15-15:40
+        and produced 1,313,354 contracts of stored volume, the second ran
+        45 minutes and produced 62,118 -- 95.5% against 4.5%, and 93.4%
+        against 6.6% for SOXL. The replaced round is usually the one that
+        collected the day.
+
+        What the overwrite destroyed is not recoverable from anywhere else.
+        The pick SET is: option_subscriptions stamps each contract with the
+        time it was first subscribed, and on 2026-11-25 those timestamps
+        held exactly 60 QQQ and exactly 140 SOXL codes at the open, which
+        are the two configured quotas. The SCORES and RANKS are not: they
+        come from a get_option_chain snapshot taken at selection time, and
+        the chain is not re-fetchable. A round whose scores are overwritten
+        is a round nobody can ever grade -- which is the one thing this
+        table was added to prevent.
 
         Each row needs code/rank/picked; score, expiry, strike and opt_type
         are recorded when present.
         """
-        now = _ts_str(datetime.now())
+        now = _ts_str(datetime.now() if recorded is None else recorded)
         data = [(session, underlying, r["code"], int(r["rank"]),
                  (None if r.get("score") is None else float(r["score"])),
                  r.get("expiry"),
@@ -508,20 +553,64 @@ class OptionTickStore:
     @_locked
     def candidates_on(self, session: str,
                       underlying: str) -> list[dict]:
-        """That day's scored candidate list, best-ranked first.
+        """The LAST selection of that day, best-ranked first.
 
         `underlying` is REQUIRED for the same reason subscribed_on requires
         it: two underlyings share this table, and a reconcile that scored a
         band against both symbols' candidates would be comparing nothing in
         particular.
+
+        One round, not every round, because the reconcile divides by this
+        list and a union of rounds is not a band anybody chose: the rounds
+        are scored at different spots, so their pre-filter windows differ,
+        and `rank` means a different thing in each. Reading the union made
+        2026-11-25 print "546 candidates for 150 slots" for SOXL, where
+        150 is the sum of two rounds' picks against a quota of 140 -- a
+        number no round ever had.
+
+        A contract subscribed under an EARLIER round can therefore fall
+        outside this band, and the caller has to count those rather than
+        divide them away: on 2026-11-25 ten SOXL contracts carrying 4,434
+        of our stored volume sat outside the final round's band. Use
+        all_candidates_on for the offline dataset, which wants every round.
         """
         cur = self._con.execute(
             "SELECT code, rank, score, expiry, strike, opt_type, picked "
             "FROM option_candidates WHERE session = ? AND underlying = ? "
-            "ORDER BY rank", (session, underlying))
+            "AND recorded = (SELECT MAX(recorded) FROM option_candidates "
+            "                WHERE session = ? AND underlying = ?) "
+            "ORDER BY rank", (session, underlying, session, underlying))
         return [{"code": r[0], "rank": r[1], "score": r[2], "expiry": r[3],
                  "strike": r[4], "opt_type": r[5], "picked": bool(r[6])}
                 for r in cur.fetchall()]
+
+    @_locked
+    def all_candidates_on(self, session: str,
+                          underlying: str) -> list[dict]:
+        """Every selection of that day, each row carrying its round.
+
+        Two callers, for two reasons that both break on candidates_on:
+
+          * record_band_volume, because a contract that appeared only in an
+            earlier round would otherwise never get a realised-volume row,
+            and those rows are the whole offline scoring dataset. On
+            2026-11-25 that would have dropped 74 QQQ and 166 SOXL
+            contracts.
+          * anything grading a RANKING, which must not mix two scorings.
+            Group by `recorded` first; the rank is only meaningful inside
+            its own round.
+
+        A code may appear more than once, with a different rank, score and
+        picked flag in each round. That is the point, not a duplicate.
+        """
+        cur = self._con.execute(
+            "SELECT code, rank, score, expiry, strike, opt_type, picked, "
+            "       recorded FROM option_candidates "
+            "WHERE session = ? AND underlying = ? "
+            "ORDER BY recorded, rank", (session, underlying))
+        return [{"code": r[0], "rank": r[1], "score": r[2], "expiry": r[3],
+                 "strike": r[4], "opt_type": r[5], "picked": bool(r[6]),
+                 "recorded": r[7]} for r in cur.fetchall()]
 
     @_locked
     def subscribed_on(self, session: str, underlying: str) -> list[str]:
@@ -552,6 +641,30 @@ class OptionTickStore:
             "JOIN option_contracts c ON c.code = s.code "
             "WHERE s.session = ? AND c.underlying = ? ORDER BY s.code",
             (session, underlying))]
+
+    @_locked
+    def subscribed_times_on(self, session: str,
+                            underlying: str) -> dict[str, str]:
+        """{code: when it was FIRST subscribed} for that session.
+
+        The timestamp is what survives of a selection the candidate table
+        once overwrote: grouping 2026-11-25's subscribed codes by it gave
+        exactly 60 QQQ and exactly 140 SOXL at the open, the two configured
+        quotas, which is the first round's pick set recovered in full.
+
+        FIRST, not every time: record_subscriptions is INSERT OR IGNORE, so
+        a contract re-picked by a later round keeps the earlier stamp and
+        nothing records that it was re-confirmed. Good enough to tell "held
+        from the open" from "picked up later"; NOT enough to tell whether a
+        contract was dropped and re-subscribed in between. A caller that
+        needs the latter wants a per-round subscription record, which does
+        not exist yet.
+        """
+        return {r[0]: r[1] for r in self._con.execute(
+            "SELECT s.code, s.subscribed FROM option_subscriptions s "
+            "JOIN option_contracts c ON c.code = s.code "
+            "WHERE s.session = ? AND c.underlying = ?",
+            (session, underlying))}
 
     @_locked
     def all_subscribed_on(self, session: str) -> list[str]:
@@ -638,6 +751,86 @@ class OptionTickStore:
             self._con.execute(
                 "ALTER TABLE option_coverage ADD COLUMN first_ts TEXT")
             self._con.commit()
+        self._rekey_candidates()
+
+    @_locked
+    def _rekey_candidates(self) -> None:
+        """Put `recorded` into option_candidates' key on an older file.
+
+        SQLite cannot alter a constraint, so this rebuilds the table. That
+        is affordable exactly once: the table is never pruned (prune_before
+        touches only option_ticks and option_greeks) and held 2,758 rows
+        for a single session when this ran. At eight or ten sessions it is
+        still small; the reason to do it now is that it only gets bigger.
+
+        The old rows cannot be un-flattened. A session that re-picked has
+        already lost the overwritten rounds' scores, and the survivors
+        collapse into one round under the new key -- which is honest, since
+        one `recorded` value is all that is left of them.
+        """
+        row = self._con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='option_candidates'").fetchone()
+        # No table yet (a fresh file just ran _SETUP_SQL and already has the
+        # new key), or already rekeyed.
+        if not row or not row[0]:
+            return
+        if "UNIQUE(session, code, recorded)" in row[0]:
+            return
+        # Never fatal, but do not read that as "startup is lock-safe". It
+        # is not, and measured: with another connection holding BEGIN
+        # EXCLUSIVE, __init__ raises at _SETUP_SQL, several statements
+        # before this one is reached. What this guard actually buys is
+        # narrower -- the rebuild holds a write lock for ~14 ms of real
+        # DROP and CREATE, far longer than _SETUP_SQL's IF NOT EXISTS
+        # no-ops, so it is the one statement here with a collision window
+        # worth protecting, and losing it costs only the old key: a
+        # re-pick still overwrites the first round, which is yesterday's
+        # behaviour. The next open tries again.
+        #
+        # The real mitigation is that this runs ONCE, and it was run
+        # deliberately on 2026-11-25 with nothing else open.
+        self._con.execute("PRAGMA busy_timeout=30000")
+        try:
+            self._rebuild_candidates()
+        except sqlite3.Error as exc:
+            log.warning("could not rekey option_candidates (%s) -- the old "
+                        "key stands, so a mid-session re-pick will still "
+                        "overwrite the first round's scores", exc)
+            try:
+                self._con.rollback()
+            except sqlite3.Error:
+                pass
+
+    def _rebuild_candidates(self) -> None:
+        """The rebuild itself. Separate so the guard above can catch it."""
+        self._con.executescript("""
+            PRAGMA foreign_keys=off;
+            BEGIN;
+            CREATE TABLE option_candidates_new (
+                session    TEXT    NOT NULL,
+                underlying TEXT    NOT NULL,
+                code       TEXT    NOT NULL,
+                rank       INTEGER NOT NULL,
+                score      REAL,
+                expiry     TEXT,
+                strike     REAL,
+                opt_type   TEXT,
+                picked     INTEGER NOT NULL,
+                recorded   TEXT    NOT NULL,
+                UNIQUE(session, code, recorded)
+            );
+            INSERT INTO option_candidates_new
+                SELECT session, underlying, code, rank, score, expiry,
+                       strike, opt_type, picked, recorded
+                FROM option_candidates;
+            DROP TABLE option_candidates;
+            ALTER TABLE option_candidates_new RENAME TO option_candidates;
+            CREATE INDEX IF NOT EXISTS idx_ocand_session
+                ON option_candidates (session, underlying);
+            COMMIT;
+            PRAGMA foreign_keys=on;
+        """)
 
     @_locked
     def first_ts_for(self, session: str, codes: list[str]) -> dict[str, str]:

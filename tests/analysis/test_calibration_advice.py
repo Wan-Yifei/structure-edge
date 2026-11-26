@@ -190,10 +190,64 @@ class TestItStaysAdvice:
         _cands(store, 2288, 60)
         store.record_subscription_check(SESSION, UNDER, asked=60, listed=60)
         lines = calibration_advice(store, SESSION, UNDER, _summary(
-            band={"ratio": 0.134, "selection_ratio": 0.141}))
+            band={"ratio": 0.134, "ranking_ratio": 0.141,
+                  "taken_ratio": 0.293}))
         assert "band 13.4%" in _text(lines)
-        assert "selection 14.1%" in _text(lines)
+        # The RANKING figure, not the held one. On a re-pick day the held
+        # figure is the wider of the two (7.0% against 14.6% for QQQ on
+        # 2026-11-25), so advising from it reads a messier day as a
+        # better-aimed one.
+        assert "ranking reached 14.1%" in _text(lines)
+        assert "29.3%" not in _text(lines)
 
     def test_it_survives_a_session_with_nothing_at_all(self, store):
         lines = calibration_advice(store, SESSION, UNDER, _summary())
         assert lines and _proposals(lines) == ["-> no change proposed"]
+
+
+class TestSlotsAreTheQuotaAsked:
+    """`slots` was sum(picked) over candidates_on, and on 2026-11-25 that
+    reader returned a union of rounds, so SOXL printed "546 candidates for
+    150 slots (4x)" on the same screen as "asked 140" -- 150 being two
+    rounds' picks added together, a number no round ever had.
+
+    Every other case in this file makes asked equal sum(picked), which is
+    why the mutation that reverts this line survived the whole suite.
+    """
+
+    def test_the_subscription_check_wins_over_counting_picks(self, store):
+        _cands(store, 300, 150)                 # as if two rounds were summed
+        store.record_subscription_check(SESSION, UNDER, asked=140, listed=140)
+        lines = calibration_advice(store, SESSION, UNDER, _summary())
+        assert "300 candidates for 140 slots" in _text(lines)
+        assert "150 slots" not in _text(lines)
+
+    def test_the_wrong_slot_count_would_fire_a_spurious_proposal(self, store):
+        """Not cosmetic: the ratio is what decides whether advice is given.
+
+        290 candidates is 2.07x against the 140 asked -- silent -- and
+        1.93x against a summed 150, which trips the `< 2` gate and tells
+        the operator to widen --pct. Widening the band is the opposite of
+        what a day with two selection rounds needs.
+        """
+        _cands(store, 290, 150)
+        store.record_subscription_check(SESSION, UNDER, asked=140, listed=140)
+        lines = calibration_advice(store, SESSION, UNDER, _summary())
+        assert 290 / 140 > 2 > 290 / 150, "the pair must straddle the gate"
+        assert not any("pre-filter is binding" in p
+                       for p in _proposals(lines)), _text(lines)
+
+    def test_the_gate_still_fires_when_the_band_really_is_tight(self, store):
+        """The guard above must not be passing because advice never fires."""
+        _cands(store, 200, 140)
+        store.record_subscription_check(SESSION, UNDER, asked=140, listed=140)
+        lines = calibration_advice(store, SESSION, UNDER, _summary())
+        assert any("pre-filter is binding" in p
+                   for p in _proposals(lines)), _text(lines)
+
+    def test_counting_picks_remains_the_fallback(self, store):
+        """A session with no subscription check recorded -- one that
+        predates that table -- still gets a reading rather than a crash."""
+        _cands(store, 300, 60)
+        lines = calibration_advice(store, SESSION, UNDER, _summary())
+        assert "300 candidates for 60 slots" in _text(lines)
