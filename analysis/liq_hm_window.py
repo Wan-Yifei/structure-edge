@@ -567,20 +567,64 @@ def _hot_rgba(grid: np.ndarray, gamma: float = 1.0) -> np.ndarray | None:
 
 def _single_rgba(grid: np.ndarray, hex_color: str,
                  gamma: float = 1.0) -> np.ndarray | None:
-    """Single-hue intensity map for bid or ask separately."""
+    """Single-hue intensity map for bid or ask separately.
+
+    Computed on the OCCUPIED cells only, which is most of the saving here.
+    The grid is mostly empty by construction: the painted band is
+    `(hi - lo) + max(hi - lo, mid * 2%)` wide while near-touch depth spans a
+    fraction of that, so on QQQ about 9.7% of cells hold anything. Running
+    log1p, the percentile normalisation and the gamma curve over the whole
+    720x240 array spent most of its time on zeros.
+
+    The result is byte-identical, not merely close, and that is a property
+    of the arithmetic rather than a tolerance:
+
+      * log1p(0) is exactly 0, so an empty cell contributes nothing to the
+        percentile either way -- _percentile_norm already selects on
+        `log_g > 0`, and log1p(x) > 0 exactly when x > 0.
+      * 0 / ref clips to 0.0, and 0 ** gamma is 0 for any gamma > 0, so an
+        empty cell normalises to 0.
+      * alpha for a 0 is 0 twice over: int(0 * 180) is 0, and the
+        `norm < 0.02` cut would zero it regardless.
+
+    So an empty cell is alpha 0 under both versions, and the RGB channels
+    are a constant fill either way. Pinned in
+    tests/analysis/test_liq_hm_grid_fidelity.py against the dense version,
+    with np.array_equal and no tolerance.
+
+    Input is accumulated volume, so non-negative. A negative cell would put
+    a NaN through log1p in the old version and be treated as empty here;
+    nothing in the grid can produce one (_paint_column only ever adds).
+
+    Measured on a real 720x240 QQQ grid at gamma 5.0: 7.085 ms -> 1.549 ms
+    per side. The win shrinks as the grid fills -- 5.4x at 10% occupancy,
+    1.6x at 55%, 1.1x at 91% -- and never turns into a loss.
+    """
     if grid.max() <= 0:
         return None
-    log_g = np.log1p(grid)
-    norm  = _percentile_norm(log_g)
+    occupied = grid > 0
+    vals = np.log1p(grid[occupied])
+    ref  = float(np.percentile(vals, _COLOR_NORM_PCT))
+    if ref <= 0:
+        # Unreachable while grid.max() > 0 -- kept because the dense version
+        # has the same fallback and this has to match it, not improve on it.
+        ref = float(vals.max())
+    norm = np.clip(vals / ref, 0.0, 1.0).astype(np.float32)
     if gamma != 1.0:
         np.power(norm, gamma, out=norm)
     c     = QColor(hex_color)
-    rgba  = np.zeros((*norm.shape, 4), dtype=np.uint8)
+    rgba  = np.zeros((*grid.shape, 4), dtype=np.uint8)
     rgba[..., 0] = c.red()
     rgba[..., 1] = c.green()
     rgba[..., 2] = c.blue()
-    rgba[..., 3]         = np.clip((norm * 180).astype(np.uint8), 0, 180)
-    rgba[norm < 0.02, 3] = 0
+    alpha = np.clip((norm * 180).astype(np.uint8), 0, 180)
+    alpha[norm < 0.02] = 0
+    # reshape(-1, 4), NOT rgba[..., 3].ravel(): the alpha channel of a 3-D
+    # array is a strided view, and ravel() on a non-contiguous view returns
+    # a COPY -- the assignment would land in a temporary and be discarded,
+    # leaving every cell at alpha 0. reshape on the contiguous base gives a
+    # real view, so this writes through.
+    rgba.reshape(-1, 4)[occupied.ravel(), 3] = alpha
     return rgba
 
 

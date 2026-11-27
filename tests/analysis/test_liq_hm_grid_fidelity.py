@@ -49,6 +49,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtGui import QColor                # noqa: E402
+
 from analysis.liq_hm_window import (           # noqa: E402
     LiqHmWindow, _percentile_norm, _single_rgba,
 )
@@ -412,3 +414,116 @@ class TestWhyThatCouplingMattered(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSingleRgbaOnOccupiedCellsOnly(unittest.TestCase):
+    """The sparse _single_rgba must be byte-identical to the dense one.
+
+    Byte-identical, not close, so the assertion carries no tolerance. An
+    empty cell normalises to exactly 0 under both versions -- log1p(0) is 0,
+    _percentile_norm selects on `log_g > 0`, 0 ** gamma is 0, and the
+    `norm < 0.02` cut zeroes the alpha anyway -- so there is nothing a
+    tolerance could legitimately cover. If one is ever needed here, the
+    rewrite is wrong.
+
+    The dense version is kept below as the oracle, as in
+    test_near_touch_cutoff.py, so these keep working after it is gone from
+    the module.
+    """
+
+    @staticmethod
+    def _dense(grid, hex_color, gamma=1.0):
+        """analysis/liq_hm_window.py's _single_rgba as of v0.104.4."""
+        if grid.max() <= 0:
+            return None
+        log_g = np.log1p(grid)
+        norm = _percentile_norm(log_g)
+        if gamma != 1.0:
+            np.power(norm, gamma, out=norm)
+        c = QColor(hex_color)
+        rgba = np.zeros((*norm.shape, 4), dtype=np.uint8)
+        rgba[..., 0] = c.red()
+        rgba[..., 1] = c.green()
+        rgba[..., 2] = c.blue()
+        rgba[..., 3] = np.clip((norm * 180).astype(np.uint8), 0, 180)
+        rgba[norm < 0.02, 3] = 0
+        return rgba
+
+    def _both(self, grid, gamma):
+        want = self._dense(grid, "#00e5ff", gamma)
+        got = _single_rgba(grid, "#00e5ff", gamma)
+        if want is None:
+            self.assertIsNone(got)
+            return
+        self.assertIsNotNone(got)
+        self.assertEqual(got.shape, want.shape)
+        self.assertEqual(got.dtype, want.dtype)
+        bad = int(np.count_nonzero(got != want))
+        gap = int(np.abs(got[..., 3].astype(int)
+                         - want[..., 3].astype(int)).max()) if bad else 0
+        self.assertEqual(bad, 0, f"{bad} bytes differ, max alpha gap {gap}")
+
+    @staticmethod
+    def _book_grid(seed, occupancy):
+        """Shaped like the real grid: a band of occupied rows wandering up
+        and down the price axis, everything else empty."""
+        rng = np.random.default_rng(seed)
+        g = np.zeros((720, 240), dtype=np.float64)
+        depth = max(1, int(240 * occupancy))
+        centre = 120
+        for col in range(720):
+            centre = int(np.clip(centre + rng.integers(-2, 3),
+                                 depth, 240 - depth))
+            lo = max(0, centre - depth // 2)
+            g[col, lo:lo + depth] = rng.lognormal(6.0, 1.8,
+                                                  g[col, lo:lo + depth].size)
+        return g
+
+    def test_a_realistic_grid_at_each_gamma(self):
+        for gamma in (1.0, 5.0, 0.5, 2.0):
+            with self.subTest(gamma=gamma):
+                self._both(self._book_grid(7, 0.10), gamma)
+
+    def test_every_density(self):
+        """The saving shrinks as the grid fills; the equality must not."""
+        for occ in (0.02, 0.10, 0.33, 0.55, 0.95):
+            with self.subTest(occupancy=occ):
+                self._both(self._book_grid(11, occ), 5.0)
+
+    def test_an_empty_grid_returns_none(self):
+        self._both(np.zeros((720, 240)), 5.0)
+
+    def test_a_single_occupied_cell(self):
+        """Degenerate percentile: one value, so ref is that value."""
+        g = np.zeros((720, 240))
+        g[300, 120] = 1234.0
+        self._both(g, 5.0)
+
+    def test_a_grid_that_is_entirely_one_value(self):
+        """Every cell occupied and equal, so ref equals every value and the
+        whole grid normalises to exactly 1.0."""
+        self._both(np.full((720, 240), 500.0), 5.0)
+
+    def test_levels_small_enough_to_fall_under_the_cut(self):
+        """`norm < 0.02` is the branch that zeroes alpha. It has to fire in
+        the same cells under both, so this puts one huge outlier in to drag
+        ref up and leaves the rest just under the line."""
+        g = self._book_grid(3, 0.10)
+        occ = g > 0
+        g[occ] = 1.0 + (g[occ] % 3.0)
+        g[0, :10] = 1e6
+        self._both(g, 5.0)
+
+    def test_the_alpha_actually_reached_the_array(self):
+        """The reshape-vs-ravel trap.
+
+        rgba[..., 3] is a strided view, and ravel() on one returns a COPY --
+        writing alpha through it lands in a temporary and is discarded,
+        leaving every cell transparent. An equality test alone would not
+        catch that if the oracle had the same bug, so this checks the alpha
+        is there at all.
+        """
+        out = _single_rgba(self._book_grid(5, 0.10), "#00e5ff", 5.0)
+        self.assertIsNotNone(out)
+        self.assertGreater(int(out[..., 3].max()), 0,
+                           "every cell came back transparent")
