@@ -75,6 +75,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from analysis import viewer_config as vcfg
 from analysis.qt_axis_cache import cache_grid_axes
+from analysis import qt_axis_probe
 from analysis.qt_widgets import fit_all_spins
 from core.time_utils import candle_start
 from core.sdk_log import quiet_sdk_file_log
@@ -3833,6 +3834,11 @@ class TradeViewerQt(QMainWindow):
 
         # ── Left: main chart (candles + volume + KD) ─────────────────────────
         self._chart_widget = pg.GraphicsLayoutWidget()
+        # Named so the axis probe's report says which view a row is,
+        # instead of numbering them in construction order -- this window
+        # owns three GraphicsViews and they invalidate for different
+        # reasons. See analysis/qt_axis_probe.py.
+        self._chart_widget.setObjectName("chart")
         self._chart_widget.setBackground(_BG)
 
         # Candle plot (row 0)
@@ -4304,6 +4310,7 @@ class TradeViewerQt(QMainWindow):
         # Single-candle tick profile (top-right, shown on hover)
         self._tick_profile_widget = pg.PlotWidget(
             axisItems={"bottom": _VolumeAxisItem()})
+        self._tick_profile_widget.setObjectName("tick-profile")
         self._tick_profile_widget.setBackground(_BG)
         self._tick_profile_widget.setMinimumWidth(200)
         self._tick_profile_widget.setMaximumWidth(300)
@@ -4397,6 +4404,7 @@ class TradeViewerQt(QMainWindow):
         # Session vol profile (bottom-right)
         self._profile_widget = pg.PlotWidget(
             axisItems={"bottom": _VolumeAxisItem()})
+        self._profile_widget.setObjectName("range-profile")
         self._profile_widget.setBackground(_BG)
         self._profile_widget.setMinimumWidth(200)
         self._profile_widget.setMaximumWidth(300)
@@ -9902,9 +9910,14 @@ def main(argv=None) -> None:
     args = _parse_args(argv)
     app  = QApplication(sys.argv)
     app.setApplicationName("Trade Viewer Qt")
+    # Before any window, so no frame is missed. Returns immediately unless
+    # MOOMOO_AXIS_PROBE is set; see analysis/qt_axis_probe.py.
+    qt_axis_probe.maybe_install()
     win  = TradeViewerQt(args)
     win.show()
     ret = app.exec()
+    # Here and not in an atexit handler: os._exit below runs none of them.
+    qt_axis_probe.final_report()
     # os._exit() bypasses Python's thread-join shutdown so the process exits
     # immediately even if the moomoo SDK left non-daemon threads running.
     os._exit(ret)
