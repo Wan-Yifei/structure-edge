@@ -826,3 +826,49 @@ plot 数 + 真窗口,预测与实测差 ≤3%)、各尺寸真实字节数、像�
 **内存政策待定**:硬顶现在是 128 MB(`_PIXMAP_CACHE_MAX_KB`)。抬高上限本身不花
 内存,花内存的是真实需求,所以这个数是**政策不是测量**。它在 2560x1440 DPR 1.25
 两窗(92 MB)放行、DPR 1.5 两窗(133 MB)拒绝。这台机器是 DPR 1.0,目前用不到边界。
+
+
+---
+
+## 今天收盘后要做:切到 QQQ 主导(2026-11-27,13:00 ET 半日市收盘后)
+
+原计划是 12-01 翻配额,**提前到今天收盘后**。两处改动都在
+`config/schedule.json`,**这个文件在工作区是常驻 ` M`**(`remote_backup.enabled`
+刻意保持 false 不提交),所以改完要**只提交这两处**,不要把 remote_backup 带进去。
+
+| 键 | 现在 | 改成 |
+|---|---|---|
+| `default_code` | `US.SOXL` | `US.QQQ` |
+| `option_window.quota` | `{SOXL: 140, QQQ: 60}` | `{SOXL: 60, QQQ: 140}` |
+
+- `default_code` 是主图的默认标的,`analysis/trade_viewer_qt.py:9873` 的
+  `_default_code()` 读它;读不到才退到 `targets[0]`(现在已经是 `US.QQQ`)。
+  **只影响下次启动 viewer 的默认值,不影响已经开着的窗口。**
+- `quota` 是**账户级 200 的切分**,不是每标的 200。
+
+**`pct` 不动** —— SOXL 的 80% 和 QQQ 的 15% 是按各自的流量形态定的
+(SOXL 开盘能离前收 24%;QQQ 流量集中在平值),跟谁是主标的无关。
+
+### 为什么必须等收盘
+
+期权采集窗口是 07:30-16:25,盘中 scheduler 里跑着两个 collector 进程。
+配额改动**要重启 scheduler 才生效**(cfg 只在启动时读盘),而盘中重启会打断
+tape —— 而 tape 是事后补不回来的(`get_rt_ticker` 每合约最多 1000 条)。
+
+**另一个盘中改文件的风险**:`analysis/scheduler.py:804` 在面板上按保存时会用
+`_option_config_from_panel()` 覆写 `self.cfg["option_window"]` 并落盘,会把手改
+的内容冲掉。
+
+### 做的顺序
+
+1. 等 13:00 ET 之后(窗口到 16:25 才关,但收盘后 tape 本来就没了)
+2. 改 `config/schedule.json` 两处
+3. 只暂存这两处,`remote_backup` 留在工作区
+4. **重启 scheduler**(上次是本人手动重启的)
+5. CHANGELOG 记一笔
+
+### 还没定的
+
+两个配额数 **140/60 都是判断不是测量** —— 三个 session 远不够分辨 10 个点
+(见 doc,要 8 个)。翻成 60/140 同样是判断。SOXL 的**股票 tick 继续采**,
+只是不再交易。
