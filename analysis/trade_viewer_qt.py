@@ -74,6 +74,7 @@ from PyQt6.QtWidgets import (
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from analysis import viewer_config as vcfg
+from analysis.qt_axis_cache import cache_grid_axes
 from analysis.qt_widgets import fit_all_spins
 from core.time_utils import candle_start
 from core.sdk_log import quiet_sdk_file_log
@@ -4434,6 +4435,24 @@ class TradeViewerQt(QMainWindow):
         splitter.setStretchFactor(1, 1)
 
         self.setCentralWidget(splitter)
+
+        # Render the grid axes once and blit them. ONE call for the whole
+        # window, with every plot it owns: the budget is computed per
+        # window, and calling it per plot reserves one plot's worth for
+        # all nine (see analysis/qt_axis_cache.py).
+        #
+        # The two profile panels are the weakest beneficiaries here --
+        # every rebuild calls setXRange(0, max_vol * 1.15), which
+        # invalidates their axes on the same frame that draws them -- but
+        # they share this window's area budget, so including them costs
+        # nothing that is not already reserved, and their crosshair
+        # frames are in the 93% class like everything else.
+        cache_grid_axes(
+            [self._plot_c, self._plot_v, self._plot_kd, self._plot_cvd,
+             self._plot_adi, self._plot_dcvd, self._plot_oflow,
+             self._tick_profile_widget.getPlotItem(),
+             self._profile_widget.getPlotItem()],
+            who="viewer")
 
     # ── Status bar ────────────────────────────────────────────────────────────
 

@@ -31,7 +31,7 @@ from PyQt6.QtCore    import (
 )
 from PyQt6.QtGui     import QColor, QFont, QPainterPath
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QGraphicsItem, QLabel,
+    QCheckBox, QComboBox, QDoubleSpinBox, QLabel,
     QPushButton, QSpinBox, QToolBar, QVBoxLayout, QWidget,
 )
 import pyqtgraph as pg
@@ -42,6 +42,7 @@ from analysis import pg_patches as _pg_patches  # noqa: F401
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from analysis import viewer_config as vcfg
+from analysis.qt_axis_cache import cache_grid_axes
 from analysis.qt_widgets import fit_all_spins
 from feeds.order_book_store import SERVER_LEAD_SECS
 
@@ -769,113 +770,6 @@ def _blend(color_rgb: tuple, alpha: float) -> str:
 
 # ── custom time axis ───────────────────────────────────────────────────────────
 
-# Headroom for the axis pixmaps below. Qt keeps DeviceCoordinateCache
-# bitmaps in the PROCESS-WIDE QPixmapCache, whose default ceiling is
-# 10 MB -- and this window's two grid axes alone want 9.4 MB of it.
-#
-# Oversubscribing that cache does not degrade to "uncached". Every paint
-# becomes a miss, which renders into a pixmap AND blits it: strictly more
-# work than drawing directly. Measured with the main chart open as well
-# (9.5 MB + 7.9 MB against the 10 MB default): 66.8 ms a frame uncached,
-# 96.6 ms with both windows cached under the default ceiling, 10.3 ms with
-# the ceiling raised. The regression is the reason this constant exists.
-#
-# 32 MB leaves room for this window's 9.4 MB, the main chart's 7.9 MB if it
-# is ever given the same treatment, and whatever Qt's own icons and styles
-# put there.
-_PIXMAP_CACHE_KB = 32 * 1024
-
-# Hard stop on how far the ceiling will be raised to make room. A bitmap
-# per grid axis is the whole SCREEN's worth of pixels when the window is
-# maximised, times the square of the device pixel ratio, so the appetite
-# grows fast: 9.4 MB at 1500x950, 25.6 at 2560x1440, 59.5 at 3840x2160,
-# and all of those again x2.25 at 150% scaling. Rather than let it take
-# whatever it likes, anything that will not fit inside this is left
-# uncached -- slower than a cache that fits, much faster than one that
-# does not (see _PIXMAP_CACHE_KB).
-_PIXMAP_CACHE_MAX_KB = 96 * 1024
-
-
-def _cache_grid_axes(plot_item) -> None:
-    """Render the grid axes once and blit them, instead of replaying.
-
-    A grid-enabled AxisItem's boundingRect is unioned with its linked
-    view's, so its QPicture is replayed over the whole plot area on every
-    repaint -- 18.4 ms for this window's price axis against 0.138 ms for a
-    non-grid axis holding a near-identical number of painter commands. The
-    cost is the area, not the drawing.
-
-    DeviceCoordinateCache turns the replay into a blit of a cached bitmap.
-    On scripts/bench/bench_liq_hm.py the whole window goes from 117.6 s to
-    60.1 s of CPU per 300 simulated seconds.
-
-    ONLY the grid axes. A non-grid axis is a 43x512 strip costing 0.138 ms,
-    so a bitmap for it buys nothing and still spends the shared budget.
-
-    ONLY this window's. Setting the cache mode on pg.AxisItem globally --
-    which is how this was first measured -- is a 45% REGRESSION once the
-    main chart is open, because the two windows together oversubscribe the
-    pixmap cache. See _PIXMAP_CACHE_KB.
-
-    WHAT IT COSTS. About 10 MB of resident memory for this window, and
-    2-17% on frames where BOTH axes are invalidated at once, which is what
-    dragging or zooming diagonally does (+2 to +7 ms on a 45 ms frame).
-    Everything else is a large win, including the crosshair: moving it
-    currently replays both axes in full, and that measured 61-70% cheaper
-    cached.
-
-    The output is identical at device pixel ratio 1, which is what this
-    machine runs. At fractional scaling it is NOT -- 1.5 showed 4-5% of
-    pixels differing, up to 22 levels on a channel. pyqtgraph has this same
-    line commented out upstream (AxisItem.py:148) next to a note about a
-    Qt 4.6 bug showing cached results incorrectly; that is 2010 and this is
-    Qt 6.11, but it is why the pixel test next to this exists.
-
-    SIZED FOR THE SCREEN, NOT FOR THE WINDOW. The bitmaps are as big as the
-    plot area, so the appetite follows whatever the window is dragged to --
-    and the first version of this had no check at all, which made it a
-    silent REGRESSION on a maximised 4K window (59.5 MB wanted against a
-    32 MB ceiling). The budget below is therefore computed from the screen
-    the window is on, at the device pixel ratio in force, so a later resize
-    or maximise cannot walk off the edge of it. If even
-    _PIXMAP_CACHE_MAX_KB cannot hold that, nothing is cached and a line is
-    logged: a cache that does not fit is slower than no cache.
-    """
-    from PyQt6.QtGui import QGuiApplication, QPixmapCache
-
-    axes = [plot_item.getAxis(s) for s in ("left", "bottom", "right", "top")]
-    grid_axes = [a for a in axes if a is not None and a.grid is not False]
-    if not grid_axes:
-        return
-
-    # One bitmap per grid axis, each the size of the plot area, in DEVICE
-    # pixels. The screen rather than the current window because the window
-    # is resizable and this runs once.
-    view = plot_item.scene().views()[0] if plot_item.scene() else None
-    screen = (view.window().screen() if view is not None else None) \
-        or QGuiApplication.primaryScreen()
-    dpr = screen.devicePixelRatio() if screen is not None else 1.0
-    size = screen.size() if screen is not None else None
-    w, h = (size.width(), size.height()) if size is not None else (1920, 1080)
-    need_kb = len(grid_axes) * w * h * (dpr ** 2) * 4 / 1024
-
-    want_kb = max(_PIXMAP_CACHE_KB, int(need_kb * 1.3))
-    if want_kb > _PIXMAP_CACHE_MAX_KB:
-        # flush, because a Qt process under uv block-buffers stdout and a
-        # line that never appears is the same as no line at all.
-        print(f"[liqhm] axis pixmap cache OFF: {len(grid_axes)} grid axes "
-              f"on a {w}x{h} screen at DPR {dpr:.2f} would want "
-              f"{need_kb / 1024:.1f} MB, over the "
-              f"{_PIXMAP_CACHE_MAX_KB // 1024} MB ceiling -- an "
-              f"oversubscribed cache is slower than none", flush=True)
-        return
-
-    if QPixmapCache.cacheLimit() < want_kb:
-        QPixmapCache.setCacheLimit(want_kb)
-    for ax in grid_axes:
-        ax.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
-
-
 class _TimeAxisItem(pg.AxisItem):
     """Bottom axis showing HH:MM labels derived from column timestamps."""
 
@@ -1411,7 +1305,7 @@ class LiqHmWindow(QWidget):
         pi.setMenuEnabled(False)
         pi.getAxis("left").setTextPen(_FG)
         pi.getAxis("bottom").setTextPen(_FG)
-        _cache_grid_axes(pi)
+        cache_grid_axes([pi], who="liqhm")
 
         self._img_combined = pg.ImageItem()
         self._img_bid      = pg.ImageItem()
