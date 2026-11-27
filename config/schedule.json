@@ -1,6 +1,6 @@
 {
   "_comment": "All times are US Eastern Time (ET). Collector starts prestart_minutes before each session.",
-  "default_code": "US.SOXL",
+  "default_code": "US.QQQ",
   "prestart_minutes": 5,
   "data_timeout_minutes": 10,
   "live_refresh_seconds": 15,
@@ -129,12 +129,12 @@
       "US.QQQ": 15.0
     },
     "quota": {
-      "US.SOXL": 140,
-      "US.QQQ": 60
+      "US.SOXL": 60,
+      "US.QQQ": 140
     },
     "reconcile_cron": "50 16 * * 1-5",
-    "_window_note": "07:30 because both names are ETF options with a pre-market session: the tape runs 07:30-09:25 and then 09:30-16:15. SOXL reaches 16:15 through an extended (GTH/Curb) leg after the 16:00 close; QQQ's regular session simply runs to 16:15 with no separate post leg. Either way the practical window is the same. Measured on db/option_ticks.db over 2026-11-23..25 -- the last print of every day is 16:14:5x and there is nothing after, while 09:25-09:29 is empty on all three days. The old 09:15 start missed the whole pre-market leg and caught only its last ten minutes (about 10 prints a minute). The end stays at 16:25 as a pad past the 16:15 close. NOTE this window drives the PROCESS; the collector's own _SESSION_OPEN_ET=09:20 gates greeks sampling only, and the TICKER subscription stays up for the whole process lifetime, which is what makes the earlier start pick up the pre-market tape. Contract selection at 07:30 centres on last_price, which is then yesterday's regular close -- the selection bands (SOXL +/-80%, QQQ +/-15%) are wide enough to cover an overnight move, but a gap larger than that would pick strikes around the wrong centre until the next re-pick.",
+    "_window_note": "07:30 is for QQQ only. QQQ options print pre-market from 07:30; SOXL options do not, despite published contract descriptions saying both names run a 07:30-09:25 leg. Measured on db/option_ticks.db: QQQ's first print is 07:30:01 (11-25) and 07:30:02 (11-27), while SOXL's is exactly 09:30:00 on 11-23, 11-24, 11-25 and 11-27. 11-25 is the clean control -- the 07:30 window was already live and option_subscription_check records 140 SOXL contracts asked and 140 listed, yet SOXL printed nothing before 09:30. The start stays at 07:30 anyway: the quota is claimed per day and the process has to be up regardless, so it costs SOXL nothing and is what collects QQQ's pre-market leg. The regular leg runs 09:30-16:15. SOXL reaches 16:15 through an extended (GTH/Curb) leg after the 16:00 close; QQQ's regular session simply runs to 16:15 with no separate post leg. Either way the practical window is the same. Measured on db/option_ticks.db over 2026-11-23..25 -- the last print of every day is 16:14:5x and there is nothing after. QQQ's pre-market leg stops at 09:25 and 09:25-09:29 is empty. The old 09:15 start would have caught only the last ten minutes of that leg: 105 of QQQ's 2,337 pre-open prints on 11-25, about 10 a minute. (11-23 and 11-24 collected SOXL only; QQQ was added on 11-25, so those two days say nothing about it.) The end stays at 16:25 as a pad past the 16:15 close. NOTE this window drives the PROCESS; the collector's own _SESSION_OPEN_ET=09:20 gates greeks sampling only, and the TICKER subscription stays up for the whole process lifetime, which is what makes the earlier start pick up the pre-market tape. Contract selection at 07:30 centres on last_price, which is then yesterday's regular close -- the selection bands (SOXL +/-80%, QQQ +/-15%) are wide enough to cover an overnight move, but a gap larger than that would pick strikes around the wrong centre until the next re-pick.",
     "_pct_note": "Per code. SOXL stays wide because selection is centred on last_price, the previous regular close, and SOXL has opened 24% away from it. QQQ is narrowed because its flow concentrates near the money and the ranking cannot be trusted to find it.",
-    "_quota_note": "Shares of the account-wide 200. Until 2026-11-30 SOXL stays the traded instrument; from 2026-12-01 QQQ becomes primary and these flip to 60/140. Both numbers are judgement, not measurement - see doc, 3 sessions is far short of the 8 needed to resolve 10 points."
+    "_quota_note": "Shares of the account-wide 200. Flipped to QQQ-primary on 2026-11-27 after the close, ahead of the 2026-12-01 date originally planned. SOXL is no longer traded but keeps 60 contracts so its option tape does not go dark. Both numbers are judgement, not measurement - see doc, 3 sessions is far short of the 8 needed to resolve 10 points."
   }
 }
