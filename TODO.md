@@ -867,6 +867,28 @@ tape —— 而 tape 是事后补不回来的(`get_rt_ticker` 每合约最多 10
 4. **重启 scheduler**(上次是本人手动重启的)
 5. CHANGELOG 记一笔
 
+### 一起改:`_window_note` 里关于 SOXL 盘前的那句是错的
+
+`config/schedule.json` 的 `option_window._window_note` 写着「both names are ETF
+options with a pre-market session: the tape runs 07:30-09:25」。**这句对 SOXL 是
+错的**,它来自网上查的资料,不是实测。
+
+实测(`db/option_ticks.db`):
+
+```
+SOXL 每天最早一笔   11-23 09:30:00   11-24 09:30:00   11-25 09:30:00   11-27 09:30:00.083
+QQQ  每天最早一笔   11-25 07:30:01   11-27 07:30:02
+```
+
+**11-25 是干净对照** —— 那天窗口已经是 07:30、SOXL 订阅着 140 个合约
+(`option_subscription_check` 有记录),**整个盘前零成交**,而 QQQ 同一天
+07:30:01 就有。11-27 是第二次干净复现(盘前 2 小时 0 笔,09:30:00.083 第一笔,
+两分钟 2,238 笔 / 105 个合约 / 0 笔 undirected)。11-23/24 窗口还是 09:15,
+只覆盖盘前最后 15 分钟,同样是零 —— 证据弱但方向一致。
+
+**起点 07:30 不用改**(配额按天占,进程本来就得起着),只把那句话换成测到的:
+QQQ 有盘前 tape,SOXL 没有,n=2 个干净 session。
+
 ### 还没定的
 
 两个配额数 **140/60 都是判断不是测量** —— 三个 session 远不够分辨 10 个点
