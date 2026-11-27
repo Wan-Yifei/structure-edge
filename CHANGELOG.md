@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.105.1 - `option_window` 进仓库,订正 v0.104.7 的措辞 (2026-11-27)
+
+patch 级。只动配置和文档,没有代码改动。
+
+### v0.104.7 描述了一个没有被提交的改动
+
+那一版的正文和 commit message 都写了期权时段的调整,但 `git show v0.104.7 --stat`
+只有四个文件(`CHANGELOG.md` / `VERSION` / `analysis/liq_hm_window.py` /
+`tests/analysis/test_axis_cache.py`)—— **`config/schedule.json` 不在里面**,
+到今天仍是工作区的 ` M`。运行时一直是对的(scheduler 于 2026-11-27 01:58 重启,
+从磁盘读到 07:30),缺口只在版本控制那一侧。本版把 `option_window` 这一块提进来。
+
+### 订正:「`start` 从 09:15 改到 07:30」这个说法不准,而且后果说轻了
+
+`git log -S'09:15' -- config/schedule.json` 是**空的** —— 这个值从来没出现在这个
+文件的任何历史版本里。diff 是**整块新增**;`09:15` 是 `analysis/scheduler.py:725`
+的 `_DEFAULT_OPTION` 代码默认值。正确说法是「配置里原本没有 `option_window`,
+走的是代码默认」。
+
+**而且「回到代码默认的 09:15」本身也是错的。**`_DEFAULT_OPTION["enabled"]` 是
+**`False`**,`scheduler.py:1783` 的 `_launch_opt` 第一件事就是
+`if not cfg.get("enabled", False): return`。所以这一块缺失不是「从 09:15 开始收」,
+是**期权 tape 根本不会启动**。这就是它必须进仓库的理由。
+
+### `remote_backup.enabled` 刻意留在工作区,不提交
+
+同一个未提交的 diff 里还有 `remote_backup.enabled` 从 `true` 翻成 `false`
+(S3 周备份,`cron: 0 20 * * 1`)。**这不是本次会话改的**,会话开始时就已经在那里。
+按决定它**保持 false 但不进 git**,所以 `config/schedule.json` 在工作区会**长期
+显示为 ` M`**。代价要记一笔:这个常驻的 ` M` 会掩盖以后对这个文件的误改 ——
+这次 `option_window` 失踪两周没被发现,正是同一个机制。
+
 ## v0.105.0 - 主图的网格轴也走缓存,预算改成按窗口、进程级 (2026-11-27)
 
 minor。v0.104.7/.8 只给热力图开的 `DeviceCoordinateCache` 现在也给主图开了,

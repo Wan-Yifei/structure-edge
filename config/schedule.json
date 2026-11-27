@@ -115,5 +115,26 @@
     "enabled": true,
     "cron": "0 21 * * 1-5",
     "keep": 1200
+  },
+  "option_window": {
+    "enabled": true,
+    "codes": [
+      "US.SOXL",
+      "US.QQQ"
+    ],
+    "start": "07:30",
+    "end": "16:25",
+    "pct": {
+      "US.SOXL": 80.0,
+      "US.QQQ": 15.0
+    },
+    "quota": {
+      "US.SOXL": 140,
+      "US.QQQ": 60
+    },
+    "reconcile_cron": "50 16 * * 1-5",
+    "_window_note": "07:30 because both names are ETF options with a pre-market session: the tape runs 07:30-09:25 and then 09:30-16:15. SOXL reaches 16:15 through an extended (GTH/Curb) leg after the 16:00 close; QQQ's regular session simply runs to 16:15 with no separate post leg. Either way the practical window is the same. Measured on db/option_ticks.db over 2026-11-23..25 -- the last print of every day is 16:14:5x and there is nothing after, while 09:25-09:29 is empty on all three days. The old 09:15 start missed the whole pre-market leg and caught only its last ten minutes (about 10 prints a minute). The end stays at 16:25 as a pad past the 16:15 close. NOTE this window drives the PROCESS; the collector's own _SESSION_OPEN_ET=09:20 gates greeks sampling only, and the TICKER subscription stays up for the whole process lifetime, which is what makes the earlier start pick up the pre-market tape. Contract selection at 07:30 centres on last_price, which is then yesterday's regular close -- the selection bands (SOXL +/-80%, QQQ +/-15%) are wide enough to cover an overnight move, but a gap larger than that would pick strikes around the wrong centre until the next re-pick.",
+    "_pct_note": "Per code. SOXL stays wide because selection is centred on last_price, the previous regular close, and SOXL has opened 24% away from it. QQQ is narrowed because its flow concentrates near the money and the ranking cannot be trusted to find it.",
+    "_quota_note": "Shares of the account-wide 200. Until 2026-11-30 SOXL stays the traded instrument; from 2026-12-01 QQQ becomes primary and these flip to 60/140. Both numbers are judgement, not measurement - see doc, 3 sessions is far short of the 8 needed to resolve 10 points."
   }
 }
