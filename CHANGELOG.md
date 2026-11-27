@@ -1,5 +1,93 @@
 # Changelog
 
+## v0.104.6 - MultiVP 每 30 秒的那次刷新:518 → 164 ms (2026-11-27)
+
+patch 级。来自一份 300 秒的**实盘** py-spy 剖面(夜盘,主图 + 热力图 + MultiVP
+三窗同开)。
+
+### 归因一开始是错的,这条值得先写
+
+剖面说 `kline_store.close` 占 MultiVP 刷新成本的 **56%**。照着这个去优化 close
+是打错靶子 —— 离线分相位消融:
+
+```
+照搬出厂设置            总 486 ms   其中 close 344 ms
+去掉 clear_coverage     总 103 ms   其中 close  11 ms
+只开+关,什么都不写      总  19 ms   其中 close 2.5 ms
+```
+
+**`close()` 本身是 2.5 ms。**它变成 344 ms,是因为 `clear_coverage` 的那条
+`DELETE` 让关闭时的 checkpoint 必须重写整个 1 GB 的库。**真正的靶子是 DELETE。**
+
+而且那条 DELETE 在这条路上**是空转**:`force_refresh` 本来就跳过 `missing_days`
+检查,所以这条路根本不读 coverage;`clear_coverage(昨天..明天)` 删掉的行,
+`mark_covered` 几行之后又原样写回去。**viewer 每 30 秒付一次全库 checkpoint,
+只为了删掉它马上要写回的行。**
+
+### 改了什么
+
+`fetch_klines` 加一个 `live_refresh` 参数,只由 `multi_vp_window._sessions` 的
+定时器分支传。两件事绑在一个开关上,因为**单独设任何一个都是错的**:
+
+- **跳过 coverage 的 DELETE**(上面那条)
+- **DuckDB buffer pool 上限 256MB**。不设时 DuckDB 按系统内存的 80% 开,
+  这台 32 GB 的机器上是 25 GiB 上限 —— 打开并 checkpoint 一个 1 GB 的库就能
+  把进程的常驻集抬上去几百 MB。**不能做默认值:回测要大内存池。**
+
+`live_refresh` 不带 `force_refresh` 会抛 `ValueError` —— 没有 `force_refresh` 时,
+coverage 行正是决定要不要调 API 的东西,留一行陈旧的会把缓存**无声地焊死**。
+
+### 量到了什么
+
+驱动**真的 `KlineStore`**(不是裸 DuckDB),1.03 GB 真库的副本,8 轮取中位
+(丢掉第一轮的冷文件缓存):
+
+| | 旧 | 新 |
+|---|---|---|
+| 总墙钟 | 518 ms | **164 ms** |
+| CPU | 547 ms | **172 ms** |
+| 其中 close | 394 ms | **68 ms** |
+| 峰值 RSS | 776 MB | **377 MB** |
+
+这条路**每 30 秒跑一次,而且在 GUI 线程上**(`refresh_live` 的 docstring 自己
+写着 "The fetch blocks the GUI thread, which the main chart shares")。剖面里
+它是 **1.49% 单核 = 进程 CPU 的 3.5%**,但它真正的份量在内存:实盘观测到进程
+私有提交每约 30 秒摆动 **580 MB**,离线把这个现象完整复现出来(690/700 MB)。
+
+**没有验证的**:这个库在 viewer 开着时以约 256 KB / 30 秒 的节奏增长
+(约 360 MB/天,而 DuckDB 不回收文件空间)。跳过 DELETE 应该会减少写入 churn,
+**但我没量过改动后的增长率**。
+
+### 一个本来就存在的风险,记下来但没修
+
+DuckDB 1.5.2 在 Windows 上对库文件加**排他 OS 锁,只读也一样** —— 实测第二个
+进程连只读都开不了,0.4 秒抛 `IOException`,不重试不等待。而 `fetch_klines`
+没有任何重试。
+
+viewer 开着 MultiVP 时每 30 秒持锁约 0.5 秒**加一次网络往返**(连接在发请求
+之前就打开了)。撞上这个窗口的有:`backtest/run.py`、`audit.py`、`fvg_inspect.py`、
+`compare_versions.py`、`screener.py`,以及 scheduler 以子进程拉起的 6 个 watcher。
+
+**这不是本次改动引入的**,本次也没修 —— 只是把窗口从「0.5 秒 + 网络」缩短了
+一点。详见 `TODO.md`。
+
+### 顺带:尺子的一处失真,以及抗锯齿
+
+`scripts/bench/bench_liq_hm.py` 只 import `liq_hm_window`,而
+`pg.setConfigOptions(antialias=True)` 在 `trade_viewer_qt.py` 里 —— 所以
+**这把尺子一直在抗锯齿关闭下跑,而 app 是开着的**。加了 `MOOMOO_AA` 开关并
+写明;**默认不动**,因为 v0.104.5 起的数都绑在现在这个设置上。
+
+A/B(交替三轮,区间不重叠):AA 开 106.31/109.53/111.47,AA 关 98.33/98.92/97.22,
+中位差 **11.2 s / 300 模拟秒**,相对 10.2%。
+
+**这是关于那把 harness 的陈述,不是关于 app 的。**而且它**不能外推到主图**,
+理由是机制不是样本量:`AxisItem` 源码里 `setRenderHint(Antialiasing, False)` 是
+**无条件**的,`ImageItem` 根本不读这个选项 —— 只有 `PlotCurveItem` 读。实盘剖面
+里主图全部 `PlotCurveItem.paint` 是 **2.65% 单核**,那是关 AA 在主图上的全部上界。
+
+全量套件 2731 passed / 6 skipped。
+
 ## v0.104.5 - 热力图只给有东西的格子上色;回放台进仓库 (2026-11-26)
 
 patch 级。输出**逐字节**不变 —— 不是近似,是算术。

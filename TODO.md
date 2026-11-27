@@ -664,3 +664,54 @@ v0.104.4 的 CHANGELOG 把这条称作「真正的大头」,还说它和 cutoff 
   11-25 19:48 以后)。盘后中位 211 档/本,RTH 是 175。
 - CHANGELOG 里 `2.342 → 0.060 ms/推送`:**38.9x 这个比例成立**,但两个绝对值
   只在那个混合样本上成立。QQQ RTH 上是 **4.589 → 0.0975**。
+
+---
+
+## 未修:DuckDB 的跨进程排他锁(2026-11-27 记)
+
+`db/backtest_klines.duckdb` 在 viewer 开着 MultiVP 时每 30 秒被持锁一次。
+实测(DuckDB 1.5.2 / Windows):**它加的是排他 OS 锁,只读打开也一样** ——
+
+```
+持有者=读写  第二个进程=读写  -> IOException
+持有者=读写  第二个进程=只读  -> IOException
+持有者=只读  第二个进程=读写  -> IOException
+持有者=只读  第二个进程=只读  -> 成功
+第二个读写进程 0.40 s 返回失败 —— 不重试、不等待
+```
+
+而 `feeds/fetcher.py` 的 `fetch_klines` **没有任何重试**,直接抛异常。
+
+**会撞上的**:`backtest/run.py`、`backtest/audit.py`、`backtest/fvg_inspect.py`、
+`backtest/compare_versions.py`、`screener.py`,以及 scheduler 以子进程拉起的六个
+watcher(`fvg_watcher` / `indicator_alert_watcher` / `session_vp_watcher` /
+`vah_soxs_watcher` / `val_kd_tp_watcher` / `signal_scanner`),后者还是
+`force_refresh=True`。
+
+**v0.104.6 没有修这件事**,只是把持锁窗口从「约 0.5 秒 + 一次网络往返」缩短了
+(518 → 164 ms,网络那段不变 —— 连接在发请求之前就打开了)。
+
+**要修的话**有两条,都没做:
+- `fetch_klines` 加有界重试(撞锁时退避重试,而不是抛)
+- 走下面那条 F:live 刷新根本不碰 DuckDB,窗口直接消失
+
+## 未做:MultiVP 的 live 刷新改用 `get_cur_kline`(方案 F)
+
+v0.104.6 做的是 E+G(限内存 + 跳过空转的 DELETE)。**更彻底的是 F:live 刷新
+完全不碰 DuckDB。**
+
+依据:`trade_viewer_qt.py` 里 `fetch_klines` **只在第 81 行被 import,从未被调用**
+—— 主图走的是 `DataFetcher`(QThread)直连 OpenD,`get_cur_kline(code, 200, ktype)`
+做增量补齐,全程内存缓存。**整个 viewer 进程唯一的 kline DuckDB 流量就是 MultiVP
+这一次刷新。**
+
+做法:`refresh_live` 用主图已经在用的 `get_cur_kline` 取最新那天的 1m bar 喂给
+`_absorb()`;冷启动 / 全量 reload 继续走 `fetch_klines`。一次 200 根,覆盖 30 秒
+的缺口绰绰有余。
+
+收益:CPU 再降、**文件不再增长**、**跨进程锁窗口消失**,并且顺带绕开
+[[project_fetcher_pagination_bug]](续页不传 start/end,小窗口请求会拉全历史
+—— 而这正是这个调用)。
+
+代价:`multi_vp_window.main()` 有独立启动模式、没有 ctx,得留 `fetch_klines` 兜底。
+这是要把 OpenD 的 ctx 接进 MultiVP 的改动,**单独一轮**。

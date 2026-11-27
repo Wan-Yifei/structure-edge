@@ -84,6 +84,7 @@ def fetch_klines(
     end: str,
     force_refresh: bool = False,
     db_path: str | pathlib.Path | None = None,
+    live_refresh: bool = False,
 ) -> pd.DataFrame:
     """Return OHLCV DataFrame for the given code, timeframe, and date range.
 
@@ -96,7 +97,35 @@ def fetch_klines(
         end:           'YYYY-MM-DD'  (inclusive)
         force_refresh: re-fetch from API and overwrite cache
         db_path:       override the default DuckDB path
+        live_refresh:  this call is a small foreground refresh on a timer,
+                       not a one-off load. Two things change, and they are
+                       one flag because setting either alone is a mistake:
+                       the buffer pool is capped (see KlineStore), and the
+                       coverage rows are left alone.
+
+                       Skipping the coverage DELETE is what the flag is
+                       really for. Measured on the 1 GB cache, a refresh
+                       cycle costs 486 ms, of which close() is 344 -- and
+                       close() on its own is 2.5 ms. It is the DELETE that
+                       makes the checkpoint rewrite the file. Dropping it
+                       takes the cycle to 103 ms.
+
+                       It is also pointless on this path: force_refresh
+                       already skips the missing_days check, so nothing
+                       here reads coverage, and mark_covered re-inserts the
+                       same rows a few lines later. The viewer was paying a
+                       whole-database checkpoint to delete rows it was
+                       about to write back.
+
+                       Only valid together with force_refresh. Without it
+                       the coverage rows are what decides whether the API
+                       is called at all, and leaving a stale one in place
+                       would pin the cache shut.
     """
+    if live_refresh and not force_refresh:
+        raise ValueError(
+            "live_refresh is only meaningful with force_refresh: without it "
+            "the coverage rows are what decides whether the API is called")
     # Synthetic TFs are derived on-the-fly from cached 60m data
     if ktype in _SYNTH_TF:
         df_60m = fetch_klines(code, "60m", start, end, force_refresh, db_path)
@@ -104,12 +133,21 @@ def fetch_klines(
         print(f"[fetcher] Resampled {code} {ktype} from 60m  ({len(resampled)} bars)")
         return resampled
 
-    store = KlineStore(db_path) if db_path else KlineStore()
+    # 256MB is far more than three statements need and far less than the
+    # default 80%-of-RAM pool, which is what made this call swing the
+    # viewer's resident set by ~690 MB every 30 seconds.
+    mem = "256MB" if live_refresh else None
+    store = (KlineStore(db_path, memory_limit=mem) if db_path
+             else KlineStore(memory_limit=mem))
 
-    if force_refresh:
+    if force_refresh and not live_refresh:
         # The caller is overriding the cache, so forget what we think we know
         # about this range -- otherwise a span recorded from a fetch that came
         # back empty for the wrong reason could never be retried.
+        #
+        # Skipped for a live refresh, where it costs a whole-database
+        # checkpoint to delete rows mark_covered writes straight back. See
+        # the live_refresh argument.
         store.clear_coverage(code, ktype, start, end)
     else:
         missing = store.missing_days(code, ktype, start, end)

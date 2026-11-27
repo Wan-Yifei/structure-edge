@@ -225,3 +225,77 @@ class TestToday:
         store.seed_coverage("X", "1m")
         assert store.missing_days("X", "1m", "2026-10-14", "2026-10-14",
                                   today=date(2026, 10, 14)) == [date(2026, 10, 14)]
+
+
+class TestTheLiveRefreshPath:
+    """MultiVP's timer refresh leaves the coverage rows alone, and must.
+
+    It calls fetch_klines every 30 seconds with force_refresh. That branch
+    used to begin with a clear_coverage DELETE, which on the real 1 GB cache
+    made the closing checkpoint rewrite the file: 518 ms per cycle, of which
+    394 was close(), against 2.5 ms for a close with nothing written. The
+    DELETE was also pointless there -- force_refresh skips the missing_days
+    check, so nothing on that path reads coverage, and mark_covered writes
+    the same rows back a few lines later.
+
+    What is pinned here is the part that could go wrong silently: the flag
+    must not be usable without force_refresh, because then the coverage rows
+    ARE what decides whether the API is called, and leaving a stale one in
+    place would pin the cache shut with no error anywhere.
+    """
+
+    def test_it_is_refused_without_force_refresh(self):
+        """Loud, not quietly ignored -- a silently dropped flag here looks
+        like a cache that stopped updating for no reason."""
+        from feeds.fetcher import fetch_klines
+        with pytest.raises(ValueError, match="force_refresh"):
+            fetch_klines("US.QQQ", "1m", "2026-11-24", "2026-11-26",
+                         live_refresh=True)
+
+    def test_a_memory_limit_is_accepted_and_is_not_the_default(self, tmp_path):
+        """The cap belongs on the foreground path only. A backtest reading
+        millions of rows wants the big pool, so the default must stay
+        whatever DuckDB chooses."""
+        def limit_mib(store):
+            """DuckDB reports the setting back in its own units -- "256MB"
+            comes out as "244.1 MiB" -- so compare magnitudes, not the
+            string that was passed in."""
+            txt = store._con.execute(
+                "SELECT current_setting('memory_limit')").fetchone()[0]
+            num, unit = txt.split()
+            return float(num) * {"KiB": 1 / 1024, "MiB": 1,
+                                 "GiB": 1024, "TiB": 1024 * 1024}[unit]
+
+        capped = KlineStore(tmp_path / "a.duckdb", memory_limit="256MB")
+        try:
+            assert 200 <= limit_mib(capped) <= 300, (
+                f"the cap did not take: {limit_mib(capped):.0f} MiB")
+        finally:
+            capped.close()
+
+        plain = KlineStore(tmp_path / "b.duckdb")
+        try:
+            # DuckDB's own default is a fraction of system RAM, so this is
+            # orders of magnitude larger on any machine that runs backtests.
+            assert limit_mib(plain) > 4 * 1024, (
+                f"the cap leaked into the default: {limit_mib(plain):.0f} MiB")
+        finally:
+            plain.close()
+
+    def test_coverage_survives_a_live_refresh(self, store, tmp_path):
+        """The behaviour the skip relies on: mark_covered writes the same
+        rows the DELETE would have removed, so skipping it leaves coverage
+        in the state the next caller expects."""
+        df = pd.DataFrame({
+            "time_key": ["2026-11-24 09:30:00", "2026-11-24 09:31:00"],
+            "open": [1.0, 1.0], "high": [1.0, 1.0],
+            "low": [1.0, 1.0], "close": [1.0, 1.0], "volume": [1, 1],
+        })
+        store.save("US.QQQ", "1m", df)
+        store.mark_covered("US.QQQ", "1m", "2026-11-24", "2026-11-24")
+        before = store.covered_days("US.QQQ", "1m")
+        # A second refresh that does NOT clear first.
+        store.save("US.QQQ", "1m", df)
+        store.mark_covered("US.QQQ", "1m", "2026-11-24", "2026-11-24")
+        assert store.covered_days("US.QQQ", "1m") == before
+        assert date(2026, 11, 24) in before

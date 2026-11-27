@@ -352,6 +352,21 @@ wrap_mod(L, "_query_ticks")
 
 PAINTS = {"n": 0}
 import pyqtgraph as pg                                        # noqa: E402
+
+# ANTIALIASING IS OFF HERE AND ON IN THE APP, which is a real gap between
+# this ruler and what it stands in for. pyqtgraph defaults `antialias` to
+# False; the app turns it on in analysis/trade_viewer_qt.py, and importing
+# liq_hm_window alone -- which is all this harness does -- never reaches
+# that line. Everything measured with the default setting is therefore
+# measured without it.
+#
+# The default is left alone rather than "fixed", because the CHANGELOG
+# numbers from v0.104.5 onward were taken with it off and silently moving
+# the ruler would invalidate them without saying so. Set MOOMOO_AA=1 to
+# match the app; both arms of any comparison have to use the same setting.
+_AA = os.environ.get("MOOMOO_AA") == "1"
+pg.setConfigOptions(antialias=_AA)
+print(f"[AA] antialias={_AA}  (the app runs True)", flush=True)
 _orig_paint = pg.ImageItem.paint
 
 
