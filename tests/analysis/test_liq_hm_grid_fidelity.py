@@ -52,7 +52,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtGui import QColor                # noqa: E402
 
 from analysis.liq_hm_window import (           # noqa: E402
-    LiqHmWindow, _percentile_norm, _single_rgba,
+    LiqHmWindow, _bright_norm, _percentile_norm, _single_rgba,
 )
 
 
@@ -527,3 +527,97 @@ class TestSingleRgbaOnOccupiedCellsOnly(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertGreater(int(out[..., 3].max()), 0,
                            "every cell came back transparent")
+
+
+class TestBrightNormOnOccupiedCellsOnly(unittest.TestCase):
+    """The sparse wall-label brightness must be byte-identical to the dense
+    one, AND so must the column mean the ranking actually reads.
+
+    THE SECOND HALF IS WHY THIS CANNOT BE A COPY OF THE CLASS ABOVE.
+    _single_rgba's equality is asserted on `(norm * 180).astype(uint8)`
+    with everything under 0.02 zeroed, which quantises the last ulp away.
+    What comes out of _bright_norm is averaged down the visible columns and
+    then compared against _WALL_MIN_BRIGHT and sorted, so one ulp decides
+    which level gets a label. "v0.104.5 already pinned this arithmetic" is
+    therefore not an argument that carries over to here.
+
+    The dense version is kept below as the oracle, as in
+    test_near_touch_cutoff.py, so these keep working once it is gone from
+    the module.
+    """
+
+    _book_grid = staticmethod(TestSingleRgbaOnOccupiedCellsOnly._book_grid)
+
+    @staticmethod
+    def _dense(src, gamma):
+        """_draw_wall_labels' brightness pipeline as of v0.105.1."""
+        norm = _percentile_norm(np.log1p(src))
+        if gamma != 1.0:
+            norm = np.power(norm, gamma)
+        return norm
+
+    def _both(self, grid, gamma, windows=None):
+        want = self._dense(grid, gamma)
+        got = _bright_norm(grid, gamma)
+        self.assertEqual(got.shape, want.shape)
+        self.assertEqual(got.dtype, want.dtype,
+                         f"dtype {got.dtype} against the dense {want.dtype}")
+        self.assertEqual(got.tobytes(), want.tobytes(),
+                         f"{int(np.count_nonzero(got != want))} cells differ")
+
+        # The quantity the caller takes. Asserted separately because a
+        # difference of one ulp in a single cell survives averaging and
+        # changes an ordering, and because a mutant that returns the right
+        # array for the wrong slice would pass the comparison above.
+        n = grid.shape[0]
+        for lo, hi in (windows or ((0, n), (0, 1), (n - 1, n),
+                                   (n // 3, n // 3 + 7), (5, n - 5))):
+            with self.subTest(window=(lo, hi)):
+                a = want[lo:hi].mean(axis=0)
+                b = got[lo:hi].mean(axis=0)
+                self.assertEqual(a.dtype, b.dtype)
+                self.assertEqual(a.tobytes(), b.tobytes())
+
+    def test_a_realistic_grid_at_each_gamma(self):
+        """0.2 and 10.0 are the ends of the control's range."""
+        for gamma in (0.2, 1.0, 2.0, 5.0, 10.0):
+            with self.subTest(gamma=gamma):
+                self._both(self._book_grid(7, 0.10), gamma)
+
+    def test_every_density(self):
+        """The saving shrinks as the grid fills; the equality must not."""
+        for occ in (0.02, 0.10, 0.33, 0.55, 0.95):
+            with self.subTest(occupancy=occ):
+                self._both(self._book_grid(11, occ), 5.0)
+
+    def test_the_combined_grid(self):
+        """What the window passes when Bid/Ask is unchecked."""
+        self._both(self._book_grid(3, 0.10) + self._book_grid(4, 0.10), 2.0)
+
+    def test_an_empty_grid_keeps_the_dense_dtype(self):
+        """_percentile_norm returns its input untouched when nothing is
+        positive, so the dense result is float64 -- NOT the float32 the
+        occupied path produces. A zero array of the wrong dtype compares
+        equal cell by cell and changes what the caller's mean is made of."""
+        g = np.zeros((720, 240))
+        self.assertEqual(_bright_norm(g, 5.0).dtype, np.float64)
+        self._both(g, 5.0)
+
+    def test_a_single_occupied_cell(self):
+        """Degenerate percentile: one value, so ref is that value."""
+        g = np.zeros((720, 240))
+        g[300, 120] = 1234.0
+        self._both(g, 5.0)
+
+    def test_the_clip_is_exercised(self):
+        """Values above the 99th percentile must clip to 1.0 here too.
+
+        Asserted as a precondition rather than assumed: without a grid that
+        reaches the ceiling, dropping the clip would change nothing and the
+        equality above would pass whatever the rewrite did."""
+        g = self._book_grid(5, 0.10)
+        dense = self._dense(g, 1.0)
+        self.assertTrue((dense >= 1.0).any(),
+                        "fixture never reaches the reference, so the clip "
+                        "is untested")
+        self._both(g, 1.0)

@@ -629,6 +629,81 @@ def _single_rgba(grid: np.ndarray, hex_color: str,
     return rgba
 
 
+def _bright_norm(src: np.ndarray, gamma: float) -> np.ndarray:
+    """`_percentile_norm(log1p(src)) ** gamma`, on the occupied cells only.
+
+    The same saving _single_rgba takes, for the brightness the wall
+    ranking reads. The grid is mostly empty by construction -- measured on
+    the real QQQ grid, 10.8% of bid cells and 11.9% of ask cells hold
+    anything, 22.4% when the two are combined -- so running log1p, the
+    percentile normalisation and the gamma curve over the whole 720x240
+    array spends most of its time on zeros.
+
+    SCATTERED BACK, NOT RETURNED SPARSE, and that is the one thing this
+    differs from _single_rgba in. The caller takes
+    `norm[lo:hi].mean(axis=0)`, so an empty cell is in the DENOMINATOR and
+    has to be present as a zero. In _single_rgba an empty cell only ever
+    becomes alpha 0, which is why that one can leave the array alone.
+
+    THE EQUALITY IS BYTE-FOR-BYTE, and it is a property of the arithmetic
+    rather than a tolerance:
+
+      * log1p(0) is exactly 0, and log1p(x) > 0 exactly when x > 0, so
+        `log_g[log_g > 0]` and `log1p(src[src > 0])` select the same values
+        in the same C order -- the percentile sees an identical array and
+        returns an identical `ref`. (Checked down to subnormals: no
+        positive input is flattened to 0 by log1p, which would otherwise
+        put an extra zero into the percentile's input.)
+      * 0 / ref clips to 0.0, and 0 ** gamma is 0 for any gamma > 0, so an
+        empty cell normalises to 0 either way.
+      * when nothing is positive, _percentile_norm returns its input
+        untouched -- float64 from log1p, not float32 -- so this returns
+        log1p(src) rather than a zero array of its own.
+
+    TWO PRECONDITIONS, both held by the callers rather than by the maths:
+
+      * `src >= 0`. It is accumulated volume and _paint_column only ever
+        adds. A NaN or a value below -1 would put a NaN through the dense
+        version and be treated as empty here.
+      * `gamma > 0`. np.power(0, 0) is 1, which would make every empty
+        cell full-bright in the dense version and leave it at 0 here. The
+        control's range starts at 0.2, and
+        test_the_gamma_control_cannot_reach_zero is what keeps it there --
+        the same dependency _single_rgba has already been shipping.
+
+    WHY THE TEST FOR THIS CANNOT BE COPIED FROM _single_rgba's. That one
+    compares `(norm * 180).astype(uint8)` with everything under 0.02
+    zeroed, which quantises the last ulp away. What comes out of here is
+    compared against _WALL_MIN_BRIGHT and then sorted, so one ulp can flip
+    which level gets a label. The equivalence test asserts on the returned
+    array AND on the `mean(axis=0)` the caller takes from it.
+
+    Measured on the bench, five interleaved rounds against the dense form:
+    the wall-label path's own time falls about 47%, around 2.1 s per 300
+    simulated seconds, with the 1,257 labels' text and coordinates
+    byte-identical in every round. Total CPU moves -4.1% with a paired
+    interval of [-8.2%, +0.0%] -- not demonstrated at that sample size,
+    and not the reason for the change.
+    """
+    nz = src > 0
+    vals = np.log1p(src[nz])
+    if vals.size == 0:
+        return np.log1p(src)
+    ref = float(np.percentile(vals, _COLOR_NORM_PCT))
+    if ref <= 0:
+        # Unreachable while anything is positive -- kept because the dense
+        # version has the same fallback and this has to match it, not
+        # improve on it. Its `log_g.max()` over the whole grid is this
+        # `vals.max()` whenever no cell is negative.
+        ref = float(vals.max())
+    v = np.clip(vals / ref, 0.0, 1.0).astype(np.float32)
+    if gamma != 1.0:
+        np.power(v, gamma, out=v)
+    norm = np.zeros(src.shape, dtype=np.float32)
+    norm[nz] = v
+    return norm
+
+
 def _near_touch_cutoff(
     prices_from_touch: list[float],
     min_keep: int = _NEAR_TOUCH_MIN_LEVELS,
@@ -2871,16 +2946,28 @@ class LiqHmWindow(QWidget):
         mid = (None if self._best_bid is None or self._best_ask is None
                else (self._best_bid + self._best_ask) / 2.0)
 
+        # Computed once when both sides share it. With Bid/Ask combined the
+        # two iterations below are handed the SAME array -- bid+ask over the
+        # same columns -- so the previous shape ran an identical pipeline
+        # twice and discarded one result. Checked in the running window
+        # rather than argued from the code: over 179 combined redraws both
+        # iterations' source hashed the same, 179 times out of 179.
+        #
+        # `if combined else None`, NOT an unconditional call. In split mode
+        # a combined grid would be built and never read, and every
+        # equivalence test would still pass -- only a call count notices
+        # that, which is why there is one.
+        shared = (_bright_norm(self._bid_grid[:n_cols]
+                               + self._ask_grid[:n_cols], gamma)
+                  if combined else None)
+
         for grid, side, colour in ((self._bid_grid, "B", _TEAL),
                                    (self._ask_grid, "A", _RED)):
             # Brightness as drawn. The reference percentile spans the whole
             # painted grid [:n], not the zoomed slice, because that is what the
             # renderer normalises against -- panning must not relabel.
-            src = (self._bid_grid[:n_cols] + self._ask_grid[:n_cols]
-                   if combined else grid[:n_cols])
-            norm = _percentile_norm(np.log1p(src))
-            if gamma != 1.0:
-                norm = np.power(norm, gamma)
+            norm = (shared if shared is not None
+                    else _bright_norm(grid[:n_cols], gamma))
             bright = norm[lo:hi].mean(axis=0)       # how much of the row is lit
 
             peak = grid[lo:hi].max(axis=0)          # largest size per price bin
